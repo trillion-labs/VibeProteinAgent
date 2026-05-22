@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/proteinmpnn.input.json",
+  "type": "object",
+  "required": ["pdb_path"],
+  "properties": {
+    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "chains": {
+      "type": ["array", "null"],
+      "items": {"type": "string", "minLength": 1},
+      "default": null
+    },
+    "num_designs": {"type": "integer", "minimum": 1, "maximum": 1024, "default": 8},
+    "temperature": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.1},
+    "omit_aas": {"type": "string", "default": "X"},
+    "seed": {"type": ["integer", "null"], "default": null}
+  },
+  "additionalProperties": false
+}

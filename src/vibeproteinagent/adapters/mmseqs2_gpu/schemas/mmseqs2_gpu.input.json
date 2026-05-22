@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/mmseqs2_gpu.input.json",
+  "type": "object",
+  "required": ["query_fasta", "target_db"],
+  "properties": {
+    "query_fasta": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "target_db": {"type": "string", "minLength": 1},
+    "min_seq_id": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.3},
+    "coverage": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.8},
+    "sensitivity": {"type": "number", "minimum": 1.0, "maximum": 7.5, "default": 7.5},
+    "max_seqs": {"type": "integer", "minimum": 1, "default": 300}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,15 @@
+PyRosetta is distributed by Rosetta Commons under a separate academic
+licence that is NOT redistributable. This file is intentionally a
+pointer only — see vendor/pyrosetta/UPSTREAM.md for the bootstrap path
+and licence acquisition link.
+
+The canonical licence text and terms live at:
+
+  https://www.pyrosetta.org/  (overview)
+  https://els2.comotion.uw.edu/product/pyrosetta  (academic licence form)
+
+The VibeProteinAgent adapter code in
+  src/vibeproteinagent/adapters/pyrosetta/
+is original to this project and licensed under VibeProteinAgent's first-party
+PolyForm Noncommercial License 1.0.0. No PyRosetta source, binary, or
+licence-protected artefact is checked into this tree.

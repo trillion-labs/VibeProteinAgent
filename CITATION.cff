@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "VibeProteinAgent"
+authors:
+  - family-names: "Contributors"
+    given-names: "VibeProteinAgent"
+repository-code: "https://github.com/<your-org>/VibeProteinAgent"
+url: "https://github.com/<your-org>/VibeProteinAgent"
+license: PolyForm-Noncommercial-1.0.0

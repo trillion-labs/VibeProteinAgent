@@ -1,0 +1,17 @@
+name: literature_search
+version: "1.0.0"
+category: retrieval
+description: "Searches Europe PMC for publications matching a query and writes evidence artifacts (titles, abstracts, IDs, optional open-access filters) to ground design context. Supports organism, date-range, must-include keywords, and lite/core result depth."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [literature_search]
+input_schema: schemas/literature_search.input.json
+output_schema: schemas/literature_search.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.literature_search.adapter:LiteratureSearchAdapter"

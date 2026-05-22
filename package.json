@@ -1,0 +1,28 @@
+{
+  "name": "vibeproteinagent",
+  "version": "0.0.0",
+  "description": "Thin npm/npx bootstrapper for the VibeProteinAgent Python installer.",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "bin": {
+    "vpa": "bin/vibeproteinagent.js",
+    "vibeproteinagent": "bin/vibeproteinagent.js",
+    "vpa-install": "bin/vibeproteinagent.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "vendor/",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "CONTRIBUTING.md",
+    "CITATION.cff"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node bin/vibeproteinagent.js install --dry-run --profile base --json"
+  }
+}

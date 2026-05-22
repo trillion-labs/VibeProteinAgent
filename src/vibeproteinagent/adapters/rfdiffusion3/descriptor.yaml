@@ -1,0 +1,28 @@
+name: rfdiffusion3
+version: "0.1.0+foundry"
+category: protein_design
+description: "Target-conditioned binder backbone diffusion using the newer RFdiffusion3 model. Requires a target PDB, target chain, and optional hotspots; backbones only — pair with an inverse-folding tool for sequences. For motif/symmetric/partial-diffusion modes use `rfdiffusion`."
+runtime: python
+backend: pytorch
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 24
+startup_cost: high
+estimated_runtime_s: 600
+warm_load_capable: false
+pin_warm: false
+execution_isolation: subprocess
+environment_name: rfdiffusion3-vpa
+environment_reason: "Foundry's RFD3 dependency stack can downgrade pandas/atomworks/wandb relative to the shared vpa env, so each run launches the local Foundry CLI in a subprocess compatibility environment."
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.rfdiffusion3:availability_skip_reason"
+supported_tasks: [binder_design]
+input_schema: schemas/rfdiffusion3.input.json
+output_schema: schemas/rfdiffusion3.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+entry_point: "vibeproteinagent.adapters.rfdiffusion3.adapter:RFdiffusion3Adapter"

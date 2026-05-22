@@ -1,0 +1,55 @@
+diff --git a/protenix/model/layer_norm/layer_norm.py b/protenix/model/layer_norm/layer_norm.py
+index b25b16b..98eaf16 100644
+--- a/protenix/model/layer_norm/layer_norm.py
++++ b/protenix/model/layer_norm/layer_norm.py
+@@ -24,13 +24,13 @@ from torch.nn.parameter import Parameter
+ sys.path.append(os.path.dirname(__file__))
+ 
+ try:
+-    fastfold_layer_norm_cuda = importlib.import_module("fastfold_layer_norm_cuda")
++    fastfold_layer_norm_cuda = importlib.import_module("fastfold_layer_norm_cuda_v2")
+ except ImportError:
+     from protenix.model.layer_norm.torch_ext_compile import compile
+ 
+     current_dir = os.path.dirname(__file__)
+     fastfold_layer_norm_cuda = compile(
+-        name="fastfold_layer_norm_cuda",
++        name="fastfold_layer_norm_cuda_v2",
+         sources=[
+             os.path.join(f"{current_dir}/kernel", file)
+             for file in ["layer_norm_cuda.cpp", "layer_norm_cuda_kernel.cu"]
+diff --git a/protenix/model/layer_norm/torch_ext_compile.py b/protenix/model/layer_norm/torch_ext_compile.py
+index 40ade5a..05fbf26 100644
+--- a/protenix/model/layer_norm/torch_ext_compile.py
++++ b/protenix/model/layer_norm/torch_ext_compile.py
+@@ -19,7 +19,9 @@ from torch.utils.cpp_extension import load
+ 
+ 
+ def compile(name, sources, extra_include_paths, build_directory):
+-    os.environ["TORCH_CUDA_ARCH_LIST"] = "7.0;8.0"
++    # Respect externally provided arch list; default to B200-friendly target.
++    if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
++        os.environ["TORCH_CUDA_ARCH_LIST"] = "10.0"
+     return load(
+         name=name,
+         sources=sources,
+@@ -43,13 +45,15 @@ def compile(name, sources, extra_include_paths, build_directory):
+             "--expt-relaxed-constexpr",
+             "--expt-extended-lambda",
+             "-gencode",
+-            "arch=compute_70,code=sm_70",
+-            "-gencode",
+-            "arch=compute_80,code=sm_80",
+-            "-gencode",
++            # "arch=compute_70,code=sm_70",
++            # "-gencode",
++            # "arch=compute_80,code=sm_80",
++            # "-gencode",
+             "arch=compute_86,code=sm_86",
+             "-gencode",
+             "arch=compute_90,code=sm_90",
++            "-gencode",
++            "arch=compute_100,code=sm_100",
+         ],
+         verbose=True,
+         build_directory=build_directory,

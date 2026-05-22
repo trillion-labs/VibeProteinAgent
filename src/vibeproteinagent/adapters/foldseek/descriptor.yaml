@@ -1,0 +1,25 @@
+name: foldseek
+version: "1.0.0"
+category: misc
+description: "Fast structural similarity search of a query PDB against a Foldseek-indexed database; supports `easy-search` (hits) and `easy-cluster` modes. Use when the query is a 3D structure; for sequence-only search use `mmseqs2_gpu`."
+runtime: python
+backend: binary
+gpu_required: false
+gpus_required: 1
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.foldseek:availability_skip_reason"
+supported_tasks: [structure_search]
+input_schema: schemas/foldseek.input.json
+output_schema: schemas/foldseek.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.foldseek.adapter:FoldseekAdapter"

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/sequence_to_protenix_input.input.json",
+  "type": "object",
+  "anyOf": [
+    {"required": ["sequence"]},
+    {"required": ["fasta_path"]}
+  ],
+  "properties": {
+    "sequence": {"type": ["string", "null"], "default": null},
+    "fasta_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "default": "sequence"
+    },
+    "count": {"type": "integer", "minimum": 1, "maximum": 1024, "default": 1},
+    "seeds": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "minItems": 1,
+      "default": [101]
+    }
+  },
+  "additionalProperties": false
+}

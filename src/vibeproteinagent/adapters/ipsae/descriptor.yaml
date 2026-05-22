@@ -1,0 +1,22 @@
+name: ipsae
+version: "1.0.0"
+category: scoring
+description: "Computes the ipSAE interface confidence score from a structure prediction model (requires both the predicted PDB and the model's PAE matrix) for a given chain pair. Use as an in-silico binder-design triage filter; CPU-only and fast."
+runtime: python
+backend: numpy
+gpu_required: false
+gpus_required: 1
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [interface_scoring]
+input_schema: schemas/ipsae.input.json
+output_schema: schemas/ipsae.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.ipsae.adapter:IpSaeAdapter"

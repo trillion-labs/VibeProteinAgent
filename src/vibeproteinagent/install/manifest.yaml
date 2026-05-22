@@ -1,0 +1,341 @@
+schema_version: 1
+package: vibeproteinagent
+defaults:
+  install_root: "~/.vibeproteinagent"
+  shared_env: "envs/vpa"
+  sidecars_root: "sidecars"
+  cache_dir: "cache"
+  state_db: "install/state.json"
+profiles:
+  base:
+    description: "Core VPA runtime plus lightweight local tools."
+    tools:
+      - sequence_analysis
+      - sequence_edit
+      - structure_analysis
+      - protein_qc
+      - rank_designs
+  agent:
+    description: "Agent orchestration plus lightweight planning/retrieval tools."
+    extends: base
+    tools:
+      - literature_search
+      - interpro_sequences
+      - go_sequences
+      - template_select
+  full:
+    description: "Every supported first-class in-tree tool, sidecar, and required model weight."
+    tools:
+      - bindcraft
+      - boltz2_affinity
+      - boltzgen
+      - colabdesign_utils
+      - dssp
+      - esm2
+      - esm3
+      - foldseek
+      - go_sequences
+      - interpro_sequences
+      - ipsae
+      - ligandmpnn
+      - literature_search
+      - mmseqs2_gpu
+      - prodigy
+      - proteina_complexa
+      - protein_qc
+      - proteinmpnn
+      - protenix_v2
+      - pxdesign
+      - pxmeter
+      - pyrosetta
+      - rank_designs
+      - rfdiffusion
+      - rfdiffusion3
+      - rfpeptides
+      - sequence_analysis
+      - sequence_edit
+      - structure_analysis
+      - template_select
+      - tmalign
+      - vina
+tool_defaults:
+  runtime: shared
+  required: true
+tools:
+  bindcraft:
+    runtime: sidecar
+    sidecar:
+      env_name: BindCraft
+      path: "sidecars/bindcraft"
+      install_script: "bash -lc 'cd vendor/bindcraft && bash install_bindcraft.sh --pkg_manager micromamba --env-prefix {sidecar_path} --cuda 12.8'"
+    disk_bytes: 120000000000
+  boltz2_affinity:
+    runtime: shared
+    required: false
+    weights:
+      - name: boltz2_conf
+        path: "cache/boltz/boltz2_conf.ckpt"
+        env_var: VPA_BOLTZ_CACHE
+        source_path: "/opt/vpa-data/boltz_cache/boltz2_conf.ckpt"
+        required: true
+      - name: boltz2_aff
+        path: "cache/boltz/boltz2_aff.ckpt"
+        env_var: VPA_BOLTZ_CACHE
+        source_path: "/opt/vpa-data/boltz_cache/boltz2_aff.ckpt"
+        required: true
+      - name: boltz_mols
+        path: "cache/boltz/mols"
+        env_var: VPA_BOLTZ_CACHE
+        source_path: "/opt/vpa-data/boltz_cache/mols"
+        required: true
+    disk_bytes: 12000000000
+  boltzgen:
+    runtime: shared
+    required: false
+    weights:
+      - name: boltzgen_cache
+        path: "cache/boltzgen"
+        env_var: VPA_BOLTZGEN_CACHE
+        source_path: "/opt/vpa-data/boltzgen_cache"
+        required: true
+    disk_bytes: 50000000000
+  colabdesign_utils:
+    runtime: shared
+    required: false
+    depends_on:
+      - bindcraft
+  dssp:
+    runtime: external_binary
+    required: false
+    binary: mkdssp
+    weights:
+      - name: dssp_binary
+        path: "envs/vpa/bin/mkdssp"
+        source_path: "vendor/bindcraft/functions/dssp"
+        required: true
+  esm2:
+    runtime: shared
+    weights:
+      - name: esm2_cache
+        path: "cache/huggingface"
+        env_var: HF_HOME
+        source_path: "/opt/vpa-data/models/huggingface"
+        required: false
+    disk_bytes: 3000000000
+  esm3:
+    runtime: shared
+    required: false
+    weights:
+      - name: esm3_cache
+        path: "cache/huggingface"
+        env_var: HF_HOME
+        source_path: "/opt/vpa-data/models/huggingface"
+        required: false
+    disk_bytes: 6000000000
+  foldseek:
+    runtime: external_binary
+    required: false
+    binary: foldseek
+    weights:
+      - name: foldseek_binary
+        path: "envs/vpa/bin/foldseek"
+        source_path: "/opt/miniconda3/envs/vpa/bin/foldseek"
+        required: true
+  go_sequences:
+    runtime: shared
+  interpro_sequences:
+    runtime: shared
+  ipsae:
+    runtime: shared
+  ligandmpnn:
+    runtime: shared
+    required: false
+    weights:
+      - name: ligandmpnn_weights
+        path: "models/ligandmpnn_v_32_020_25.pt"
+        source_path: "vendor/ligandmpnn/weights/ligandmpnn_v_32_020_25.pt"
+        env_var: VPA_MODEL_CACHE
+        required: true
+    disk_bytes: 1000000000
+  literature_search:
+    runtime: shared
+  mmseqs2_gpu:
+    runtime: external_binary
+    required: false
+    binary: mmseqs
+    weights:
+      - name: mmseqs_binary
+        path: "envs/vpa/bin/mmseqs"
+        source_path: "/opt/vpa-data/mmseqs2-gpu/bin/mmseqs"
+        required: true
+  mpnn_to_protenix_input:
+    runtime: shared
+  noop:
+    runtime: shared
+    required: false
+  prodigy:
+    runtime: shared
+  protein_qc:
+    runtime: shared
+  proteinmpnn:
+    runtime: shared
+    weights:
+      - name: proteinmpnn_weights
+        path: "models/v_48_020.pt"
+        env_var: VPA_MODEL_CACHE
+        url: "https://raw.githubusercontent.com/dauparas/ProteinMPNN/8907e6671bfbfc92303b5f79c4b5e6ce47cdef57/vanilla_model_weights/v_48_020.pt"
+        sha256: "c9cb4a671d79604111231f8dbfc7c590e06f1197453b7a6854ac6661a642f5bd"
+        source_path: "vendor/proteinmpnn/weights/v_48_020.pt"
+        required: true
+    disk_bytes: 500000000
+  proteina_complexa:
+    runtime: sidecar
+    required: false
+    sidecar:
+      env_name: proteina-complexa-vpa
+      path: "sidecars/proteina-complexa"
+      install_script: "bash vendor/proteina-complexa/env/build_uv_env.sh --root {sidecar_path}"
+    weights:
+      - name: proteina_complexa_checkpoints
+        path: "cache/proteina-complexa/checkpoints"
+        source_path: "vendor/proteina-complexa/ckpts"
+        env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        required: true
+    disk_bytes: 30000000000
+  protenix_v2:
+    runtime: shared
+    required: false
+    weights:
+      - name: protenix_checkpoint
+        path: "cache/protenix/protenix_base_default_v1.0.0.pt"
+        source_path: "/opt/vpa-data/protenix_ckpt/protenix_base_default_v1.0.0.pt"
+        env_var: VPA_PROTENIX_CKPT
+        required: true
+      - name: protenix_ccd_cache
+        path: "cache/protenix/common"
+        source_path: "/opt/vpa-data/protenix_ckpt/common"
+        env_var: VPA_PROTENIX_CKPT
+        required: true
+    disk_bytes: 8000000000
+  pxdesign:
+    runtime: shared
+    required: false
+    sidecar:
+      env_name: pxdesign-pipeline-vpa
+      path: "sidecars/pxdesign-pipeline"
+      install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path}"
+    weights:
+      - name: pxdesign_weights
+        path: "cache/pxdesign"
+        source_path: "/opt/vpa-data/pxdesign_ckpt"
+        env_var: VPA_PXDESIGN_CKPT_DIR
+        required: true
+  pxdesign_pipeline_multi_gpu:
+    runtime: sidecar
+    required: false
+    internal: true
+    depends_on:
+      - pxdesign
+    sidecar:
+      env_name: pxdesign-pipeline-vpa
+      path: "sidecars/pxdesign-pipeline"
+      install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path}"
+  pxmeter:
+    runtime: shared
+  pyrosetta:
+    runtime: shared
+    required: false
+  rank_designs:
+    runtime: shared
+  rfdiffusion:
+    runtime: shared
+    weights:
+      - name: rfdiffusion_base
+        path: "cache/rfdiffusion/Base_ckpt.pt"
+        env_var: VPA_RFDIFFUSION_WEIGHTS
+        url: "http://files.ipd.uw.edu/pub/RFdiffusion/6f5902ac237024bdd0c176cb93063dc4/Base_ckpt.pt"
+        sha256: "0fcf7d7c32b4848030aca3a051e6768de194616f96ba6c38186351a33bfc6eca"
+        source_path: "vendor/rfpeptides/weights/Base_ckpt.pt"
+        modes:
+          - unconditional
+          - motif
+          - partial
+          - symmetric
+        required: true
+      - name: rfdiffusion_complex
+        path: "cache/rfdiffusion/Complex_base_ckpt.pt"
+        env_var: VPA_RFDIFFUSION_WEIGHTS
+        url: "http://files.ipd.uw.edu/pub/RFdiffusion/e29311f6f1bf1af907f9ef9f44b8328b/Complex_base_ckpt.pt"
+        sha256: "76e4e260aefee3b582bd76b77ab95d2592e64f00c51bf344968ab9239f3250bc"
+        source_path: "vendor/rfpeptides/weights/Complex_base_ckpt.pt"
+        modes:
+          - binder
+          - symmetric_motif
+        required: false
+      - name: rfdiffusion_fold
+        path: "cache/rfdiffusion/Complex_Fold_base_ckpt.pt"
+        env_var: VPA_RFDIFFUSION_WEIGHTS
+        url: "http://files.ipd.uw.edu/pub/RFdiffusion/60f09a193fb5e5ccdc4980417708dbab/Complex_Fold_base_ckpt.pt"
+        sha256: "0ac3b4024aea811078cec41482528291d6d7d7084bf8190ec118f54642fb81a1"
+        source_path: "vendor/rfpeptides/weights/Complex_Fold_base_ckpt.pt"
+        modes:
+          - fold_conditioning
+        required: false
+    smoke_test: "tests/test_adapter_rfdiffusion_real.py"
+    disk_bytes: 1600000000
+  rfdiffusion3:
+    runtime: sidecar
+    required: false
+    sidecar:
+      env_name: rfdiffusion3-vpa
+      path: "sidecars/rfdiffusion3"
+      install_script: "bash scripts/install_rfdiffusion3_sidecar.sh --prefix {sidecar_path} --repo-root {repo_root}"
+    weights:
+      - name: rfdiffusion3_checkpoint
+        path: "cache/rfdiffusion3/rfd3_latest.ckpt"
+        source_path: "vendor/rfdiffusion3/checkpoints/rfd3_latest.ckpt"
+        env_var: VPA_RFDIFFUSION3_CKPT
+        env_value: path
+        required: true
+    disk_bytes: 6000000000
+  rfpeptides:
+    runtime: shared
+    required: false
+    weights:
+      - name: rfpeptides_weights
+        path: "cache/rfpeptides"
+        source_path: "vendor/rfpeptides/weights"
+        env_var: VPA_RFPEPTIDES_WEIGHTS
+        required: true
+    disk_bytes: 2000000000
+  sequence_analysis:
+    runtime: shared
+  sequence_edit:
+    runtime: shared
+  sequence_to_protenix_input:
+    runtime: shared
+  structure_analysis:
+    runtime: shared
+  template_select:
+    runtime: shared
+    depends_on:
+      - mmseqs2_gpu
+      - foldseek
+  tmalign:
+    runtime: external_binary
+    required: false
+    binary: TMalign
+    weights:
+      - name: tmalign_binary
+        path: "envs/vpa/bin/TMalign"
+        source_path: "/opt/miniconda3/envs/vpa/bin/TMalign"
+        required: true
+  vina:
+    runtime: external_binary
+    required: false
+    binary: vina
+    weights:
+      - name: vina_binary
+        path: "envs/vpa/bin/vina"
+        source_path: "/opt/miniconda3/envs/vpa/bin/vina"
+        required: true

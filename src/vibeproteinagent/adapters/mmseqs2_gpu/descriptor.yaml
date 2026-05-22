@@ -1,0 +1,23 @@
+name: mmseqs2_gpu
+version: "1.0.0"
+category: misc
+description: "GPU-accelerated sequence similarity search of a FASTA query against an MMseqs2-formatted target database, with identity, coverage, and sensitivity thresholds. Use for sequence-based search; for structure-based search use `foldseek`."
+runtime: python
+backend: binary
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 4
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [sequence_search]
+input_schema: schemas/mmseqs2_gpu.input.json
+output_schema: schemas/mmseqs2_gpu.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.mmseqs2_gpu.adapter:MMseqs2GpuAdapter"

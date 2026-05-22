@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/sequence_analysis.output.json",
+  "type": "object",
+  "required": [
+    "sequence_length",
+    "metrics",
+    "liabilities",
+    "top_annotations",
+    "artifacts",
+    "runtime_ms"
+  ],
+  "properties": {
+    "sequence_length": {"type": "integer", "minimum": 0},
+    "metrics": {"type": "object"},
+    "liabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "positions", "reason"],
+        "properties": {
+          "type": {"type": "string"},
+          "positions": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+          "reason": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "top_annotations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "position",
+          "residue",
+          "biochemical_class",
+          "charge_class",
+          "hydrophobicity_class",
+          "aromatic",
+          "sulfur_containing",
+          "glycine",
+          "proline",
+          "cysteine",
+          "caution_flags"
+        ],
+        "properties": {
+          "position": {"type": "integer", "minimum": 1},
+          "residue": {"type": "string"},
+          "biochemical_class": {"type": "string"},
+          "charge_class": {"type": "string"},
+          "hydrophobicity_class": {"type": "string"},
+          "aromatic": {"type": "boolean"},
+          "sulfur_containing": {"type": "boolean"},
+          "glycine": {"type": "boolean"},
+          "proline": {"type": "boolean"},
+          "cysteine": {"type": "boolean"},
+          "caution_flags": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "required": ["metrics_json", "residue_annotations_tsv", "summary_json"],
+      "properties": {
+        "metrics_json": {"type": "string"},
+        "residue_annotations_tsv": {"type": ["string", "null"]},
+        "summary_json": {"type": "string"},
+        "per_sequence_metrics_jsonl": {"type": ["string", "null"], "default": null}
+      },
+      "additionalProperties": false
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

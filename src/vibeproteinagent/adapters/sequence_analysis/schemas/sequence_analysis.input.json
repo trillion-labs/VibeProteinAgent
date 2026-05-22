@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/sequence_analysis.input.json",
+  "type": "object",
+  "anyOf": [
+    {"required": ["sequence"]},
+    {"required": ["fasta_path"]}
+  ],
+  "properties": {
+    "sequence": {"type": ["string", "null"], "default": null},
+    "fasta_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "positions": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "uniqueItems": true,
+      "default": []
+    },
+    "ph": {"type": "number", "minimum": 0.0, "maximum": 14.0, "default": 7.4},
+    "max_annotations": {"type": "integer", "minimum": 0, "default": 100},
+    "include_regions": {"type": "boolean", "default": true},
+    "include_residue_table": {"type": "boolean", "default": true},
+    "output_prefix": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "default": "sequence_analysis"}
+  },
+  "additionalProperties": false
+}

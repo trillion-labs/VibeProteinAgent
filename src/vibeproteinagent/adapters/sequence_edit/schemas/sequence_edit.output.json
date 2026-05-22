@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/sequence_edit.output.json",
+  "type": "object",
+  "required": [
+    "operation",
+    "wild_type_length",
+    "mutant_length",
+    "mutations",
+    "changed_positions",
+    "mutant_sequence",
+    "mismatch_count",
+    "warnings",
+    "runtime_ms"
+  ],
+  "properties": {
+    "operation": {"type": "string", "enum": ["mutate_residues", "check_wt_consistency"]},
+    "wild_type_length": {"type": "integer", "minimum": 0},
+    "mutant_length": {"type": "integer", "minimum": 0},
+    "mutations": {"type": "array", "items": {"type": "string"}},
+    "changed_positions": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+    "mutant_sequence": {"type": "string"},
+    "mutant_fasta": {"type": ["string", "null"], "default": null},
+    "is_consistent": {"type": ["boolean", "null"], "default": null},
+    "mismatch_count": {"type": "integer", "minimum": 0},
+    "expected_mutations_match": {"type": ["boolean", "null"], "default": null},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

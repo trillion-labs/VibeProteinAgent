@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/literature_search.input.json",
+  "type": "object",
+  "required": ["query"],
+  "properties": {
+    "query": {"type": "string", "minLength": 1},
+    "functional_description": {"type": ["string", "null"], "default": null},
+    "must_include": {"type": "array", "items": {"type": "string"}, "default": []},
+    "organism": {"type": ["string", "null"], "default": null},
+    "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+    "published_before": {"type": ["string", "null"], "default": null},
+    "published_after": {"type": ["string", "null"], "default": null},
+    "temporal_cutoff": {"type": ["string", "null"], "default": null},
+    "result_type": {"type": "string", "enum": ["lite", "core"], "default": "lite"},
+    "open_access_only": {"type": "boolean", "default": false},
+    "include_abstracts": {"type": "boolean", "default": true},
+    "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+    "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 120, "default": 20}
+  },
+  "additionalProperties": false
+}

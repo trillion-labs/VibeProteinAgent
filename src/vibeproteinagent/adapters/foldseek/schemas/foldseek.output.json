@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/foldseek.output.json",
+  "type": "object",
+  "required": ["hits_tsv", "num_hits", "runtime_ms"],
+  "properties": {
+    "hits_tsv": {"type": "string", "minLength": 1},
+    "num_hits": {"type": "integer", "minimum": 0},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

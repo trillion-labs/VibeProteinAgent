@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/go_sequences.output.json",
+  "type": "object",
+  "required": ["go_id", "association_records", "resolved_uniprot_accessions", "kept_sequences", "fasta_path", "metadata_jsonl", "dropped", "summary", "artifacts", "runtime_ms"],
+  "properties": {
+    "go_id": {"type": "string"},
+    "go_label": {"type": ["string", "null"]},
+    "association_records": {"type": "integer", "minimum": 0},
+    "resolved_uniprot_accessions": {"type": "integer", "minimum": 0},
+    "kept_sequences": {"type": "integer", "minimum": 0},
+    "fasta_path": {"type": "string"},
+    "metadata_jsonl": {"type": "string"},
+    "dropped": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "summary": {"type": "object", "additionalProperties": true},
+    "artifacts": {"type": "object", "additionalProperties": {"type": "string"}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

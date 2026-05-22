@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/ipsae.input.json",
+  "type": "object",
+  "required": ["pae_path", "pdb_path", "chain_a", "chain_b"],
+  "properties": {
+    "pae_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "chain_a": {"type": "string", "minLength": 1},
+    "chain_b": {"type": "string", "minLength": 1},
+    "cutoff": {"type": "number", "exclusiveMinimum": 0.0, "default": 10.0},
+    "dist_cutoff": {"type": "number", "exclusiveMinimum": 0.0, "default": 10.0}
+  },
+  "additionalProperties": false
+}

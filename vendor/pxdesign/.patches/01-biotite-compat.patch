@@ -1,0 +1,40 @@
+Subject: [PATCH] biotite >= 1.4 compat: guard PDBX_COVALENT_TYPES + shim two private APIs
+
+Same rationale as vendor/protenix-pxd/.patches/02-biotite-compat.patch — the
+pxdesign tree carries an independent copy of the same parser-init guards at
+pxdesign/data/parser.py. Mirror all three shims here.
+
+--- a/pxdesign/data/parser.py
++++ b/pxdesign/data/parser.py
+@@ -54,8 +54,28 @@
+
+ logger = logging.getLogger(__name__)
+
+-# Ignore inter residue metal coordinate bonds in mmcif _struct_conn
+-if "metalc" in pdbx_convert.PDBX_COVALENT_TYPES:  # for reload
+-    pdbx_convert.PDBX_COVALENT_TYPES.remove("metalc")
++# Ignore inter residue metal coordinate bonds in mmcif _struct_conn.
++# biotite >= 1.4 renamed/removed the PDBX_COVALENT_TYPES module attribute;
++# guard against AttributeError so the import survives on modernized envs.
++_covalent_types = getattr(pdbx_convert, "PDBX_COVALENT_TYPES", None)
++if _covalent_types is not None and "metalc" in _covalent_types:  # for reload
++    _covalent_types.remove("metalc")
++
++# biotite >= 1.4 removed pdbx.convert._get_model_starts (private API). Reinstate
++# a drop-in shim: given the int array of pdbx_PDB_model_num values, return the
++# starting row index of each model. Identical behavior to biotite 1.0.1.
++if not hasattr(pdbx_convert, "_get_model_starts"):
++    def _get_model_starts(model_array):
++        diff = np.diff(model_array)
++        return np.concatenate(([0], np.where(diff != 0)[0] + 1))
++    pdbx_convert._get_model_starts = _get_model_starts
++
++# biotite >= 1.4 changed _filter_model from (atom_site, model_starts, model)
++# to (atom_site, model). Provide a 3-arg wrapper that dispatches to the 2-arg
++# implementation so this module's get_structure() call site still works.
++import inspect as _inspect
++_orig_filter_model = pdbx_convert._filter_model
++if len(_inspect.signature(_orig_filter_model).parameters) == 2:
++    def _filter_model_shim(atom_site, model_starts, model):
++        return _orig_filter_model(atom_site, model)
++    pdbx_convert._filter_model = _filter_model_shim

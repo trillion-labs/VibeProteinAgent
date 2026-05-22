@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/noop.output.json",
+  "type": "object",
+  "required": ["payload", "echoed_at"],
+  "properties": {
+    "payload": {"type": "string"},
+    "echoed_at": {"type": "number"}
+  },
+  "additionalProperties": false
+}

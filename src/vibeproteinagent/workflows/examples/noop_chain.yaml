@@ -1,0 +1,23 @@
+name: noop_chain
+version: "1.0.0"
+description: "Three-node noop chain used for engine smoke tests."
+params:
+  msg:
+    type: str
+    default: "hi"
+nodes:
+  - id: a
+    tool: noop
+    inputs:
+      payload: ${params.msg}
+    cache: true
+  - id: b
+    tool: noop
+    inputs:
+      payload: "${outputs.a.payload}-b"
+    cache: true
+  - id: c
+    tool: noop
+    inputs:
+      payload: "${outputs.b.payload}-c"
+    cache: true

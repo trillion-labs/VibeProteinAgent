@@ -1,0 +1,97 @@
+"""Tests for the Protein-QC first-party adapter."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import torch
+from pydantic import ValidationError
+
+from vibeproteinagent.adapters import null_context
+from vibeproteinagent.adapters.protein_qc.adapter import (
+    ProteinQCAdapter,
+    ProteinQCInput,
+    ProteinQCOutput,
+    _polybasic_hits,
+)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PDB_FIXTURE = _PROJECT_ROOT / "tests" / "fixtures" / "6MRR.pdb"
+_CIF_FIXTURE = _PROJECT_ROOT / "tests" / "fixtures" / "5o45.cif"
+
+
+def test_descriptor_fields():
+    d = ProteinQCAdapter.descriptor
+    assert d.name == "protein_qc"
+    assert d.category.value == "scoring"
+    assert d.gpu_required is False
+    assert d.pin_warm is True
+
+
+def test_input_requires_at_least_one():
+    with pytest.raises(ValidationError):
+        ProteinQCInput()
+    # sequence-only is fine.
+    ProteinQCInput(sequence="MKKL")
+    # pdb-only is fine.
+    ProteinQCInput(pdb_path="/tmp/x.pdb")
+
+
+def test_polybasic_helper():
+    assert _polybasic_hits("MKKK") == [1]
+    assert _polybasic_hits("MKR") == []
+    assert _polybasic_hits("AAAKRKKMAAARRR") == [3, 11]
+
+
+def test_sequence_only_smoke(tmp_path):
+    a = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    seq = "MKLLILTCLVAVALARPKHPIKHQGLPQEVLNENLLRFKKKR"
+    out = a.run(ProteinQCInput(sequence=seq), null_context(tmp_path))
+    assert "gravy" in out.metrics
+    assert "polybasic_hits" in out.metrics
+    assert out.metrics["polybasic_hits"] == 1.0
+    assert "contains_polybasic_cluster" in out.flags
+    assert out.metrics["plddt"] is None  # no PDB → pLDDT unset
+    assert out.runtime_ms >= 0
+
+
+def test_selected_metrics_only(tmp_path):
+    a = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = a.run(
+        ProteinQCInput(sequence="MKKL", metrics=["gravy", "pi"]),
+        null_context(tmp_path),
+    )
+    assert set(out.metrics) >= {"gravy", "pi"}
+    assert "instability_index" not in out.metrics
+    assert "plddt" not in out.metrics
+
+
+@pytest.mark.skipif(not _PDB_FIXTURE.exists(), reason="6MRR fixture missing")
+def test_pdb_path_extracts_plddt(tmp_path):
+    a = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = a.run(
+        ProteinQCInput(pdb_path=str(_PDB_FIXTURE), metrics=["plddt", "gravy"]),
+        null_context(tmp_path),
+    )
+    assert out.metrics["plddt"] is not None
+    assert out.metrics["gravy"] is not None
+
+
+@pytest.mark.skipif(not _CIF_FIXTURE.exists(), reason="5o45 CIF fixture missing")
+def test_mmcif_path_extracts_plddt(tmp_path):
+    a = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = a.run(
+        ProteinQCInput(pdb_path=str(_CIF_FIXTURE), metrics=["plddt"]),
+        null_context(tmp_path),
+    )
+    assert out.metrics["plddt"] is not None
+
+
+def test_output_round_trip():
+    out = ProteinQCOutput(
+        metrics={"gravy": -0.5, "pi": 6.5, "instability_index": 30.0},
+        flags=["high_GRAVY"],
+        runtime_ms=12,
+    )
+    rebuilt = ProteinQCOutput.model_validate(out.model_dump())
+    assert rebuilt == out

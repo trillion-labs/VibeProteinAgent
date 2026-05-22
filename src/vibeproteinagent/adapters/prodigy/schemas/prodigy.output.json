@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/prodigy.output.json",
+  "type": "object",
+  "required": [
+    "delta_g_kcal_mol",
+    "kd_nm",
+    "interface_contacts",
+    "runtime_ms"
+  ],
+  "properties": {
+    "delta_g_kcal_mol": {"type": "number"},
+    "kd_nm": {"type": "number", "minimum": 0.0},
+    "interface_contacts": {"type": "integer", "minimum": 0},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/literature_search.output.json",
+  "type": "object",
+  "required": ["query", "backend", "result_count", "date_filter", "constraint_evidence", "top_records", "artifacts", "runtime_ms"],
+  "properties": {
+    "query": {"type": "string"},
+    "backend": {"type": "string"},
+    "result_count": {"type": "integer", "minimum": 0},
+    "date_filter": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
+    "constraint_evidence": {"type": "object", "additionalProperties": true},
+    "top_records": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "artifacts": {"type": "object", "additionalProperties": {"type": "string"}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

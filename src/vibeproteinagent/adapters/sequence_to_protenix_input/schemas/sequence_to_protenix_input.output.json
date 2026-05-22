@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/sequence_to_protenix_input.output.json",
+  "type": "object",
+  "required": ["input_json", "input_jsons", "names", "count", "runtime_ms"],
+  "properties": {
+    "input_json": {"type": "string", "minLength": 1},
+    "input_jsons": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "names": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "count": {"type": "integer", "minimum": 1},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

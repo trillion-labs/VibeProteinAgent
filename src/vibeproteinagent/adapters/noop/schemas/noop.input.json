@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/noop.input.json",
+  "type": "object",
+  "required": ["payload"],
+  "properties": {
+    "payload": {"type": "string"}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,22 @@
+name: prodigy
+version: "1.0.0"
+category: scoring
+description: "Predicts protein-protein binding affinity (ΔG in kcal/mol and K_d) from a complex PDB using a statistical contact-based model on a chain-A vs chain-B interface. CPU-only; fast triage when an ML predictor is overkill or unavailable."
+runtime: python
+backend: biopython
+gpu_required: false
+gpus_required: 1
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [binding_affinity, scoring]
+input_schema: schemas/prodigy.input.json
+output_schema: schemas/prodigy.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.prodigy.adapter:ProdigyAdapter"

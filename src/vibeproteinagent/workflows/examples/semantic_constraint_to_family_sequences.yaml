@@ -1,0 +1,31 @@
+name: semantic_constraint_to_family_sequences
+version: "1.0.0"
+description: "Retrieve literature for a semantic goal, extract a GO term, collect matching sequences, and summarize the family FASTA."
+params:
+  query: {type: str, required: true}
+  temporal_cutoff: {type: str, default: null}
+  max_sequences: {type: int, default: 100}
+nodes:
+  - id: literature
+    tool: literature_search
+    version: ">=1.0.0,<2"
+    inputs:
+      query: ${params.query}
+      temporal_cutoff: ${params.temporal_cutoff}
+      max_results: 25
+    cache: true
+  - id: family_sequences
+    tool: go_sequences
+    version: ">=1.0.0,<2"
+    inputs:
+      go_id: ${outputs.literature.constraint_evidence.go_terms[0]}
+      temporal_cutoff: ${params.temporal_cutoff}
+      max_sequences: ${params.max_sequences}
+    cache: true
+  - id: sequence_summary
+    tool: sequence_analysis
+    version: ">=1.0.0,<2"
+    inputs:
+      fasta_path: ${outputs.family_sequences.fasta_path}
+      max_annotations: 50
+    cache: true

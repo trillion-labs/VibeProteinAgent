@@ -1,0 +1,27 @@
+name: pxdesign_pipeline_multi_gpu
+version: "1.0.0"
+category: protein_design
+description: "Multi-GPU variant of the `pxdesign` pipeline mode that shards binder generation (diffusion + AF2 initial-guess + ProteinMPNN + filtering) across GPU ranks for higher throughput. Use only when ≥2 GPUs are available; for single-GPU runs use `pxdesign` with `mode=pipeline`."
+runtime: python
+backend: mixed
+gpu_required: true
+gpus_required: 2
+vram_min_gib: 24
+startup_cost: high
+estimated_runtime_s: 600
+warm_load_capable: false
+pin_warm: false
+execution_isolation: subprocess
+environment_name: pxdesign-pipeline-vpa
+environment_reason: "Distributed pipeline mode launches a local PXDesign/JAX/ColabDesign rank sidecar for each claimed worker rank. It is verified as local multi-GPU execution but does not claim warm sidecar reuse."
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.pxdesign:availability_skip_reason"
+distributed_entrypoint: "vibeproteinagent.adapters.pxdesign.adapter:run_distributed"
+supported_tasks: [binder_design, multi_gpu_dispatch]
+input_schema: schemas/pxdesign_pipeline_multi_gpu.input.json
+output_schema: ../pxdesign/schemas/pxdesign.output.json
+supported_precisions: [bf16]
+supports_batching: false
+incompatible_with: [protenix_v2]
+entry_point: "vibeproteinagent.adapters.pxdesign_pipeline_multi_gpu.adapter:PXDesignPipelineMultiGpuAdapter"

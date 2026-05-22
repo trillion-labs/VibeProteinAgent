@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/rfdiffusion.input.json",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": [
+        "unconditional",
+        "unconditional_generation",
+        "backbone_generation",
+        "motif_scaffolding",
+        "symmetric_motif_scaffolding",
+        "partial_diffusion",
+        "binder_design",
+        "binder_backbone_design",
+        "fold_conditioning",
+        "symmetric_oligomer",
+        "symmetric_oligomer_design"
+      ],
+      "default": "unconditional"
+    },
+    "target_pdb": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "target_chain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1,
+      "default": "A"
+    },
+    "target_residues": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]+-[0-9]+$",
+      "default": null
+    },
+    "target_hotspots": {
+      "type": "array",
+      "items": {"type": ["integer", "string"]},
+      "default": []
+    },
+    "contigs": {
+      "type": ["array", "null"],
+      "items": {"type": "string", "minLength": 1},
+      "default": null
+    },
+    "length_min": {"type": "integer", "minimum": 20, "maximum": 5000, "default": 100},
+    "length_max": {"type": ["integer", "null"], "minimum": 20, "maximum": 5000, "default": null},
+    "total_length": {"type": ["integer", "null"], "minimum": 20, "maximum": 5000, "default": null},
+    "binder_length_min": {"type": "integer", "minimum": 20, "maximum": 1000, "default": 70},
+    "binder_length_max": {"type": ["integer", "null"], "minimum": 20, "maximum": 1000, "default": null},
+    "symmetry": {"type": ["string", "null"], "minLength": 1, "default": null},
+    "num_designs": {"type": "integer", "minimum": 1, "maximum": 256, "default": 10},
+    "num_diffusion_steps": {"type": "integer", "minimum": 15, "maximum": 200, "default": 50},
+    "partial_T": {"type": ["integer", "null"], "minimum": 1, "maximum": 200, "default": null},
+    "noise_scale_ca": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
+    "noise_scale_frame": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
+    "inpaint_seq": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
+    "inpaint_str": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
+    "provide_seq": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
+    "contig_length": {"type": ["string", "null"], "pattern": "^[0-9]+-[0-9]+$", "default": null},
+    "checkpoint_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "model_directory_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "scaffold_dir": {
+      "type": ["string", "null"],
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "target_ss": {
+      "type": ["string", "null"],
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "target_adj": {
+      "type": ["string", "null"],
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "guiding_potentials": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
+    "guide_scale": {"type": ["number", "null"], "minimum": 0.0, "default": null},
+    "guide_decay": {
+      "type": ["string", "null"],
+      "enum": ["constant", "linear", "quadratic", "cubic", null],
+      "default": null
+    },
+    "olig_intra_all": {"type": ["boolean", "null"], "default": null},
+    "olig_inter_all": {"type": ["boolean", "null"], "default": null},
+    "hydra_overrides": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "default": []
+    },
+    "seed": {"type": ["integer", "null"], "default": null}
+  },
+  "additionalProperties": false
+}

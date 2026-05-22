@@ -1,0 +1,35 @@
+name: template_guided_design_prep
+version: "1.0.0"
+description: "Collect InterPro sequences, select templates from that family FASTA, and summarize the retrieved sequence set."
+params:
+  interpro_id: {type: str, required: true}
+  query_sequence: {type: str, required: true}
+  metadata_table: {type: path, default: null}
+  temporal_cutoff: {type: str, default: null}
+nodes:
+  - id: family_sequences
+    tool: interpro_sequences
+    version: ">=1.0.0,<2"
+    inputs:
+      interpro_id: ${params.interpro_id}
+      temporal_cutoff: ${params.temporal_cutoff}
+      max_sequences: 100
+    cache: true
+  - id: templates
+    tool: template_select
+    version: ">=1.0.0,<2"
+    inputs:
+      query_sequence: ${params.query_sequence}
+      template_db: ${outputs.family_sequences.fasta_path}
+      template_db_kind: fasta
+      metadata_table: ${params.metadata_table}
+      temporal_cutoff: ${params.temporal_cutoff}
+      max_templates: 25
+    cache: true
+  - id: family_analysis
+    tool: sequence_analysis
+    version: ">=1.0.0,<2"
+    inputs:
+      fasta_path: ${outputs.family_sequences.fasta_path}
+      max_annotations: 50
+    cache: true

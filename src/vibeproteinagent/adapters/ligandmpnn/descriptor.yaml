@@ -1,0 +1,26 @@
+name: ligandmpnn
+version: "1.0.0"
+category: inverse_folding
+description: "Inverse folding that designs sequences for a fixed protein backbone, conditioning on nearby small-molecule, cofactor, or metal atoms in the same PDB. Variants: `ligand_mpnn` (default), `protein_mpnn`, `soluble_mpnn`, `ca_mpnn`. Prefer over `proteinmpnn` when ligands matter."
+runtime: python
+backend: pytorch
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 2
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [sequence_design, ligand_aware_design]
+input_schema: schemas/ligandmpnn.input.json
+output_schema: schemas/ligandmpnn.output.json
+supported_precisions: [fp32, bf16]
+supports_batching: true
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris:
+  - uri: "vendor://ligandmpnn/weights/ligandmpnn_v_32_020_25.pt"
+    sha256: "42caaa5cdb380867d2b31c30de4ab53ea89171279b3a0732ddf94bc4d3cb6981"
+    size_bytes: 10541943
+entry_point: "vibeproteinagent.adapters.ligandmpnn.adapter:LigandMPNNAdapter"

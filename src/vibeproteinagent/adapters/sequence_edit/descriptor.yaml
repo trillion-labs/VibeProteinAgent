@@ -1,0 +1,18 @@
+name: sequence_edit
+version: "1.0.0"
+category: sequence_engineering
+description: "Deterministic sequence editing with two operations: `mutate_residues` applies a position→amino-acid mapping to a sequence, and `check_wt_consistency` verifies that listed positions still match a reference wild-type. CPU; no model required."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 5
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [sequence_engineering, mutation]
+input_schema: schemas/sequence_edit.input.json
+output_schema: schemas/sequence_edit.output.json
+supported_precisions: [fp32]
+supports_batching: false
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.sequence_edit.adapter:SequenceEditAdapter"

@@ -1,0 +1,18 @@
+name: sequence_analysis
+version: "1.0.0"
+category: analysis
+description: "Sequence-only analysis: composition, charge (pH-dependent), regions/motifs, per-residue biochemical annotations, and simple liabilities for a raw sequence or FASTA. CPU; no structure required. For structural environment use `structure_analysis`."
+runtime: python
+backend: biopython
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 10
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [sequence_analysis, quality_control]
+input_schema: schemas/sequence_analysis.input.json
+output_schema: schemas/sequence_analysis.output.json
+supported_precisions: [fp32]
+supports_batching: false
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.sequence_analysis.adapter:SequenceAnalysisAdapter"

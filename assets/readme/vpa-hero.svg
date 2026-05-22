@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1672" height="560" viewBox="0 0 1672 560" role="img" aria-labelledby="title desc" font-family="Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="title">VibeProteinAgent</title>
+  <desc id="desc">Project banner showing the VibeProteinAgent wordmark, a one-line tagline, and a calm schematic of a protein cartoon next to a workflow chain from prompt to ranked candidates.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#faf8ff"/>
+      <stop offset="1" stop-color="#f1ecfa"/>
+    </linearGradient>
+    <linearGradient id="ribbonA" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#6b1ea8"/>
+    </linearGradient>
+    <linearGradient id="ribbonB" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="1" stop-color="#4cc4e4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1672" height="560" fill="url(#bg)"/>
+
+  <!-- ============ LEFT: WORDMARK + TAGLINE + 3 FACT LINES ============ -->
+
+  <!-- brand mark: benzene ring (hexagon outline + inner aromatic circle) -->
+  <g transform="translate(112, 122)">
+    <rect width="56" height="56" rx="14" fill="#6b1ea8"/>
+    <g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round">
+      <polygon points="46,28 37,12.4 19,12.4 10,28 19,43.6 37,43.6"/>
+      <circle cx="28" cy="28" r="11"/>
+    </g>
+  </g>
+
+  <!-- wordmark -->
+  <text x="184" y="156" font-size="30" font-weight="800" fill="#1a1535" letter-spacing="-0.4">VibeProteinAgent</text>
+
+  <!-- tagline -->
+  <text x="112" y="246" font-size="40" font-weight="700" fill="#1a1535" letter-spacing="-0.6">Local-first, flexible protein design</text>
+  <text x="112" y="294" font-size="40" font-weight="700" fill="#6b1ea8" letter-spacing="-0.6">with LLM agent orchestration.</text>
+
+  <!-- three bullets -->
+  <g font-size="16" font-weight="500" fill="#1a1535">
+    <g>
+      <circle cx="124" cy="350" r="3.5" fill="#6b1ea8"/>
+      <text x="140" y="356">One CLI for 30+ open-source tools — design, prediction, scoring, retrieval.</text>
+    </g>
+    <g>
+      <circle cx="124" cy="380" r="3.5" fill="#6b1ea8"/>
+      <text x="140" y="386">Three ways to run: direct tool call, YAML workflow, or natural-language agent.</text>
+    </g>
+    <g>
+      <circle cx="124" cy="410" r="3.5" fill="#6b1ea8"/>
+      <text x="140" y="416">Warm GPU workers and isolated sidecars handle heavy model-backed tools.</text>
+    </g>
+  </g>
+
+  <!-- ============ RIGHT: CLEAN SCHEMATIC ============ -->
+  <!-- Soft separator line -->
+  <line x1="936" y1="120" x2="936" y2="440" stroke="#e8e4f2" stroke-width="1"/>
+
+  <!-- column header -->
+  <text x="986" y="148" font-size="11" font-weight="700" fill="#6b6491" letter-spacing="2.4">WHAT A RUN LOOKS LIKE</text>
+
+  <!-- prompt card -->
+  <g>
+    <rect x="986" y="172" width="552" height="64" rx="12" fill="#ffffff" stroke="#e8e4f2"/>
+    <circle cx="1014" cy="204" r="5" fill="#6b1ea8"/>
+    <text x="1030" y="200" font-size="10.5" font-weight="700" fill="#6b1ea8" letter-spacing="0.8">PROMPT</text>
+    <text x="1030" y="222" font-size="14" font-weight="500" fill="#1a1535" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">Design 8 binders to target.pdb and rank them.</text>
+  </g>
+
+  <!-- vertical connector -->
+  <path d="M1262 236 V268" stroke="#d4cee5" stroke-width="1.5" fill="none"/>
+  <circle cx="1262" cy="270" r="2.5" fill="#a78bfa"/>
+
+  <!-- workflow chain -->
+  <g font-size="11" font-weight="700" letter-spacing="0.4">
+    <!-- stage 1 -->
+    <rect x="986" y="282" width="124" height="48" rx="10" fill="#ede9fe" stroke="#d4cee5"/>
+    <text x="1048" y="304" text-anchor="middle" fill="#6b6491" font-size="9" letter-spacing="0.8">DESIGN</text>
+    <text x="1048" y="322" text-anchor="middle" fill="#1a1535" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">rfdiffusion</text>
+    <!-- arrow -->
+    <path d="M1110 306 H1124" stroke="#a78bfa" stroke-width="1.6" fill="none"/>
+    <path d="M1120 302 L1125 306 L1120 310 Z" fill="#a78bfa"/>
+    <!-- stage 2 -->
+    <rect x="1128" y="282" width="124" height="48" rx="10" fill="#ede9fe" stroke="#d4cee5"/>
+    <text x="1190" y="304" text-anchor="middle" fill="#6b6491" font-size="9" letter-spacing="0.8">SEQUENCE</text>
+    <text x="1190" y="322" text-anchor="middle" fill="#1a1535" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">proteinmpnn</text>
+    <path d="M1252 306 H1266" stroke="#a78bfa" stroke-width="1.6" fill="none"/>
+    <path d="M1262 302 L1267 306 L1262 310 Z" fill="#a78bfa"/>
+    <!-- stage 3 -->
+    <rect x="1270" y="282" width="124" height="48" rx="10" fill="#e5f4fd" stroke="#a5dceb"/>
+    <text x="1332" y="304" text-anchor="middle" fill="#6b6491" font-size="9" letter-spacing="0.8">PREDICT</text>
+    <text x="1332" y="322" text-anchor="middle" fill="#1a1535" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">protenix v2</text>
+    <path d="M1394 306 H1408" stroke="#a78bfa" stroke-width="1.6" fill="none"/>
+    <path d="M1404 302 L1409 306 L1404 310 Z" fill="#a78bfa"/>
+    <!-- stage 4 -->
+    <rect x="1412" y="282" width="124" height="48" rx="10" fill="#fcebdd" stroke="#f8c98a"/>
+    <text x="1474" y="304" text-anchor="middle" fill="#6b6491" font-size="9" letter-spacing="0.8">RANK</text>
+    <text x="1474" y="322" text-anchor="middle" fill="#1a1535" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">rank_designs</text>
+  </g>
+
+  <!-- vertical connector -->
+  <path d="M1262 332 V366" stroke="#d4cee5" stroke-width="1.5" fill="none"/>
+  <circle cx="1262" cy="368" r="2.5" fill="#a78bfa"/>
+
+  <!-- result strip -->
+  <g>
+    <rect x="986" y="380" width="552" height="60" rx="12" fill="#ffffff" stroke="#e8e4f2"/>
+    <text x="1014" y="402" font-size="10.5" font-weight="700" fill="#6b1ea8" letter-spacing="0.8">RESULT</text>
+    <text x="1014" y="424" font-size="14" font-weight="600" fill="#1a1535">12 candidates · 5 pass QC · </text>
+    <text x="1240" y="424" font-size="14" font-weight="600" fill="#6b1ea8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">report.html</text>
+    <!-- tiny structure cartoon on the right of the strip -->
+    <g transform="translate(1460, 392)">
+      <rect width="68" height="40" rx="8" fill="#1c0345"/>
+      <clipPath id="thumbClip"><rect x="2" y="2" width="64" height="36" rx="6"/></clipPath>
+      <g clip-path="url(#thumbClip)" fill="none" stroke-linecap="round">
+        <path d="M11 26 C 21 16 30 18 36 28 S 50 30 56 18" stroke="url(#ribbonA)" stroke-width="3.4"/>
+        <path d="M11 31 C 24 33 38 25 56 30" stroke="url(#ribbonB)" stroke-width="2.6"/>
+      </g>
+      <circle cx="28" cy="20" r="2" fill="#fbbf24"/>
+    </g>
+  </g>
+
+</svg>

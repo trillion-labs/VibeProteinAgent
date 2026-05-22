@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/tmalign.input.json",
+  "type": "object",
+  "required": ["pdb_a", "pdb_b"],
+  "properties": {
+    "pdb_a": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "pdb_b": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "normalize_by": {
+      "type": "string",
+      "enum": ["a", "b", "average", "shorter", "longer"],
+      "default": "shorter"
+    }
+  },
+  "additionalProperties": false
+}

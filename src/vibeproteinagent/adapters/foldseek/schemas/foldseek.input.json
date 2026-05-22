@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/foldseek.input.json",
+  "type": "object",
+  "required": ["query_pdb", "target_db"],
+  "properties": {
+    "query_pdb": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "target_db": {"type": "string", "minLength": 1},
+    "mode": {
+      "type": "string",
+      "enum": ["easy-search", "easy-cluster"],
+      "default": "easy-search"
+    },
+    "alignment_type": {"type": "integer", "minimum": 0, "maximum": 4, "default": 2},
+    "e_value": {"type": "number", "exclusiveMinimum": 0.0, "default": 0.001},
+    "max_seqs": {"type": "integer", "minimum": 1, "default": 1000}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,14 @@
+[
+    {
+        "sequences": [
+            {
+                "proteinChain": {
+                    "sequence": "MKQHKAMIVALIVICITAVVAALVTRKDLCEVHIRTGQTEVAVF",
+                    "count": 1
+                }
+            }
+        ],
+        "name": "tiny_monomer_44aa",
+        "modelSeeds": [101]
+    }
+]

@@ -1,0 +1,28 @@
+name: bindcraft
+version: "1.0.0"
+category: protein_design
+description: "End-to-end protein binder design against a target PDB: hallucinates the binder via AlphaFold2-multimer backprop, redesigns with ProteinMPNN, and filters with PyRosetta interface metrics. Returns ready-to-test binder sequences plus predicted complexes, not just backbones."
+runtime: python
+backend: jax
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 24
+startup_cost: high
+estimated_runtime_s: 600
+warm_load_capable: true
+pin_warm: true
+execution_isolation: persistent_sidecar
+environment_name: BindCraft
+environment_reason: "BindCraft pins JAX/CUDA, PyRosetta, ColabDesign, and numpy<2 outside the shared vpa env; a persistent sidecar avoids per-call cold starts."
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.bindcraft:availability_skip_reason"
+supported_tasks: [binder_design]
+input_schema: schemas/bindcraft.input.json
+output_schema: schemas/bindcraft.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+entry_point: "vibeproteinagent.adapters.bindcraft.adapter:BindCraftAdapter"

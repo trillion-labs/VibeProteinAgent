@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/template_select.output.json",
+  "type": "object",
+  "required": ["query_kind", "engine", "template_count", "templates_json", "templates_tsv", "top_templates", "artifacts", "runtime_ms"],
+  "properties": {
+    "query_kind": {"type": "string"},
+    "engine": {"type": "string"},
+    "template_count": {"type": "integer", "minimum": 0},
+    "templates_json": {"type": "string"},
+    "templates_tsv": {"type": "string"},
+    "top_templates": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "artifacts": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

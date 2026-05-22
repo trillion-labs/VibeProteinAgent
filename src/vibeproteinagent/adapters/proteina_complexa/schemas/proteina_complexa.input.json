@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/proteina_complexa.input.json",
+  "type": "object",
+  "required": ["mode"],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["protein_binder", "ligand_binder", "motif"],
+      "description": "Proteina-Complexa task: protein_binder designs binders to a protein target; ligand_binder designs binders around a ligand pocket; motif scaffolds a functional motif."
+    },
+    "target_pdb": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Protein target PDB for protein_binder, or ligand-only PDB for ligand_binder.",
+      "vpa:digest": "sha256-if-path"
+    },
+    "target_chain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1,
+      "default": "A"
+    },
+    "target_pocket_residues": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "default": [],
+      "description": "ligand_binder only: target-chain residue indices around the ligand pocket."
+    },
+    "ligand_smiles": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "ligand_binder only: ligand SMILES."
+    },
+    "motif_pdb": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "motif only: PDB containing the motif residues to preserve.",
+      "vpa:digest": "sha256-if-path"
+    },
+    "motif_chain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1,
+      "default": "A"
+    },
+    "motif_residues": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "default": [],
+      "description": "motif only: residue indices on motif_chain to preserve."
+    },
+    "total_length": {
+      "type": ["integer", "null"],
+      "minimum": 30,
+      "maximum": 400,
+      "default": null,
+      "description": "motif only: total designed monomer length."
+    },
+    "binder_length": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 200,
+      "default": 80
+    },
+    "num_designs": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 128,
+      "default": null,
+      "description": "Candidate count. Null preserves the mode-specific default: protein_binder=4, ligand_binder=2, motif=10."
+    },
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null
+    },
+    "run_name": {
+      "type": ["string", "null"],
+      "default": null
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "protein_binder"}}},
+      "then": {"required": ["target_pdb"]}
+    },
+    {
+      "if": {"properties": {"mode": {"const": "ligand_binder"}}},
+      "then": {
+        "required": ["target_pdb", "target_pocket_residues", "ligand_smiles"],
+        "properties": {
+          "target_pocket_residues": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"mode": {"const": "motif"}}},
+      "then": {
+        "required": ["motif_pdb", "motif_residues", "total_length"],
+        "properties": {
+          "motif_residues": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

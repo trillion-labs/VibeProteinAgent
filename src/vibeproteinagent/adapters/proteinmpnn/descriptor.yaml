@@ -1,0 +1,26 @@
+name: proteinmpnn
+version: "1.0.1"
+category: inverse_folding
+description: "Inverse folding that designs amino-acid sequences for a fixed protein backbone (multi-chain context aware) and emits ranked candidate sequences with scores. Standard post-step after backbone generation; for ligand- or cofactor-aware design use `ligandmpnn`."
+runtime: python
+backend: pytorch
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 2
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [sequence_design]
+input_schema: schemas/proteinmpnn.input.json
+output_schema: schemas/proteinmpnn.output.json
+supported_precisions: [fp32, bf16]
+supports_batching: true
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris:
+  - uri: "vendor://proteinmpnn/weights/v_48_020.pt"
+    sha256: "c9cb4a671d79604111231f8dbfc7c590e06f1197453b7a6854ac6661a642f5bd"
+    size_bytes: 6681301
+entry_point: "vibeproteinagent.adapters.proteinmpnn.adapter:ProteinMPNNAdapter"

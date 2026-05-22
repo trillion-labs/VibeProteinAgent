@@ -1,0 +1,23 @@
+name: protenix_v2
+version: "1.0.0"
+category: structure_prediction
+description: "AlphaFold3-class state-of-the-art 3D structure prediction for proteins, complexes, nucleic acids, and small molecules from a Protenix-format input JSON. Optional MSA/templates and configurable sampling/recycling. Use `boltz2_affinity` when binding affinity is also needed."
+runtime: python
+backend: pytorch
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 16
+startup_cost: high
+estimated_runtime_s: 600
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [structure_prediction]
+input_schema: schemas/protenix_v2.input.json
+output_schema: schemas/protenix_v2.output.json
+supported_precisions: [bf16]
+supports_batching: false
+incompatible_with: [pxdesign]
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+entry_point: "vibeproteinagent.adapters.protenix_v2.adapter:ProtenixV2Adapter"

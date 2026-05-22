@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/dssp.input.json",
+  "type": "object",
+  "required": ["pdb_path"],
+  "properties": {
+    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "format": {
+      "type": "string",
+      "enum": ["dssp", "mmcif", "json"],
+      "default": "json"
+    }
+  },
+  "additionalProperties": false
+}

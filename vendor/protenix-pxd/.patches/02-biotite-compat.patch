@@ -1,0 +1,61 @@
+Subject: [PATCH] biotite >= 1.4 compat: guard PDBX_COVALENT_TYPES + shim two private APIs
+
+Upstream protenix-pxd was pinned to biotite==1.0.1 where the following
+attributes existed in `biotite.structure.io.pdbx.convert`:
+
+  - PDBX_COVALENT_TYPES (module-level list)
+  - _get_model_starts(model_array_int) -> ndarray of model start indices
+  - _filter_model(atom_site, model_starts, model) -> filtered atom_site
+
+biotite >= 1.4 (vpa env ships 1.6.0) removed PDBX_COVALENT_TYPES, removed
+_get_model_starts entirely, and changed _filter_model's signature to
+(atom_site, model) -- the model_starts argument is computed internally.
+
+The fix lives in protenix/data/parser.py at module import time:
+
+  (1) PDBX_COVALENT_TYPES is accessed via getattr(...) fallback so the
+      original "remove 'metalc' from the list" guard becomes a no-op when
+      the attribute is absent.
+  (2) _get_model_starts is reinstated as a drop-in shim using
+      `np.concatenate(([0], np.where(np.diff(model_array) != 0)[0] + 1))`
+      which is numerically identical to the biotite 1.0.1 implementation.
+  (3) _filter_model is wrapped in a 3-arg shim that drops the unused
+      model_starts argument and forwards to the new 2-arg implementation.
+
+All three are idempotent (guarded by hasattr / signature inspection) so
+this patch is a no-op on biotite 1.0.x.
+
+--- a/protenix/data/parser.py
++++ b/protenix/data/parser.py
+@@ -55,8 +55,28 @@
+
+ logger = logging.getLogger(__name__)
+
+-# Ignore inter residue metal coordinate bonds in mmcif _struct_conn
+-if "metalc" in pdbx_convert.PDBX_COVALENT_TYPES:  # for reload
+-    pdbx_convert.PDBX_COVALENT_TYPES.remove("metalc")
++# Ignore inter residue metal coordinate bonds in mmcif _struct_conn.
++# biotite >= 1.4 renamed/removed the PDBX_COVALENT_TYPES module attribute;
++# guard against AttributeError so the import survives on modernized envs.
++_covalent_types = getattr(pdbx_convert, "PDBX_COVALENT_TYPES", None)
++if _covalent_types is not None and "metalc" in _covalent_types:  # for reload
++    _covalent_types.remove("metalc")
++
++# biotite >= 1.4 removed pdbx.convert._get_model_starts (private API). Reinstate
++# a drop-in shim: given the int array of pdbx_PDB_model_num values, return the
++# starting row index of each model. Identical behavior to biotite 1.0.1.
++if not hasattr(pdbx_convert, "_get_model_starts"):
++    def _get_model_starts(model_array):
++        diff = np.diff(model_array)
++        return np.concatenate(([0], np.where(diff != 0)[0] + 1))
++    pdbx_convert._get_model_starts = _get_model_starts
++
++# biotite >= 1.4 changed _filter_model from (atom_site, model_starts, model)
++# to (atom_site, model). Provide a 3-arg wrapper that dispatches to the 2-arg
++# implementation so this module's get_structure() call site still works.
++import inspect as _inspect
++_orig_filter_model = pdbx_convert._filter_model
++if len(_inspect.signature(_orig_filter_model).parameters) == 2:
++    def _filter_model_shim(atom_site, model_starts, model):
++        return _orig_filter_model(atom_site, model)
++    pdbx_convert._filter_model = _filter_model_shim

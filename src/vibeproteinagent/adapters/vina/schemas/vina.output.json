@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/vina.output.json",
+  "type": "object",
+  "required": ["docked_pdbqt", "best_affinity_kcal_mol", "modes", "runtime_ms"],
+  "properties": {
+    "docked_pdbqt": {"type": "string", "minLength": 1},
+    "best_affinity_kcal_mol": {"type": "number"},
+    "modes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rank", "affinity_kcal_mol", "rmsd_lb", "rmsd_ub"],
+        "properties": {
+          "rank": {"type": "integer", "minimum": 1},
+          "affinity_kcal_mol": {"type": "number"},
+          "rmsd_lb": {"type": "number", "minimum": 0.0},
+          "rmsd_ub": {"type": "number", "minimum": 0.0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

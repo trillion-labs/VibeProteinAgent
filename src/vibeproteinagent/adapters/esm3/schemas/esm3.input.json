@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/esm3.input.json",
+  "type": "object",
+  "required": ["sequence"],
+  "properties": {
+    "sequence": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z]+$"
+    },
+    "model_name": {
+      "type": "string",
+      "minLength": 1,
+      "default": "esm3_sm_open_v1"
+    },
+    "tracks": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["sequence", "structure", "embedding"]
+      },
+      "uniqueItems": true,
+      "default": ["sequence", "structure"]
+    },
+    "num_steps": {"type": "integer", "minimum": 1, "default": 20},
+    "temperature": {"type": "number", "minimum": 0.0, "default": 0.5}
+  },
+  "additionalProperties": false
+}

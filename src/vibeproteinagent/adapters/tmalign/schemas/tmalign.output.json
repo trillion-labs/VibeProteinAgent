@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/tmalign.output.json",
+  "type": "object",
+  "required": [
+    "tm_score_normalized_by_a",
+    "tm_score_normalized_by_b",
+    "rmsd",
+    "aligned_length",
+    "seq_identity",
+    "runtime_ms"
+  ],
+  "properties": {
+    "tm_score_normalized_by_a": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "tm_score_normalized_by_b": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "tm_score_normalized": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "rmsd": {"type": "number", "minimum": 0.0},
+    "aligned_length": {"type": "integer", "minimum": 0},
+    "length_a": {"type": "integer", "minimum": 0},
+    "length_b": {"type": "integer", "minimum": 0},
+    "seq_identity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "superposition_pdb": {"type": ["string", "null"]},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}
