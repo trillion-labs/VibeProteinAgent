@@ -466,6 +466,7 @@ def list_workflows(_ctx: SessionCtx) -> list[dict[str, Any]]:
                         "tool": node.tool,
                         "version": node.version,
                         "foreach": node.foreach,
+                        "max_parallel": node.max_parallel,
                         "when": node.when,
                         "inputs": node.inputs,
                     }

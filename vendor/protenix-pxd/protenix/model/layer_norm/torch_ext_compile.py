@@ -14,14 +14,38 @@
 
 
 import os
+import re
 
 from torch.utils.cpp_extension import load
 
 
+def cuda_arch_list() -> str:
+    return os.environ.get("VPA_PROTENIX_CUDA_ARCH_LIST") or os.environ.get(
+        "TORCH_CUDA_ARCH_LIST",
+        "8.6;8.9;9.0;10.0",
+    )
+
+
+def extension_suffix() -> str:
+    return re.sub(r"[^0-9A-Za-z]+", "_", cuda_arch_list()).strip("_")
+
+
+def gencode_flags() -> list[str]:
+    flags: list[str] = []
+    for raw_arch in cuda_arch_list().split(";"):
+        arch = raw_arch.strip()
+        if not arch:
+            continue
+        arch = arch.removesuffix("+PTX")
+        compact = arch.replace(".", "")
+        flags.extend(["-gencode", f"arch=compute_{compact},code=sm_{compact}"])
+    return flags
+
+
 def compile(name, sources, extra_include_paths, build_directory):
-    # Respect externally provided arch list; default to B200-friendly target.
+    # Respect externally provided arch list; default to common VPA GPU targets.
     if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "10.0"
+        os.environ["TORCH_CUDA_ARCH_LIST"] = cuda_arch_list()
     return load(
         name=name,
         sources=sources,
@@ -44,16 +68,7 @@ def compile(name, sources, extra_include_paths, build_directory):
             "-U__CUDA_NO_HALF_CONVERSIONS__",
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
-            "-gencode",
-            # "arch=compute_70,code=sm_70",
-            # "-gencode",
-            # "arch=compute_80,code=sm_80",
-            # "-gencode",
-            "arch=compute_86,code=sm_86",
-            "-gencode",
-            "arch=compute_90,code=sm_90",
-            "-gencode",
-            "arch=compute_100,code=sm_100",
+            *gencode_flags(),
         ],
         verbose=True,
         build_directory=build_directory,

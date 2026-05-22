@@ -17,6 +17,9 @@ A workflow YAML has two main parts:
 
 Inside a node, use `${params.name}` to read a workflow parameter, and
 `${outputs.step_id.field}` to use a result from an earlier step.
+For expensive candidate generators, prefer `foreach` fan-out over one large
+single-GPU node. Add `max_parallel` to cap active shards so the plan matches
+your GPU budget.
 
 Example `my_sequence_workflow.yaml`:
 
@@ -56,6 +59,8 @@ vpa workflow run my_sequence_workflow.yaml \
 ```
 
 Use `vpa tool <tool_name>` to see which input fields each tool accepts.
+Shardable heavy tools advertise planner metadata in `vpa tool <tool_name>`:
+`shardable_fields`, `recommended_shard_size`, and `default_max_parallel`.
 
 Cf. You do not need to write `version` in a simple workflow; VPA uses the installed
 tool version by default. Add a version only when you intentionally want to pin a
@@ -67,7 +72,8 @@ For full workflow capability:
 
 ```bash
 # `--yes` skips confirmation prompts and starts the install right away.
-npx vibeproteinagent install --profile full --yes
+npx vibeproteinagent install preflight --profile full --cuda-profile auto
+npx vibeproteinagent install --profile full --cuda-profile auto --yes
 ```
 
 `--profile full` includes ESM3. If the open ESM3 cache is not already present,
@@ -80,7 +86,8 @@ export HF_TOKEN=<huggingface-access-token>
 Or install only the tools you need:
 
 ```bash
-npx vibeproteinagent install --tools rfdiffusion,proteinmpnn,protenix_v2,structure_analysis,protein_qc,rank_designs --yes
+npx vibeproteinagent install preflight --tools rfdiffusion,proteinmpnn,protenix_v2,structure_analysis,protein_qc,rank_designs --cuda-profile auto
+npx vibeproteinagent install --tools rfdiffusion,proteinmpnn,protenix_v2,structure_analysis,protein_qc,rank_designs --cuda-profile auto --yes
 ```
 
 ## 3. Create A Workspace And Start Workers

@@ -3,7 +3,7 @@
 ################## specify conda/mamba folder, and installation folder for git repositories, and whether to use mamba or $pkg_manager
 # Default value for pkg_manager
 pkg_manager='conda'
-cuda=''
+cuda="${VPA_BINDCRAFT_CUDA:-${VPA_CUDA_VERSION:-}}"
 env_prefix=''
 
 # Define the short and long options

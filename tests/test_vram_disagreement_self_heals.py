@@ -33,7 +33,7 @@ def _bare_supervisor(tmp_workspace: Workspace) -> Supervisor:
     sup.workspace = tmp_workspace
     sup._gpu_wait_log_ts = {}
     sup._vram_reject_blocklist = {}
-    sup._vram_reject_gpus = {}
+    sup._vram_reject_workers = {}
     sup.workers = []
     sup._registry = None
     sup._log = SimpleNamespace(  # type: ignore[attr-defined]
@@ -95,17 +95,17 @@ def test_handle_vram_reject_requeues_and_blocklists_worker(
     store = JobStore(tmp_workspace)
     sup = _bare_supervisor(tmp_workspace)
     sup.workers = [
-        SimpleNamespace(gpu_id=0, process=SimpleNamespace(is_alive=lambda: True)),
-        SimpleNamespace(gpu_id=1, process=SimpleNamespace(is_alive=lambda: True)),
+        SimpleNamespace(worker_id=0, gpu_id=0, process=SimpleNamespace(is_alive=lambda: True)),
+        SimpleNamespace(worker_id=1, gpu_id=1, process=SimpleNamespace(is_alive=lambda: True)),
     ]
     job_id = _failed_job(store, tmp_workspace)
 
-    sup._handle_vram_reject(store, job_id, gpu_id=0)
+    sup._handle_vram_reject(store, job_id, worker_id=0)
 
     after = store.get(job_id)
     assert after.state is JobState.QUEUED
     assert after.retry_count == 0
-    assert sup._vram_reject_gpus[job_id] == {0}
+    assert sup._vram_reject_workers[job_id] == {0}
     assert 0 in sup._vram_reject_blocklist[job_id]
 
 
@@ -116,11 +116,11 @@ def test_vram_reject_stays_failed_after_all_workers_reject(
     store = JobStore(tmp_workspace)
     sup = _bare_supervisor(tmp_workspace)
     sup.workers = [
-        SimpleNamespace(gpu_id=0, process=SimpleNamespace(is_alive=lambda: True)),
+        SimpleNamespace(worker_id=0, gpu_id=0, process=SimpleNamespace(is_alive=lambda: True)),
     ]
     job_id = _failed_job(store, tmp_workspace)
 
-    sup._handle_vram_reject(store, job_id, gpu_id=0)
+    sup._handle_vram_reject(store, job_id, worker_id=0)
 
     after = store.get(job_id)
     assert after.state is JobState.FAILED
@@ -134,10 +134,10 @@ def test_terminal_vram_reject_is_not_auto_retried(
     store = JobStore(tmp_workspace)
     sup = _bare_supervisor(tmp_workspace)
     sup.workers = [
-        SimpleNamespace(gpu_id=0, process=SimpleNamespace(is_alive=lambda: True)),
+        SimpleNamespace(worker_id=0, gpu_id=0, process=SimpleNamespace(is_alive=lambda: True)),
     ]
     job_id = _failed_job(store, tmp_workspace)
-    sup._vram_reject_gpus[job_id] = {0}
+    sup._vram_reject_workers[job_id] = {0}
 
     sup._maybe_auto_retry(job_id, tmp_workspace.job_dir(job_id) / "events.ndjson")
 

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PREFIX=""
+CUDA_PROFILE="${VPA_CUDA_PROFILE:-cu128}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -9,8 +10,12 @@ while [[ $# -gt 0 ]]; do
             PREFIX="$2"
             shift 2
             ;;
+        --cuda-profile)
+            CUDA_PROFILE="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 --prefix PATH"
+            echo "Usage: $0 --prefix PATH [--cuda-profile auto|cu128|cu126|cpu]"
             exit 0
             ;;
         *)
@@ -23,6 +28,18 @@ done
 if [[ -z "$PREFIX" ]]; then
     echo "--prefix is required" >&2
     exit 2
+fi
+
+if [[ "$CUDA_PROFILE" == "auto" ]]; then
+    CUDA_PROFILE="${VPA_CUDA_TAG:-cu128}"
+fi
+TORCH_SPEC="${VPA_TORCH_SPEC:-torch==2.7.1+${CUDA_PROFILE}}"
+TORCH_INDEX_URL="${VPA_TORCH_INDEX_URL:-https://download.pytorch.org/whl/${CUDA_PROFILE}}"
+JAX_CUDA_EXTRA="${VPA_JAX_CUDA_EXTRA:-jax[cuda12]}"
+if [[ "$CUDA_PROFILE" == "cpu" ]]; then
+    TORCH_SPEC="${VPA_TORCH_SPEC:-torch==2.7.1}"
+    TORCH_INDEX_URL="${VPA_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+    JAX_CUDA_EXTRA="jax"
 fi
 
 if [[ -x "$PREFIX/bin/python" ]]; then
@@ -57,11 +74,11 @@ fi
 PY="$PREFIX/bin/python"
 
 "$PY" -m pip install --no-user \
-    "jax[cuda12]==0.4.29" jaxlib==0.4.29 \
+    "${JAX_CUDA_EXTRA}==0.4.29" jaxlib==0.4.29 \
     "optax==0.2.5" "dm-haiku==0.0.13" dm-tree \
     "transformers==4.51.3" msgpack \
-    torch==2.7.1+cu128 \
-    --extra-index-url https://download.pytorch.org/whl/cu128
+    "$TORCH_SPEC" \
+    --extra-index-url "$TORCH_INDEX_URL"
 
 "$PY" -m pip install --no-user \
     git+https://github.com/sokrypton/ColabDesign.git \

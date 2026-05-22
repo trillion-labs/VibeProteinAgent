@@ -9,6 +9,7 @@ import signal
 import socket
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,12 @@ def _pick_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+@dataclass(frozen=True)
+class _WorkerSpec:
+    worker_id: int
+    gpu_id: int
+
+
 class _WorkerHandle:
     """Bookkeeping for one spawned worker subprocess."""
 
@@ -49,12 +56,20 @@ class _WorkerHandle:
         "gpu_id",
         "process",
         "socket_path",
+        "worker_id",
     )
 
-    def __init__(self, gpu_id: int, process: mp.Process) -> None:
+    def __init__(
+        self,
+        gpu_id: int,
+        process: mp.Process,
+        *,
+        worker_id: int | None = None,
+    ) -> None:
+        self.worker_id = int(gpu_id if worker_id is None else worker_id)
         self.gpu_id = gpu_id
         self.process = process
-        self.socket_path = paths.worker_socket(gpu_id)
+        self.socket_path = paths.worker_socket(self.worker_id)
         self.busy = False
         self.current_job_id: str | None = None
 
@@ -93,7 +108,7 @@ class Supervisor:
         # E_VRAM_EXHAUSTED. This is permanent for the job; once every eligible
         # worker has rejected, the job stays terminally failed instead of
         # cycling forever.
-        self._vram_reject_gpus: dict[str, set[int]] = {}
+        self._vram_reject_workers: dict[str, set[int]] = {}
         self._log: Logger = get_file_logger(
             "supervisor", paths.supervisor_log_file()
         )
@@ -113,6 +128,7 @@ class Supervisor:
         workspace_name: str,
         num_workers: int,
         gpu_ids: list[int],
+        cpu_workers: int = 0,
     ) -> None:
         """Entrypoint for the supervisor subprocess."""
         log_path = paths.supervisor_log_file()
@@ -123,36 +139,71 @@ class Supervisor:
         boot_log = get_file_logger("supervisor", log_path)
         boot_log.info(
             "starting",
-            workspace=workspace_name, workers=num_workers, gpu_ids=str(gpu_ids),
+            workspace=workspace_name,
+            workers=num_workers,
+            gpu_ids=str(gpu_ids),
+            cpu_workers=cpu_workers,
         )
         supervisor = cls(workspace_name, num_workers)
         supervisor._gpu_ids = gpu_ids  # type: ignore[attr-defined]
         try:
-            asyncio.run(supervisor._async_main(gpu_ids))
+            asyncio.run(supervisor._async_main(gpu_ids, cpu_workers=cpu_workers))
         except KeyboardInterrupt:
             pass
         except Exception as exc:
             boot_log.error("fatal", error=str(exc))
             raise
 
-    async def _async_main(self, gpu_ids: list[int]) -> None:
+    @staticmethod
+    def _worker_specs(gpu_ids: list[int], cpu_workers: int = 0) -> list[_WorkerSpec]:
+        """Build worker identities from device ids.
+
+        GPU workers keep ``worker_id == gpu_id`` for backward-compatible run
+        records. CPU workers all use ``gpu_id == -1`` for device setup, but get
+        distinct negative worker ids to avoid UDS/log/pid collisions.
+        """
+        specs: list[_WorkerSpec] = []
+        seen_worker_ids: set[int] = set()
+        for gid in gpu_ids:
+            if gid < 0:
+                cpu_workers += 1
+                continue
+            if gid in seen_worker_ids:
+                continue
+            seen_worker_ids.add(gid)
+            specs.append(_WorkerSpec(worker_id=gid, gpu_id=gid))
+        for idx in range(max(0, cpu_workers)):
+            worker_id = -(idx + 1)
+            while worker_id in seen_worker_ids:
+                worker_id -= 1
+            seen_worker_ids.add(worker_id)
+            specs.append(_WorkerSpec(worker_id=worker_id, gpu_id=-1))
+        return specs
+
+    async def _async_main(self, gpu_ids: list[int], *, cpu_workers: int = 0) -> None:
         self._stop_event = asyncio.Event()
         # Spawn workers.
         ctx = mp.get_context("spawn")
         spawn_started = time.monotonic()
-        for gid in gpu_ids:
+        worker_specs = self._worker_specs(gpu_ids, cpu_workers)
+        for spec in worker_specs:
             proc = ctx.Process(
                 target=worker_main,
-                args=(gid, self.workspace_name),
-                name=f"vpa-worker-{gid}",
+                args=(spec.worker_id, spec.gpu_id, self.workspace_name),
+                name=f"vpa-worker-{spec.worker_id}",
                 daemon=False,
             )
             proc.start()
-            self._log.info("spawn_worker", gpu_id=gid, pid=proc.pid)
-            handle = _WorkerHandle(gid, proc)
+            self._log.info(
+                "spawn_worker",
+                worker_id=spec.worker_id,
+                gpu_id=spec.gpu_id,
+                pid=proc.pid,
+            )
+            handle = _WorkerHandle(spec.gpu_id, proc, worker_id=spec.worker_id)
             self.workers.append(handle)
-            self._submit_locks[gid] = asyncio.Lock()
-            self._worker_state[gid] = self._synth_state(handle)
+            self._submit_locks[handle.worker_id] = asyncio.Lock()
+            self._worker_state[handle.worker_id] = self._synth_state(handle)
         # Wait for each worker socket to appear (torch init can be slow on N GPUs).
         await self._wait_workers_ready(timeout_s=45.0)
         self._log.info(
@@ -207,14 +258,14 @@ class Supervisor:
         ready: set[int] = set()
         while time.monotonic() < deadline and len(ready) < len(self.workers):
             for h in self.workers:
-                if h.gpu_id in ready:
+                if h.worker_id in ready:
                     continue
                 if h.socket_path.exists():
-                    ready.add(h.gpu_id)
+                    ready.add(h.worker_id)
             if len(ready) == len(self.workers):
                 break
             await asyncio.sleep(0.1)
-        missing = [h.gpu_id for h in self.workers if h.gpu_id not in ready]
+        missing = [h.worker_id for h in self.workers if h.worker_id not in ready]
         if missing:
             self._log.warn("workers_not_ready", missing=str(missing))
 
@@ -241,6 +292,7 @@ class Supervisor:
     def _synth_state(self, h: _WorkerHandle) -> dict[str, Any]:
         """Cheap stand-in cached entry used before the first poll succeeds."""
         return {
+            "worker_id": h.worker_id,
             "gpu_id": h.gpu_id,
             "pid": h.process.pid,
             "busy": h.busy,
@@ -266,7 +318,7 @@ class Supervisor:
                         # Supervisor truth wins for busy / current_job_id
                         info["busy"] = h.busy
                         info["current_job_id"] = h.current_job_id
-                        self._worker_state[h.gpu_id] = info
+                        self._worker_state[h.worker_id] = info
                 except Exception:
                     # Connection refused while worker is restarting / busy is fine.
                     pass
@@ -375,7 +427,7 @@ class Supervisor:
                 continue
 
             claimed = store.claim_next_queued(
-                worker_id=chosen.gpu_id,
+                worker_id=chosen.worker_id,
                 gpu_ids=[chosen.gpu_id] if chosen.gpu_id >= 0 else [],
                 job_id=rec.job_id,
             )
@@ -384,7 +436,7 @@ class Supervisor:
                 continue
             chosen.busy = True
             chosen.current_job_id = claimed.job_id
-            cached = self._worker_state.get(chosen.gpu_id)
+            cached = self._worker_state.get(chosen.worker_id)
             if cached is not None:
                 cached["busy"] = True
                 cached["current_job_id"] = claimed.job_id
@@ -411,10 +463,10 @@ class Supervisor:
         # blocklist decays after K=2 placement ticks (see _decay_vram_blocklist).
         blocklist = self._vram_reject_blocklist.get(rec.job_id) or {}
         if blocklist:
-            candidates = [c for c in candidates if c.gpu_id not in blocklist]
-        rejected = self._vram_reject_gpus.get(rec.job_id) or set()
+            candidates = [c for c in candidates if c.worker_id not in blocklist]
+        rejected = self._vram_reject_workers.get(rec.job_id) or set()
         if rejected:
-            candidates = [c for c in candidates if c.gpu_id not in rejected]
+            candidates = [c for c in candidates if c.worker_id not in rejected]
         if not candidates:
             return None
 
@@ -423,17 +475,17 @@ class Supervisor:
         affinity_gpu = self._workflow_affinity.get(wf_id) if wf_id else None
 
         # Warm-pool boost: workers that already have this adapter loaded.
-        warm_gpus = self._warm_workers_for(rec.tool_name, rec.tool_version)
+        warm_workers = self._warm_workers_for(rec.tool_name, rec.tool_version)
 
         def score(h: _WorkerHandle) -> tuple[int, int, int, int]:
-            cached = self._worker_state.get(h.gpu_id, {})
+            cached = self._worker_state.get(h.worker_id, {})
             free = int(cached.get("free_vram_mib", 0))
             # We want MAX free, so negate for ascending sort.
             return (
                 0 if (affinity_gpu is not None and h.gpu_id == affinity_gpu) else 1,
-                0 if h.gpu_id in warm_gpus else 1,
+                0 if h.worker_id in warm_workers else 1,
                 -free,
-                h.gpu_id,
+                h.worker_id,
             )
 
         candidates.sort(key=score)
@@ -450,7 +502,7 @@ class Supervisor:
         required_mib = required_vram_mib(descriptor) if descriptor is not None else (
             4 * 1024
         )
-        warm_gpus = self._warm_workers_for(rec.tool_name, rec.tool_version)
+        warm_workers = self._warm_workers_for(rec.tool_name, rec.tool_version)
 
         out: list[_WorkerHandle] = []
         for h in self.workers:
@@ -459,9 +511,9 @@ class Supervisor:
             has_gpu = h.gpu_id >= 0
             if gpu_required and not has_gpu:
                 continue
-            cached = self._worker_state.get(h.gpu_id, {})
+            cached = self._worker_state.get(h.worker_id, {})
             free = int(cached.get("free_vram_mib", 0))
-            if h.gpu_id in warm_gpus:
+            if h.worker_id in warm_workers:
                 # Already loaded — only need a small headroom to actually run.
                 headroom = DEFAULT_MIN_FREE_VRAM_MIB
                 if gpu_required and free <= 0:
@@ -476,7 +528,10 @@ class Supervisor:
                 if free and free < needed:
                     continue
             out.append(h)
-        return out
+        if gpu_required:
+            return out
+        cpu_workers = [h for h in out if h.gpu_id < 0]
+        return cpu_workers or out
 
     def _fail_if_no_gpu_can_ever_run(
         self,
@@ -517,14 +572,14 @@ class Supervisor:
 
     def _warm_workers_for(self, name: str, version: str | None) -> set[int]:
         gpus: set[int] = set()
-        for gpu_id, state in self._worker_state.items():
+        for worker_id, state in self._worker_state.items():
             for entry in state.get("loaded_adapters", []) or []:
                 if entry.get("name") == name and (
                     version is None or entry.get("version") == version
                 ):
                     if entry.get("healthy") is False:
                         continue
-                    gpus.add(gpu_id)
+                    gpus.add(worker_id)
                     break
         return gpus
 
@@ -598,7 +653,7 @@ class Supervisor:
         for h in all_gpu_workers:
             if h.busy or not h.process.is_alive():
                 continue
-            cached = self._worker_state.get(h.gpu_id, {})
+            cached = self._worker_state.get(h.worker_id, {})
             free = int(cached.get("free_vram_mib", 0))
             needed_with_headroom = needed_mib + DEFAULT_MIN_FREE_VRAM_MIB
             if free <= 0:
@@ -619,7 +674,7 @@ class Supervisor:
 
         rank0 = chosen_block[0]
         claimed = store.claim_next_queued(
-            worker_id=rank0.gpu_id,
+            worker_id=rank0.worker_id,
             gpu_ids=[h.gpu_id for h in chosen_block],
             job_id=rec.job_id,
         )
@@ -639,14 +694,14 @@ class Supervisor:
             return False
         descriptor = self._descriptor_for(rec.tool_name, rec.tool_version)
         eligible = self._eligible_worker_ids_for_vram_retry(descriptor)
-        rejected = self._vram_reject_gpus.get(job_id) or set()
+        rejected = self._vram_reject_workers.get(job_id) or set()
         return bool(eligible and rejected.issuperset(eligible))
 
-    def _handle_vram_reject(self, store: JobStore, job_id: str, gpu_id: int) -> None:
+    def _handle_vram_reject(self, store: JobStore, job_id: str, worker_id: int) -> None:
         """Self-heal a scheduler/worker VRAM disagreement (Codex round-2 RC5).
 
         The scheduler used the descriptor's declared minimum to admit this
-        job onto ``gpu_id``, but once the worker actually loaded the
+        job onto ``worker_id``, but once the worker actually loaded the
         adapter and ran its own ``estimate_vram(params)`` it concluded
         the job won't fit. The fix here is twofold:
 
@@ -657,28 +712,28 @@ class Supervisor:
           rejecting worker permanently for this job.
         """
         rec = store.get(job_id)
-        rejected = self._vram_reject_gpus.setdefault(job_id, set())
-        rejected.add(gpu_id)
+        rejected = self._vram_reject_workers.setdefault(job_id, set())
+        rejected.add(worker_id)
         descriptor = self._descriptor_for(rec.tool_name, rec.tool_version)
         eligible = self._eligible_worker_ids_for_vram_retry(descriptor)
         if eligible and rejected.issuperset(eligible):
             self._log.warn(
                 "vram_reject_terminal",
                 job_id=job_id,
-                rejected_gpus=str(sorted(rejected)),
-                eligible_gpus=str(sorted(eligible)),
+                rejected_workers=str(sorted(rejected)),
+                eligible_workers=str(sorted(eligible)),
             )
             return
         try:
             store.requeue_after_worker_reject(job_id)
         except VPAError as exc:
             self._log.warn(
-                "vram_requeue_failed", job_id=job_id, gpu_id=gpu_id, error=str(exc),
+                "vram_requeue_failed", job_id=job_id, worker_id=worker_id, error=str(exc),
             )
             return
-        self._vram_reject_blocklist.setdefault(job_id, {})[gpu_id] = 1 << 30
+        self._vram_reject_blocklist.setdefault(job_id, {})[worker_id] = 1 << 30
         self._log.info(
-            "job_requeued_after_vram_reject", job_id=job_id, worker_id=gpu_id,
+            "job_requeued_after_vram_reject", job_id=job_id, worker_id=worker_id,
         )
 
     def _eligible_worker_ids_for_vram_retry(self, descriptor: Any | None) -> set[int]:
@@ -689,18 +744,18 @@ class Supervisor:
                 continue
             if gpu_required and h.gpu_id < 0:
                 continue
-            out.add(h.gpu_id)
+            out.add(h.worker_id)
         return out
 
     def _decay_vram_blocklist(self) -> None:
         """Tick down the per-job worker exclusion entries by one each pass."""
         empty_jobs: list[str] = []
-        for job_id, by_gpu in list(self._vram_reject_blocklist.items()):
-            for gpu_id in list(by_gpu.keys()):
-                by_gpu[gpu_id] -= 1
-                if by_gpu[gpu_id] <= 0:
-                    by_gpu.pop(gpu_id, None)
-            if not by_gpu:
+        for job_id, by_worker in list(self._vram_reject_blocklist.items()):
+            for worker_id in list(by_worker.keys()):
+                by_worker[worker_id] -= 1
+                if by_worker[worker_id] <= 0:
+                    by_worker.pop(worker_id, None)
+            if not by_worker:
                 empty_jobs.append(job_id)
         for j in empty_jobs:
             self._vram_reject_blocklist.pop(j, None)
@@ -759,14 +814,17 @@ class Supervisor:
             rec_pre = store.get(job_id)
             attempt = int(rec_pre.retry_count) + 1
             run_id = run_store.start_run(
-                job_id, attempt, worker_id=handle.gpu_id,
+                job_id, attempt, worker_id=handle.worker_id,
                 gpu_ids=full_gpu_ids,
             )
         except Exception as exc:
             self._log.warn("run_record_failed", job_id=job_id, error=str(exc))
 
         self._log.info(
-            "dispatch_job", job_id=job_id, worker_id=handle.gpu_id, gpu_id=handle.gpu_id,
+            "dispatch_job",
+            job_id=job_id,
+            worker_id=handle.worker_id,
+            gpu_id=handle.gpu_id,
         )
         dispatch_started = time.monotonic()
         try:
@@ -808,7 +866,7 @@ class Supervisor:
         finally:
             handle.busy = False
             handle.current_job_id = None
-            cached = self._worker_state.get(handle.gpu_id)
+            cached = self._worker_state.get(handle.worker_id)
             if cached is not None:
                 cached["busy"] = False
                 cached["current_job_id"] = None
@@ -816,7 +874,7 @@ class Supervisor:
                 for s in slaves:
                     s.busy = False
                     s.current_job_id = None
-                    cs = self._worker_state.get(s.gpu_id)
+                    cs = self._worker_state.get(s.worker_id)
                     if cs is not None:
                         cs["busy"] = False
                         cs["current_job_id"] = None
@@ -839,7 +897,7 @@ class Supervisor:
             }.get(final_state or "", "job_finished")
             log_kwargs: dict[str, Any] = {
                 "job_id": job_id,
-                "worker_id": handle.gpu_id,
+                "worker_id": handle.worker_id,
                 "duration_ms": duration_ms,
             }
             if log_event == "job_failed" and final_error_code:
@@ -851,7 +909,7 @@ class Supervisor:
                     if final_state is None:
                         final_state = store.get(job_id).state.value
                     vram_peak = None
-                    cached = self._worker_state.get(handle.gpu_id, {})
+                    cached = self._worker_state.get(handle.worker_id, {})
                     used = cached.get("total_vram_mib", 0) - cached.get(
                         "free_vram_mib", 0
                     )
@@ -873,7 +931,7 @@ class Supervisor:
         body: dict[str, Any],
     ) -> dict[str, Any] | None:
         """Send one submit-like request to one persistent worker."""
-        async with self._submit_locks[handle.gpu_id]:
+        async with self._submit_locks[handle.worker_id]:
             reader, writer = await asyncio.open_unix_connection(str(handle.socket_path))
             try:
                 await ipc.send(writer, ipc.make_request(body))
@@ -1104,7 +1162,7 @@ class Supervisor:
         error_code = body.get("error_code")
         if error_code:
             if not distributed and error_code == ErrorCode.VRAM_EXHAUSTED:
-                self._handle_vram_reject(store, job_id, handle.gpu_id)
+                self._handle_vram_reject(store, job_id, handle.worker_id)
                 return False
             self._fail_running_job(
                 store,
@@ -1331,8 +1389,9 @@ class Supervisor:
             return ipc.make_response(mid, {}, error=ipc.error_from_exception(exc))
 
     def _worker_info(self, h: _WorkerHandle) -> dict[str, Any]:
-        cached = self._worker_state.get(h.gpu_id, {})
+        cached = self._worker_state.get(h.worker_id, {})
         info = {
+            "worker_id": h.worker_id,
             "gpu_id": h.gpu_id,
             "pid": h.process.pid,
             "socket": str(h.socket_path),
@@ -1421,6 +1480,7 @@ class Supervisor:
                 reader, writer = await asyncio.open_unix_connection(str(h.socket_path))
             except (FileNotFoundError, ConnectionRefusedError) as e:
                 return {
+                    "worker_id": h.worker_id,
                     "gpu_id": h.gpu_id,
                     "success": False,
                     "error": str(e),
@@ -1438,6 +1498,7 @@ class Supervisor:
                 waited_ms = int((time.monotonic() - t0) * 1000)
                 if resp is None:
                     return {
+                        "worker_id": h.worker_id,
                         "gpu_id": h.gpu_id,
                         "success": False,
                         "error": "no response",
@@ -1447,6 +1508,7 @@ class Supervisor:
                 if resp.get("error"):
                     err = resp["error"]
                     return {
+                        "worker_id": h.worker_id,
                         "gpu_id": h.gpu_id,
                         "success": False,
                         "error_code": err.get("code"),
@@ -1456,6 +1518,7 @@ class Supervisor:
                     }
                 rb = resp.get("body") or {}
                 return {
+                    "worker_id": h.worker_id,
                     "gpu_id": h.gpu_id,
                     "success": True,
                     "vram_used_mib": rb.get("vram_used_mib", 0),
@@ -1546,9 +1609,14 @@ def _pick_free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def supervisor_main(workspace_name: str, num_workers: int, gpu_ids: list[int]) -> None:
+def supervisor_main(
+    workspace_name: str,
+    num_workers: int,
+    gpu_ids: list[int],
+    cpu_workers: int = 0,
+) -> None:
     """Subprocess entry point (passed to multiprocessing.spawn)."""
-    Supervisor.run_blocking(workspace_name, num_workers, gpu_ids)
+    Supervisor.run_blocking(workspace_name, num_workers, gpu_ids, cpu_workers=cpu_workers)
 
 
 def resolve_default_gpu_ids(num_workers: int | None = None) -> list[int]:
@@ -1556,13 +1624,17 @@ def resolve_default_gpu_ids(num_workers: int | None = None) -> list[int]:
 
     Without torch / CUDA, returns ``[-1]`` (single CPU-only worker).
     """
+    if num_workers is not None and num_workers <= 0:
+        return []
     try:
         import torch
 
         if torch.cuda.is_available():
             total = torch.cuda.device_count()
-            wanted = num_workers if num_workers is not None else min(total, 8)
-            wanted = max(1, min(wanted, total))
+            if num_workers is None:
+                wanted = min(total, 8)
+            else:
+                wanted = max(0, min(num_workers, total))
             return list(range(wanted))
     except Exception:
         pass

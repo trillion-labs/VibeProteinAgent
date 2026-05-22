@@ -304,6 +304,8 @@ def test_build_cmd_unconditional_exposes_core_overrides(tmp_path):
     assert "inference.num_designs=2" in payload
     assert "diffuser.T=30" in payload
     assert "diffuser.crd_scale=0.5" in payload
+    assert "allow_full_torch_load" in payload
+    assert "inference.schedule_directory_path=" in payload
 
 
 def test_build_cmd_binder_includes_target_hotspots_and_complex_ckpt(tmp_path):

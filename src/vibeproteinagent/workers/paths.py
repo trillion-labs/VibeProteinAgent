@@ -82,24 +82,24 @@ def supervisor_socket() -> Path:
     return runtime_dir() / "supervisor.sock"
 
 
-def worker_socket(gpu_id: int) -> Path:
-    return runtime_dir() / f"worker_{gpu_id}.sock"
+def worker_socket(worker_id: int) -> Path:
+    return runtime_dir() / f"worker_{worker_id}.sock"
 
 
 def supervisor_pid_file() -> Path:
     return runtime_dir() / "supervisor.pid"
 
 
-def worker_pid_file(gpu_id: int) -> Path:
-    return runtime_dir() / f"worker_{gpu_id}.pid"
+def worker_pid_file(worker_id: int) -> Path:
+    return runtime_dir() / f"worker_{worker_id}.pid"
 
 
 def supervisor_log_file() -> Path:
     return runtime_dir() / "supervisor.log"
 
 
-def worker_log_file(gpu_id: int) -> Path:
-    return runtime_dir() / f"worker_{gpu_id}.log"
+def worker_log_file(worker_id: int) -> Path:
+    return runtime_dir() / f"worker_{worker_id}.log"
 
 
 __all__ = [

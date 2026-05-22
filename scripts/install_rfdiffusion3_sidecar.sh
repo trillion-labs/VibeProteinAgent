@@ -3,6 +3,7 @@ set -euo pipefail
 
 PREFIX=""
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CUDA_PROFILE="${VPA_CUDA_PROFILE:-cu128}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -14,8 +15,12 @@ while [[ $# -gt 0 ]]; do
             REPO_ROOT="$2"
             shift 2
             ;;
+        --cuda-profile)
+            CUDA_PROFILE="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 --prefix PATH [--repo-root PATH]"
+            echo "Usage: $0 --prefix PATH [--repo-root PATH] [--cuda-profile auto|cu128|cu126|cpu]"
             exit 0
             ;;
         *)
@@ -28,6 +33,16 @@ done
 if [[ -z "$PREFIX" ]]; then
     echo "--prefix is required" >&2
     exit 2
+fi
+
+if [[ "$CUDA_PROFILE" == "auto" ]]; then
+    CUDA_PROFILE="${VPA_CUDA_TAG:-cu128}"
+fi
+TORCH_SPEC="${VPA_TORCH_SPEC:-torch==2.7.1+${CUDA_PROFILE}}"
+TORCH_INDEX_URL="${VPA_TORCH_INDEX_URL:-https://download.pytorch.org/whl/${CUDA_PROFILE}}"
+if [[ "$CUDA_PROFILE" == "cpu" ]]; then
+    TORCH_SPEC="${VPA_TORCH_SPEC:-torch==2.7.1}"
+    TORCH_INDEX_URL="${VPA_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
 fi
 
 if [[ -x "$PREFIX/bin/rfd3" ]]; then
@@ -66,8 +81,8 @@ fi
 
 uv venv --python "$PYTHON_BIN" "$PREFIX"
 "$PREFIX/bin/python" -m pip install --no-user \
-    torch==2.7.1+cu128 torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128
+    "$TORCH_SPEC" torchvision torchaudio \
+    --index-url "$TORCH_INDEX_URL"
 "$PREFIX/bin/python" -m pip install --no-user 'rc-foundry[rfd3]'
 "$PREFIX/bin/rfd3" --help >/dev/null
 echo "RFdiffusion3 sidecar installed at $PREFIX"

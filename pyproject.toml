@@ -74,6 +74,7 @@ include = [
   "THIRD_PARTY_NOTICES.md",
   "CONTRIBUTING.md",
   "CITATION.cff",
+  "containers",
   "pyproject.toml",
 ]
 

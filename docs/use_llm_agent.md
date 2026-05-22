@@ -15,6 +15,7 @@ Agent mode should have the planner, runtime, and tool metadata ready:
 
 ```bash
 # `--yes` skips confirmation prompts and starts the install right away.
+npx vibeproteinagent install preflight --profile agent --cuda-profile auto
 npx vibeproteinagent install --profile agent --yes
 ```
 
@@ -28,7 +29,8 @@ For fully automatic tool selection across all design tools:
 # Optional if ESM3 first-run downloads or gated Hugging Face variants are needed.
 export HF_TOKEN=<huggingface-access-token>
 
-npx vibeproteinagent install --profile full --yes
+npx vibeproteinagent install preflight --profile full --cuda-profile auto
+npx vibeproteinagent install --profile full --cuda-profile auto --yes
 ```
 
 ## 2. Configure The LLM Provider
@@ -102,6 +104,11 @@ curl https://openrouter.ai/api/v1/models | python -m json.tool
 prompt below, plus your request, available VPA tools, workflow templates, and a
 strict JSON output contract. VPA validates the returned plan locally, but does
 not submit jobs, start tool execution, or warm models.
+
+For tools that advertise sharding metadata, the planner should prefer `foreach`
+fan-out with small seed/candidate shards and `max_parallel` set to the available
+GPU budget. ProteinMPNN/LigandMPNN keep warm batches together unless the design
+count is above their sharding threshold.
 
 NOTE: You can skip this preview and run everything at once by omitting `--plan-only`.
 

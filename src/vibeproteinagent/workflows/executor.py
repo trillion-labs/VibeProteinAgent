@@ -292,6 +292,9 @@ class WorkflowExecutor:
                     progressed = True
                     continue
 
+                if not self._foreach_parallel_slot_available(rt, runtime):
+                    continue
+
                 # Resolve inputs.
                 try:
                     resolved = resolve(rt.desc.inputs, scope)
@@ -715,6 +718,23 @@ class WorkflowExecutor:
                 cache_key="",
                 state="pending",
             )
+
+    @staticmethod
+    def _foreach_parallel_slot_available(
+        rt: _NodeRuntime,
+        runtime: dict[str, _NodeRuntime],
+    ) -> bool:
+        if rt.foreach_parent is None or rt.desc.max_parallel is None:
+            return True
+        active = 0
+        for sibling in runtime.values():
+            if sibling.runtime_id == rt.runtime_id:
+                continue
+            if sibling.foreach_parent != rt.foreach_parent:
+                continue
+            if sibling.state in {"ready", "running"}:
+                active += 1
+        return active < rt.desc.max_parallel
 
 
 # ---------------------------------------------------------------- helpers

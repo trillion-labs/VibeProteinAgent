@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
+from vibeproteinagent.core.errors import TimeoutError_
 from vibeproteinagent.workflows import (
     Workflow,
     WorkflowExecutor,
@@ -237,6 +238,40 @@ def test_foreach_outputs_gate_aggregate_downstream(
     assert job.output["payload"] == "a-b"
 
 
+def test_foreach_max_parallel_caps_active_child_submissions(
+    tmp_workspace: Workspace,
+) -> None:
+    wf = Workflow(name="noop-foreach-max-parallel", version="1.0.0")
+    wf.fanout(
+        "fan",
+        tool="noop",
+        over="${params.items}",
+        inputs={"payload": "${item}"},
+        cache=False,
+        max_parallel=2,
+    )
+
+    registry = ToolRegistry()
+    registry.discover()
+    ex = WorkflowExecutor(tmp_workspace, registry, object())
+    wf_id = ex.submit(wf, {"items": ["a", "b", "c", "d", "e"]})
+
+    with pytest.raises(TimeoutError_):
+        ex.run_sync(wf_id, max_wait_s=1, poll_s=0.02)
+
+    child_nodes = [
+        node for node in ex.store.list_nodes(wf_id) if node.node_id.startswith("fan[")
+    ]
+    assert len(child_nodes) == 5
+    submitted_children = [node for node in child_nodes if node.job_id is not None]
+    assert len(submitted_children) == 2
+
+    jobs = ex.jobs.list(workflow_id=wf_id)
+    assert {job.workflow_node_id for job in jobs} == {
+        node.node_id for node in submitted_children
+    }
+
+
 def test_empty_foreach_outputs_allow_downstream_aggregate(
     tmp_workspace: Workspace,
     inline_supervisor: object,
@@ -332,8 +367,6 @@ def test_run_sync_timeout_marks_workflow_failed_durably(
     registry.discover()
     ex = WorkflowExecutor(tmp_workspace, registry, object())
     wf_id = ex.submit(wf, {})
-
-    from vibeproteinagent.core.errors import TimeoutError_
 
     with pytest.raises(TimeoutError_):
         ex.run_sync(wf_id, max_wait_s=0, poll_s=0.01)

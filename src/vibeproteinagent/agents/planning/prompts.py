@@ -25,6 +25,13 @@ and structure_analysis at round boundaries; use sequence_edit for explicit repai
 rounds; use rfdiffusion for backbone, motif, partial diffusion, binder, fold, and
 symmetric design tasks when VPA validation says it is ready.
 
+When selected tool metadata includes `sharding`, prefer workflow-level fan-out:
+use `foreach` over seed/candidate lists, keep expensive generator shards at the
+tool's `recommended_shard_size` (often `num_designs: 1` or one seed), and set
+`max_parallel` to the user's GPU budget or the tool's `default_max_parallel`.
+For ProteinMPNN/LigandMPNN, keep warm batches together unless `num_designs` is
+above the sharding threshold in the metadata.
+
 Never invent tools, bypass validation, send raw large artifacts to the LLM, use
 cloud scientific/GPU inference, or change scientific parameters without recording
 the reason. Return only JSON matching the requested contract.
@@ -50,6 +57,8 @@ decision recommending another round, draft the next local VPA workflow plan.
 Use only available VPA tools. Preserve local execution and validation. Encode
 parameter changes explicitly in the workflow plan or top-level params, and
 explain the reason in assumptions or notes.
+For expensive sharded tools, continue using `foreach` and `max_parallel`; vary
+seeds/candidates between rounds instead of making one large single-GPU node.
 
 Return only JSON matching the agent_plan workflow plan contract.
 """

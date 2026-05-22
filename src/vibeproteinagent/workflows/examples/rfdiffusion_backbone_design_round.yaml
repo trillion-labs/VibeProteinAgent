@@ -36,6 +36,7 @@ nodes:
     tool: protenix_v2
     version: ">=1.0.0,<2"
     foreach: ${outputs.protenix_input.input_jsons}
+    max_parallel: 2
     inputs:
       input_json: ${item}
       seeds: [101]
@@ -48,6 +49,7 @@ nodes:
     tool: structure_analysis
     version: ">=1.0.0,<2"
     foreach: ${outputs.refold}
+    max_parallel: 4
     inputs:
       structure_path: ${item.predicted_cif}
       max_annotations: 100
@@ -56,6 +58,7 @@ nodes:
     tool: protein_qc
     version: ">=1.0.0,<2"
     foreach: ${outputs.refold}
+    max_parallel: 4
     inputs:
       pdb_path: ${item.predicted_cif}
     cache: true

@@ -21,6 +21,7 @@ npx vibeproteinagent install --profile base --yes
 For selected heavy tools and their weights (e.g., Boltz2, RFDiffusion, ProteinMPNN):
 
 ```bash
+npx vibeproteinagent install preflight --tools boltz2_affinity,rfdiffusion,proteinmpnn --cuda-profile auto
 npx vibeproteinagent install --tools boltz2_affinity,rfdiffusion,proteinmpnn --yes
 ```
 

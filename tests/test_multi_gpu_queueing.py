@@ -40,7 +40,7 @@ def _make_supervisor(tmp_workspace: Workspace, n_gpu_workers: int) -> Supervisor
     sup._draining = False
     sup._gpu_wait_log_ts = {}
     sup._vram_reject_blocklist = {}
-    sup._vram_reject_gpus = {}
+    sup._vram_reject_workers = {}
     sup._log = SimpleNamespace(  # type: ignore[attr-defined]
         info=lambda *a, **k: None,
         warn=lambda *a, **k: None,
@@ -54,9 +54,14 @@ def _make_supervisor(tmp_workspace: Workspace, n_gpu_workers: int) -> Supervisor
         h = _WorkerHandle(gpu_id=gid, process=proc)
         h.socket_path = tmp_workspace.root / f"fake_worker_{gid}.sock"
         sup.workers.append(h)
-        sup._worker_state[gid] = {
-            "gpu_id": gid, "free_vram_mib": 80_000, "total_vram_mib": 80_000,
-            "loaded_adapters": [], "busy": False, "current_job_id": None,
+        sup._worker_state[h.worker_id] = {
+            "worker_id": h.worker_id,
+            "gpu_id": gid,
+            "free_vram_mib": 80_000,
+            "total_vram_mib": 80_000,
+            "loaded_adapters": [],
+            "busy": False,
+            "current_job_id": None,
         }
     return sup
 

@@ -133,7 +133,10 @@ def _fallback_tool_selection(
     return {
         "mode": "tool_selection",
         "candidate_tools": names,
-        "reason": "Recovered from a non-JSON provider response using matching local workflow metadata.",
+        "reason": (
+            "Recovered from a non-JSON provider response using matching local "
+            "workflow metadata."
+        ),
         "missing_inputs": [],
     }
 
@@ -156,6 +159,7 @@ def _fallback_plan_from_prompt(
                 "tool": spec.get("tool"),
                 "version": spec.get("version") or "*",
                 "foreach": spec.get("foreach"),
+                "max_parallel": spec.get("max_parallel"),
                 "when": spec.get("when"),
                 "inputs": spec.get("inputs") or {},
             }
@@ -172,7 +176,8 @@ def _fallback_plan_from_prompt(
         "source_kind": "workflow_template",
         "goal": str(prompt.get("request") or template.get("description") or template.get("name")),
         "assumptions": [
-            "Provider response was not valid JSON; selected the closest validated local workflow template."
+            "Provider response was not valid JSON; selected the closest "
+            "validated local workflow template."
         ],
         "missing_inputs": [],
         "required_tools": list(dict.fromkeys(tool_sequence)),
@@ -290,7 +295,16 @@ class WorkflowPlanner:
                     "name": "string",
                     "version": "0.1.0",
                     "params": {},
-                    "nodes": [],
+                    "nodes": [
+                        {
+                            "id": "string",
+                            "tool": "tool_name",
+                            "version": "*",
+                            "foreach": "optional ${params.seed_jobs}",
+                            "max_parallel": 2,
+                            "inputs": {},
+                        }
+                    ],
                 },
                 "success_criteria": {},
                 "warm_tools": ["tool_name"],
@@ -372,7 +386,16 @@ class WorkflowPlanner:
                     "name": "string",
                     "version": "0.1.0",
                     "params": {},
-                    "nodes": [],
+                    "nodes": [
+                        {
+                            "id": "string",
+                            "tool": "tool_name",
+                            "version": "*",
+                            "foreach": "optional ${params.seed_jobs}",
+                            "max_parallel": 2,
+                            "inputs": {},
+                        }
+                    ],
                 },
                 "success_criteria": previous_plan.get("success_criteria", {}),
                 "warm_tools": ["tool_name"],
@@ -533,7 +556,8 @@ class WorkflowPlanner:
                 for item in plan.get("assumptions", [])
                 if isinstance(item, str)
             ],
-            "Provider selected a matching local workflow template; canonicalized glue-tool steps from the validated template.",
+            "Provider selected a matching local workflow template; canonicalized "
+            "glue-tool steps from the validated template.",
         ]
         canonical["assumptions"] = list(dict.fromkeys(assumptions))
         return canonical

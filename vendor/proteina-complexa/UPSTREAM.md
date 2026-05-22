@@ -64,7 +64,7 @@ Upstream's `pyproject.toml` requires:
 | --- | --- | --- | --- |
 | `scipy` | `==1.12.0` | `1.17.1` | **hard conflict** — explicit `==` pin |
 | `lightning` | `>=2.5.0,<2.6` | (not pinned) | tolerable, but upstream documents a known checkpoint-loading bug at 2.6+ |
-| PyTorch | `cu126` extra index | `2.7.1+cu128` | wheel index mismatch |
+| PyTorch | profile-driven CUDA wheel | VPA CUDA profile (`cu128` primary) | must stay isolated from shared env |
 | `tmol` | git URL, requires custom `numba`/`llvmlite` on Python 3.12 | — | environment-specific install footgun |
 | `pyrosetta` | required by `tmol` | — | separate distribution channel |
 | AF2/RF3/ESM2 weights | required by reward + refold | — | gated downloads, gigabytes |

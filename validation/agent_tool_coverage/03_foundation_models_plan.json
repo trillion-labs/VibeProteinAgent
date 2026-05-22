@@ -1,0 +1,98 @@
+{
+  "mode": "agent_plan",
+  "goal": "Coverage run 3: heavyweight structure/foundation-model sidecars and atomistic design tools.",
+  "assumptions": [
+    "This plan uses the repository's tiny Boltz and Protenix fixtures plus minimal design counts.",
+    "The selected tools require the full/gated runtime artifacts to be installed before submission."
+  ],
+  "missing_inputs": [],
+  "required_tools": [
+    "boltz2_affinity",
+    "boltzgen",
+    "proteina_complexa",
+    "protenix_v2"
+  ],
+  "workflow_plan": {
+    "name": "agent_coverage_foundation_models",
+    "version": "0.1.0",
+    "description": "Tiny smoke run for heavy model sidecars and structure/foundation model adapters.",
+    "params": {
+      "boltz_yaml": {"type": "path", "required": true},
+      "protenix_json": {"type": "path", "required": true},
+      "complex_pdb": {"type": "path", "required": true}
+    },
+    "nodes": [
+      {
+        "id": "boltz2_affinity",
+        "tool": "boltz2_affinity",
+        "inputs": {
+          "input_yaml": "${params.boltz_yaml}",
+          "seeds": [42],
+          "recycling_steps": 1,
+          "sampling_steps": 20,
+          "diffusion_samples": 1,
+          "sampling_steps_affinity": 20,
+          "diffusion_samples_affinity": 1,
+          "use_msa": false,
+          "affinity_mw_correction": false
+        },
+        "on_failure": "continue"
+      },
+      {
+        "id": "protenix_v2",
+        "tool": "protenix_v2",
+        "inputs": {
+          "input_json": "${params.protenix_json}",
+          "seeds": [101],
+          "use_msa": false,
+          "use_template": false,
+          "n_sample": 1,
+          "n_step": 10,
+          "n_cycle": 1
+        },
+        "on_failure": "continue"
+      },
+      {
+        "id": "boltzgen_design_only",
+        "tool": "boltzgen",
+        "inputs": {
+          "target_pdb": "${params.complex_pdb}",
+          "target_chain": "A",
+          "binder_length": 20,
+          "num_designs": 1,
+          "num_diffusion_steps": 10,
+          "protocol": "protein-anything",
+          "design_only": true,
+          "budget": 1,
+          "seed": 43
+        },
+        "on_failure": "continue"
+      },
+      {
+        "id": "proteina_complexa_binder",
+        "tool": "proteina_complexa",
+        "inputs": {
+          "mode": "protein_binder",
+          "target_pdb": "${params.complex_pdb}",
+          "target_chain": "A",
+          "binder_length": 30,
+          "num_designs": 1,
+          "seed": 47,
+          "run_name": "coverage_proteina_complexa"
+        },
+        "on_failure": "continue"
+      }
+    ]
+  },
+  "success_criteria": {
+    "report_html_renders": true,
+    "heavy_model_nodes_attempted": true
+  },
+  "warm_tools": [
+    "boltz2_affinity",
+    "boltzgen",
+    "proteina_complexa",
+    "protenix_v2"
+  ],
+  "estimated_llm_calls": 0
+}

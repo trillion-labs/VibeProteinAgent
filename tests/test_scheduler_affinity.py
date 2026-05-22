@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from vibeproteinagent.workers.supervisor import Supervisor, _WorkerHandle
+from vibeproteinagent.workers.supervisor import (
+    Supervisor,
+    _WorkerHandle,
+    resolve_default_gpu_ids,
+)
 from vibeproteinagent.workspace import JobState, JobStore, Workspace
 
 
@@ -22,6 +26,7 @@ class _FakeProcess:
 
 def _make_handle(gpu_id: int, pid: int = 1000) -> _WorkerHandle:
     h = _WorkerHandle.__new__(_WorkerHandle)
+    h.worker_id = gpu_id
     h.gpu_id = gpu_id
     h.process = _FakeProcess(pid=pid + gpu_id)  # type: ignore[assignment]
     from vibeproteinagent.workers import paths
@@ -172,3 +177,85 @@ def test_gpu_required_job_fails_on_cpu_only_daemon(
     final = store.get(rec.job_id)
     assert final.state is JobState.FAILED
     assert final.error_code == "E_NO_GPU"
+
+
+def test_multiple_cpu_worker_specs_have_distinct_identity() -> None:
+    specs = Supervisor._worker_specs([], cpu_workers=3)
+
+    assert [s.gpu_id for s in specs] == [-1, -1, -1]
+    assert [s.worker_id for s in specs] == [-1, -2, -3]
+
+
+def test_zero_gpu_workers_is_respected() -> None:
+    assert resolve_default_gpu_ids(0) == []
+
+
+def test_cpu_job_prefers_cpu_worker_over_gpu_worker(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU-capable jobs should not occupy a GPU worker while CPU workers exist."""
+    s = _make_supervisor(tmp_workspace, [-1, 0])
+    monkeypatch.setattr(
+        s,
+        "_descriptor_for",
+        lambda name, version: SimpleNamespace(
+            gpu_required=False,
+            gpus_required=0,
+            vram_min_gib=0,
+            name=name,
+            version=version,
+        ),
+    )
+    store = JobStore(tmp_workspace)
+    rec = store.submit(
+        "noop",
+        "1.0.0",
+        {"payload": "x"},
+        workspace_name=tmp_workspace.name,
+    )
+    store.transition(rec.job_id, JobState.QUEUED)
+
+    decisions = s._place_one_pass()
+
+    assert len(decisions) == 1
+    chosen, _, _ = decisions[0]
+    assert chosen.gpu_id == -1
+    claimed = store.get(rec.job_id)
+    assert claimed.worker_id == -1
+    assert claimed.gpu_ids == []
+
+
+def test_gpu_job_never_routes_to_cpu_when_gpu_available(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _make_supervisor(tmp_workspace, [-1, 0])
+    monkeypatch.setattr(
+        s,
+        "_descriptor_for",
+        lambda name, version: SimpleNamespace(
+            gpu_required=True,
+            gpus_required=1,
+            vram_min_gib=0,
+            name=name,
+            version=version,
+        ),
+    )
+    store = JobStore(tmp_workspace)
+    rec = store.submit(
+        "noop",
+        "1.0.0",
+        {"payload": "x"},
+        workspace_name=tmp_workspace.name,
+    )
+    store.transition(rec.job_id, JobState.QUEUED)
+
+    decisions = s._place_one_pass()
+
+    assert len(decisions) == 1
+    chosen, _, _ = decisions[0]
+    assert chosen.gpu_id == 0
+    claimed = store.get(rec.job_id)
+    assert claimed.worker_id == 0
+    assert claimed.gpu_ids == [0]

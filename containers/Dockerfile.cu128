@@ -1,0 +1,38 @@
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+ARG MAMBA_VERSION=2.0.5
+ENV DEBIAN_FRONTEND=noninteractive \
+    MAMBA_ROOT_PREFIX=/opt/micromamba \
+    VPA_HOME=/opt/vpa \
+    VPA_CUDA_PROFILE=cu128 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/opt/vpa/envs/vpa/bin:/opt/micromamba/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        nodejs \
+        npm \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -Ls "https://micro.mamba.pm/api/micromamba/linux-64/${MAMBA_VERSION}" \
+    | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
+
+WORKDIR /opt/VibeProteinAgent
+COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md CONTRIBUTING.md CITATION.cff ./
+COPY src ./src
+COPY docs ./docs
+COPY containers ./containers
+
+RUN micromamba create -y -p /opt/vpa/envs/vpa -c conda-forge python=3.12 pip \
+    && /opt/vpa/envs/vpa/bin/python -m pip install --no-user uv \
+    && /opt/vpa/envs/vpa/bin/python -m pip install --no-user -e /opt/VibeProteinAgent \
+    && /opt/vpa/envs/vpa/bin/vpa version
+
+ENTRYPOINT []
+CMD ["vpa", "install", "preflight", "--profile", "base"]

@@ -789,6 +789,12 @@ def test_compact_tool_schema_keeps_only_planner_facing_fields() -> None:
             "support_status": "verified",
             "gpu_required": True,
             "vram_min_gib": 24,
+            "sharding": {
+                "strategy": "design_seed_shards",
+                "shardable_fields": ["num_designs", "seed"],
+                "recommended_shard_size": 1,
+                "default_max_parallel": 4,
+            },
             "input_schema": {
                 "type": "object",
                 "required": ["mode"],
@@ -807,6 +813,12 @@ def test_compact_tool_schema_keeps_only_planner_facing_fields() -> None:
     assert compact == {
         "name": "rfdiffusion",
         "description": "Backbone generation.",
+        "sharding": {
+            "strategy": "design_seed_shards",
+            "shardable_fields": ["num_designs", "seed"],
+            "recommended_shard_size": 1,
+            "default_max_parallel": 4,
+        },
         "parameters": {
             "required": ["mode"],
             "properties": {
@@ -913,6 +925,12 @@ def test_workflow_planner_two_stage_prompt_resolves_selected_parameters(
                     "name": "protein_qc",
                     "description": "Protein sequence and structure QC.",
                     "input_schema": "schemas/protein_qc.input.json",
+                    "sharding": {
+                        "strategy": "candidate_shards",
+                        "shardable_fields": ["sequence"],
+                        "recommended_shard_size": 1,
+                        "default_max_parallel": 4,
+                    },
                 }
             ],
             workflows=[],
@@ -922,10 +940,20 @@ def test_workflow_planner_two_stage_prompt_resolves_selected_parameters(
     assert plan["workflow_plan"]["nodes"][0]["tool"] == "protein_qc"
     first_prompt, second_prompt = provider.prompts
     assert first_prompt["available_tools"] == [
-        {"name": "protein_qc", "description": "Protein sequence and structure QC."}
+        {
+            "name": "protein_qc",
+            "description": "Protein sequence and structure QC.",
+            "sharding": {
+                "strategy": "candidate_shards",
+                "shardable_fields": ["sequence"],
+                "recommended_shard_size": 1,
+                "default_max_parallel": 4,
+            },
+        }
     ]
     selected = second_prompt["selected_tools"][0]
     assert selected["name"] == "protein_qc"
+    assert selected["sharding"]["strategy"] == "candidate_shards"
     assert "sequence" in selected["parameters"]["properties"]
     assert selected["parameters"]["properties"]["sequence"]["pattern"] == "^[A-Za-z]*$"
 

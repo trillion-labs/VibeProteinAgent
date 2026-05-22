@@ -11,7 +11,8 @@ prediction, sequence/structure search, literature evidence gathering,
 GO/InterPro-based sequence retrieval, QC, ranking, visualization, and
 human-readable reports.
 
-![VibeProteinAgent hero](assets/readme/vpa-hero.png)
+<!-- ![VibeProteinAgent hero](assets/readme/vpa-hero.png) -->
+![VPA report snapshot](assets/readme/vpa-report-snapshot.svg)
 
 > [!IMPORTANT]
 > **Non-commercial use only.** VibeProteinAgent is licensed under the
@@ -71,14 +72,17 @@ export HF_TOKEN=<huggingface-access-token>
 # Optional; only needed when running `vpa agent ... --provider openrouter`.
 export OPENROUTER_API_KEY=<openrouter-api-key>
 
+# Check the host GPU/driver/toolkit contract before a heavy install.
+npx vibeproteinagent install preflight --profile full --cuda-profile auto --json
+
 # Full agent/tool experience: all first-class tools, sidecars, and weights.
-npx vibeproteinagent install --profile full --yes
+npx vibeproteinagent install --profile full --cuda-profile auto --yes
 
 # Agent mode without forcing every heavyweight model install.
 npx vibeproteinagent install --profile agent --yes
 
 # Select only the heavyweight tools you need.
-npx vibeproteinagent install --tools rfdiffusion,proteinmpnn,protenix_v2 --yes
+npx vibeproteinagent install --tools rfdiffusion,proteinmpnn,protenix_v2 --cuda-profile auto --yes
 
 # Preview selected tools, disk estimate, and install steps first.
 npx vibeproteinagent install --profile full --dry-run --json
@@ -96,6 +100,12 @@ before a large install.
 | `--tools rfdiffusion,proteinmpnn,protenix_v2` | Backbone generation + sequence design + structure prediction | ~10.1 GB tool artifacts, plus env/cache |
 | `--tools boltz2_affinity,rfdiffusion,proteinmpnn` | Affinity prediction + RFdiffusion + ProteinMPNN | ~14.1 GB tool artifacts, plus env/cache |
 | `--profile full` | Every first-class tool, sidecar, and required checkpoint; optional/gated tools become ready when their cache or credentials are available | ~240 GB tool artifacts, plus env/cache |
+
+If you already have validated sidecar environments, pass
+`--use-prebuilt-sidecars` and export the matching path, for example
+`VPA_BINDCRAFT_ENV_PATH`, `VPA_PROTEINA_COMPLEXA_VENV`,
+`VPA_PXDESIGN_PIPELINE_ENV`, or `VPA_RFDIFFUSION3_ENV`. VPA will link/reuse
+those envs instead of resolving a fresh fragile sidecar when possible.
 
 ### Credentials
 
@@ -118,17 +128,34 @@ without a Hugging Face credential if the open ESM3 cache is already present, but
 first-run downloads or gated variants may require `HF_TOKEN` plus accepted model
 terms on Hugging Face.
 
-GPU memory depends on the selected model, input size, and sampling settings.
-VPA is primarily validated on NVIDIA B200 GPUs. H100/H200-class GPUs are
-expected to work for most workflows when enough VRAM is available. Older GPUs
-such as RTX 3090 or RTX 5090 can run many tools, especially base/agent tools
-and smaller model settings, but heavyweight workflows may require reduced
-lengths, batch sizes, diffusion steps, or samples.
+### GPU Requirements
 
-After installation, run `vpa install doctor` and a small smoke job for the tools
-you plan to use. If you hit an installation or GPU-compatibility issue, please
-open a GitHub issue with your GPU model, driver/CUDA version, install command,
-and the relevant error log.
+GPU memory depends on the selected model, input size, and sampling settings.
+VPA's tested GPU stack currently targets CUDA 12.8-era packages, including
+PyTorch 2.7.1+cu128 and CUDA 12.x sidecar dependencies. We recommend NVIDIA
+driver 570+ on Linux for CUDA 12.8 workflows.
+
+`--cuda-profile auto` is the default. It selects the primary `cu128` stack on
+compatible hosts and can fall back to `cu126` for older CUDA 12.6-era drivers.
+Use `--cuda-profile cpu` only for base/agent/lightweight checks; GPU-heavy tools
+will not become fully ready under the CPU profile.
+
+VPA is primarily validated on NVIDIA B200 GPUs. H100/H200, RTX 4090, and
+RTX 3090 are CUDA 12.8-capable, and most cu128 sidecars should install on them
+when a recent driver is present. Workflow success still depends on VRAM and on
+whether CUDA-compiling tools can find a matching nvcc/CUDA toolkit. H100/H200
+class GPUs are expected to work for most workflows; older or smaller GPUs such
+as RTX 3090 can run many tools, especially base/agent tools and smaller model
+settings, but heavyweight workflows may require reduced lengths, batch sizes,
+diffusion steps, or samples. Proteina-Complexa and RFdiffusion/RFpeptides are
+more environment-sensitive because they combine PyTorch/JAX/PyG/DGL/tmol/
+PyRosetta-style dependencies.
+
+Before installation, run `vpa install preflight --profile full --cuda-profile
+auto`. After installation, run `vpa install doctor` and a small smoke job for
+the tools you plan to use. If host dependency resolution is fragile, the repo
+also provides Docker and Apptainer CUDA 12.8 fallback definitions under
+[`containers/`](containers/).
 
 ## Start
 
@@ -315,7 +342,7 @@ Notebook: [demo/use_llm_agent_demo.ipynb](demo/use_llm_agent_demo.ipynb)
 workflow. It is read-only: it summarizes existing artifacts and never launches
 new scientific jobs.
 
-![VPA report snapshot](assets/readme/vpa-report-snapshot.svg)
+<!-- ![VPA report snapshot](assets/readme/vpa-report-snapshot.svg) -->
 
 ```bash
 # Self-contained HTML report.

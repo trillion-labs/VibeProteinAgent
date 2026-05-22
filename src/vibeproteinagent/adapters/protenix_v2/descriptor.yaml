@@ -17,6 +17,11 @@ output_schema: schemas/protenix_v2.output.json
 supported_precisions: [bf16]
 supports_batching: false
 incompatible_with: [pxdesign]
+sharding:
+  strategy: seed_sample_shards
+  shardable_fields: [seeds, n_sample]
+  recommended_shard_size: 1
+  default_max_parallel: 2
 fusion:
   output_kind: disk
   input_kinds: [disk]

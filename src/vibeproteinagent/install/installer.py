@@ -17,6 +17,13 @@ import yaml
 from vibeproteinagent.adapters.visibility import is_retired_registry_tool_name
 from vibeproteinagent.core import config as cfg
 from vibeproteinagent.core.errors import DependencyError
+from vibeproteinagent.install.cuda import (
+    GPU_HEAVY_TOOLS,
+    RF_DGL_TOOLS,
+    CudaStack,
+    preflight_report,
+    resolve_cuda_stack,
+)
 from vibeproteinagent.install.manifest import (
     InstallManifest,
     InstallTool,
@@ -39,6 +46,8 @@ class InstallOptions:
     repair: bool = False
     offline: bool = False
     source_root: Path | None = None
+    cuda_profile: str | None = None
+    use_prebuilt_sidecars: bool = False
 
 
 class ManifestInstaller:
@@ -77,8 +86,8 @@ class ManifestInstaller:
             _ensure_shared_env(paths, options, state, results)
             _ensure_vpa_install(paths, options, state, results)
             _ensure_shared_runtime_deps(paths, selection, options, state, results)
-            _write_env_exports(selection, paths, state, results)
-            exports = _env_exports(selection, paths)
+            _write_env_exports(selection, paths, options, state, results)
+            exports = _env_exports(selection, paths, options)
             old_env = _apply_install_env(paths, exports)
             try:
                 for tool in selection.tools:
@@ -105,6 +114,7 @@ class ManifestInstaller:
         return {
             "status": status,
             "profile": selection.profile,
+            "cuda_profile": resolve_cuda_stack(options.cuda_profile).name,
             "selected_tools": list(selection.tool_names),
             "install_root": str(paths.root),
             "shared_env": str(paths.shared_env),
@@ -182,6 +192,41 @@ def install_readiness(tool_names: tuple[str, ...] = ()) -> dict[str, Any]:
     }
 
 
+def install_preflight(
+    *,
+    profile: str | None = None,
+    tools: tuple[str, ...] = (),
+    install_root: Path | None = None,
+    cache_dir: Path | None = None,
+    cuda_profile: str | None = None,
+) -> dict[str, Any]:
+    manifest = load_manifest()
+    installer = ManifestInstaller(manifest)
+    paths, selection = installer.resolve(
+        InstallOptions(
+            profile=profile,
+            tools=tools,
+            install_root=install_root,
+            cache_dir=cache_dir,
+            cuda_profile=cuda_profile,
+        )
+    )
+    data = preflight_report(
+        requested_profile=cuda_profile,
+        selected_tools=tuple(selection.tool_names),
+    )
+    data.update(
+        {
+            "profile": selection.profile,
+            "install_root": str(paths.root),
+            "shared_env": str(paths.shared_env),
+            "sidecars_root": str(paths.sidecars_root),
+            "cache_dir": str(paths.cache_dir),
+        }
+    )
+    return data
+
+
 def _registry_tool_names() -> set[str]:
     names: set[str] = set()
     adapters_root = Path(__file__).resolve().parents[1] / "adapters"
@@ -226,14 +271,19 @@ def _plan_payload(
     selection: InstallSelection,
     options: InstallOptions,
 ) -> dict[str, Any]:
+    cuda_stack = resolve_cuda_stack(options.cuda_profile)
     steps = [
         {"unit": "bootstrap:micromamba", "action": "ensure micromamba is available"},
         {"unit": "env:vpa", "action": f"create shared env at {paths.shared_env}"},
         {"unit": "package:vibeproteinagent", "action": "install VPA into shared env"},
+        {
+            "unit": "cuda:profile",
+            "action": f"use {cuda_stack.name} ({cuda_stack.summary})",
+        },
     ]
     for tool in selection.tools:
         steps.extend(_tool_steps(tool, paths))
-    exports = _env_exports(selection, paths)
+    exports = _env_exports(selection, paths, options)
     steps.append(
         {
             "unit": "env:vpa-activation",
@@ -248,9 +298,15 @@ def _plan_payload(
     if coverage["missing_from_manifest"] or coverage["missing_from_registry"]:
         warnings.append({"type": "registry_manifest_drift", **coverage})
     warnings.extend(_credential_warnings(paths, selection))
+    warnings.extend(_cuda_profile_warnings(selection, cuda_stack))
     return {
         "dry_run": options.dry_run,
         "profile": selection.profile,
+        "requested_cuda_profile": (
+            options.cuda_profile or os.environ.get("VPA_CUDA_PROFILE") or "auto"
+        ),
+        "cuda_profile": cuda_stack.name,
+        "cuda_version": cuda_stack.cuda_version,
         "requested_tools": list(selection.requested_tools),
         "selected_tools": list(selection.tool_names),
         "install_root": str(paths.root),
@@ -264,6 +320,35 @@ def _plan_payload(
         "env_exports": exports,
         "next_command": _next_doctor_command(paths, selection),
     }
+
+
+def _cuda_profile_warnings(
+    selection: InstallSelection,
+    cuda_stack: CudaStack,
+) -> list[dict[str, Any]]:
+    selected = set(selection.tool_names)
+    warnings: list[dict[str, Any]] = []
+    if cuda_stack.name == "cpu" and selected.intersection(GPU_HEAVY_TOOLS):
+        warnings.append(
+            {
+                "type": "cpu_cuda_profile_with_gpu_tools",
+                "cuda_profile": cuda_stack.name,
+                "message": "GPU-heavy tools are selected under the CPU CUDA profile.",
+            }
+        )
+    if selected.intersection(RF_DGL_TOOLS):
+        warnings.append(
+            {
+                "type": "rfdiffusion_dgl_best_effort",
+                "cuda_profile": cuda_stack.name,
+                "message": (
+                    "RFdiffusion/RFpeptides use a best-effort DGL CUDA wheel "
+                    "because DGL does not publish a first-class cu128 wheel for "
+                    "the primary VPA stack."
+                ),
+            }
+        )
+    return warnings
 
 
 def _credential_warnings(
@@ -449,31 +534,25 @@ def _ensure_shared_runtime_deps(
     selected_torch_tools = sorted(set(selection.tool_names).intersection(_TORCH_TOOLS))
     if not selected_torch_tools:
         return
+    cuda_stack = resolve_cuda_stack(options.cuda_profile)
     python = paths.shared_env / "bin" / "python"
-    probe = subprocess.run(
-        [str(python), "-c", "import torch; print(torch.__version__)"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if probe.returncode == 0 and not options.force:
-        version = probe.stdout.strip()
-        results.append({"unit": "shared-dep:torch", "status": "ready", "version": version})
-        state.mark("shared-dep:torch", "ready", {"version": version})
-        if "boltz2_affinity" in selection.tool_names:
-            _ensure_boltz2_affinity_shared_deps(python, options, state, results)
-        if "esm3" in selection.tool_names:
-            _ensure_esm3_shared_deps(python, options, state, results)
-        if "ligandmpnn" in selection.tool_names:
-            _ensure_ligandmpnn_shared_deps(python, options, state, results)
-        if "prodigy" in selection.tool_names:
-            _ensure_prodigy_shared_deps(python, options, state, results)
-        if "proteina_complexa" in selection.tool_names:
-            _ensure_proteina_complexa_shared_deps(python, options, state, results)
-        if "pyrosetta" in selection.tool_names:
-            _ensure_pyrosetta_shared_deps(python, options, state, results)
-        if {"rfdiffusion", "rfpeptides"}.intersection(selection.tool_names):
-            _ensure_rfdiffusion_shared_deps(python, options, state, results)
+    probe = _probe_torch_install(python)
+    if probe.get("ok") and not options.force and _torch_install_matches_stack(probe, cuda_stack):
+        version = str(probe["version"])
+        results.append(
+            {
+                "unit": "shared-dep:torch",
+                "status": "ready",
+                "version": version,
+                "cuda_profile": cuda_stack.name,
+            }
+        )
+        state.mark(
+            "shared-dep:torch",
+            "ready",
+            {"version": version, "cuda_profile": cuda_stack.name},
+        )
+        _ensure_selected_shared_deps(python, selection, options, state, results)
         return
     if options.offline:
         raise DependencyError(
@@ -486,26 +565,86 @@ def _ensure_shared_runtime_deps(
             "-m",
             "pip",
             "install",
-            "torch==2.7.1+cu128",
+            cuda_stack.torch_spec,
             "--index-url",
-            "https://download.pytorch.org/whl/cu128",
+            cuda_stack.torch_index_url,
         ],
         cwd=None,
     )
-    verify = subprocess.run(
-        [str(python), "-c", "import torch; print(torch.__version__)"],
+    verify = _probe_torch_install(python)
+    if not verify.get("ok"):
+        raise DependencyError(
+            "torch installation did not become importable in the shared VPA env",
+            details={"stderr": verify.get("stderr"), "stdout": verify.get("stdout")},
+        )
+    if not _torch_install_matches_stack(verify, cuda_stack):
+        raise DependencyError(
+            "torch installation does not match the selected CUDA profile",
+            details={
+                "installed": verify,
+                "cuda_profile": cuda_stack.name,
+                "expected_torch": cuda_stack.torch_spec,
+            },
+        )
+    version = str(verify["version"])
+    results.append(
+        {
+            "unit": "shared-dep:torch",
+            "status": "installed",
+            "version": version,
+            "cuda_profile": cuda_stack.name,
+        }
+    )
+    state.mark("shared-dep:torch", "ready", {"version": version, "cuda_profile": cuda_stack.name})
+    _ensure_selected_shared_deps(python, selection, options, state, results)
+
+
+def _probe_torch_install(python: Path) -> dict[str, Any]:
+    code = (
+        "import json, torch; "
+        "print(json.dumps({'version': torch.__version__, 'cuda': torch.version.cuda}))"
+    )
+    probe = subprocess.run(
+        [str(python), "-c", code],
         text=True,
         capture_output=True,
         check=False,
     )
-    if verify.returncode != 0:
-        raise DependencyError(
-            "torch installation did not become importable in the shared VPA env",
-            details={"stderr": verify.stderr[-2000:], "stdout": verify.stdout[-2000:]},
-        )
-    version = verify.stdout.strip()
-    results.append({"unit": "shared-dep:torch", "status": "installed", "version": version})
-    state.mark("shared-dep:torch", "ready", {"version": version})
+    if probe.returncode != 0:
+        return {
+            "ok": False,
+            "stdout": probe.stdout[-2000:],
+            "stderr": probe.stderr[-2000:],
+        }
+    try:
+        info = json.loads(probe.stdout.strip())
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "stdout": probe.stdout[-2000:],
+            "stderr": "torch probe did not emit JSON",
+        }
+    return {"ok": True, **info}
+
+
+def _torch_install_matches_stack(probe: dict[str, Any], stack: CudaStack) -> bool:
+    version = str(probe.get("version") or "")
+    cuda = probe.get("cuda")
+    if stack.name == "cpu":
+        return version.startswith("2.7.1") and not cuda
+    expected_suffix = f"+{stack.name}"
+    return version == stack.torch_spec.removeprefix("torch==") and version.endswith(
+        expected_suffix
+    )
+
+
+def _ensure_selected_shared_deps(
+    python: Path,
+    selection: InstallSelection,
+    options: InstallOptions,
+    state: InstallState,
+    results: list[dict[str, Any]],
+) -> None:
     if "boltz2_affinity" in selection.tool_names:
         _ensure_boltz2_affinity_shared_deps(python, options, state, results)
     if "esm3" in selection.tool_names:
@@ -888,6 +1027,7 @@ def _ensure_rfdiffusion_shared_deps(
     state: InstallState,
     results: list[dict[str, Any]],
 ) -> None:
+    cuda_stack = resolve_cuda_stack(options.cuda_profile)
     probe_code = (
         "from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard; "
         "import_dgl_with_graphbolt_guard(); "
@@ -909,6 +1049,11 @@ def _ensure_rfdiffusion_shared_deps(
             "--offline was set",
             details={"package": "dgl"},
         )
+    if not cuda_stack.dgl_package or not cuda_stack.dgl_wheel_url:
+        raise DependencyError(
+            "DGL CUDA support is not available for the selected CPU CUDA profile",
+            details={"cuda_profile": cuda_stack.name},
+        )
     _run(
         [
             str(python),
@@ -918,9 +1063,9 @@ def _ensure_rfdiffusion_shared_deps(
             "--no-user",
             "--no-deps",
             "--force-reinstall",
-            "dgl==2.1.0+cu121",
+            cuda_stack.dgl_package,
             "-f",
-            "https://data.dgl.ai/wheels/cu121/repo.html",
+            cuda_stack.dgl_wheel_url,
         ],
         cwd=None,
     )
@@ -931,9 +1076,15 @@ def _ensure_rfdiffusion_shared_deps(
             "pip",
             "install",
             "--no-user",
+            "decorator==5.1.0",
+            "e3nn==0.3.3",
+            "hydra-core==1.3.2",
             "networkx",
+            "opt_einsum",
             "pandas",
             "psutil",
+            "pynvml==11.0.0",
+            "pyrsistent==0.19.3",
             "requests",
             "scipy",
             "torchdata==0.7.1",
@@ -1010,10 +1161,11 @@ def _ensure_tool_readiness(
 def _write_env_exports(
     selection: InstallSelection,
     paths: InstallPaths,
+    options: InstallOptions,
     state: InstallState,
     results: list[dict[str, Any]],
 ) -> None:
-    exports = _env_exports(selection, paths)
+    exports = _env_exports(selection, paths, options)
     lines = [
         "# Generated by vibeproteinagent install. Safe to regenerate.",
         f"export {cfg.VPA_HOME_ENV}={shlex.quote(str(paths.root))}",
@@ -1057,7 +1209,11 @@ def _restore_env(old: dict[str, str | None]) -> None:
             os.environ[key] = value
 
 
-def _env_exports(selection: InstallSelection, paths: InstallPaths) -> dict[str, str]:
+def _env_exports(
+    selection: InstallSelection,
+    paths: InstallPaths,
+    options: InstallOptions | None = None,
+) -> dict[str, str]:
     grouped: dict[str, list[str]] = {}
     for tool in selection.tools:
         for weight in tool.weights:
@@ -1078,13 +1234,83 @@ def _env_exports(selection: InstallSelection, paths: InstallPaths) -> dict[str, 
             continue
         sidecar_path = paths.root / tool.sidecar.path
         if tool.name == "bindcraft":
-            exports.setdefault("VPA_BINDCRAFT_ENV_PATH", str(sidecar_path))
+            exports.setdefault(
+                "VPA_BINDCRAFT_ENV_PATH",
+                _prebuilt_export_or_default(
+                    tool.name,
+                    "VPA_BINDCRAFT_ENV_PATH",
+                    sidecar_path,
+                    options,
+                ),
+            )
         elif tool.name == "proteina_complexa":
-            exports.setdefault("VPA_PROTEINA_COMPLEXA_VENV", str(sidecar_path / ".venv"))
+            exports.setdefault(
+                "VPA_PROTEINA_COMPLEXA_VENV",
+                _prebuilt_export_or_default(
+                    tool.name,
+                    "VPA_PROTEINA_COMPLEXA_VENV",
+                    sidecar_path / ".venv",
+                    options,
+                ),
+            )
         elif tool.name in {"pxdesign", "pxdesign_pipeline_multi_gpu"}:
-            exports.setdefault("VPA_PXDESIGN_PIPELINE_ENV", str(sidecar_path))
+            exports.setdefault(
+                "VPA_PXDESIGN_PIPELINE_ENV",
+                _prebuilt_export_or_default(
+                    tool.name,
+                    "VPA_PXDESIGN_PIPELINE_ENV",
+                    sidecar_path,
+                    options,
+                ),
+            )
         elif tool.name == "rfdiffusion3":
-            exports.setdefault("VPA_RFDIFFUSION3_ENV", str(sidecar_path))
+            exports.setdefault(
+                "VPA_RFDIFFUSION3_ENV",
+                _prebuilt_export_or_default(
+                    tool.name,
+                    "VPA_RFDIFFUSION3_ENV",
+                    sidecar_path,
+                    options,
+                ),
+            )
+    if options is not None:
+        exports.update(_cuda_env_exports(resolve_cuda_stack(options.cuda_profile)))
+    return exports
+
+
+def _prebuilt_export_or_default(
+    tool_name: str,
+    env_var: str,
+    default_path: Path,
+    options: InstallOptions | None,
+) -> str:
+    if options is None or not options.use_prebuilt_sidecars:
+        return str(default_path)
+    candidate = os.environ.get(env_var)
+    if candidate and _prebuilt_python_path(tool_name, Path(candidate).expanduser()).is_file():
+        return str(Path(candidate).expanduser())
+    return str(default_path)
+
+
+def _cuda_env_exports(stack: CudaStack) -> dict[str, str]:
+    exports = {
+        "VPA_CUDA_PROFILE": stack.name,
+        "VPA_CUDA_TAG": stack.name,
+        "VPA_TORCH_SPEC": stack.torch_spec,
+        "VPA_TORCH_INDEX_URL": stack.torch_index_url,
+    }
+    if stack.cuda_version:
+        exports["VPA_CUDA_VERSION"] = stack.cuda_version
+    if stack.pyg_wheel_url:
+        exports["VPA_PYG_WHEEL_URL"] = stack.pyg_wheel_url
+    if stack.jax_extra:
+        exports["VPA_JAX_CUDA_EXTRA"] = stack.jax_extra
+    if stack.bindcraft_cuda:
+        exports["VPA_BINDCRAFT_CUDA"] = stack.bindcraft_cuda
+    if stack.dgl_package:
+        exports["VPA_DGL_PACKAGE"] = stack.dgl_package
+    if stack.dgl_wheel_url:
+        exports["VPA_DGL_WHEEL_URL"] = stack.dgl_wheel_url
     return exports
 
 
@@ -1104,6 +1330,22 @@ def _ensure_sidecar(
         results.append({"unit": f"sidecar:{tool.name}", "status": "ready", "path": str(path)})
         state.mark(f"sidecar:{tool.name}", "ready", {"path": str(path), "python": str(python)})
         return
+    prebuilt = _link_prebuilt_sidecar(tool.name, path, options)
+    if prebuilt is not None and not options.force and not options.repair:
+        results.append(
+            {
+                "unit": f"sidecar:{tool.name}",
+                "status": "linked",
+                "path": str(path),
+                "source": str(prebuilt),
+            }
+        )
+        state.mark(
+            f"sidecar:{tool.name}",
+            "ready",
+            {"path": str(path), "source": str(prebuilt)},
+        )
+        return
     if not tool.sidecar.install_script:
         if required:
             raise DependencyError(
@@ -1118,10 +1360,83 @@ def _ensure_sidecar(
         install_root=str(paths.root),
         sidecar_path=str(path),
         repo_root=str(source_root),
+        **_cuda_format_values(resolve_cuda_stack(options.cuda_profile)),
     )
     _run(shlex.split(command), cwd=source_root)
     results.append({"unit": f"sidecar:{tool.name}", "status": "installed", "path": str(path)})
     state.mark(f"sidecar:{tool.name}", "ready", {"path": str(path)})
+
+
+def _cuda_format_values(stack: CudaStack) -> dict[str, str]:
+    return {
+        "cuda_profile": stack.name,
+        "cuda_version": stack.cuda_version or "",
+        "cuda_tag": stack.name,
+        "torch_spec": stack.torch_spec,
+        "torch_index_url": stack.torch_index_url,
+        "pyg_wheel_url": stack.pyg_wheel_url or "",
+        "jax_extra": stack.jax_extra or "",
+        "bindcraft_cuda": stack.bindcraft_cuda or "12.8",
+        "dgl_package": stack.dgl_package or "",
+        "dgl_wheel_url": stack.dgl_wheel_url or "",
+    }
+
+
+def _link_prebuilt_sidecar(
+    tool_name: str,
+    target: Path,
+    options: InstallOptions,
+) -> Path | None:
+    if not options.use_prebuilt_sidecars:
+        return None
+    env_var = {
+        "bindcraft": "VPA_BINDCRAFT_ENV_PATH",
+        "proteina_complexa": "VPA_PROTEINA_COMPLEXA_VENV",
+        "pxdesign": "VPA_PXDESIGN_PIPELINE_ENV",
+        "pxdesign_pipeline_multi_gpu": "VPA_PXDESIGN_PIPELINE_ENV",
+        "rfdiffusion3": "VPA_RFDIFFUSION3_ENV",
+    }.get(tool_name)
+    if not env_var:
+        return None
+    raw = os.environ.get(env_var)
+    if not raw:
+        return None
+    source = Path(raw).expanduser()
+    if not _prebuilt_python_path(tool_name, source).is_file():
+        return None
+    if tool_name == "proteina_complexa" and source.name == ".venv":
+        target.mkdir(parents=True, exist_ok=True)
+        link = target / ".venv"
+        if not _prepare_sidecar_link(link):
+            return None
+        link.symlink_to(source, target_is_directory=True)
+        return source if _sidecar_python(target).is_file() else None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not _prepare_sidecar_link(target):
+        return None
+    target.symlink_to(source, target_is_directory=True)
+    return source if _sidecar_python(target).is_file() else None
+
+
+def _prepare_sidecar_link(path: Path) -> bool:
+    if path.is_symlink():
+        path.unlink()
+        return True
+    if not path.exists():
+        return True
+    if path.is_dir():
+        try:
+            next(path.iterdir())
+        except StopIteration:
+            path.rmdir()
+            return True
+    return False
+
+
+def _prebuilt_python_path(tool_name: str, source: Path) -> Path:
+    if tool_name == "proteina_complexa" and source.name == ".venv":
+        return source / "bin" / "python"
+    return _sidecar_python(source)
 
 
 def _ensure_weight(

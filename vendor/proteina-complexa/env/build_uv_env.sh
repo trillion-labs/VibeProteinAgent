@@ -18,6 +18,8 @@ set -e
 #                   vpa conda Python on clusters without system python-dev.
 #   --name NAME     Custom prompt name shown when venv is activated (default: complexa)
 #   --root PATH     Specify installation root directory (where .venv will be created)
+#   --cuda-profile PROFILE
+#                   CUDA stack: auto, cu128, cu126, or cpu (default: VPA_CUDA_PROFILE or cu128)
 #   -h, --help      Show this help message
 #
 # Examples:
@@ -36,6 +38,7 @@ CLEAN=false
 PYTHON_VERSION="3.12"
 PYTHON_BIN="${VPA_PROTEINA_COMPLEXA_PYTHON:-}"
 VENV_NAME="complexa"
+CUDA_PROFILE="${VPA_CUDA_PROFILE:-cu128}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -67,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             INSTALL_ROOT="$2"
             shift 2
             ;;
+        --cuda-profile)
+            CUDA_PROFILE="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: ./build_public_uv_env.sh [OPTIONS]"
             echo ""
@@ -78,6 +85,8 @@ while [[ $# -gt 0 ]]; do
             echo "                  Exact Python interpreter to seed the uv venv"
             echo "  --name NAME     Custom prompt name (default: complexa)"
             echo "  --root PATH     Specify where to create .venv (default: project dir)"
+            echo "  --cuda-profile PROFILE"
+            echo "                  CUDA stack: auto, cu128, cu126, or cpu"
             echo "  -h, --help      Show this help message"
             echo ""
             echo "Examples:"
@@ -134,7 +143,22 @@ if [[ -n "$PYTHON_BIN" ]]; then
 fi
 echo "Prompt name: $VENV_NAME"
 echo "Full install: $FULL_INSTALL"
+echo "CUDA profile: $CUDA_PROFILE"
 echo ""
+
+if [[ "$CUDA_PROFILE" == "auto" ]]; then
+    CUDA_PROFILE="${VPA_CUDA_TAG:-cu128}"
+fi
+TORCH_SPEC="${VPA_TORCH_SPEC:-torch==2.7.1+${CUDA_PROFILE}}"
+TORCH_INDEX_URL="${VPA_TORCH_INDEX_URL:-https://download.pytorch.org/whl/${CUDA_PROFILE}}"
+PYG_WHEEL_URL="${VPA_PYG_WHEEL_URL:-https://data.pyg.org/whl/torch-2.7.0+${CUDA_PROFILE}.html}"
+JAX_CUDA_EXTRA="${VPA_JAX_CUDA_EXTRA:-jax[cuda12]}"
+if [[ "$CUDA_PROFILE" == "cpu" ]]; then
+    TORCH_SPEC="${VPA_TORCH_SPEC:-torch==2.7.1}"
+    TORCH_INDEX_URL="${VPA_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+    PYG_WHEEL_URL="${VPA_PYG_WHEEL_URL:-https://data.pyg.org/whl/torch-2.7.0+cpu.html}"
+    JAX_CUDA_EXTRA="jax"
+fi
 
 # ------------------------------------------------------------------------------
 # 1. Check/Install UV
@@ -163,12 +187,12 @@ source "$VENV_DIR/.venv/bin/activate"
 echo "      Python: $(which python)"
 
 # ------------------------------------------------------------------------------
-# 3. Install PyTorch with CUDA 12.8
+# 3. Install PyTorch for the selected CUDA profile
 # ------------------------------------------------------------------------------
-echo "[3/8] Installing PyTorch 2.7.1 with CUDA 12.8..."
+echo "[3/8] Installing PyTorch for CUDA profile $CUDA_PROFILE..."
 uv pip install --index-strategy unsafe-best-match \
-    torch==2.7.1+cu128 torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128
+    "$TORCH_SPEC" torchvision torchaudio \
+    --index-url "$TORCH_INDEX_URL"
 
 # ------------------------------------------------------------------------------
 # 4. Install base dependencies from pyproject.toml
@@ -187,9 +211,9 @@ uv pip install "numpy==2.4.5" "aiosqlite>=0.20" "toolz>=1.0"
 # ------------------------------------------------------------------------------
 echo "[5/7] Installing PyTorch Geometric packages..."
 uv pip install torch_geometric torch_sparse torch_cluster \
-    -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+    -f "$PYG_WHEEL_URL"
 uv pip install torch-scatter \
-    -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+    -f "$PYG_WHEEL_URL"
 
 # ------------------------------------------------------------------------------
 # 6. Install Graphein and Atomworks
@@ -214,7 +238,7 @@ if [ "$FULL_INSTALL" = true ]; then
     uv pip install -e "$PROJECT_DIR/community_models/colabdesign"
 
     echo "      -> JAX with CUDA..."
-    uv pip install "jax[cuda12]==0.10.0" \
+    uv pip install "${JAX_CUDA_EXTRA}==0.10.0" \
         -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
     uv pip install flax==0.9.0 --no-deps
     uv pip install dm-haiku==0.0.16 --no-deps

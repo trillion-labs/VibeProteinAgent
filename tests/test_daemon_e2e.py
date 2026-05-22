@@ -168,3 +168,32 @@ def test_daemon_supervisor_client_status_and_workers(
         assert not client.is_running()
     finally:
         _stop_supervisor(proc, socket_path)
+
+
+def test_daemon_multiple_cpu_workers_have_distinct_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy ``[-1, -1]`` CPU layout starts distinct workers instead of colliding."""
+    from vibeproteinagent.workers.supervisor_client import SupervisorClient
+
+    home = tmp_path / "vpa_home"
+    home.mkdir()
+    runtime = tmp_path / "vpa_run"
+    runtime.mkdir()
+    monkeypatch.setenv("VPA_HOME", str(home))
+    monkeypatch.setenv("VPA_RUNTIME_DIR", str(runtime))
+
+    Workspace.create("e2e_cpu2")
+    socket_path = runtime / "supervisor.sock"
+    proc = _spawn_supervisor("e2e_cpu2", runtime, home, num_workers=2, cpu_only=True)
+    try:
+        assert _wait_socket(socket_path, timeout_s=20.0)
+        client = SupervisorClient()
+        info = client.worker_info()
+        workers = info.get("workers", [])
+        assert len(workers) == 2
+        assert sorted(w["worker_id"] for w in workers) == [-2, -1]
+        assert all(w["gpu_id"] == -1 for w in workers)
+        assert len({w["socket"] for w in workers}) == 2
+    finally:
+        _stop_supervisor(proc, socket_path)

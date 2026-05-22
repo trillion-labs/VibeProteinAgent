@@ -13,7 +13,7 @@ from vibeproteinagent.adapters import (
     load_descriptor,
     serialize_descriptor,
 )
-from vibeproteinagent.adapters.descriptor import _SCHEMA_PATH
+from vibeproteinagent.adapters.descriptor import _SCHEMA_PATH, resolve_input_schema_dict
 from vibeproteinagent.core.errors import ErrorCode, InvalidParamsError, VPAError
 
 _ADAPTERS_ROOT = Path(__file__).resolve().parents[1] / "src" / "vibeproteinagent" / "adapters"
@@ -53,6 +53,9 @@ def test_load_proteinmpnn_descriptor():
         "c9cb4a671d79604111231f8dbfc7c590e06f1197453b7a6854ac6661a642f5bd"
     )
     assert d.fusion is not None and d.fusion.output_kind.value == "disk"
+    assert d.sharding is not None
+    assert d.sharding.strategy == "warm_batch_shards"
+    assert d.sharding.recommended_shard_size == 8
 
 
 def test_serialize_round_trips(tmp_path):
@@ -64,6 +67,49 @@ def test_serialize_round_trips(tmp_path):
     p.write_text(json.dumps(out))
     again = load_descriptor(p)
     assert again.model_dump(mode="json") == d.model_dump(mode="json")
+
+
+def test_builtin_sharding_metadata_is_typed_and_schema_backed():
+    expected = {
+        "protenix_v2": ("seed_sample_shards", {"seeds", "n_sample"}, 1),
+        "boltz2_affinity": (
+            "seed_shards",
+            {"seeds", "diffusion_samples", "diffusion_samples_affinity"},
+            1,
+        ),
+        "boltzgen": ("design_budget_shards", {"num_designs", "budget", "seed"}, 1),
+        "proteina_complexa": (
+            "design_seed_shards",
+            {"num_designs", "seed", "run_name"},
+            1,
+        ),
+        "rfdiffusion": ("design_seed_shards", {"num_designs", "seed"}, 1),
+        "rfpeptides": ("design_seed_shards", {"num_designs", "seed"}, 1),
+        "rfdiffusion3": ("design_seed_shards", {"num_designs", "seed"}, 1),
+        "pxdesign": ("design_seed_shards", {"num_samples", "seed"}, 1),
+        "bindcraft": (
+            "trajectory_seed_shards",
+            {"num_designs", "max_trajectories", "seed"},
+            1,
+        ),
+        "proteinmpnn": ("warm_batch_shards", {"num_designs", "seed"}, 8),
+        "ligandmpnn": ("warm_batch_shards", {"num_designs", "seed"}, 8),
+    }
+
+    for name, (strategy, shardable_fields, recommended_size) in expected.items():
+        descriptor = load_descriptor(_ADAPTERS_ROOT / name / "descriptor.yaml")
+        assert descriptor.sharding is not None, name
+        assert descriptor.sharding.strategy == strategy
+        assert set(descriptor.sharding.shardable_fields) == shardable_fields
+        assert descriptor.sharding.recommended_shard_size == recommended_size
+        assert descriptor.sharding.default_max_parallel is not None
+
+        input_schema = resolve_input_schema_dict(descriptor)
+        properties = set((input_schema.get("properties") or {}).keys())
+        assert shardable_fields <= properties, name
+
+        serialized = serialize_descriptor(descriptor)
+        assert serialized["sharding"]["strategy"] == strategy
 
 
 def test_support_status_fields_default_to_verified():

@@ -85,6 +85,8 @@ def _node_to_dict(n: Any) -> dict[str, Any]:
         out["cache"] = False
     if n.foreach:
         out["foreach"] = n.foreach
+    if n.max_parallel is not None:
+        out["max_parallel"] = n.max_parallel
     if n.when:
         out["when"] = n.when
     if n.on_failure != "stop":

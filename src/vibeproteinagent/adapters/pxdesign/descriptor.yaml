@@ -23,4 +23,9 @@ output_schema: schemas/pxdesign.output.json
 supported_precisions: [bf16]
 supports_batching: false
 incompatible_with: [protenix_v2]
+sharding:
+  strategy: design_seed_shards
+  shardable_fields: [num_samples, seed]
+  recommended_shard_size: 1
+  default_max_parallel: 2
 entry_point: "vibeproteinagent.adapters.pxdesign.adapter:PXDesignAdapter"

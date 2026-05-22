@@ -31,6 +31,7 @@ class WorkflowNode(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     cache: bool = True
     foreach: str | None = None
+    max_parallel: int | None = Field(default=None, ge=1)
     when: str | None = None
     on_failure: OnFailure = "stop"
     max_retries: int = 0
@@ -70,6 +71,7 @@ class Workflow(BaseModel):
         on_failure: OnFailure = "stop",
         max_retries: int = 0,
         priority: str = "normal",
+        max_parallel: int | None = None,
     ) -> WorkflowNode:
         """Append a node to the workflow and return it (for chaining)."""
         n = WorkflowNode(
@@ -78,6 +80,7 @@ class Workflow(BaseModel):
             version=version,
             inputs=inputs or {},
             cache=cache,
+            max_parallel=max_parallel,
             when=when,
             on_failure=on_failure,
             max_retries=max_retries,
@@ -96,6 +99,7 @@ class Workflow(BaseModel):
         version: str = "*",
         cache: bool = True,
         on_failure: OnFailure = "stop",
+        max_parallel: int | None = None,
     ) -> WorkflowNode:
         """Append a foreach (fanout) node."""
         n = WorkflowNode(
@@ -105,6 +109,7 @@ class Workflow(BaseModel):
             inputs=inputs or {},
             cache=cache,
             foreach=over,
+            max_parallel=max_parallel,
             on_failure=on_failure,
         )
         self.nodes.append(n)

@@ -6,7 +6,13 @@ import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.core.errors import InvalidParamsError, UnknownToolError
-from vibeproteinagent.install.installer import InstallOptions, ManifestInstaller
+from vibeproteinagent.install.cuda import resolve_cuda_stack
+from vibeproteinagent.install.installer import (
+    InstallOptions,
+    ManifestInstaller,
+    _link_prebuilt_sidecar,
+    _torch_install_matches_stack,
+)
 from vibeproteinagent.install.manifest import load_manifest
 from vibeproteinagent.install.planner import resolve_selection
 
@@ -105,6 +111,7 @@ def test_install_dry_run_is_deterministic_and_non_mutating(
     assert first["dry_run"] is True
     assert first["selected_tools"] == ["rfdiffusion", "proteinmpnn"]
     assert first["env_exports"]["VPA_RFDIFFUSION_WEIGHTS"].endswith("/cache/rfdiffusion")
+    assert first["env_exports"]["VPA_CUDA_PROFILE"] == first["cuda_profile"]
     assert not (isolated_vpa_home / "install" / "state.json").exists()
 
 
@@ -121,3 +128,81 @@ def test_manifest_can_export_exact_weight_file_path(isolated_vpa_home: Path) -> 
     assert plan["env_exports"]["VPA_RFDIFFUSION3_CKPT"].endswith(
         "/cache/rfdiffusion3/rfd3_latest.ckpt"
     )
+
+
+def test_cuda_profile_parameterizes_install_plan(isolated_vpa_home: Path) -> None:
+    installer = ManifestInstaller(load_manifest())
+    options = InstallOptions(
+        profile=None,
+        tools=("rfdiffusion3",),
+        install_root=isolated_vpa_home,
+        dry_run=True,
+        cuda_profile="cu126",
+    )
+    plan = installer.install(options)
+
+    assert plan["cuda_profile"] == "cu126"
+    assert plan["cuda_version"] == "12.6"
+    assert plan["env_exports"]["VPA_TORCH_SPEC"] == "torch==2.7.1+cu126"
+    assert plan["env_exports"]["VPA_TORCH_INDEX_URL"].endswith("/cu126")
+
+
+def test_torch_probe_must_match_selected_cuda_profile() -> None:
+    cu128 = resolve_cuda_stack("cu128")
+    cu126 = resolve_cuda_stack("cu126")
+    cpu = resolve_cuda_stack("cpu")
+
+    assert _torch_install_matches_stack({"version": "2.7.1+cu128", "cuda": "12.8"}, cu128)
+    assert not _torch_install_matches_stack(
+        {"version": "2.7.1+cu128", "cuda": "12.8"},
+        cu126,
+    )
+    assert _torch_install_matches_stack({"version": "2.7.1+cpu", "cuda": None}, cpu)
+    assert not _torch_install_matches_stack(
+        {"version": "2.7.1+cu128", "cuda": "12.8"},
+        cpu,
+    )
+
+
+def test_prebuilt_sidecar_link_replaces_empty_stale_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "prebuilt"
+    (source / "bin").mkdir(parents=True)
+    (source / "bin" / "python").write_text("")
+    target = tmp_path / "install" / "sidecars" / "rfdiffusion3"
+    target.mkdir(parents=True)
+    monkeypatch.setenv("VPA_RFDIFFUSION3_ENV", str(source))
+
+    linked = _link_prebuilt_sidecar(
+        "rfdiffusion3",
+        target,
+        InstallOptions(use_prebuilt_sidecars=True),
+    )
+
+    assert linked == source
+    assert target.is_symlink()
+    assert (target / "bin" / "python").is_file()
+
+
+def test_prebuilt_sidecar_link_does_not_claim_nonempty_stale_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "prebuilt"
+    (source / "bin").mkdir(parents=True)
+    (source / "bin" / "python").write_text("")
+    target = tmp_path / "install" / "sidecars" / "rfdiffusion3"
+    target.mkdir(parents=True)
+    (target / "partial.log").write_text("failed")
+    monkeypatch.setenv("VPA_RFDIFFUSION3_ENV", str(source))
+
+    linked = _link_prebuilt_sidecar(
+        "rfdiffusion3",
+        target,
+        InstallOptions(use_prebuilt_sidecars=True),
+    )
+
+    assert linked is None
+    assert not target.is_symlink()

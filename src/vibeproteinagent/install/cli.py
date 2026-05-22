@@ -11,7 +11,13 @@ from vibeproteinagent.cli.output import (
     protect_json_stdout,
 )
 from vibeproteinagent.cli.render import render_install_result
-from vibeproteinagent.install.installer import InstallOptions, ManifestInstaller, install_readiness
+from vibeproteinagent.install.cuda import CUDA_PROFILE_CHOICES
+from vibeproteinagent.install.installer import (
+    InstallOptions,
+    ManifestInstaller,
+    install_preflight,
+    install_readiness,
+)
 from vibeproteinagent.install.manifest import load_manifest
 
 install_app = typer.Typer(
@@ -35,6 +41,17 @@ def install_default(
     force: Annotated[bool, typer.Option("--force")] = False,
     repair: Annotated[bool, typer.Option("--repair")] = False,
     offline: Annotated[bool, typer.Option("--offline")] = False,
+    cuda_profile: Annotated[
+        str,
+        typer.Option("--cuda-profile", help="CUDA stack: auto, cu128, cu126, or cpu."),
+    ] = "auto",
+    use_prebuilt_sidecars: Annotated[
+        bool,
+        typer.Option(
+            "--use-prebuilt-sidecars",
+            help="Prefer existing sidecar envs from VPA_*_ENV variables when present.",
+        ),
+    ] = False,
     json_: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Install the selected profile or tool set."""
@@ -51,6 +68,8 @@ def install_default(
         force=force,
         repair=repair,
         offline=offline,
+        cuda_profile=cuda_profile,
+        use_prebuilt_sidecars=use_prebuilt_sidecars,
         json_=json_,
     )
 
@@ -61,9 +80,21 @@ def plan(
     tools: Annotated[str | None, typer.Option("--tools")] = None,
     install_root: Annotated[Path | None, typer.Option("--install-root")] = None,
     cache_dir: Annotated[Path | None, typer.Option("--cache-dir")] = None,
+    cuda_profile: Annotated[
+        str,
+        typer.Option("--cuda-profile", help="CUDA stack: auto, cu128, cu126, or cpu."),
+    ] = "auto",
+    use_prebuilt_sidecars: Annotated[
+        bool,
+        typer.Option(
+            "--use-prebuilt-sidecars",
+            help="Prefer existing sidecar envs from VPA_*_ENV variables when present.",
+        ),
+    ] = False,
     json_: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Show the resolved install plan without mutating the machine."""
+    _validate_cuda_profile(cuda_profile)
     try:
         with protect_json_stdout(json_):
             data = ManifestInstaller(load_manifest()).plan(
@@ -72,6 +103,8 @@ def plan(
                     tools=((tools,) if tools else ()),
                     install_root=install_root,
                     cache_dir=cache_dir,
+                    cuda_profile=cuda_profile,
+                    use_prebuilt_sidecars=use_prebuilt_sidecars,
                     dry_run=True,
                 )
             )
@@ -92,6 +125,17 @@ def run(
     force: Annotated[bool, typer.Option("--force")] = False,
     repair: Annotated[bool, typer.Option("--repair")] = False,
     offline: Annotated[bool, typer.Option("--offline")] = False,
+    cuda_profile: Annotated[
+        str,
+        typer.Option("--cuda-profile", help="CUDA stack: auto, cu128, cu126, or cpu."),
+    ] = "auto",
+    use_prebuilt_sidecars: Annotated[
+        bool,
+        typer.Option(
+            "--use-prebuilt-sidecars",
+            help="Prefer existing sidecar envs from VPA_*_ENV variables when present.",
+        ),
+    ] = False,
     json_: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Install the selected profile or tool set."""
@@ -106,6 +150,8 @@ def run(
         force=force,
         repair=repair,
         offline=offline,
+        cuda_profile=cuda_profile,
+        use_prebuilt_sidecars=use_prebuilt_sidecars,
         json_=json_,
     )
 
@@ -122,8 +168,11 @@ def _run_install(
     force: bool,
     repair: bool,
     offline: bool,
+    cuda_profile: str,
+    use_prebuilt_sidecars: bool,
     json_: bool,
-    ) -> None:
+) -> None:
+    _validate_cuda_profile(cuda_profile)
     try:
         with protect_json_stdout(json_):
             data = ManifestInstaller(load_manifest()).install(
@@ -138,6 +187,8 @@ def _run_install(
                     force=force,
                     repair=repair,
                     offline=offline,
+                    cuda_profile=cuda_profile,
+                    use_prebuilt_sidecars=use_prebuilt_sidecars,
                 )
             )
     except Exception as exc:
@@ -148,16 +199,67 @@ def _run_install(
 @install_app.command("doctor")
 def doctor(
     tools: Annotated[str | None, typer.Option("--tools")] = None,
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+    preflight: Annotated[bool, typer.Option("--preflight")] = False,
+    cuda_profile: Annotated[
+        str,
+        typer.Option("--cuda-profile", help="CUDA stack: auto, cu128, cu126, or cpu."),
+    ] = "auto",
     json_: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Report installer-oriented readiness for all or selected tools."""
+    _validate_cuda_profile(cuda_profile)
     try:
         with protect_json_stdout(json_):
             tool_tuple = ((tools,) if tools else ())
-            data = install_readiness(tool_tuple)
+            data = (
+                install_preflight(
+                    profile=profile,
+                    tools=tool_tuple,
+                    cuda_profile=cuda_profile,
+                )
+                if preflight
+                else install_readiness(tool_tuple)
+            )
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
     print_envelope_ok(data, json_mode=json_, render=render_install_result)
+
+
+@install_app.command("preflight")
+def preflight(
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+    tools: Annotated[str | None, typer.Option("--tools")] = None,
+    install_root: Annotated[Path | None, typer.Option("--install-root")] = None,
+    cache_dir: Annotated[Path | None, typer.Option("--cache-dir")] = None,
+    cuda_profile: Annotated[
+        str,
+        typer.Option("--cuda-profile", help="CUDA stack: auto, cu128, cu126, or cpu."),
+    ] = "auto",
+    json_: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Check host GPU, driver, CUDA toolkit, and selected CUDA profile before install."""
+    _validate_cuda_profile(cuda_profile)
+    try:
+        with protect_json_stdout(json_):
+            data = install_preflight(
+                profile=profile,
+                tools=((tools,) if tools else ()),
+                install_root=install_root,
+                cache_dir=cache_dir,
+                cuda_profile=cuda_profile,
+            )
+    except Exception as exc:
+        fail_from_exception(exc, json_mode=json_)
+    print_envelope_ok(data, json_mode=json_, render=render_install_result)
+
+
+def _validate_cuda_profile(profile: str) -> None:
+    if profile not in CUDA_PROFILE_CHOICES:
+        raise typer.BadParameter(
+            f"choose one of: {', '.join(CUDA_PROFILE_CHOICES)}",
+            param_hint="--cuda-profile",
+        )
 
 
 def main() -> None:

@@ -24,7 +24,8 @@ Upstream's ``pyproject.toml`` pins:
 * ``lightning>=2.5.0,<2.6`` — upper-bounded for a known checkpoint
   loading bug; not catastrophic but pip-installing the full upstream
   stack into vpa would resolve to this and bump our 2.5.x install.
-* PyTorch ``cu126`` extra index — would override our cu128 install.
+* PyTorch/JAX/PyG CUDA wheels are profile-driven and must not leak into the
+  shared vpa env.
 * ``tmol`` (Rosetta force fields) — needs Python-3.12-specific
   ``llvmlite``/``numba`` workarounds per upstream's README.
 * Multiple weights gated behind NGC accounts (AF2, RF3, ESM2 weights

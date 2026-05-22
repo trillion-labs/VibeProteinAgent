@@ -27,6 +27,7 @@ nodes:
     tool: protenix_v2
     version: ">=1.0.0,<2"
     foreach: ${outputs.convert.input_jsons}
+    max_parallel: 2
     inputs:
       input_json: ${item}
       seeds: [101]

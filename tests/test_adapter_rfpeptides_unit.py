@@ -144,6 +144,8 @@ def test_build_cmd_monomer_omits_input_pdb(tmp_path):
     assert "contigmap.contigs=[10-10]" in payload
     assert "inference.num_designs=1" in payload
     assert "inference.input_pdb=" not in payload
+    assert "allow_full_torch_load" in payload
+    assert "inference.schedule_directory_path=" in payload
 
 
 def test_build_cmd_binder_includes_input_pdb_and_hotspots(tmp_path):

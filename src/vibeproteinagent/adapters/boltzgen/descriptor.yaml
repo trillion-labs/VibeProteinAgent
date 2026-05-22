@@ -18,6 +18,11 @@ input_schema: schemas/boltzgen.input.json
 output_schema: schemas/boltzgen.output.json
 supported_precisions: [bf16]
 supports_batching: false
+sharding:
+  strategy: design_budget_shards
+  shardable_fields: [num_designs, budget, seed]
+  recommended_shard_size: 1
+  default_max_parallel: 2
 fusion:
   output_kind: disk
   input_kinds: [disk]

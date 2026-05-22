@@ -369,6 +369,7 @@ def render_daemon_status(
     if not workers:
         return
     t = _table("Workers" if get_verbosity() != Verbosity.QUIET else None, style)
+    t.add_column("worker", justify="right")
     t.add_column("gpu", justify="right")
     t.add_column("pid", justify="right")
     t.add_column("state")
@@ -376,6 +377,7 @@ def render_daemon_status(
     t.add_column("total", justify="right")
     t.add_column("loaded")
     for w in workers:
+        worker_id = w.get("worker_id", w.get("gpu_id", "?"))
         gpu_id = w.get("gpu_id", "?")
         loaded = w.get("loaded_adapters") or []
         loaded_parts = []
@@ -391,6 +393,7 @@ def render_daemon_status(
         total = w.get("total_vram_mib") or 0
         busy = "busy" if w.get("busy") else ("alive" if w.get("alive") else "dead")
         t.add_row(
+            str(worker_id),
             str(gpu_id),
             str(w.get("pid", "-")),
             busy,
@@ -418,12 +421,14 @@ def render_daemon_start(
     if get_verbosity() == Verbosity.QUIET or not workers:
         return
     for w in workers:
+        worker_id = w.get("worker_id", w.get("gpu_id", "?"))
         gpu_id = w.get("gpu_id", "?")
         pid_w = w.get("pid", "-")
         total = w.get("total_vram_mib") or 0
         total_s = f"{total // 1024} GiB" if total else "cpu"
+        device_s = f"gpu=#{gpu_id}" if isinstance(gpu_id, int) and gpu_id >= 0 else "cpu"
         c.print(
-            f"{_g('ok', style)} worker {gpu_id}  pid={pid_w}  gpu=#{gpu_id}  vram={total_s}"
+            f"{_g('ok', style)} worker {worker_id}  pid={pid_w}  {device_s}  vram={total_s}"
         )
 
 
@@ -672,6 +677,9 @@ def render_install_result(
         c.print("=" * len(head))
 
     rows = [
+        ("status", data.get("status")),
+        ("cuda profile", data.get("cuda_profile")),
+        ("cuda version", data.get("cuda_version")),
         ("install root", data.get("install_root")),
         ("shared env", data.get("shared_env")),
         ("sidecars", data.get("sidecars_root")),
@@ -697,6 +705,20 @@ def render_install_result(
             status = item.get("status") or item.get("action") or "-"
             st.add_row(str(item.get("unit", "?")), str(status))
         c.print(st)
+
+    checks = data.get("checks") or []
+    if checks and get_verbosity() != Verbosity.QUIET:
+        ct = _table("CUDA preflight", style)
+        ct.add_column("check")
+        ct.add_column("status")
+        ct.add_column("message", overflow="fold")
+        for item in checks:
+            ct.add_row(
+                str(item.get("name", "?")),
+                str(item.get("status", "?")),
+                str(item.get("message") or "-"),
+            )
+        c.print(ct)
 
     readiness_tools = data.get("tools") or []
     if readiness_tools and get_verbosity() != Verbosity.QUIET:

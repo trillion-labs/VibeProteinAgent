@@ -2,21 +2,44 @@ from __future__ import annotations
 
 from typing import Any
 
-AGENT_TOOL_SCHEMA_VERSION = "vpa-agent-tools-v2"
+AGENT_TOOL_SCHEMA_VERSION = "vpa-agent-tools-v3"
 
 
 def compact_tool_outline(tool: dict[str, Any]) -> dict[str, Any]:
-    return {
+    out = {
         "name": tool.get("name"),
         "description": tool.get("description"),
     }
+    sharding = _compact_sharding(tool.get("sharding"))
+    if sharding:
+        out["sharding"] = sharding
+    return out
 
 
 def compact_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
-    return {
+    out = {
         "name": tool.get("name"),
         "description": tool.get("description"),
         "parameters": _compact_parameters(tool.get("input_schema")),
+    }
+    sharding = _compact_sharding(tool.get("sharding"))
+    if sharding:
+        out["sharding"] = sharding
+    return out
+
+
+def _compact_sharding(sharding: Any) -> dict[str, Any]:
+    if not isinstance(sharding, dict):
+        return {}
+    return {
+        key: sharding[key]
+        for key in (
+            "strategy",
+            "shardable_fields",
+            "recommended_shard_size",
+            "default_max_parallel",
+        )
+        if key in sharding
     }
 
 

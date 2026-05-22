@@ -19,22 +19,19 @@ to preserve internal imports.
 
 ## Patches applied to upstream
 
-Single B200 (Blackwell sm_100) arch patch. Captured as a git-format diff at
-`./.patches/01-b200-arch.patch`. Following the recipe in project note
-`2a82eaba-…` (B200 Port Recipe):
+CUDA arch compatibility patch. Captured as a git-format diff at
+`./.patches/01-b200-arch.patch`.
 
 - `protenix/model/layer_norm/torch_ext_compile.py` —
-  - Hard-coded `TORCH_CUDA_ARCH_LIST = "7.0;8.0"` replaced with a B200
-    default `"10.0"` that respects an externally-set value.
-  - `-gencode` flags: dropped `arch=compute_70/sm_70` and
-    `arch=compute_80/sm_80`, kept sm_86 and sm_90, added
-    `arch=compute_100,code=sm_100`.
+  - Hard-coded `TORCH_CUDA_ARCH_LIST = "7.0;8.0"` replaced with an
+    env-driven default covering common VPA targets: sm_86, sm_89, sm_90,
+    and sm_100.
+  - `-gencode` flags are derived from `VPA_PROTENIX_CUDA_ARCH_LIST` or
+    `TORCH_CUDA_ARCH_LIST`, so older CUDA toolkits can opt out of unsupported
+    architectures.
 - `protenix/model/layer_norm/layer_norm.py` —
-  - Renamed the cached extension `fastfold_layer_norm_cuda → fastfold_layer_norm_cuda_v2`
-    so a fresh kernel compiles instead of reusing any stale
-    sm_70/sm_80 build sitting in a build cache. (No on-disk cache
-    collision is expected for our fresh vendor tree, but the rename is
-    cheap insurance and matches the pattern used by the v1.0.4 patch.)
+  - The cached extension name includes a sanitized arch suffix so switching
+    CUDA arch profiles does not reuse a stale compiled extension.
 
 This is the same recipe the user pre-applied to the v1.0.4 Protenix tree at
 `/opt/vpa-data/Protenix/` (consumed by the Phase 4.2 adapter).

@@ -16,6 +16,11 @@ input_schema: schemas/proteinmpnn.input.json
 output_schema: schemas/proteinmpnn.output.json
 supported_precisions: [fp32, bf16]
 supports_batching: true
+sharding:
+  strategy: warm_batch_shards
+  shardable_fields: [num_designs, seed]
+  recommended_shard_size: 8
+  default_max_parallel: 4
 fusion:
   output_kind: disk
   input_kinds: [disk]

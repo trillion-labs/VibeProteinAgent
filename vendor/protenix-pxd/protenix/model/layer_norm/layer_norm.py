@@ -23,14 +23,18 @@ from torch.nn.parameter import Parameter
 
 sys.path.append(os.path.dirname(__file__))
 
+from protenix.model.layer_norm.torch_ext_compile import extension_suffix
+
+_EXTENSION_NAME = f"fastfold_layer_norm_cuda_v2_{extension_suffix()}"
+
 try:
-    fastfold_layer_norm_cuda = importlib.import_module("fastfold_layer_norm_cuda_v2")
+    fastfold_layer_norm_cuda = importlib.import_module(_EXTENSION_NAME)
 except ImportError:
     from protenix.model.layer_norm.torch_ext_compile import compile
 
     current_dir = os.path.dirname(__file__)
     fastfold_layer_norm_cuda = compile(
-        name="fastfold_layer_norm_cuda_v2",
+        name=_EXTENSION_NAME,
         sources=[
             os.path.join(f"{current_dir}/kernel", file)
             for file in ["layer_norm_cuda.cpp", "layer_norm_cuda_kernel.cu"]

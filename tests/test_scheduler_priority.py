@@ -23,6 +23,7 @@ class _FakeProcess:
 
 def _make_handle(gpu_id: int) -> _WorkerHandle:
     h = _WorkerHandle.__new__(_WorkerHandle)
+    h.worker_id = gpu_id
     h.gpu_id = gpu_id
     h.process = _FakeProcess(pid=2000 + gpu_id)  # type: ignore[assignment]
     from vibeproteinagent.workers import paths

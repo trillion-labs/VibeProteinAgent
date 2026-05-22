@@ -164,8 +164,10 @@ class Worker:
         gpu_id: int,
         workspace_name: str,
         *,
+        worker_id: int | None = None,
         min_free_vram_mib: int = DEFAULT_MIN_FREE_VRAM_MIB,
     ) -> None:
+        self.worker_id = int(gpu_id if worker_id is None else worker_id)
         self.gpu_id = gpu_id
         self.workspace_name = workspace_name
         self.workspace = Workspace.resolve(workspace_name)
@@ -176,13 +178,13 @@ class Worker:
         self._adapter_meta: dict[tuple[str, str], AdapterMeta] = {}
         self.min_free_vram_mib = min_free_vram_mib
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix=f"worker{gpu_id}"
+            max_workers=1, thread_name_prefix=f"worker{self.worker_id}"
         )
         self._stop_event: asyncio.Event | None = None
         self._server: asyncio.base_events.Server | None = None
         self._current_job_id: str | None = None
         self._log: Logger = get_file_logger(
-            f"worker:{gpu_id}", paths.worker_log_file(gpu_id)
+            f"worker:{self.worker_id}", paths.worker_log_file(self.worker_id)
         )
         self._torch = _setup_torch(gpu_id, log=self._log)
         self._registry: Any = None
@@ -198,7 +200,7 @@ class Worker:
         return self._registry
 
     async def serve(self) -> None:
-        sock = paths.worker_socket(self.gpu_id)
+        sock = paths.worker_socket(self.worker_id)
         with contextlib.suppress(FileNotFoundError):
             sock.unlink()
         self._stop_event = asyncio.Event()
@@ -209,9 +211,15 @@ class Worker:
             os.chmod(sock, 0o600)
         except OSError:
             pass
-        pid_file = paths.worker_pid_file(self.gpu_id)
+        pid_file = paths.worker_pid_file(self.worker_id)
         pid_file.write_text(str(os.getpid()))
-        self._log.info("ready", socket=str(sock), pid=os.getpid())
+        self._log.info(
+            "ready",
+            socket=str(sock),
+            pid=os.getpid(),
+            worker_id=self.worker_id,
+            gpu_id=self.gpu_id,
+        )
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -273,8 +281,15 @@ class Worker:
             if op == "warm":
                 return await self._op_warm(mid, body)
             if op == "healthcheck":
-                return ipc.make_response(mid, {"ok": True, "gpu_id": self.gpu_id,
-                                               "busy": self._busy})
+                return ipc.make_response(
+                    mid,
+                    {
+                        "ok": True,
+                        "worker_id": self.worker_id,
+                        "gpu_id": self.gpu_id,
+                        "busy": self._busy,
+                    },
+                )
             if op == "worker_info":
                 return ipc.make_response(mid, self._info())
             if op == "shutdown":
@@ -306,6 +321,7 @@ class Worker:
                 }
             )
         return {
+            "worker_id": self.worker_id,
             "gpu_id": self.gpu_id,
             "pid": os.getpid(),
             "busy": self._busy,
@@ -1130,9 +1146,20 @@ def _introspect_artifacts(out_dict: dict[str, Any], job_dir: Path) -> list[dict[
     return out
 
 
-def worker_main(gpu_id: int, workspace_name: str) -> None:
+def worker_main(
+    worker_id: int,
+    gpu_id_or_workspace: int | str,
+    workspace_name: str | None = None,
+) -> None:
     """Subprocess entry point — call this from multiprocessing.spawn."""
-    log_path = paths.worker_log_file(gpu_id)
+    if workspace_name is None:
+        gpu_id = int(worker_id)
+        workspace_name = str(gpu_id_or_workspace)
+        worker_id = gpu_id
+    else:
+        gpu_id = int(gpu_id_or_workspace)
+
+    log_path = paths.worker_log_file(worker_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Redirect stdout/stderr to the per-worker logfile so any escaping
     # third-party prints land there (the structured Logger writes alongside).
@@ -1142,10 +1169,10 @@ def worker_main(gpu_id: int, workspace_name: str) -> None:
     os.dup2(log_fp.fileno(), sys.stdout.fileno())
     os.dup2(log_fp.fileno(), sys.stderr.fileno())
 
-    boot_log = get_file_logger(f"worker:{gpu_id}", log_path)
-    boot_log.info("starting", workspace=workspace_name)
+    boot_log = get_file_logger(f"worker:{worker_id}", log_path)
+    boot_log.info("starting", workspace=workspace_name, worker_id=worker_id, gpu_id=gpu_id)
 
-    worker = Worker(gpu_id, workspace_name)
+    worker = Worker(gpu_id, workspace_name, worker_id=worker_id)
     try:
         asyncio.run(worker.serve())
     except KeyboardInterrupt:

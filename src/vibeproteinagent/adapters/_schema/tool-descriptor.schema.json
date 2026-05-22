@@ -186,6 +186,38 @@
         }
       }
     },
+    "sharding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "shardable_fields", "recommended_shard_size"],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Planner-facing candidate/job sharding strategy."
+        },
+        "shardable_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Input fields a planner may vary across foreach shards."
+        },
+        "recommended_shard_size": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Recommended count per shard for expensive fan-out jobs."
+        },
+        "default_max_parallel": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Default foreach max_parallel when the user has not set a GPU budget."
+        }
+      }
+    },
     "entry_point": {
       "type": "string",
       "pattern": "^[a-zA-Z_][a-zA-Z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*$"

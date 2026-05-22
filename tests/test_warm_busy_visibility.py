@@ -67,7 +67,7 @@ async def _fake_warm_worker(
 
 def _make_handle(gpu_id: int, sock: Path, *, busy: bool) -> SimpleNamespace:
     """Build a stand-in for :class:`_WorkerHandle` consumed by ``_op_warm``."""
-    return SimpleNamespace(gpu_id=gpu_id, socket_path=sock, busy=busy)
+    return SimpleNamespace(worker_id=gpu_id, gpu_id=gpu_id, socket_path=sock, busy=busy)
 
 
 def test_warm_records_busy_state_and_wait(tmp_path: Path) -> None:

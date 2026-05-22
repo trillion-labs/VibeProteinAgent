@@ -22,6 +22,11 @@ input_schema: schemas/proteina_complexa.input.json
 output_schema: schemas/proteina_complexa.output.json
 supported_precisions: [fp32]
 supports_batching: false
+sharding:
+  strategy: design_seed_shards
+  shardable_fields: [num_designs, seed, run_name]
+  recommended_shard_size: 1
+  default_max_parallel: 2
 fusion:
   output_kind: disk
   input_kinds: [disk]

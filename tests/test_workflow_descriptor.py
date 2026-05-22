@@ -90,6 +90,25 @@ def test_serialize_round_trip_with_foreach() -> None:
     assert "each" in yaml
 
 
+def test_serialize_round_trip_with_foreach_max_parallel(tmp_path: Path) -> None:
+    wf = Workflow(name="fan", version="1.0.0")
+    wf.fanout(
+        "each",
+        tool="noop",
+        over="${params.items}",
+        inputs={"payload": "${item}"},
+        max_parallel=2,
+    )
+
+    yaml = serialize_workflow(wf)
+    assert "max_parallel: 2" in yaml
+
+    p = tmp_path / "fan.yaml"
+    p.write_text(yaml)
+    loaded = load_workflow(p)
+    assert loaded.nodes[0].max_parallel == 2
+
+
 def test_node_id_cannot_contain_brackets() -> None:
     with pytest.raises(ValidationError):
         WorkflowNode(id="x[0]", tool="noop")

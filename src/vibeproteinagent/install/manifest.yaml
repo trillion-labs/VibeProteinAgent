@@ -67,7 +67,7 @@ tools:
     sidecar:
       env_name: BindCraft
       path: "sidecars/bindcraft"
-      install_script: "bash -lc 'cd vendor/bindcraft && bash install_bindcraft.sh --pkg_manager micromamba --env-prefix {sidecar_path} --cuda 12.8'"
+      install_script: "bash -lc 'cd vendor/bindcraft && bash install_bindcraft.sh --pkg_manager micromamba --env-prefix {sidecar_path} --cuda {bindcraft_cuda}'"
     disk_bytes: 120000000000
   boltz2_affinity:
     runtime: shared
@@ -194,7 +194,7 @@ tools:
     sidecar:
       env_name: proteina-complexa-vpa
       path: "sidecars/proteina-complexa"
-      install_script: "bash vendor/proteina-complexa/env/build_uv_env.sh --root {sidecar_path}"
+      install_script: "bash vendor/proteina-complexa/env/build_uv_env.sh --root {sidecar_path} --cuda-profile {cuda_profile}"
     weights:
       - name: proteina_complexa_checkpoints
         path: "cache/proteina-complexa/checkpoints"
@@ -223,7 +223,7 @@ tools:
     sidecar:
       env_name: pxdesign-pipeline-vpa
       path: "sidecars/pxdesign-pipeline"
-      install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path}"
+      install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path} --cuda-profile {cuda_profile}"
     weights:
       - name: pxdesign_weights
         path: "cache/pxdesign"
@@ -239,7 +239,7 @@ tools:
     sidecar:
       env_name: pxdesign-pipeline-vpa
       path: "sidecars/pxdesign-pipeline"
-      install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path}"
+      install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path} --cuda-profile {cuda_profile}"
   pxmeter:
     runtime: shared
   pyrosetta:
@@ -289,7 +289,7 @@ tools:
     sidecar:
       env_name: rfdiffusion3-vpa
       path: "sidecars/rfdiffusion3"
-      install_script: "bash scripts/install_rfdiffusion3_sidecar.sh --prefix {sidecar_path} --repo-root {repo_root}"
+      install_script: "bash scripts/install_rfdiffusion3_sidecar.sh --prefix {sidecar_path} --repo-root {repo_root} --cuda-profile {cuda_profile}"
     weights:
       - name: rfdiffusion3_checkpoint
         path: "cache/rfdiffusion3/rfd3_latest.ckpt"

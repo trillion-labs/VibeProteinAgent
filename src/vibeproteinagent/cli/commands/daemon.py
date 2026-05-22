@@ -32,7 +32,17 @@ daemon_app = typer.Typer(no_args_is_help=True, help="Worker daemon lifecycle.")
 
 @daemon_app.command("start")
 def daemon_start(
-    workers: int | None = typer.Option(None, "--workers", help="Number of worker procs."),
+    workers: int | None = typer.Option(
+        None,
+        "--workers",
+        help="Number of GPU worker procs.",
+    ),
+    cpu_workers: int = typer.Option(
+        0,
+        "--cpu-workers",
+        min=0,
+        help="Number of CPU-only worker procs.",
+    ),
     workspace: str | None = typer.Option(None, "--workspace", help="Workspace name."),
     json_: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -52,6 +62,26 @@ def daemon_start(
             ws = Workspace.create(ws.name)
 
         gpu_ids = resolve_default_gpu_ids(workers)
+        if gpu_ids == [-1]:
+            gpu_ids = []
+            if workers is None and cpu_workers == 0:
+                cpu_workers = 1
+            elif workers is not None and workers > 0 and cpu_workers == 0:
+                print_envelope_err(
+                    ErrorCode.NO_GPU,
+                    "no CUDA GPUs are available; use --cpu-workers for CPU-only jobs",
+                    {"requested_gpu_workers": workers},
+                    json_mode=json_,
+                )
+                return
+        if not gpu_ids and cpu_workers == 0:
+            print_envelope_err(
+                ErrorCode.INVALID_PARAMS,
+                "daemon start needs at least one GPU worker or CPU worker",
+                {"requested_gpu_workers": workers, "cpu_workers": cpu_workers},
+                json_mode=json_,
+            )
+            return
         gpu_arg = ",".join(str(g) for g in gpu_ids)
         subprocess.Popen(
             [
@@ -62,10 +92,12 @@ def daemon_start(
                     "from vibeproteinagent.workers.supervisor import supervisor_main; "
                     "workspace=sys.argv[1]; "
                     "gpu_ids=[int(x) for x in sys.argv[2].split(',') if x]; "
-                    "supervisor_main(workspace, len(gpu_ids), gpu_ids)"
+                    "cpu_workers=int(sys.argv[3]); "
+                    "supervisor_main(workspace, len(gpu_ids)+cpu_workers, gpu_ids, cpu_workers)"
                 ),
                 ws.name,
                 gpu_arg,
+                str(cpu_workers),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -88,6 +120,8 @@ def daemon_start(
                 "pid": client.pid(),
                 "socket": str(client.socket_path),
                 "workspace": ws.name,
+                "gpu_workers": len(gpu_ids),
+                "cpu_workers": cpu_workers,
                 "workers": info.get("workers", []),
                 "log": str(paths.supervisor_log_file()),
             },

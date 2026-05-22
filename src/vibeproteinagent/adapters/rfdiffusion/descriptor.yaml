@@ -29,6 +29,11 @@ input_schema: schemas/rfdiffusion.input.json
 output_schema: schemas/rfdiffusion.output.json
 supported_precisions: [fp32]
 supports_batching: false
+sharding:
+  strategy: design_seed_shards
+  shardable_fields: [num_designs, seed]
+  recommended_shard_size: 1
+  default_max_parallel: 4
 fusion:
   output_kind: disk
   input_kinds: [disk]

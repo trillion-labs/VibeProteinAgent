@@ -113,6 +113,39 @@ class Fusion(BaseModel):
     input_kinds: list[str] | None = None
 
 
+class Sharding(BaseModel):
+    """Planner-facing metadata for candidate/job-level fan-out.
+
+    This describes safe workflow shapes. It is intentionally not an optimizer:
+    VPA does not rewrite user-authored params from this metadata alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: str = Field(
+        pattern=r"^[a-z][a-z0-9_]*$",
+        description="Named sharding strategy understood by planners/docs.",
+    )
+    shardable_fields: list[str] = Field(min_length=1)
+    recommended_shard_size: int = Field(ge=1)
+    default_max_parallel: int | None = Field(default=None, ge=1)
+
+    @field_validator("shardable_fields")
+    @classmethod
+    def _validate_shardable_fields(cls, v: list[str]) -> list[str]:
+        pat = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+        seen: set[str] = set()
+        for name in v:
+            if not pat.match(name):
+                raise ValueError(
+                    f"shardable_fields entry '{name}' is not a valid parameter name"
+                )
+            if name in seen:
+                raise ValueError(f"duplicate shardable_fields entry '{name}'")
+            seen.add(name)
+        return v
+
+
 class ToolDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
@@ -162,6 +195,7 @@ class ToolDescriptor(BaseModel):
         description="Tool names that must not be co-resident in the same worker process.",
     )
     fusion: Fusion | None = None
+    sharding: Sharding | None = None
 
     @field_validator("incompatible_with")
     @classmethod

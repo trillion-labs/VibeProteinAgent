@@ -22,6 +22,11 @@ input_schema: schemas/bindcraft.input.json
 output_schema: schemas/bindcraft.output.json
 supported_precisions: [fp32]
 supports_batching: false
+sharding:
+  strategy: trajectory_seed_shards
+  shardable_fields: [num_designs, max_trajectories, seed]
+  recommended_shard_size: 1
+  default_max_parallel: 2
 fusion:
   output_kind: disk
   input_kinds: [disk]

@@ -22,6 +22,8 @@ def test_cli_install_selective_dry_run(
     assert data["profile"] is None
     assert data["selected_tools"] == ["rfdiffusion", "proteinmpnn"]
     assert any(step["unit"] == "weight:rfdiffusion:rfdiffusion_base" for step in data["steps"])
+    assert data["cuda_profile"] in {"cu128", "cu126"}
+    assert any(step["unit"] == "cuda:profile" for step in data["steps"])
 
 
 def test_cli_install_full_profile_includes_all_tools(
@@ -70,3 +72,42 @@ def test_cli_install_doctor_reports_rfdiffusion_modes(
     assert data["tools"][0]["name"] == "rfdiffusion"
     assert "rfdiffusion_modes" in data["tools"][0]
     assert "missing_mode_checkpoints" in data["tools"][0]["rfdiffusion_modes"]
+
+
+def test_cli_install_preflight_reports_cuda_contract(
+    runner: CliRunner,
+    isolated_vpa_home: Path,
+) -> None:
+    res = runner.invoke(
+        app,
+        [
+            "install",
+            "preflight",
+            "--tools",
+            "rfdiffusion,proteinmpnn",
+            "--cuda-profile",
+            "cu128",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.stdout
+    data = json.loads(res.stdout)["data"]
+    assert data["requested_cuda_profile"] == "cu128"
+    assert data["cuda_profile"] == "cu128"
+    assert data["cuda_version"] == "12.8"
+    assert "checks" in data
+    assert any(check["name"] == "rfdiffusion_dgl" for check in data["checks"])
+
+
+def test_cli_install_dry_run_accepts_cpu_cuda_profile(
+    runner: CliRunner,
+    isolated_vpa_home: Path,
+) -> None:
+    res = runner.invoke(
+        app,
+        ["install", "--profile", "agent", "--cuda-profile", "cpu", "--dry-run", "--json"],
+    )
+    assert res.exit_code == 0, res.stdout
+    data = json.loads(res.stdout)["data"]
+    assert data["cuda_profile"] == "cpu"
+    assert data["env_exports"]["VPA_CUDA_PROFILE"] == "cpu"

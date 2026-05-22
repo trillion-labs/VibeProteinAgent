@@ -528,6 +528,7 @@ def _build_cmd(
         f"denoiser.noise_scale_ca={params.noise_scale_ca}",
         f"denoiser.noise_scale_frame={params.noise_scale_frame}",
         f"inference.model_directory_path={checkpoint.parent}",
+        f"inference.schedule_directory_path={output_prefix.parent / 'schedules'}",
     ]
     if checkpoint.name not in {_BASE_CKPT} or params.checkpoint_path:
         argv.append(f"inference.ckpt_override_path={checkpoint}")
@@ -577,6 +578,9 @@ def _build_cmd(
     preload = (
         "import sys, types; "
         "sys.modules.setdefault('dgl.graphbolt', types.ModuleType('dgl.graphbolt')); "
+        "from vibeproteinagent.core.compat import allow_full_torch_load; "
+        "_ctx = allow_full_torch_load(); _ctx.__enter__(); "
+        "import atexit; atexit.register(_ctx.__exit__, None, None, None); "
         "import sys as _s; _s.argv = "
         + repr(argv)
         + "; import runpy; runpy.run_path("

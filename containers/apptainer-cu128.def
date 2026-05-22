@@ -1,0 +1,41 @@
+Bootstrap: docker
+From: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+%environment
+    export VPA_HOME=/opt/vpa
+    export VPA_CUDA_PROFILE=cu128
+    export MAMBA_ROOT_PREFIX=/opt/micromamba
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=/opt/vpa/envs/vpa/bin:/opt/micromamba/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+%files
+    pyproject.toml /opt/VibeProteinAgent/pyproject.toml
+    README.md /opt/VibeProteinAgent/README.md
+    LICENSE /opt/VibeProteinAgent/LICENSE
+    THIRD_PARTY_NOTICES.md /opt/VibeProteinAgent/THIRD_PARTY_NOTICES.md
+    CONTRIBUTING.md /opt/VibeProteinAgent/CONTRIBUTING.md
+    CITATION.cff /opt/VibeProteinAgent/CITATION.cff
+    src /opt/VibeProteinAgent/src
+    docs /opt/VibeProteinAgent/docs
+    containers /opt/VibeProteinAgent/containers
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    export MAMBA_ROOT_PREFIX=/opt/micromamba
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=/opt/vpa/envs/vpa/bin:/opt/micromamba/bin:/usr/local/cuda/bin:$PATH
+    apt-get update
+    apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git nodejs npm wget
+    rm -rf /var/lib/apt/lists/*
+
+    curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/2.0.5 \
+        | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
+
+    mkdir -p /opt/VibeProteinAgent /opt/vpa
+    cd /opt/VibeProteinAgent
+    micromamba create -y -p /opt/vpa/envs/vpa -c conda-forge python=3.12 pip
+    /opt/vpa/envs/vpa/bin/python -m pip install --no-user uv
+    /opt/vpa/envs/vpa/bin/python -m pip install --no-user -e /opt/VibeProteinAgent
+    /opt/vpa/envs/vpa/bin/vpa version
+%runscript
+    exec vpa "$@"
