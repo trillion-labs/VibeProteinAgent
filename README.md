@@ -41,6 +41,9 @@ human-readable reports.
   your workspace instead of disappearing into a remote black box.
 - **Heavy-tool friendly:** persistent workers and sidecars are designed for
   model-backed tools that are expensive to cold-start.
+- **Built for throughput:** seed/candidate sharding, `max_parallel`, and
+  separate CPU/GPU workers keep broad design rounds moving without forcing
+  fragile multi-GPU model internals.
 
 ## How VPA Works
 
@@ -75,7 +78,7 @@ export OPENROUTER_API_KEY=<openrouter-api-key>
 # Check the host GPU/driver/toolkit contract before a heavy install.
 npx vibeproteinagent install preflight --profile full --cuda-profile auto --json
 
-# Full agent/tool experience: all first-class tools, sidecars, and weights.
+# Full agent/tool experience: non-gated tools plus gated tools when credentials/cache are available.
 npx vibeproteinagent install --profile full --cuda-profile auto --yes
 
 # Agent mode without forcing every heavyweight model install.
@@ -99,7 +102,7 @@ before a large install.
 | `--profile agent` | `base` + retrieval/template tools for LLM planning; provider credentials are only needed at runtime | conda env only; no large model weights selected |
 | `--tools rfdiffusion,proteinmpnn,protenix_v2` | Backbone generation + sequence design + structure prediction | ~10.1 GB tool artifacts, plus env/cache |
 | `--tools boltz2_affinity,rfdiffusion,proteinmpnn` | Affinity prediction + RFdiffusion + ProteinMPNN | ~14.1 GB tool artifacts, plus env/cache |
-| `--profile full` | Every first-class tool, sidecar, and required checkpoint; optional/gated tools become ready when their cache or credentials are available | ~240 GB tool artifacts, plus env/cache |
+| `--profile full` | All non-gated first-class tools, sidecars, and checkpoints; optional/gated tools become ready when their cache or credentials are available | ~240 GB tool artifacts, plus env/cache |
 
 If you already have validated sidecar environments, pass
 `--use-prebuilt-sidecars` and export the matching path, for example
@@ -164,7 +167,7 @@ also provides Docker and Apptainer CUDA 12.8 fallback definitions under
 vpa version
 vpa install doctor --tools rfdiffusion,proteinmpnn,protenix_v2
 
-# Create a workspace and start one worker.
+# Create a workspace and start one GPU worker.
 vpa workspace create my_run
 vpa daemon start --workers 1 --workspace my_run
 
@@ -181,6 +184,11 @@ vpa status <job_id> --workspace my_run
 vpa results <job_id> --workspace my_run
 vpa artifacts <job_id> --workspace my_run
 ```
+
+`--workers` is the GPU worker count. Add `--cpu-workers M` when workflows have
+CPU-only analysis or retrieval nodes that should not occupy GPU workers. Heavy
+models remain single-GPU per job by default; VPA accelerates broad design
+rounds by sharding independent seed/candidate jobs across workers.
 
 ## Tools
 
@@ -287,6 +295,13 @@ nodes:
 
 The full workflow guide shows how to extend this pattern into generation →
 sequence design → structure prediction → QC → ranking.
+
+For expensive generators, prefer `foreach` fan-out over one large node and set
+`max_parallel` to the number of GPU slots you want that fan-out to occupy.
+Tools such as RFdiffusion/RFpeptides/RFdiffusion3, PXDesign, BindCraft,
+Protenix-v2, Boltz2 affinity, BoltzGen, Proteina-Complexa, ProteinMPNN, and
+LigandMPNN advertise sharding guidance for planner/templates; user-authored
+workflow YAML is never silently rewritten.
 
 Guide: [docs/use_workflows.md](docs/use_workflows.md)
 Notebook: [demo/use_workflows_demo.ipynb](demo/use_workflows_demo.ipynb)

@@ -81,7 +81,7 @@ def test_boltz_inline_msa_suppresses_remote_server_in_auto(tmp_path) -> None:
     ) is False
 
 
-def test_boltz_inline_msa_is_stripped_when_disabled_or_remote(tmp_path) -> None:
+def test_boltz_inline_msa_uses_empty_when_disabled_and_strips_for_remote(tmp_path) -> None:
     base_sequences = [
         {"type": "protein", "id": "A", "sequence": "ACDE", "msa": "A.a3m"},
         {"type": "ligand", "id": "L", "smiles": "C"},
@@ -96,7 +96,9 @@ def test_boltz_inline_msa_is_stripped_when_disabled_or_remote(tmp_path) -> None:
         ),
         disabled_dir,
     )
-    assert not yaml_file_has_prepared_msa(disabled)
+    disabled_doc = yaml.safe_load(disabled.read_text())
+    assert disabled_doc["sequences"][0]["protein"]["msa"] == "empty"
+    assert yaml_file_has_prepared_msa(disabled)
 
     remote_dir = tmp_path / "remote"
     remote_dir.mkdir()
@@ -141,6 +143,31 @@ def test_boltz_yaml_msa_empty_is_stripped_for_remote_backend(tmp_path) -> None:
     protein = raw["sequences"][0]["protein"]
     assert "msa" not in protein
     assert not yaml_file_has_prepared_msa(staged)
+
+
+def test_boltz_yaml_msa_empty_is_preserved_when_msa_disabled(tmp_path) -> None:
+    input_yaml = tmp_path / "input.yaml"
+    input_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "sequences": [
+                    {"protein": {"id": "A", "sequence": "ACDE", "msa": "A.a3m"}},
+                    {"ligand": {"id": "L", "smiles": "C"}},
+                ],
+                "properties": [{"affinity": {"binder": "L"}}],
+            },
+            sort_keys=False,
+        )
+    )
+    staged_dir = tmp_path / "staged"
+    staged_dir.mkdir()
+    staged = _stage_input(
+        Boltz2AffinityInput(input_yaml=str(input_yaml), use_msa=False),
+        staged_dir,
+    )
+    raw = yaml.safe_load(staged.read_text())
+    assert raw["sequences"][0]["protein"]["msa"] == "empty"
 
 
 def test_boltz_yaml_without_msa_falls_back_to_remote_in_auto(tmp_path) -> None:

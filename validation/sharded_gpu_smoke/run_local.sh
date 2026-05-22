@@ -10,7 +10,7 @@ CPU_WORKERS="${VPA_SMOKE_CPU_WORKERS:-2}"
 MAX_WAIT_S="${VPA_SMOKE_MAX_WAIT_S:-21600}"
 PLAN="validation/sharded_gpu_smoke/sharded_heavy_plan.json"
 PARAMS="validation/agent_tool_coverage/params.local.json"
-OUT_DIR="validation/sharded_gpu_smoke/out"
+OUT_DIR="${VPA_SMOKE_OUT_DIR:-validation/sharded_gpu_smoke/out}"
 
 mkdir -p "$OUT_DIR"
 
@@ -18,26 +18,45 @@ if [[ -f "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh" ]]; then
   # shellcheck disable=SC1091
   source "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh"
 fi
+if [[ -n "${VPA_SMOKE_BOLTZ_CACHE:-}" ]]; then
+  export VPA_BOLTZ_CACHE="$VPA_SMOKE_BOLTZ_CACHE"
+fi
+if [[ -n "${VPA_SMOKE_BOLTZGEN_CACHE:-}" ]]; then
+  export VPA_BOLTZGEN_CACHE="$VPA_SMOKE_BOLTZGEN_CACHE"
+fi
 
-vpa daemon start \
+VPA_BIN="${VPA_BIN:-$(command -v vpa || true)}"
+if [[ -z "$VPA_BIN" && -x "${VPA_HOME:-$HOME/.vibeproteinagent}/envs/vpa/bin/vpa" ]]; then
+  VPA_BIN="${VPA_HOME:-$HOME/.vibeproteinagent}/envs/vpa/bin/vpa"
+fi
+if [[ -z "$VPA_BIN" ]]; then
+  echo "vpa executable not found; set VPA_BIN or activate the VPA environment" >&2
+  exit 127
+fi
+VPA_PYTHON_BIN="${VPA_PYTHON_BIN:-$(dirname "$VPA_BIN")/python}"
+if [[ ! -x "$VPA_PYTHON_BIN" ]]; then
+  echo "VPA python executable not found at $VPA_PYTHON_BIN; set VPA_PYTHON_BIN" >&2
+  exit 127
+fi
+
+"$VPA_BIN" daemon start \
   --workers "$GPU_WORKERS" \
   --cpu-workers "$CPU_WORKERS" \
   --workspace "$WORKSPACE" \
   --json | tee "$OUT_DIR/daemon_start.json"
 
-vpa agent validate-plan "$PLAN" \
-  --params-file "$PARAMS" \
+"$VPA_BIN" agent validate-plan "$PLAN" \
   --workspace "$WORKSPACE" \
   --json | tee "$OUT_DIR/validate.json"
 
-vpa agent submit-plan "$PLAN" \
+"$VPA_BIN" agent submit-plan "$PLAN" \
   --params-file "$PARAMS" \
   --workspace "$WORKSPACE" \
   --max-wait-s "$MAX_WAIT_S" \
   --json | tee "$OUT_DIR/submit.json"
 
 WORKFLOW_ID="$(
-  python - "$OUT_DIR/submit.json" <<'PY'
+  "$VPA_PYTHON_BIN" - "$OUT_DIR/submit.json" <<'PY'
 import json
 import sys
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -48,11 +67,11 @@ print((workflow_ids or [result.get("workflow_id")])[0])
 PY
 )"
 
-vpa report "$WORKFLOW_ID" \
+"$VPA_BIN" report "$WORKFLOW_ID" \
   --workspace "$WORKSPACE" \
   --out "$OUT_DIR/report.html"
 
-python - "$WORKSPACE" "$WORKFLOW_ID" "$OUT_DIR/gpu_ids.json" <<'PY'
+"$VPA_PYTHON_BIN" - "$WORKSPACE" "$WORKFLOW_ID" "$OUT_DIR/gpu_ids.json" <<'PY'
 import json
 import sys
 from vibeproteinagent.workspace import JobStore, Workspace
@@ -75,6 +94,17 @@ Path = __import__("pathlib").Path
 Path(out_path).write_text(json.dumps({"workflow_id": workflow_id, "jobs": jobs}, indent=2))
 if len({tuple(job["gpu_ids"]) for job in gpu_jobs}) < 2:
     raise SystemExit("expected shard jobs to record at least two distinct gpu_ids")
+PY
+
+"$VPA_PYTHON_BIN" - "$OUT_DIR/submit.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+data = payload.get("data", payload)
+state = data.get("state") or (data.get("result") or {}).get("state")
+if state != "completed":
+    raise SystemExit(f"expected completed workflow, got {state!r}")
 PY
 
 printf 'Sharded GPU smoke complete: %s\n' "$WORKFLOW_ID"

@@ -18,6 +18,7 @@ from typing import Any
 from vibeproteinagent._version import __version__
 from vibeproteinagent.core.errors import InvalidParamsError
 
+from ._brand import vpa_logo
 from .models import (
     MSABlock,
     PlotSpec,
@@ -404,7 +405,7 @@ def render_report_html(
 <body>
   <aside class="sidebar">
     <div class="sidebar-brand">
-      <span class="brand-mark">⌬</span>
+      {vpa_logo("brand-mark")}
       <span class="brand-text">VibeProteinAgent</span>
     </div>
     <div class="sidebar-meta">
@@ -507,7 +508,10 @@ def _exec_vitals_panel(model: ReportModel) -> str:
 
     n_candidates = len(model.candidates)
     cand_accent = "good" if n_candidates >= 1 else "neutral"
-    tiles.append(_kpi_tile("⌬", str(n_candidates), "Candidates", accent=cand_accent))
+    tiles.append(_kpi_tile(
+        "", str(n_candidates), "Candidates", accent=cand_accent,
+        raw_icon=vpa_logo("kpi-logo"),
+    ))
 
     n_nodes = len(model.graph.nodes)
     tiles.append(_kpi_tile("⚙", str(n_nodes), "Tools" if n_nodes == 1 else "Pipeline nodes"))
@@ -538,11 +542,22 @@ def _exec_vitals_panel(model: ReportModel) -> str:
     )
 
 
-def _kpi_tile(icon: str, value: str, label: str, *, accent: str = "neutral") -> str:
-    """Single dashboard KPI tile (icon + value + label, with state accent)."""
+def _kpi_tile(
+    icon: str, value: str, label: str, *, accent: str = "neutral",
+    raw_icon: str | None = None,
+) -> str:
+    """Single dashboard KPI tile (icon + value + label, with state accent).
+
+    ``raw_icon`` injects pre-built markup (e.g. the brand logo) in place of
+    the escaped glyph icon.
+    """
+    icon_html = (
+        raw_icon if raw_icon is not None
+        else f'<span class="kpi-icon" aria-hidden="true">{_h(icon)}</span>'
+    )
     return (
         f'<div class="kpi-tile kpi-{_h(accent)}">'
-        f'<span class="kpi-icon" aria-hidden="true">{_h(icon)}</span>'
+        f'{icon_html}'
         f'<div class="kpi-body">'
         f'<div class="kpi-value">{_h(value)}</div>'
         f'<div class="kpi-label">{_h(label)}</div>'
@@ -4108,11 +4123,8 @@ body {
   letter-spacing:0.02em;
 }
 .brand-mark {
-  background:linear-gradient(135deg, #c4b5fd, var(--accent-bright));
-  color:var(--accent-deep); width:26px; height:26px; border-radius:6px;
-  display:flex; align-items:center; justify-content:center;
-  font-size:15px; font-weight:700;
-  box-shadow:0 1px 4px rgba(255,255,255,0.18);
+  width:26px; height:26px; flex-shrink:0; border-radius:6px; display:block;
+  box-shadow:0 1px 4px rgba(255,255,255,0.22);
 }
 .sidebar-meta {
   display:flex; flex-direction:column; gap:3px;
@@ -4362,6 +4374,9 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   font-size:17px; font-weight:600;
   background:#ffffff; border:1px solid var(--line);
   color:var(--ink);
+}
+.kpi-logo {
+  flex-shrink:0; width:34px; height:34px; border-radius:8px; display:block;
 }
 .kpi-body { min-width:0; flex:1; }
 .kpi-value {

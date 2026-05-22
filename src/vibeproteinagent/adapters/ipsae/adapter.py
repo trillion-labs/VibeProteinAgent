@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import shutil
 import subprocess
 import sys
@@ -106,6 +107,23 @@ def _find_scoreboard_row(
     return None
 
 
+def _stage_pae_file(src: Path, out_dir: Path) -> Path:
+    """Stage a PAE file for upstream ipsae.py, decompressing JSON gzip inputs."""
+    if src.suffix.lower() != ".gz":
+        staged = out_dir / src.name
+        if staged != src:
+            shutil.copy2(src, staged)
+        return staged
+
+    inner_name = src.with_suffix("").name
+    staged = out_dir / inner_name
+    if staged == src:
+        return staged
+    with gzip.open(src, "rb") as fi, staged.open("wb") as fo:
+        shutil.copyfileobj(fi, fo)
+    return staged
+
+
 @register_adapter("descriptor.yaml")
 class IpSaeAdapter(ToolAdapter):
     """Subprocess wrapper around the vendored ``ipsae.py`` script.
@@ -140,10 +158,8 @@ class IpSaeAdapter(ToolAdapter):
 
         # ipsae.py writes outputs alongside the PDB, so stage inputs inside the
         # job dir to keep the working tree clean and reproducible.
-        staged_pae = out_dir / pae_src.name
+        staged_pae = _stage_pae_file(pae_src, out_dir)
         staged_pdb = out_dir / pdb_src.name
-        if staged_pae != pae_src:
-            shutil.copy2(pae_src, staged_pae)
         if staged_pdb != pdb_src:
             shutil.copy2(pdb_src, staged_pdb)
 

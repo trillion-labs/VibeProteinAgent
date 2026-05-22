@@ -52,7 +52,9 @@ COMMANDS: list[tuple[str, list[str], bool]] = [
     # daemon start is exercised by the slow e2e test; it spawns a real supervisor
     # and so is not suitable for in-process CliRunner smoke testing.
     ("daemon stop",        ["daemon", "stop", "--json"], False),
+    ("daemon stop --workspace", ["daemon", "stop", "--workspace", "ws1", "--json"], False),
     ("daemon status",      ["daemon", "status", "--json"], True),
+    ("daemon status --workspace", ["daemon", "status", "--workspace", "ws1", "--json"], True),
     # stdio mode actually starts a blocking MCP server (covered by the slow e2e test).
     # ws is documented as unimplemented and must surface E_DEPENDENCY.
     ("mcp serve ws",       ["mcp", "serve", "--transport", "ws", "--json"], False),

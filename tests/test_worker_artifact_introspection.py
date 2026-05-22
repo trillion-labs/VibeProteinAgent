@@ -51,6 +51,14 @@ def test_non_path_strings_are_ignored(job_dir: Path) -> None:
     assert out == []
 
 
+def test_long_non_path_strings_are_ignored(job_dir: Path) -> None:
+    out = _introspect_artifacts(
+        {"secondary_structure_string": "H" * 4096},
+        job_dir,
+    )
+    assert out == []
+
+
 def test_paths_outside_job_dir_are_ignored(tmp_path: Path, job_dir: Path) -> None:
     elsewhere = tmp_path / "rogue.txt"
     elsewhere.write_text("nope")

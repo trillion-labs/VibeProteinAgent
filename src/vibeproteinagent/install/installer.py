@@ -125,7 +125,11 @@ class ManifestInstaller:
         }
 
 
-def install_readiness(tool_names: tuple[str, ...] = ()) -> dict[str, Any]:
+def install_readiness(
+    tool_names: tuple[str, ...] = (),
+    *,
+    runtime_probe: bool = True,
+) -> dict[str, Any]:
     manifest = load_manifest()
     paths = _resolve_paths(manifest, InstallOptions())
     shared_python = paths.shared_env / "bin" / "python"
@@ -159,7 +163,25 @@ def install_readiness(tool_names: tuple[str, ...] = ()) -> dict[str, Any]:
             effective_required = bool(spec.required if spec else True)
             if tool_names and spec is not None:
                 effective_required = True
-            runtime_status = _runtime_tool_readiness(name, python=runtime_python)
+            runtime_status = (
+                _runtime_tool_readiness(name, python=runtime_python)
+                if runtime_probe
+                else {
+                    "ready": True,
+                    "reason": None,
+                    "availability": {
+                        "available": True,
+                        "availability_checked": False,
+                        "availability_reason": None,
+                        "availability_details": {
+                            "runtime_probe": "skipped",
+                            "reason": (
+                                "caller already checked descriptor availability"
+                            ),
+                        },
+                    },
+                }
+            )
             availability = runtime_status.get("availability") or {}
             manifest_status = _manifest_readiness(name, spec, paths, required=effective_required)
             runtime_ready = bool(runtime_status.get("ready"))
@@ -1389,13 +1411,7 @@ def _link_prebuilt_sidecar(
 ) -> Path | None:
     if not options.use_prebuilt_sidecars:
         return None
-    env_var = {
-        "bindcraft": "VPA_BINDCRAFT_ENV_PATH",
-        "proteina_complexa": "VPA_PROTEINA_COMPLEXA_VENV",
-        "pxdesign": "VPA_PXDESIGN_PIPELINE_ENV",
-        "pxdesign_pipeline_multi_gpu": "VPA_PXDESIGN_PIPELINE_ENV",
-        "rfdiffusion3": "VPA_RFDIFFUSION3_ENV",
-    }.get(tool_name)
+    env_var = _sidecar_env_var(tool_name)
     if not env_var:
         return None
     raw = os.environ.get(env_var)
@@ -1416,6 +1432,30 @@ def _link_prebuilt_sidecar(
         return None
     target.symlink_to(source, target_is_directory=True)
     return source if _sidecar_python(target).is_file() else None
+
+
+def _sidecar_env_var(tool_name: str) -> str | None:
+    return {
+        "bindcraft": "VPA_BINDCRAFT_ENV_PATH",
+        "proteina_complexa": "VPA_PROTEINA_COMPLEXA_VENV",
+        "pxdesign": "VPA_PXDESIGN_PIPELINE_ENV",
+        "pxdesign_pipeline_multi_gpu": "VPA_PXDESIGN_PIPELINE_ENV",
+        "rfdiffusion3": "VPA_RFDIFFUSION3_ENV",
+    }.get(tool_name)
+
+
+def _sidecar_ready_from_manifest_or_env(
+    tool_name: str,
+    manifest_path: Path,
+) -> tuple[bool, Path, bool]:
+    env_var = _sidecar_env_var(tool_name)
+    if env_var:
+        raw = os.environ.get(env_var)
+        if raw:
+            env_path = Path(raw).expanduser()
+            if _prebuilt_python_path(tool_name, env_path).is_file():
+                return True, env_path, True
+    return _sidecar_python(manifest_path).is_file(), manifest_path, False
 
 
 def _prepare_sidecar_link(path: Path) -> bool:
@@ -1549,8 +1589,16 @@ def _manifest_readiness(
         missing.append(detail)
     if spec.sidecar:
         path = paths.root / spec.sidecar.path
-        if required and not _sidecar_python(path).is_file():
-            missing.append({"unit": f"sidecar:{name}", "path": str(path)})
+        sidecar_ready, checked_path, used_env = _sidecar_ready_from_manifest_or_env(
+            name, path
+        )
+        if used_env:
+            env_override_ready = True
+        if required and not sidecar_ready:
+            detail = {"unit": f"sidecar:{name}", "path": str(path)}
+            if checked_path != path:
+                detail["checked_path"] = str(checked_path)
+            missing.append(detail)
     if spec.binary and required and shutil.which(spec.binary) is None:
         missing.append({"unit": f"binary:{name}", "path": spec.binary})
     if missing:

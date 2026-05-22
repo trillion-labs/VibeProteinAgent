@@ -84,7 +84,10 @@ def _raise_if_unavailable(
     try:
         from vibeproteinagent.install.installer import install_readiness
 
-        install_status = install_readiness((str(descriptor.name),))
+        install_status = install_readiness(
+            (str(descriptor.name),),
+            runtime_probe=False,
+        )
     except Exception as exc:
         install_status = {
             "install_ready": False,

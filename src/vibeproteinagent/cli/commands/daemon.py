@@ -83,6 +83,9 @@ def daemon_start(
             )
             return
         gpu_arg = ",".join(str(g) for g in gpu_ids)
+        runtime_dir = paths.runtime_dir()
+        child_env = os.environ.copy()
+        child_env["VPA_RUNTIME_DIR"] = str(runtime_dir)
         subprocess.Popen(
             [
                 sys.executable,
@@ -104,6 +107,7 @@ def daemon_start(
             stderr=subprocess.DEVNULL,
             close_fds=True,
             start_new_session=True,
+            env=child_env,
         )
 
         if not client.wait_until_running(timeout_s=45.0):
@@ -134,10 +138,16 @@ def daemon_start(
 
 @daemon_app.command("stop")
 def daemon_stop(
+    workspace: str | None = typer.Option(
+        None,
+        "--workspace",
+        help="Workspace name. Accepted for symmetry with daemon start/status.",
+    ),
     json_: bool = typer.Option(False, "--json"),
 ) -> None:
     """Stop the supervisor (and all workers) cleanly."""
     try:
+        del workspace
         client = SupervisorClient()
         if not client.is_running():
             print_envelope_err(
@@ -175,15 +185,21 @@ def daemon_stop(
 
 @daemon_app.command("status")
 def daemon_status(
+    workspace: str | None = typer.Option(
+        None,
+        "--workspace",
+        help="Workspace name. Accepted for symmetry with daemon start.",
+    ),
     json_: bool = typer.Option(False, "--json"),
 ) -> None:
     """Report whether the supervisor is running, and list its workers."""
     try:
+        ws = Workspace.resolve(workspace)
         client = SupervisorClient()
         running = client.is_running()
         if not running:
             print_envelope_ok(
-                {"running": False},
+                {"running": False, "workspace": ws.name},
                 json_mode=json_,
                 render=render_daemon_status,
             )
@@ -194,6 +210,7 @@ def daemon_status(
                 "running": True,
                 "pid": client.pid(),
                 "socket": str(client.socket_path),
+                "workspace": ws.name,
                 "workers": info.get("workers", []),
                 "log": str(paths.supervisor_log_file()),
             },

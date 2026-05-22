@@ -304,8 +304,13 @@ def test_adapter_run_uses_persistent_sidecar(monkeypatch, tmp_path):
     monkeypatch.setattr(adapter_mod, "_check_paths", lambda: None)
     monkeypatch.setattr(adapter_mod, "BINDCRAFT_PARAMS", params_dir)
     monkeypatch.setattr(adapter_mod, "availability_skip_reason", lambda: None)
-    monkeypatch.setattr(adapter_mod, "_find_conda_exe", lambda: Path("/usr/bin/conda"))
-    monkeypatch.setattr(adapter_mod, "_bindcraft_python", lambda *_args: fake_python)
+    monkeypatch.setenv("VPA_BINDCRAFT_ENV_PATH", str(fake_python.parents[1]))
+    monkeypatch.setattr(adapter_mod, "_find_conda_exe", lambda: None)
+    monkeypatch.setattr(
+        adapter_mod,
+        "_bindcraft_python",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("conda lookup skipped")),
+    )
     monkeypatch.setattr(adapter_mod.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(adapter_mod, "PersistentPythonSidecar", FakeSidecar)
     monkeypatch.setattr(adapter_mod.subprocess, "run", _no_subprocess_run)
@@ -326,6 +331,7 @@ def test_adapter_run_uses_persistent_sidecar(monkeypatch, tmp_path):
     assert out1.num_designs_returned == 1
     assert out2.num_designs_returned == 2
     assert len(created) == 1
+    assert created[0].kwargs["python"] == fake_python
     assert len(created[0].calls) == 2
     first_call = created[0].calls[0][1]
     assert first_call["bindcraft_py"].endswith("bindcraft.py")

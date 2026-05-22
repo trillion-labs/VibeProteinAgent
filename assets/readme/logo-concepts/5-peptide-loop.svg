@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+  <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#3a0d6e"/>
+    <stop offset="1" stop-color="#6b1ea8"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.3" cy="0.24" r="0.95">
+    <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+    <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+  <rect width="256" height="256" rx="58" fill="url(#tile)"/><rect width="256" height="256" rx="58" fill="url(#glow)"/>
+
+  <!-- peptide backbone bonds (open chain) -->
+  <path fill="none" stroke="#c4b5fd" stroke-width="9"
+        stroke-linecap="round" stroke-linejoin="round"
+        d="M148 73 L183 108 L176 161 L128 186 L80 161 L73 108"/>
+  <!-- residue beads -->
+  <g>
+    <circle cx="183" cy="108" r="15" fill="#ffffff"/>
+    <circle cx="176" cy="161" r="15" fill="#ffffff"/>
+    <circle cx="128" cy="186" r="17" fill="#ffffff"/>
+    <circle cx="80" cy="161" r="15" fill="#ffffff"/>
+  </g>
+  <g fill="#6b1ea8">
+    <circle cx="183" cy="108" r="5"/>
+    <circle cx="176" cy="161" r="5"/>
+    <circle cx="128" cy="186" r="6"/>
+    <circle cx="80" cy="161" r="5"/>
+  </g>
+  <!-- termini -->
+  <circle cx="148" cy="73" r="15" fill="#5fd3ec"/>
+  <circle cx="148" cy="73" r="5.5" fill="#0d2b33"/>
+  <circle cx="73" cy="108" r="15" fill="#ff63a6"/>
+  <circle cx="73" cy="108" r="5.5" fill="#3d1029"/>
+
+</svg>

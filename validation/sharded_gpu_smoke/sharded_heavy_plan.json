@@ -109,6 +109,9 @@
           "target_chain": "A",
           "binder_length": 30,
           "num_designs": 1,
+          "search_algorithm": "single-pass",
+          "reward_model": "none",
+          "steps": ["generate", "filter"],
           "seed": "${item.seed}",
           "run_name": "${item.run_name}"
         },

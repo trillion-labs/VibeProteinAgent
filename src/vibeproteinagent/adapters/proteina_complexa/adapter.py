@@ -14,6 +14,16 @@ from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.adapters.proteina_complexa import availability_skip_reason
 
 ProteinaComplexaMode = Literal["protein_binder", "ligand_binder", "motif"]
+ProteinaComplexaSearchAlgorithm = Literal[
+    "default",
+    "single-pass",
+    "best-of-n",
+    "beam-search",
+    "fk-steering",
+    "mcts",
+]
+ProteinaComplexaRewardModel = Literal["default", "none"]
+ProteinaComplexaStep = Literal["generate", "filter", "evaluate", "analyze"]
 
 _MODE_CONFIG = {
     "protein_binder": {
@@ -67,6 +77,29 @@ class ProteinaComplexaInput(BaseModel):
     num_designs: int | None = Field(default=None, ge=1, le=128)
     seed: int | None = None
     run_name: str | None = None
+    search_algorithm: ProteinaComplexaSearchAlgorithm = Field(
+        default="default",
+        description=(
+            "Generation search strategy. default preserves Proteina-Complexa's "
+            "upstream mode config; single-pass is useful for small smoke runs."
+        ),
+    )
+    reward_model: ProteinaComplexaRewardModel = Field(
+        default="default",
+        description=(
+            "Reward model policy. default preserves the upstream config; none "
+            "disables reward scoring/guidance for fast compatibility smoke runs."
+        ),
+    )
+    steps: list[ProteinaComplexaStep] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Optional Proteina-Complexa pipeline steps to run. Null preserves the "
+            "adapter default for the selected mode; use ['generate', 'filter'] "
+            "for fast design-only smoke runs that skip expensive evaluation."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_mode_specific_inputs(self) -> ProteinaComplexaInput:
@@ -167,7 +200,7 @@ class ProteinaComplexaAdapter(ToolAdapter):
         pipeline = str(mode_config["pipeline"])
         config_path = common.pipeline_config(pipeline)
         extra_env = {"USE_V2_COMPLEXA_ARCH": "True"} if params.mode == "motif" else None
-        steps = ["generate", "evaluate", "analyze"] if params.mode == "motif" else None
+        steps = _resolve_steps(params)
 
         ctx.emit_progress(0.10)
         common.run_design(
@@ -212,6 +245,14 @@ class ProteinaComplexaAdapter(ToolAdapter):
         self._sidecars.clear()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+def _resolve_steps(params: ProteinaComplexaInput) -> list[ProteinaComplexaStep] | None:
+    if params.steps is not None:
+        return list(params.steps)
+    if params.mode == "motif":
+        return ["generate", "evaluate", "analyze"]
+    return None
 
 
 def _prepare_mode_input(params: ProteinaComplexaInput, job_dir: Path) -> tuple[Path, str]:
@@ -276,6 +317,7 @@ def _protein_binder_overrides(
         f"++generation.dataloader.dataset.nres.low={params.binder_length}",
         f"++generation.dataloader.dataset.nres.high={params.binder_length}",
         f"++generation.dataloader.dataset.nres.nsamples={params.num_designs}",
+        *_generation_policy_overrides(params),
         *_seed_override(params),
     ]
 
@@ -303,6 +345,7 @@ def _ligand_binder_overrides(
         f"{base}.SMILES={params.ligand_smiles!r}",
         f"{base}.use_bonds_from_file=False",
         f"++generation.dataloader.dataset.nres.nsamples={params.num_designs}",
+        *_generation_policy_overrides(params),
         *_seed_override(params),
     ]
 
@@ -334,6 +377,7 @@ def _motif_overrides(
         f"{base}.segment_order={segment_order}",
         f"{base}.atom_selection_mode=all_atom",
         f"++generation.dataloader.dataset.conditional_features.0.nsamples={params.num_designs}",
+        *_generation_policy_overrides(params),
         *_seed_override(params),
     ]
 
@@ -350,6 +394,15 @@ def _base_overrides(mode: ProteinaComplexaMode, run_name: str) -> list[str]:
 
 def _seed_override(params: ProteinaComplexaInput) -> list[str]:
     return [f"++seed={params.seed}"] if params.seed is not None else []
+
+
+def _generation_policy_overrides(params: ProteinaComplexaInput) -> list[str]:
+    overrides: list[str] = []
+    if params.search_algorithm != "default":
+        overrides.append(f"++generation.search.algorithm={params.search_algorithm}")
+    if params.reward_model == "none":
+        overrides.append("++generation.reward_model=null")
+    return overrides
 
 
 def _validate_ligand_only_target(target_pdb: Path, ligand_smiles: str) -> None:

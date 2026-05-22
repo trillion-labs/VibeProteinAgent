@@ -98,9 +98,15 @@ creates the workspace if needed and launches local workers that execute queued
 tool jobs.
 
 ```bash
-vpa daemon start --workers 1 --workspace design_round
+vpa daemon start --workers 1 --cpu-workers 2 --workspace design_round
 vpa daemon status --workspace design_round
 ```
+
+`--workers` counts GPU workers. `--cpu-workers` adds separate CPU-only workers
+for retrieval, sequence analysis, QC, and other jobs that do not need a GPU.
+GPU-heavy tools stay single-GPU per job by default; use workflow `foreach`
+with `max_parallel` to fan out independent seed/candidate shards across GPU
+workers.
 
 ## 4. See Available Workflows
 

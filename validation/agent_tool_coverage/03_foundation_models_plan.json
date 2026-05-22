@@ -77,8 +77,11 @@
           "target_chain": "A",
           "binder_length": 30,
           "num_designs": 1,
-          "seed": 47,
-          "run_name": "coverage_proteina_complexa"
+          "search_algorithm": "single-pass",
+          "reward_model": "none",
+          "steps": ["generate", "filter"],
+          "seed": 301,
+          "run_name": "coverage_proteina_complexa_seed301"
         },
         "on_failure": "continue"
       }

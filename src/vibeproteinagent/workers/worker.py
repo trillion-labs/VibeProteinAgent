@@ -1117,9 +1117,10 @@ def _introspect_artifacts(out_dict: dict[str, Any], job_dir: Path) -> list[dict[
             return
         try:
             p = Path(value).resolve()
+            is_file = p.is_file()
         except (OSError, ValueError):
             return
-        if not p.is_file():
+        if not is_file:
             return
         if not p.is_relative_to(job_root):
             return

@@ -162,8 +162,10 @@ def protein_chain_input_spec(pdb: Path, chain: str) -> str:
                 continue
     if not residues:
         raise ValueError(f"No polymer ATOM residues for chain {chain!r} found in {pdb}")
-    ordered = sorted(residues)
-    return f"{chain}{ordered[0]}-{ordered[-1]}"
+    return "/".join(
+        f"{chain}{start}" if start == end else f"{chain}{start}-{end}"
+        for start, end in residue_ranges(sorted(residues))
+    )
 
 
 def hydra_task_key(path: Path, *, prefix: str = "vpa") -> str:
@@ -235,13 +237,15 @@ def build_design_cmd(
     in is appended verbatim so callers retain full control of quoting.
     """
     venv = venv or proteina_complexa_venv()
-    return [
+    base = [
         str(venv / "bin" / "complexa"),
         "design",
-        str(config_path),
-        *(["--steps", *steps] if steps else []),
-        *overrides,
     ]
+    if steps:
+        # ``--steps`` is an argparse ``nargs='+'`` option upstream. Use ``--``
+        # so Hydra overrides are parsed as positionals, not extra step names.
+        return [*base, "--steps", *steps, "--", str(config_path), *overrides]
+    return [*base, str(config_path), *overrides]
 
 
 def build_isolated_env(
@@ -496,10 +500,10 @@ def run_design_sidecar(
         raise RuntimeError(f"complexa executable not found at {entrypoint}")
     old_argv = sys.argv[:]
     old_cwd = os.getcwd()
-    argv = ["complexa", "design", config_path]
+    argv = ["complexa", "design"]
     if steps:
-        argv.extend(["--steps", *steps])
-    argv.extend(overrides)
+        argv.extend(["--steps", *steps, "--"])
+    argv.extend([config_path, *overrides])
     try:
         os.chdir(cwd)
         sys.argv = argv

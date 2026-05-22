@@ -362,6 +362,8 @@ class ProtenixV2Adapter(ToolAdapter):
             n_sample=5,
             model_name=PROTENIX_MODEL_NAME,
             use_msa=False,
+            trimul_kernel="torch",
+            triatt_kernel="torch",
         )
         self.runner = batch_inference.get_default_runner(
             **_supported_kwargs(batch_inference.get_default_runner, runner_kwargs)

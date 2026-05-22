@@ -351,7 +351,10 @@ def _stage_input(params: Boltz2AffinityInput, dest_dir: Path) -> Path:
                 f"input_yaml at {src} does not look like a Boltz input: "
                 f"missing top-level 'sequences' key"
             )
-        if not params.use_msa or params.msa_backend in {"none", "remote"}:
+        if not params.use_msa or params.msa_backend == "none":
+            doc = _force_single_sequence_msa(doc)
+            target.write_text(yaml.safe_dump(doc, sort_keys=False))
+        elif params.msa_backend == "remote":
             doc = strip_prepared_msa(doc)
             target.write_text(yaml.safe_dump(doc, sort_keys=False))
         else:
@@ -360,7 +363,7 @@ def _stage_input(params: Boltz2AffinityInput, dest_dir: Path) -> Path:
 
     # sequences path — build the Boltz schema dict.
     assert params.sequences is not None
-    include_prepared_msa = params.use_msa and params.msa_backend not in {"none", "remote"}
+    include_prepared_msa = params.use_msa and params.msa_backend != "remote"
     sequences: list[dict[str, Any]] = []
     for entry in params.sequences:
         # Each entry is { type: "...", id: ..., sequence|smiles|ccd|msa|binder ... }
@@ -369,7 +372,9 @@ def _stage_input(params: Boltz2AffinityInput, dest_dir: Path) -> Path:
         for key in ("sequence", "smiles", "ccd"):
             if key in entry and entry[key] is not None:
                 body[key] = entry[key]
-        if include_prepared_msa and entry.get("msa") is not None:
+        if kind == "protein" and not params.use_msa:
+            body["msa"] = "empty"
+        elif include_prepared_msa and entry.get("msa") is not None:
             body["msa"] = entry["msa"]
         sequences.append({kind: body})
     doc: dict[str, Any] = {"version": 1, "sequences": sequences}
@@ -377,6 +382,32 @@ def _stage_input(params: Boltz2AffinityInput, dest_dir: Path) -> Path:
         doc["properties"] = [{"affinity": {"binder": params.binder_chain}}]
     target.write_text(yaml.safe_dump(doc, sort_keys=False))
     return target
+
+
+def _force_single_sequence_msa(value: Any) -> Any:
+    """Return Boltz YAML data with protein entries marked as single-sequence.
+
+    Boltz uses the literal ``msa: empty`` to disable MSA for a protein chain.
+    Removing the field entirely asks Boltz to generate an MSA and then fails
+    unless ``--use_msa_server`` is enabled.
+    """
+    if isinstance(value, dict):
+        converted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "protein" and isinstance(item, dict):
+                protein = {
+                    k: _force_single_sequence_msa(v)
+                    for k, v in item.items()
+                    if k not in {"msa", "msa_path", "msa_file", "paired_msa", "unpaired_msa"}
+                }
+                protein["msa"] = "empty"
+                converted[key] = protein
+            else:
+                converted[key] = _force_single_sequence_msa(item)
+        return converted
+    if isinstance(value, list):
+        return [_force_single_sequence_msa(item) for item in value]
+    return value
 
 
 def _collect_outputs(job_outputs: Path, record_stem: str) -> dict[str, Any]:

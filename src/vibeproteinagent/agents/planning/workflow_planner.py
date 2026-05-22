@@ -32,7 +32,7 @@ def _install_readiness(tool_name: str) -> dict[str, Any]:
     try:
         from vibeproteinagent.install.installer import install_readiness
 
-        return install_readiness((tool_name,))
+        return install_readiness((tool_name,), runtime_probe=False)
     except Exception as exc:
         return {
             "install_ready": False,

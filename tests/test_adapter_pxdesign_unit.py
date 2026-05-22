@@ -247,6 +247,20 @@ def test_env_var_overrides_default_paths(monkeypatch: pytest.MonkeyPatch) -> Non
         importlib.reload(adapter_mod)
 
 
+def test_protenix_data_root_uses_vpa_ckpt_common(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ckpt_root = tmp_path / "protenix"
+    common = ckpt_root / "common"
+    common.mkdir(parents=True)
+    monkeypatch.delenv("VPA_PROTENIX_DATA_ROOT_DIR", raising=False)
+    monkeypatch.delenv("PROTENIX_DATA_ROOT_DIR", raising=False)
+    monkeypatch.setenv("VPA_PROTENIX_CKPT", str(ckpt_root))
+
+    assert adapter_mod._default_protenix_data_root() == str(common)
+
+
 def test_resolve_checkpoint_raises_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

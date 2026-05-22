@@ -96,6 +96,7 @@ tools:
       - name: boltzgen_cache
         path: "cache/boltzgen"
         env_var: VPA_BOLTZGEN_CACHE
+        env_value: path
         source_path: "/opt/vpa-data/boltzgen_cache"
         required: true
     disk_bytes: 50000000000
@@ -200,6 +201,7 @@ tools:
         path: "cache/proteina-complexa/checkpoints"
         source_path: "vendor/proteina-complexa/ckpts"
         env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        env_value: path
         required: true
     disk_bytes: 30000000000
   protenix_v2:
@@ -229,6 +231,7 @@ tools:
         path: "cache/pxdesign"
         source_path: "/opt/vpa-data/pxdesign_ckpt"
         env_var: VPA_PXDESIGN_CKPT_DIR
+        env_value: path
         required: true
   pxdesign_pipeline_multi_gpu:
     runtime: sidecar
@@ -306,6 +309,7 @@ tools:
         path: "cache/rfpeptides"
         source_path: "vendor/rfpeptides/weights"
         env_var: VPA_RFPEPTIDES_WEIGHTS
+        env_value: path
         required: true
     disk_bytes: 2000000000
   sequence_analysis:

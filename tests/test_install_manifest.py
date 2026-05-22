@@ -6,11 +6,14 @@ import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.core.errors import InvalidParamsError, UnknownToolError
+from vibeproteinagent.install import installer as installer_module
 from vibeproteinagent.install.cuda import resolve_cuda_stack
 from vibeproteinagent.install.installer import (
     InstallOptions,
+    InstallPaths,
     ManifestInstaller,
     _link_prebuilt_sidecar,
+    _manifest_readiness,
     _torch_install_matches_stack,
 )
 from vibeproteinagent.install.manifest import load_manifest
@@ -206,3 +209,53 @@ def test_prebuilt_sidecar_link_does_not_claim_nonempty_stale_target(
 
     assert linked is None
     assert not target.is_symlink()
+
+
+def test_manifest_readiness_accepts_prebuilt_sidecar_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = load_manifest()
+    root = tmp_path / "install"
+    source = tmp_path / "rfd3-env"
+    (source / "bin").mkdir(parents=True)
+    (source / "bin" / "python").write_text("")
+    monkeypatch.setenv("VPA_RFDIFFUSION3_ENV", str(source))
+    paths = InstallPaths(
+        root=root,
+        shared_env=root / "envs" / "vpa",
+        sidecars_root=root / "sidecars",
+        cache_dir=root / "cache",
+        state_db=root / "install" / "state.json",
+    )
+
+    readiness = _manifest_readiness(
+        "rfdiffusion3",
+        manifest.tools["rfdiffusion3"],
+        paths,
+        required=True,
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["env_override_ready"] is True
+
+
+def test_install_readiness_can_skip_duplicate_runtime_probe(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_probe(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("runtime probe should be skipped")
+
+    monkeypatch.setattr(installer_module, "_runtime_tool_readiness", fail_probe)
+
+    readiness = installer_module.install_readiness(
+        ("go_sequences",),
+        runtime_probe=False,
+    )
+
+    assert readiness["install_ready"] is True
+    assert readiness["tools"][0]["ready"] is True
+    assert readiness["tools"][0]["availability"]["availability_details"][
+        "runtime_probe"
+    ] == "skipped"

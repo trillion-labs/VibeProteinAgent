@@ -22,7 +22,7 @@ For selected heavy tools and their weights (e.g., Boltz2, RFDiffusion, ProteinMP
 
 ```bash
 npx vibeproteinagent install preflight --tools boltz2_affinity,rfdiffusion,proteinmpnn --cuda-profile auto
-npx vibeproteinagent install --tools boltz2_affinity,rfdiffusion,proteinmpnn --yes
+npx vibeproteinagent install --tools boltz2_affinity,rfdiffusion,proteinmpnn --cuda-profile auto --yes
 ```
 
 For ESM3 or other gated Hugging Face model downloads, export a credential before
@@ -30,7 +30,7 @@ installing or before the first run:
 
 ```bash
 export HF_TOKEN=<huggingface-access-token>
-npx vibeproteinagent install --tools esm3 --yes
+npx vibeproteinagent install --tools esm3 --cuda-profile auto --yes
 ```
 
 `VPA_HF_CREDENTIAL` is also accepted as a VPA-specific alias.
@@ -52,6 +52,10 @@ tool jobs.
 vpa daemon start --workers 1 --workspace my_run
 vpa daemon status --workspace my_run
 ```
+
+`--workers` is the GPU worker count. For mixed workflows, add
+`--cpu-workers M` so CPU-only retrieval, analysis, and reporting-adjacent jobs
+do not occupy GPU workers.
 
 ## 3. Find And Inspect Tools
 

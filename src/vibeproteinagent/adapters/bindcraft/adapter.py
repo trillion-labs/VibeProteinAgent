@@ -209,6 +209,13 @@ def availability_skip_reason() -> str | None:
     return _bindcraft_import_skip_reason(python)
 
 
+def _explicit_bindcraft_python() -> Path | None:
+    explicit_env = os.environ.get("VPA_BINDCRAFT_ENV_PATH")
+    if not explicit_env:
+        return None
+    return Path(explicit_env).expanduser() / "bin" / "python"
+
+
 # --------------------------------------------------------------------------- I/O models
 
 
@@ -273,12 +280,14 @@ class BindCraftAdapter(ToolAdapter):
 
         self._ensure_available_once()
 
+        explicit_python = _explicit_bindcraft_python()
         conda_exe = _find_conda_exe()
-        python = (
-            _bindcraft_python(conda_exe, BINDCRAFT_CONDA_ENV)
-            if conda_exe is not None
-            else None
-        )
+        if explicit_python and explicit_python.is_file():
+            python = explicit_python
+        elif conda_exe is not None:
+            python = _bindcraft_python(conda_exe, BINDCRAFT_CONDA_ENV)
+        else:
+            python = None
         if python is None:
             raise RuntimeError(
                 f"BindCraft conda env '{BINDCRAFT_CONDA_ENV}' not available. "

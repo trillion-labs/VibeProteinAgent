@@ -23,7 +23,7 @@ This install does not require an OpenRouter key. The agent profile installs the
 VPA runtime, local planner surface, and lightweight retrieval/template tools.
 Provider credentials are only needed when you run a provider that needs them.
 
-For fully automatic tool selection across all design tools:
+For broad tool selection across heavyweight design tools:
 
 ```bash
 # Optional if ESM3 first-run downloads or gated Hugging Face variants are needed.
@@ -32,6 +32,10 @@ export HF_TOKEN=<huggingface-access-token>
 npx vibeproteinagent install preflight --profile full --cuda-profile auto
 npx vibeproteinagent install --profile full --cuda-profile auto --yes
 ```
+
+The full profile installs all non-gated first-class tools and sidecars; gated
+or first-run Hugging Face tools become ready when credentials, accepted model
+terms, or a populated cache are available.
 
 ## 2. Configure The LLM Provider
 
@@ -129,8 +133,13 @@ The workspace stores the agent run, jobs, logs, artifacts, and reports; the
 workers execute the jobs submitted by the agent.
 
 ```bash
-vpa daemon start --workers 1 --workspace agent_round
+vpa daemon start --workers 1 --cpu-workers 2 --workspace agent_round
 ```
+
+`--workers` counts GPU workers. `--cpu-workers` keeps CPU-only retrieval,
+analysis, validation, and aggregation jobs from occupying GPU workers. The
+planner should express GPU fan-out with workflow `foreach` plus `max_parallel`
+rather than assuming one model process spans multiple GPUs.
 
 Now you can execute the agent request in one of two ways:
 

@@ -7,8 +7,6 @@ JSON or the PDB are missing.
 """
 from __future__ import annotations
 
-import gzip
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -148,15 +146,11 @@ def test_fractional_cutoffs_are_passed_to_upstream_without_rounding(tmp_path, mo
 )
 def test_run_end_to_end(tmp_path):
     a = IpSaeAdapter(config={}, weights_dir=Path("/nonexistent"), device=torch.device("cpu"))
-    # Stage PAE JSON (gunzip into temp dir).
-    pae_path = tmp_path / "pae.json"
-    with gzip.open(_PAE_GZ, "rb") as fi, pae_path.open("wb") as fo:
-        shutil.copyfileobj(fi, fo)
     job_dir = tmp_path / "jobs" / "j"
     job_dir.mkdir(parents=True)
     out = a.run(
         IpSaeInput(
-            pae_path=str(pae_path),
+            pae_path=str(_PAE_GZ),
             pdb_path=str(_PDB),
             chain_a="A",
             chain_b="B",

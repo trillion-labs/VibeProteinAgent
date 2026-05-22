@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+  <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#3a0d6e"/>
+    <stop offset="1" stop-color="#6b1ea8"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.3" cy="0.24" r="0.95">
+    <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+    <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+  </radialGradient>
+
+  <linearGradient id="spine" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#5fd3ec"/>
+    <stop offset="1" stop-color="#ff63a6"/>
+  </linearGradient>
+</defs>
+  <rect width="256" height="256" rx="58" fill="url(#tile)"/><rect width="256" height="256" rx="58" fill="url(#glow)"/>
+
+  <g transform="translate(-25.6 -24.8) scale(1.2)">
+  <!-- robot ears -->
+  <rect x="77" y="124" width="9" height="24" rx="4" fill="#b9a5f0"/>
+  <rect x="170" y="124" width="9" height="24" rx="4" fill="#b9a5f0"/>
+  <!-- antenna -->
+  <line x1="128" y1="74" x2="128" y2="100" stroke="#d7ccf5"
+        stroke-width="5" stroke-linecap="round"/>
+  <circle cx="128" cy="69" r="7" fill="#4cc4e4"/>
+  <circle cx="128" cy="69" r="2.6" fill="#ffffff"/>
+  <!-- robot head -->
+  <rect x="85" y="94" width="86" height="80" rx="20" fill="#ffffff"/>
+  <!-- visor screen -->
+  <rect x="97" y="108" width="62" height="58" rx="14" fill="#2a0a52"/>
+  <!-- alpha-helix protein glowing on the visor -->
+  <path fill="none" stroke="#7c3aed" stroke-width="6" stroke-linecap="round"
+        d="M144 128 C144 122 112 122 112 138"/>
+  <path fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round"
+        d="M112 118 C112 138 144 138 144 128
+           M112 138 C112 158 144 158 144 148"/>
+  <path fill="none" stroke="url(#spine)" stroke-width="3" stroke-linecap="round"
+        d="M112 118 C112 138 144 138 144 128
+           M112 138 C112 158 144 158 144 148"/>
+  <circle cx="112" cy="118" r="4.6" fill="#5fd3ec"/>
+  <circle cx="144" cy="148" r="4.6" fill="#ff63a6"/>
+  </g>
+
+</svg>

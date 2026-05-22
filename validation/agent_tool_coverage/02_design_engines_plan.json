@@ -92,12 +92,12 @@
         "tool": "ligandmpnn",
         "inputs": {
           "pdb_path": "${params.fixture_pdb_a}",
-          "chains": ["A"],
-          "num_designs": 2,
-          "temperature": 0.1,
-          "model_type": "protein_mpnn",
-          "seed": 19
-        },
+            "chains": ["A"],
+            "num_designs": 2,
+            "temperature": 0.1,
+            "model_type": "ligand_mpnn",
+            "seed": 19
+          },
         "on_failure": "continue"
       },
       {
