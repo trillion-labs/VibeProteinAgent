@@ -27,7 +27,7 @@ from .models import (
     ReportModel,
     WorkflowNodeSummary,
 )
-from .plots import build_plots
+from .plots import PLDDT_HOVER_JS, build_plots
 
 
 def write_report(
@@ -734,9 +734,10 @@ def _exec_pipeline_panel(model: ReportModel) -> str:
     # state (✓ green = completed, ✕ red = failed, ●/◔ for active/pending),
     # so we drop the textual state badge entirely and give the tool name
     # the full remaining width — that's the user-facing identifier that
-    # should never be ellipsis-clipped.
+    # should never be ellipsis-clipped. Every node is listed; the list
+    # scrolls within the panel rather than truncating with a "+N more" row.
     stages_rows: list[str] = []
-    for node in nodes[:8]:  # cap to 8 to keep the panel readable
+    for node in nodes:
         state = (node.state or "unknown").lower()
         colour = state_colours.get(state, "#a09bbf")
         glyph = state_glyphs.get(state, "•")
@@ -746,14 +747,6 @@ def _exec_pipeline_panel(model: ReportModel) -> str:
             f'<span class="exec-stage-glyph" style="color:{colour}">{_h(glyph)}</span>'
             f'<span class="exec-stage-name">{_h(tool)}</span>'
             f'</li>'
-        )
-    overflow_row = ""
-    if len(nodes) > 8:
-        overflow_row = (
-            f'<li class="exec-stage-row exec-stage-more">'
-            f'<span class="exec-stage-glyph">…</span>'
-            f'<span class="exec-stage-name">{len(nodes) - 8} more node(s)</span>'
-            "</li>"
         )
 
     # Compact legend strip below the donut + stages.
@@ -781,7 +774,7 @@ def _exec_pipeline_panel(model: ReportModel) -> str:
         '<div class="exec-pipe-body">'
         f'<div class="exec-pipe-donut-wrap">{donut_svg}</div>'
         '<ul class="exec-stage-list">'
-        f'{"".join(stages_rows)}{overflow_row}'
+        f'{"".join(stages_rows)}'
         '</ul>'
         '</div>'
         f'<div class="exec-pipe-legend">{"".join(legend_chips)}</div>'
@@ -1498,7 +1491,8 @@ def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
 
     return (
         f'<div class="dag-wrap">'
-        f'<svg class="dag" viewBox="0 0 {width} {height}" '
+        f'<svg class="dag" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" '
         f'preserveAspectRatio="xMinYMid meet" xmlns="http://www.w3.org/2000/svg">'
         + "".join(parts)
         + "</svg></div>"
@@ -1939,6 +1933,11 @@ _METRIC_REGISTRY: dict[str, tuple[str, str, float, float]] = {
         "Fraction of F/Y/W residues. Relevant for UV absorbance / aggregation propensity.",
         0.0, 0.25,
     ),
+    "rmsd": (
+        "RMSD (Å)",
+        "Root-mean-square deviation over aligned atoms. Lower = closer structural match; <2 A is a tight fit.",
+        0.0, 10.0,
+    ),
 }
 
 
@@ -1958,32 +1957,66 @@ _NESTED_METRIC_KEYS = ("confidence_scores", "metrics", "scores")
 # themselves (they're context, not headline metrics).
 _FOOTER_METRIC_KEYS = (
     "model_name", "model", "tool", "version", "device", "seed",
+    "seed_used", "seeds_used",
     "num_residues", "length", "n_residues", "n_atoms",
     "runtime_ms", "runtime_s", "elapsed_ms", "elapsed_s",
 )
 
 
+def _resolve_metric_spec(canonical: str) -> tuple[str, str, float, float] | None:
+    """Resolve a gauge spec ``(label, explainer, lo, hi)`` for a metric key.
+
+    Tries the explicit registry first, then a small set of name-based
+    families so suffix / variant keys (``helix_fraction``, ``tm_score_*``,
+    ``ipsae_max``, ``delta_g_kcal_mol`` …) still get a properly-scaled donut
+    instead of falling back to a range-less frame ring.
+    """
+    spec = _METRIC_REGISTRY.get(canonical)
+    if spec is not None:
+        return spec
+    # Unit-suffixed variants map back onto the base metric.
+    if canonical.endswith("_kcal_mol"):
+        base = _METRIC_REGISTRY.get(canonical[: -len("_kcal_mol")])
+        if base is not None:
+            return base
+    pretty = _pretty_metric_name(canonical)
+    # Name-based families — metrics that are 0-1 scores by construction.
+    if canonical.endswith("_fraction"):
+        return (pretty, "Fraction of residues in this category (0-1 scale).", 0.0, 1.0)
+    if canonical.startswith("tm_score") or canonical == "tmscore":
+        return (pretty, "Template-modeling score (0-1). >0.5 implies a similar fold.", 0.0, 1.0)
+    if canonical.startswith("ipsae"):
+        return (pretty, "Interface predicted symmetry-aware score (0-1 scale).", 0.0, 1.0)
+    if canonical == "lddt" or canonical.endswith("_lddt"):
+        return (pretty, "Local Distance Difference Test — structural accuracy (0-1).", 0.0, 1.0)
+    if canonical == "seq_identity" or canonical.endswith("_identity"):
+        return (pretty, "Sequence identity — fraction of identical aligned residues (0-1).", 0.0, 1.0)
+    return None
+
+
 def _auto_score_card(key: str, value: Any) -> str | None:
-    """Build a CELLKEY-style gauge card for *any* metric in the registry.
+    """Build a CELLKEY-style donut card for *any* numeric metric.
 
     Returns ``None`` when the value isn't numeric (so the caller can decide
-    to render it as a footer row instead). For metrics not in the registry
-    but still numeric, falls back to a plain card without a gauge so the
-    layout stays consistent.
+    to render it as a footer row instead). Every numeric metric gets a
+    circular card: registry / family metrics get a proportionally-filled
+    gauge, and metrics with no defensible range get a neutral "frame" ring
+    so the card grid stays visually uniform.
     """
     num = _num(value)
     if num is None:
         return None
     canonical = key.lower()
-    spec = _METRIC_REGISTRY.get(canonical)
     quality = _quality_class(canonical, num)
+    spec = _resolve_metric_spec(canonical)
     if spec is None:
-        # Unknown numeric metric — keep it on the same card grid but without
-        # a gauge (no defensible range to fill).
+        # No defensible range — render a range-less frame ring so the metric
+        # still reads as a circular card alongside the gauged ones.
         return _score_card(
             _pretty_metric_name(canonical), _fmt(num),
             "Tool-emitted metric. No reference range registered — value shown as-is.",
             quality,
+            gauge={"value": num, "frame": True},
         )
     label, explainer, lo, hi = spec
     # Autoscale gauges that may arrive on either 0-1 or 0-100.
@@ -3269,6 +3302,7 @@ def _gauge_svg(
     stroke: int = 7,
     center_text: str | None = None,
     sub_text: str | None = None,
+    frame: bool = False,
 ) -> str:
     """Smooth donut gauge with value (and optional sub-label) inside.
 
@@ -3277,34 +3311,48 @@ def _gauge_svg(
     an optional short sub-label (e.g. ``pLDDT``) sits one line below so the
     user can identify the metric at a glance without reading the body text.
 
+    With ``frame=True`` the ring is drawn as a single complete neutral
+    circle instead of a proportional arc — used for numeric metrics that
+    have no defensible ``[lo, hi]`` range, so they still render as a
+    circular card without implying a misleading fill percentage.
+
     Stays offline-pure SVG (no fonts, no images, no JS).
     """
     if value is None or not isinstance(value, (int, float)):
         return ""
-    span = (hi - lo) if hi > lo else 1.0
-    pct = max(0.0, min(1.0, (float(value) - lo) / span))
 
     cx = cy = size / 2
     r = size / 2 - stroke
-    colour = _QUALITY_COLOR.get(quality, _QUALITY_COLOR["neutral"])
-    bg_color = "#ede9fe"
 
-    circ = 2 * math.pi * r
-    arc_len = pct * circ
-    # A single continuous ring: full background circle behind, then a
-    # colour-filled foreground arc traced via stroke-dasharray. Starting at
-    # 12 o'clock by rotating -90deg around the centre.
-    ring_html = (
-        f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" fill="none" '
-        f'stroke="{bg_color}" stroke-width="{stroke}"/>'
-    )
-    if pct > 0:
-        ring_html += (
+    if frame:
+        # Range-less metric: a complete soft-lavender ring reads as a
+        # circular "medallion" around the number rather than a 0%/100% gauge.
+        ring_html = (
             f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" fill="none" '
-            f'stroke="{colour}" stroke-width="{stroke}" stroke-linecap="round" '
-            f'stroke-dasharray="{arc_len:.2f} {circ - arc_len:.2f}" '
-            f'transform="rotate(-90 {cx} {cy})"/>'
+            f'stroke="#c9bbed" stroke-width="{stroke}"/>'
         )
+    else:
+        span = (hi - lo) if hi > lo else 1.0
+        pct = max(0.0, min(1.0, (float(value) - lo) / span))
+        colour = _QUALITY_COLOR.get(quality, _QUALITY_COLOR["neutral"])
+        bg_color = "#ede9fe"
+
+        circ = 2 * math.pi * r
+        arc_len = pct * circ
+        # A single continuous ring: full background circle behind, then a
+        # colour-filled foreground arc traced via stroke-dasharray. Starting
+        # at 12 o'clock by rotating -90deg around the centre.
+        ring_html = (
+            f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" fill="none" '
+            f'stroke="{bg_color}" stroke-width="{stroke}"/>'
+        )
+        if pct > 0:
+            ring_html += (
+                f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" fill="none" '
+                f'stroke="{colour}" stroke-width="{stroke}" stroke-linecap="round" '
+                f'stroke-dasharray="{arc_len:.2f} {circ - arc_len:.2f}" '
+                f'transform="rotate(-90 {cx} {cy})"/>'
+            )
 
     text = _h(center_text) if center_text is not None else _h(_fmt_donut(value))
     # Auto-shrink the value text when it gets long enough to crowd the ring
@@ -3438,6 +3486,7 @@ def _score_card(
             stroke=7,
             center_text=center_value,
             sub_text=_donut_label(label),
+            frame=bool(gauge.get("frame", False)),
         )
         # The full label stays visible at the top of the body so the reader
         # always sees the metric's full name; the donut interior shows a
@@ -3874,8 +3923,30 @@ def _quality_class(key: str, value: Any) -> str:
     return "neutral"
 
 
+# Science tokens that should keep a fixed casing when a snake_case metric
+# key is expanded into a human label (so ``tm_score`` -> "TM score", not
+# "Tm score"). Anything not listed is sentence-cased normally.
+_METRIC_ABBR: dict[str, str] = {
+    "tm": "TM", "rmsd": "RMSD", "plddt": "pLDDT", "iplddt": "ipLDDT",
+    "ptm": "pTM", "iptm": "ipTM", "pae": "PAE", "lddt": "lDDT",
+    "ipsae": "ipSAE", "dockq": "DockQ", "kd": "Kd", "nm": "nM",
+    "pi": "pI", "ic50": "IC50", "qc": "QC", "ss": "SS", "id": "ID",
+    "uniprot": "UniProt", "dna": "DNA", "rna": "RNA", "cif": "CIF",
+    "pdb": "PDB", "msa": "MSA", "a": "A", "b": "B", "ab": "AB", "ba": "BA",
+}
+
+# Trailing unit suffixes pulled out of a metric key and rendered as a
+# parenthesised unit ("best_affinity_kcal_mol" -> "Best affinity (kcal/mol)").
+# Longest suffix first so "_kcal_mol" wins over a bare "_mol".
+_METRIC_UNIT_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("_kcal_mol", "kcal/mol"),
+    ("_nm", "nM"),
+    ("_um", "µM"),
+)
+
+
 def _pretty_metric_name(key: str) -> str:
-    return {
+    known = {
         "plddt": "pLDDT",
         "mean_plddt": "pLDDT",
         "iptm": "ipTM",
@@ -3889,7 +3960,28 @@ def _pretty_metric_name(key: str) -> str:
         "recovery": "Recovery",
         "score": "Score",
         "ranking_score": "Rank score",
-    }.get(key, key)
+    }
+    if key in known:
+        return known[key]
+    # Peel a trailing unit suffix and render it parenthesised on the base name.
+    for suffix, unit in _METRIC_UNIT_SUFFIXES:
+        if key.endswith(suffix) and len(key) > len(suffix):
+            return f"{_pretty_metric_name(key[: -len(suffix)])} ({unit})"
+    # snake_case / kebab-case -> "Sentence case", upper-casing known science
+    # abbreviations so auto-generated metric labels read cleanly.
+    tokens = [t for t in key.replace("-", "_").split("_") if t]
+    if not tokens:
+        return key
+    words: list[str] = []
+    for idx, tok in enumerate(tokens):
+        low = tok.lower()
+        if low in _METRIC_ABBR:
+            words.append(_METRIC_ABBR[low])
+        elif idx == 0:
+            words.append(tok[:1].upper() + tok[1:].lower())
+        else:
+            words.append(low)
+    return " ".join(words)
 
 
 def _as_unit(value: Any) -> float | None:
@@ -4403,28 +4495,39 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 .kpi-tile.kpi-queued .kpi-icon,
 .kpi-tile.kpi-pending .kpi-icon { background:var(--bg); color:var(--muted); }
 
-/* Confidence donut row (middle panel) ---------------------------------- */
+/* Confidence cards (middle panel) -------------------------------------- */
+/* Stacked vertically (one card per row), each card laid out as
+   [donut | label + explainer]. The list scrolls within the panel so the
+   donuts never crowd each other or blow out the dashboard height. */
 .exec-donut-row {
-  display:flex; flex-wrap:wrap; gap:10px;
-  align-items:stretch;
+  display:flex; flex-direction:column; gap:10px;
+  max-height:250px; overflow-y:auto;
+  padding-right:4px;
 }
+.exec-donut-row::-webkit-scrollbar { width:10px; }
+.exec-donut-row::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
+.exec-donut-row::-webkit-scrollbar-thumb {
+  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
+}
+.exec-donut-row::-webkit-scrollbar-thumb:hover { background:#8574c0; }
 .exec-donut {
-  flex:1 1 0; min-width:0;
-  display:flex; flex-direction:column; align-items:center; gap:8px;
-  padding:12px 8px;
+  flex-shrink:0;
+  display:flex; flex-direction:row; align-items:center; gap:14px;
+  padding:12px 14px;
   background:#ffffff; border:1px solid var(--line); border-radius:10px;
-  text-align:center;
+  text-align:left;
   box-shadow:var(--shadow-tile);
 }
-.exec-donut-viz { line-height:0; }
-.exec-donut-meta { width:100%; }
+.exec-donut-viz { line-height:0; flex-shrink:0; }
+.exec-donut-viz svg { width:86px; height:86px; }
+.exec-donut-meta { flex:1; min-width:0; }
 .exec-donut-label {
   font-size:13px; color:var(--ink); font-weight:600; letter-spacing:0;
 }
 .exec-donut-tip {
   font-size:11.5px; color:var(--muted); line-height:1.45; margin-top:3px;
 }
-.exec-donut-empty { justify-content:center; }
+.exec-donut-empty { justify-content:flex-start; }
 .exec-donut-id code {
   font-size:12px; font-family:ui-monospace, monospace;
   background:var(--panel); padding:2px 6px; border-radius:5px;
@@ -4453,14 +4556,23 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   font-weight:500; font-size:11px; fill:var(--muted);
   letter-spacing:0.04em;
 }
-/* Stages list — one row per workflow node */
+/* Stages list — one row per workflow node; every node is listed and the
+   list scrolls within the panel with an always-visible scrollbar. */
 .exec-stage-list {
   list-style:none; padding:0; margin:0;
   display:flex; flex-direction:column; gap:3px;
   flex:1; min-width:0;
-  max-height:170px; overflow-y:auto;
+  max-height:230px; overflow-y:auto;
+  padding-right:4px;
 }
+.exec-stage-list::-webkit-scrollbar { width:10px; }
+.exec-stage-list::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
+.exec-stage-list::-webkit-scrollbar-thumb {
+  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
+}
+.exec-stage-list::-webkit-scrollbar-thumb:hover { background:#8574c0; }
 .exec-stage-row {
+  flex-shrink:0;
   display:flex; align-items:center; gap:9px;
   padding:6px 10px; border-radius:7px;
   font-size:12px; line-height:1.4;
@@ -4481,8 +4593,6 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
      hover tooltip (the row already has a ``title`` attribute). */
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
-.exec-stage-more { opacity:0.7; }
-.exec-stage-more .exec-stage-name { font-family:inherit; }
 /* Compact legend chip strip below the donut + stages */
 .exec-pipe-legend {
   display:flex; flex-wrap:wrap; gap:6px;
@@ -4579,8 +4689,27 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 /* Workflow DAG — single status circle replaces left strip + dot redundancy.
    Card relies on a real (very subtle) drop-shadow filter rather than tinted
    background to convey state. Edges are soft Beziers with a thin chevron. */
-.dag-wrap { overflow-x:auto; padding:6px 2px 10px; }
-.dag { display:block; max-width:100%; height:auto; }
+.dag-wrap {
+  overflow-x:auto;
+  /* Extra bottom padding reserves room for the always-on scrollbar. */
+  padding:6px 2px 14px;
+}
+/* Always-visible custom scrollbar so users can tell the graph scrolls
+   left/right without having to click-drag first. IMPORTANT: do NOT also
+   set the standard `scrollbar-width` / `scrollbar-color` on this element —
+   when either is present Chromium ignores every ::-webkit-scrollbar rule
+   below and falls back to a near-invisible default scrollbar. */
+.dag-wrap::-webkit-scrollbar { height:13px; }
+.dag-wrap::-webkit-scrollbar-track {
+  background:#e7e3f3; border-radius:999px;
+}
+.dag-wrap::-webkit-scrollbar-thumb {
+  background:#a99cd6; border:3px solid #e7e3f3; border-radius:999px;
+}
+.dag-wrap::-webkit-scrollbar-thumb:hover { background:#8574c0; }
+/* Render the SVG at its natural pixel size (width/height attributes) so nodes
+   stay legible no matter how many tools ran; .dag-wrap scrolls horizontally. */
+.dag { display:block; }
 /* Workflow DAG edges — bright violet line with a filled chevron at the
    target, so the directional cue reads at a glance instead of fading
    into the lavender background. */
@@ -4967,8 +5096,46 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 .plot { border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:14px 0; background:#ffffff; box-shadow:var(--shadow-tile); }
 .plot h3 { margin:0 0 8px; font-size:14px; font-weight:600; color:var(--ink); text-transform:none; letter-spacing:0; }
 .plot-svg { width:100%; max-width:100%; height:auto; }
-.plot-svg rect, .plot-svg circle { fill:var(--accent); }
+/* Legacy plots (scatter / bar) keep the flat accent fill; the redesigned
+   plots (pLDDT trace, score bars) opt out and style their own elements. */
+.plot-svg:not(.plddt-plot):not(.sd-plot) rect,
+.plot-svg:not(.plddt-plot):not(.sd-plot) circle { fill:var(--accent); }
 .plot-svg text { font-size:11px; fill:var(--muted); }
+/* Per-residue pLDDT trace — product-analytics styling. */
+.plddt-plot { overflow:visible; }
+.plddt-field { fill:#fbfafe; stroke:var(--line); stroke-width:1; }
+.plddt-line {
+  fill:none; stroke:var(--accent); stroke-width:2;
+  stroke-linejoin:round; stroke-linecap:round;
+}
+.plddt-axis-line { stroke:var(--line-strong); stroke-width:1; }
+.plddt-plot .plddt-axis { font-size:10.5px; fill:var(--muted); }
+.plddt-plot .plddt-axis-title { font-size:11px; fill:var(--subtle); letter-spacing:0.04em; }
+.plddt-plot .plddt-subtitle { font-size:11.5px; fill:var(--muted); font-weight:500; }
+.plddt-plot .plddt-ref-label { font-size:9.5px; fill:var(--subtle); letter-spacing:0.02em; }
+/* Hover layer — hidden until PLDDT_HOVER_JS reveals it on mousemove. */
+.plddt-hover { opacity:0; transition:opacity .08s ease; pointer-events:none; }
+.plddt-crosshair {
+  stroke:var(--accent); stroke-width:1; stroke-dasharray:3 3; opacity:0.5;
+}
+.plddt-plot circle.plddt-cursor {
+  fill:var(--accent); stroke:#ffffff; stroke-width:2.5;
+}
+.plddt-plot rect.plddt-tip-bg { fill:var(--ink); }
+.plddt-plot .plddt-tip-res { font-size:10px; fill:#b9b3d6; font-weight:500; }
+.plddt-plot .plddt-tip-val { font-size:11.5px; fill:#ffffff; font-weight:700; }
+/* Candidate score bar chart — product-analytics styling. */
+.sd-plot { overflow:visible; }
+.sd-field { fill:#fbfafe; stroke:var(--line); stroke-width:1; }
+.sd-grid { stroke:#eceaf4; stroke-width:1; }
+.sd-axis-line { stroke:var(--line-strong); stroke-width:1; }
+.sd-plot .sd-bar { fill:url(#sdBar); }
+.sd-plot .sd-bar-label { font-size:10.5px; fill:var(--ink); font-weight:600; }
+.sd-plot .sd-axis { font-size:10.5px; fill:var(--muted); }
+.sd-plot .sd-axis-title { font-size:11px; fill:var(--subtle); letter-spacing:0.04em; }
+.sd-plot .sd-subtitle { font-size:11.5px; fill:var(--muted); font-weight:500; }
+.sd-mean { stroke:var(--accent-2); stroke-width:1; stroke-dasharray:4 4; }
+.sd-plot .sd-mean-label { font-size:9.5px; fill:var(--accent-2); letter-spacing:0.02em; }
 
 /* MSA */
 .msa-section { margin:18px 0; }
@@ -5969,7 +6136,7 @@ def _js() -> str:
     }
   }
 })();
-"""
+""" + PLDDT_HOVER_JS
 
 
 __all__ = ["render_report_html", "write_report"]

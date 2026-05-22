@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import math
 from pathlib import Path
 
 from .models import PlotSpec, ReportModel
@@ -29,7 +30,7 @@ def build_plots(model: ReportModel) -> list[PlotSpec]:
             PlotSpec(
                 f"Per-residue pLDDT · {candidate.candidate_id}",
                 "plddt_trace",
-                plddt_trace_svg(plddt_values),
+                plddt_trace_svg(plddt_values, idx=len(plots)),
             )
         )
         # Only one per-residue plot is shown unless this is a multi-candidate
@@ -39,7 +40,13 @@ def build_plots(model: ReportModel) -> list[PlotSpec]:
 
     scores = [c.score for c in model.candidates if c.score is not None]
     if len(scores) >= 3:
-        plots.append(PlotSpec("Candidate score distribution", "histogram", histogram_svg(scores)))
+        plots.append(
+            PlotSpec(
+                "Candidate score distribution",
+                "score_bars",
+                score_distribution_svg(scores),
+            )
+        )
 
     pairs = [
         (c.scores.get("plddt"), c.scores.get("iptm"), c.candidate_id)
@@ -82,91 +89,263 @@ def _extract_plddt_per_residue(path: Path) -> list[float]:
     return values
 
 
-def plddt_trace_svg(values: list[float], *, width: int = 720, height: int = 200) -> str:
-    """Line plot of pLDDT vs residue index with AlphaFold confidence bands."""
+def _nice_residue_ticks(n: int) -> list[int]:
+    """Pick ~8 evenly spaced 0-based residue indices for the x-axis.
+
+    Interior ticks land on round 1-based residue numbers (50, 100, …); the
+    first (1) and last (n) residues are always included.
+    """
+    if n <= 2:
+        return list(range(n))
+    nice = (10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000)
+    raw = (n - 1) / 8
+    step = next((s for s in nice if s >= raw), nice[-1])
+    idxs = [0]
+    label = step
+    while label < n - step * 0.35:
+        idxs.append(label - 1)  # residue number `label` -> 0-based index
+        label += step
+    if idxs[-1] != n - 1:
+        idxs.append(n - 1)
+    return idxs
+
+
+def plddt_trace_svg(
+    values: list[float], *, width: int = 860, height: int = 264, idx: int = 0
+) -> str:
+    """Per-residue pLDDT line plot — product-analytics styling.
+
+    A white plot field with subtle horizontal gridlines, a gradient area
+    fill under the trace, a crisp accent-coloured line, a multi-tick residue
+    axis, and a dashed reference at the pLDDT 70 "confident" threshold.
+
+    The per-residue values and plot geometry are emitted as ``data-*``
+    attributes so :data:`PLDDT_HOVER_JS` can map a cursor position back to a
+    residue and show a marker + tooltip on hover.
+    """
     if not values:
         return ""
-    # Auto-detect 0-1 vs 0-100 scale and normalize for color bands.
+    # Auto-detect 0-1 vs 0-100 scale and normalize to 0-100.
     max_v = max(values)
     in_unit = max_v <= 1.0
     norm = [v * 100 if in_unit else v for v in values]
-    pad_l = 42
-    pad_r = 18
-    pad_t = 14
-    pad_b = 30
+    n = len(norm)
+
+    pad_l, pad_r, pad_t, pad_b = 48, 20, 36, 42
     plot_w = width - pad_l - pad_r
     plot_h = height - pad_t - pad_b
-    n = len(norm)
+    base_y = pad_t + plot_h
     step = plot_w / max(1, n - 1)
-    # Build polyline
-    points = " ".join(
-        f"{pad_l + idx * step:.1f},{pad_t + plot_h * (1 - v / 100.0):.1f}"
-        for idx, v in enumerate(norm)
+
+    def x_of(i: float) -> float:
+        return pad_l + i * step
+
+    def y_of(v: float) -> float:
+        return pad_t + plot_h * (1 - v / 100.0)
+
+    pts = [(x_of(i), y_of(v)) for i, v in enumerate(norm)]
+    line_pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area_d = (
+        f"M{pts[0][0]:.1f},{base_y:.1f} "
+        + " ".join(f"L{x:.1f},{y:.1f}" for x, y in pts)
+        + f" L{pts[-1][0]:.1f},{base_y:.1f} Z"
     )
-    # AF/ESM confidence bands (90/70/50)
-    bands_html = ""
-    for low, high, color in [
-        (90, 100, "#4ec3e0"),    # very high
-        (70, 90, "#76d8a0"),     # confident
-        (50, 70, "#f4d35e"),     # low
-        (0, 50, "#e07a5f"),      # very low
-    ]:
-        y_top = pad_t + plot_h * (1 - high / 100.0)
-        y_bot = pad_t + plot_h * (1 - low / 100.0)
-        bands_html += (
-            f'<rect x="{pad_l}" y="{y_top:.1f}" width="{plot_w}" '
-            f'height="{y_bot - y_top:.1f}" fill="{color}" opacity="0.13"/>'
-        )
-    # Y-axis ticks
-    ticks_html = ""
+
+    # Horizontal gridlines (25/50/75) + y-axis tick labels (0..100).
+    grid = ""
+    yticks = ""
     for tick in (0, 25, 50, 75, 100):
-        y = pad_t + plot_h * (1 - tick / 100.0)
-        ticks_html += (
-            f'<line x1="{pad_l - 4}" y1="{y:.1f}" x2="{pad_l}" y2="{y:.1f}" stroke="#999" stroke-width="1"/>'
-            f'<text x="{pad_l - 8}" y="{y + 3:.1f}" text-anchor="end" font-size="10" fill="#666">{tick}</text>'
+        y = y_of(tick)
+        if tick not in (0, 100):
+            grid += (
+                f'<line x1="{pad_l}" y1="{y:.1f}" x2="{pad_l + plot_w}" '
+                f'y2="{y:.1f}" stroke="#eceaf4" stroke-width="1"/>'
+            )
+        yticks += (
+            f'<text x="{pad_l - 9}" y="{y + 3.5:.1f}" text-anchor="end" '
+            f'class="plddt-axis">{tick}</text>'
         )
-    # X axis label
-    mean_v = sum(norm) / len(norm)
-    title = f'<text x="{pad_l}" y="10" font-size="11" fill="#555">mean pLDDT {mean_v:.1f} · n={n} residues</text>'
+
+    # X-axis: round residue ticks + marks.
+    xticks = ""
+    for ri in _nice_residue_ticks(n):
+        x = x_of(ri)
+        xticks += (
+            f'<line x1="{x:.1f}" y1="{base_y:.1f}" x2="{x:.1f}" '
+            f'y2="{base_y + 4:.1f}" stroke="#cfc8e0" stroke-width="1"/>'
+            f'<text x="{x:.1f}" y="{base_y + 16:.1f}" text-anchor="middle" '
+            f'class="plddt-axis">{ri + 1}</text>'
+        )
+
+    # Dashed reference at the pLDDT 70 "confident" threshold.
+    y70 = y_of(70)
+    ref = (
+        f'<line x1="{pad_l}" y1="{y70:.1f}" x2="{pad_l + plot_w}" y2="{y70:.1f}" '
+        f'stroke="#c2b6e6" stroke-width="1" stroke-dasharray="4 4"/>'
+        f'<text x="{pad_l + plot_w - 5:.1f}" y="{y70 - 5:.1f}" text-anchor="end" '
+        f'class="plddt-ref-label">confident ≥ 70</text>'
+    )
+
+    mean_v = sum(norm) / n
+    subtitle = (
+        f'<text x="{pad_l}" y="20" class="plddt-subtitle">'
+        f'mean pLDDT {mean_v:.1f} · n = {n} residues</text>'
+    )
+    xlabel = (
+        f'<text x="{pad_l + plot_w / 2:.1f}" y="{height - 6}" text-anchor="middle" '
+        f'class="plddt-axis-title">residue index</text>'
+    )
+    data_values = ",".join(f"{v:.1f}" for v in norm)
+    grad = f"plddtArea{idx}"
+
     return (
-        f'<svg class="plot-svg" viewBox="0 0 {width} {height}" role="img" '
-        f'xmlns="http://www.w3.org/2000/svg">'
-        f'{bands_html}{ticks_html}{title}'
-        f'<polyline points="{points}" fill="none" stroke="#1f5a4a" stroke-width="1.8"/>'
-        f'<line x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{pad_t + plot_h:.1f}" stroke="#aaa"/>'
-        f'<line x1="{pad_l}" y1="{pad_t + plot_h:.1f}" x2="{width - pad_r}" y2="{pad_t + plot_h:.1f}" stroke="#aaa"/>'
-        f'<text x="{pad_l}" y="{height - 8}" font-size="10" fill="#666">1</text>'
-        f'<text x="{width - pad_r - 12}" y="{height - 8}" font-size="10" fill="#666" text-anchor="end">{n}</text>'
-        f'<text x="{(pad_l + width - pad_r) / 2:.1f}" y="{height - 8}" font-size="10" '
-        f'fill="#666" text-anchor="middle">residue index</text>'
+        f'<svg class="plot-svg plddt-plot" viewBox="0 0 {width} {height}" role="img" '
+        f'xmlns="http://www.w3.org/2000/svg" '
+        f'data-values="{data_values}" data-pad-l="{pad_l}" data-pad-t="{pad_t}" '
+        f'data-plot-w="{plot_w}" data-plot-h="{plot_h}" data-n="{n}">'
+        f'<defs><linearGradient id="{grad}" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#6b1ea8" stop-opacity="0.26"/>'
+        '<stop offset="1" stop-color="#6b1ea8" stop-opacity="0.02"/>'
+        '</linearGradient></defs>'
+        f'<rect class="plddt-field" x="{pad_l}" y="{pad_t}" width="{plot_w}" '
+        f'height="{plot_h}" rx="6"/>'
+        f'{grid}{ref}'
+        f'<path d="{area_d}" fill="url(#{grad})"/>'
+        f'<polyline class="plddt-line" points="{line_pts}"/>'
+        f'<line class="plddt-axis-line" x1="{pad_l}" y1="{pad_t}" '
+        f'x2="{pad_l}" y2="{base_y}"/>'
+        f'<line class="plddt-axis-line" x1="{pad_l}" y1="{base_y}" '
+        f'x2="{pad_l + plot_w}" y2="{base_y}"/>'
+        f'{yticks}{xticks}{subtitle}{xlabel}'
+        '<g class="plddt-hover">'
+        f'<line class="plddt-crosshair" y1="{pad_t}" y2="{base_y}"/>'
+        '<circle class="plddt-cursor" r="4.5"/>'
+        '<g class="plddt-tip">'
+        '<rect class="plddt-tip-bg" width="104" height="36" rx="6"/>'
+        '<text class="plddt-tip-res" x="52" y="14" text-anchor="middle"></text>'
+        '<text class="plddt-tip-val" x="52" y="28" text-anchor="middle"></text>'
+        '</g></g>'
         '</svg>'
     )
 
 
-def histogram_svg(values: list[float], *, width: int = 520, height: int = 180) -> str:
+def _nice_ceiling(v: float) -> float:
+    """Smallest 'nice' number (1/2/2.5/5 x 10^k) that is >= ``v``."""
+    if v <= 0:
+        return 1.0
+    mag = 10.0 ** math.floor(math.log10(v))
+    for m in (1.0, 2.0, 2.5, 5.0, 10.0):
+        if m * mag >= v:
+            return m * mag
+    return 10.0 * mag
+
+
+def score_distribution_svg(
+    values: list[float], *, width: int = 860, height: int = 232
+) -> str:
+    """Per-candidate score bar chart — product-analytics styling.
+
+    One gradient-filled bar per candidate, sorted ascending so the chart
+    reads as a clean distribution profile. White plot field with horizontal
+    gridlines, a y-axis scaled to a 'nice' ceiling, a value label above each
+    bar, and a dashed mean reference. Bar width is capped so a handful of
+    candidates never balloon into solid blocks, while the bars still span
+    the full plot width so the panel never looks empty.
+    """
     if not values:
         return ""
-    lo = min(values)
-    hi = max(values)
-    bins = min(10, max(1, len(values)))
-    span = hi - lo or 1.0
-    counts = [0] * bins
-    for value in values:
-        idx = min(bins - 1, int((value - lo) / span * bins))
-        counts[idx] += 1
-    max_count = max(counts) or 1
-    pad = 28
-    bar_w = (width - pad * 2) / bins
-    bars = []
-    for idx, count in enumerate(counts):
-        h = (height - pad * 2) * count / max_count
-        x = pad + idx * bar_w
-        y = height - pad - h
-        bars.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{max(2, bar_w - 4):.1f}" '
-            f'height="{h:.1f}" rx="3"><title>{count}</title></rect>'
+    vals = sorted(values)
+    n = len(vals)
+    vmin, vmax = vals[0], vals[-1]
+    mean_v = sum(vals) / n
+    y_top = 1.0 if vmax <= 1.0 else _nice_ceiling(vmax)
+
+    pad_l, pad_r, pad_t, pad_b = 46, 18, 42, 34
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+    base_y = pad_t + plot_h
+
+    def y_of(v: float) -> float:
+        return base_y - plot_h * (v / y_top)
+
+    def fmt(v: float) -> str:
+        return f"{v:.3g}"
+
+    # Horizontal gridlines + y-axis tick labels.
+    grid = ""
+    yticks = ""
+    n_ticks = 4
+    for k in range(n_ticks + 1):
+        tv = y_top * k / n_ticks
+        y = y_of(tv)
+        if 0 < k < n_ticks:
+            grid += (
+                f'<line class="sd-grid" x1="{pad_l}" y1="{y:.1f}" '
+                f'x2="{pad_l + plot_w}" y2="{y:.1f}"/>'
+            )
+        yticks += (
+            f'<text class="sd-axis" x="{pad_l - 9}" y="{y + 3.5:.1f}" '
+            f'text-anchor="end">{fmt(tv)}</text>'
         )
-    return _svg(width, height, "".join(bars), f"{lo:.2f}", f"{hi:.2f}")
+
+    # Bars — capped width, centred in evenly spaced slots.
+    slot = plot_w / n
+    bar_w = max(3.0, min(96.0, slot * 0.64))
+    show_idx = n <= 20
+    bars = ""
+    labels = ""
+    xidx = ""
+    for i, v in enumerate(vals):
+        cx = pad_l + (i + 0.5) * slot
+        by = y_of(v)
+        bars += (
+            f'<rect class="sd-bar" x="{cx - bar_w / 2:.1f}" y="{by:.1f}" '
+            f'width="{bar_w:.1f}" height="{base_y - by:.1f}" rx="4"/>'
+        )
+        labels += (
+            f'<text class="sd-bar-label" x="{cx:.1f}" y="{by - 6:.1f}" '
+            f'text-anchor="middle">{fmt(v)}</text>'
+        )
+        if show_idx:
+            xidx += (
+                f'<text class="sd-axis" x="{cx:.1f}" y="{base_y + 15:.1f}" '
+                f'text-anchor="middle">{i + 1}</text>'
+            )
+
+    # Dashed mean reference.
+    ymean = y_of(mean_v)
+    mean_ref = (
+        f'<line class="sd-mean" x1="{pad_l}" y1="{ymean:.1f}" '
+        f'x2="{pad_l + plot_w}" y2="{ymean:.1f}"/>'
+        f'<text class="sd-mean-label" x="{pad_l + plot_w - 5:.1f}" '
+        f'y="{ymean - 5:.1f}" text-anchor="end">mean {fmt(mean_v)}</text>'
+    )
+
+    subtitle = (
+        f'<text class="sd-subtitle" x="{pad_l}" y="20">'
+        f'n = {n} candidates · score {fmt(vmin)}–{fmt(vmax)}</text>'
+    )
+    xtitle = (
+        f'<text class="sd-axis-title" x="{pad_l + plot_w / 2:.1f}" y="{height - 5}" '
+        f'text-anchor="middle">candidate · sorted by score</text>'
+    )
+
+    return (
+        f'<svg class="plot-svg sd-plot" viewBox="0 0 {width} {height}" role="img" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        '<defs><linearGradient id="sdBar" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#8a3fc8"/>'
+        '<stop offset="1" stop-color="#6b1ea8"/>'
+        '</linearGradient></defs>'
+        f'<rect class="sd-field" x="{pad_l}" y="{pad_t}" width="{plot_w}" '
+        f'height="{plot_h}" rx="6"/>'
+        f'{grid}{bars}{mean_ref}'
+        f'<line class="sd-axis-line" x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{base_y}"/>'
+        f'<line class="sd-axis-line" x1="{pad_l}" y1="{base_y}" '
+        f'x2="{pad_l + plot_w}" y2="{base_y}"/>'
+        f'{yticks}{xidx}{labels}{subtitle}{xtitle}'
+        '</svg>'
+    )
 
 
 def scatter_svg(
@@ -244,4 +423,69 @@ def _num(value: object) -> float | None:
         return None
 
 
-__all__ = ["bar_svg", "build_plots", "histogram_svg", "plddt_trace_svg", "scatter_svg"]
+# Hover interactivity for the per-residue pLDDT trace. Self-contained IIFE —
+# included inline in the report's <script> by render._js(). On mousemove over
+# a ``.plddt-plot`` SVG it snaps to the nearest residue, shows a marker dot +
+# crosshair, and a tooltip with the residue number and pLDDT value; the whole
+# hover layer is hidden again on mouseleave.
+PLDDT_HOVER_JS = """
+(function () {
+  var TIP_W = 104, TIP_H = 36;
+  document.querySelectorAll('svg.plddt-plot').forEach(function (svg) {
+    var values = (svg.dataset.values || '').split(',').map(parseFloat);
+    var n = values.length;
+    if (n < 2) return;
+    var padL = parseFloat(svg.dataset.padL);
+    var padT = parseFloat(svg.dataset.padT);
+    var plotW = parseFloat(svg.dataset.plotW);
+    var plotH = parseFloat(svg.dataset.plotH);
+    var step = plotW / (n - 1);
+    var hover = svg.querySelector('.plddt-hover');
+    var cross = svg.querySelector('.plddt-crosshair');
+    var dot = svg.querySelector('.plddt-cursor');
+    var tip = svg.querySelector('.plddt-tip');
+    var tipRes = svg.querySelector('.plddt-tip-res');
+    var tipVal = svg.querySelector('.plddt-tip-val');
+    if (!hover || !cross || !dot || !tip) return;
+    function hide() { hover.style.opacity = '0'; }
+    function move(ev) {
+      var ctm = svg.getScreenCTM();
+      if (!ctm) return;
+      var pt = svg.createSVGPoint();
+      pt.x = ev.clientX; pt.y = ev.clientY;
+      var loc = pt.matrixTransform(ctm.inverse());
+      if (loc.x < padL - 4 || loc.x > padL + plotW + 4 ||
+          loc.y < padT - 12 || loc.y > padT + plotH + 12) { hide(); return; }
+      var i = Math.round((loc.x - padL) / step);
+      if (i < 0) i = 0;
+      if (i > n - 1) i = n - 1;
+      var v = values[i];
+      var cx = padL + i * step;
+      var cy = padT + plotH * (1 - v / 100);
+      cross.setAttribute('x1', cx); cross.setAttribute('x2', cx);
+      dot.setAttribute('cx', cx); dot.setAttribute('cy', cy);
+      tipRes.textContent = 'Residue ' + (i + 1);
+      tipVal.textContent = 'pLDDT ' + v.toFixed(1);
+      var tx = cx - TIP_W / 2;
+      if (tx < padL) tx = padL;
+      if (tx + TIP_W > padL + plotW) tx = padL + plotW - TIP_W;
+      var ty = cy - TIP_H - 13;
+      if (ty < padT) ty = cy + 15;
+      tip.setAttribute('transform', 'translate(' + tx.toFixed(1) + ',' + ty.toFixed(1) + ')');
+      hover.style.opacity = '1';
+    }
+    svg.addEventListener('mousemove', move);
+    svg.addEventListener('mouseleave', hide);
+  });
+})();
+"""
+
+
+__all__ = [
+    "PLDDT_HOVER_JS",
+    "bar_svg",
+    "build_plots",
+    "plddt_trace_svg",
+    "scatter_svg",
+    "score_distribution_svg",
+]
