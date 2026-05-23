@@ -224,6 +224,17 @@ def test_collect_designs_design_only_reads_intermediate(tmp_path):
     assert all(not d.cif_path.endswith("_native.cif") for d in designs)
 
 
+def test_collect_designs_design_only_reads_root_output_fallback(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "design.cif").write_text("# fake")
+    params = BoltzGenInput(target_pdb="/tmp/a.pdb", binder_length=42)
+    designs = _collect_designs(output_dir=out, params=params)
+    assert len(designs) == 1
+    assert designs[0].cif_path.endswith("design.cif")
+    assert designs[0].length == 42
+
+
 def test_collect_designs_raises_when_no_designs(tmp_path):
     out = tmp_path / "out"
     (out / "intermediate_designs").mkdir(parents=True)

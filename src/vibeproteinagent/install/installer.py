@@ -696,6 +696,12 @@ def _ensure_selected_shared_deps(
         _ensure_prodigy_shared_deps(python, options, state, results)
     if "proteina_complexa" in selection.tool_names:
         _ensure_proteina_complexa_shared_deps(python, options, state, results)
+    if "protenix_v2" in selection.tool_names:
+        _ensure_protenix_shared_deps(python, options, state, results)
+    if "pxdesign" in selection.tool_names:
+        _ensure_pxdesign_shared_deps(python, options, state, results)
+    if "pxmeter" in selection.tool_names:
+        _ensure_pxmeter_shared_deps(python, options, state, results)
     if "pyrosetta" in selection.tool_names:
         _ensure_pyrosetta_shared_deps(python, options, state, results)
     if {"rfdiffusion", "rfpeptides"}.intersection(selection.tool_names):
@@ -798,6 +804,7 @@ _BOLTZ2_AFFINITY_RUNTIME_DEPS = (
     "dm-tree==0.1.8",
     "einx==0.3.0",
     "fairscale==0.4.13",
+    "frozendict",
     "mashumaro==3.14",
     "modelcif==1.2",
     "wandb==0.18.7",
@@ -850,6 +857,18 @@ def _ensure_boltzgen_shared_deps(
         ],
         cwd=None,
     )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-user",
+            "--no-deps",
+            *_BOLTZGEN_NO_DEPS_RUNTIME_DEPS,
+        ],
+        cwd=None,
+    )
     verify = subprocess.run(
         [str(python), "-c", probe_code],
         text=True,
@@ -877,13 +896,216 @@ _BOLTZGEN_RUNTIME_DEPS = (
     "edit_distance",
     "pytorch-lightning",
     "pandas",
-    "pdbeccdutils",
     "rdkit>=2024.3.2",
     "einx",
     "einops",
     "mashumaro",
     "nvidia-ml-py>=12.535.133",
     "huggingface_hub",
+)
+
+_BOLTZGEN_NO_DEPS_RUNTIME_DEPS = (
+    "pdbeccdutils==1.0.3",
+)
+
+
+def _ensure_pxmeter_shared_deps(
+    python: Path,
+    options: InstallOptions,
+    state: InstallState,
+    results: list[dict[str, Any]],
+) -> None:
+    probe_code = (
+        "import biotite, gemmi, ml_collections, networkx, pdbeccdutils; "
+        "from rdkit import Chem; "
+        "print('ok')"
+    )
+    probe = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode == 0 and not options.force:
+        results.append({"unit": "shared-dep:pxmeter", "status": "ready"})
+        state.mark("shared-dep:pxmeter", "ready", {})
+        return
+    if options.offline:
+        raise DependencyError(
+            "PXMeter dependencies are required but are not installed and --offline was set",
+            details={
+                "packages": (*_PXMETER_RUNTIME_DEPS, *_PXMETER_NO_DEPS_RUNTIME_DEPS),
+                "stderr": probe.stderr[-2000:],
+                "stdout": probe.stdout[-2000:],
+            },
+        )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-user",
+            *_PXMETER_RUNTIME_DEPS,
+        ],
+        cwd=None,
+    )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-user",
+            "--no-deps",
+            *_PXMETER_NO_DEPS_RUNTIME_DEPS,
+        ],
+        cwd=None,
+    )
+    verify = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise DependencyError(
+            "PXMeter dependency installation did not make runtime imports available",
+            details={"stderr": verify.stderr[-2000:], "stdout": verify.stdout[-2000:]},
+        )
+    results.append({"unit": "shared-dep:pxmeter", "status": "installed"})
+    state.mark("shared-dep:pxmeter", "ready", {})
+
+
+_PXMETER_RUNTIME_DEPS = (
+    "absl-py",
+    "biotite",
+    "gemmi>=0.6.5",
+    "ml-collections",
+    "networkx",
+    "rdkit>=2024.3.2",
+)
+
+_PXMETER_NO_DEPS_RUNTIME_DEPS = (
+    "pdbeccdutils==1.0.3",
+)
+
+
+def _ensure_protenix_shared_deps(
+    python: Path,
+    options: InstallOptions,
+    state: InstallState,
+    results: list[dict[str, Any]],
+) -> None:
+    probe_code = "import absl, frozendict, ml_collections; print('ok')"
+    probe = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode == 0 and not options.force:
+        results.append({"unit": "shared-dep:protenix_v2", "status": "ready"})
+        state.mark("shared-dep:protenix_v2", "ready", {})
+        return
+    if options.offline:
+        raise DependencyError(
+            "Protenix dependencies are required but are not installed and --offline was set",
+            details={
+                "packages": _PROTENIX_RUNTIME_DEPS,
+                "stderr": probe.stderr[-2000:],
+                "stdout": probe.stdout[-2000:],
+            },
+        )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-user",
+            *_PROTENIX_RUNTIME_DEPS,
+        ],
+        cwd=None,
+    )
+    verify = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise DependencyError(
+            "Protenix dependency installation did not make runtime imports available",
+            details={"stderr": verify.stderr[-2000:], "stdout": verify.stdout[-2000:]},
+        )
+    results.append({"unit": "shared-dep:protenix_v2", "status": "installed"})
+    state.mark("shared-dep:protenix_v2", "ready", {})
+
+
+_PROTENIX_RUNTIME_DEPS = (
+    "absl-py",
+    "frozendict",
+    "ml-collections",
+    "optree",
+)
+
+
+def _ensure_pxdesign_shared_deps(
+    python: Path,
+    options: InstallOptions,
+    state: InstallState,
+    results: list[dict[str, Any]],
+) -> None:
+    probe_code = "import ml_collections, optree; print('ok')"
+    probe = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode == 0 and not options.force:
+        results.append({"unit": "shared-dep:pxdesign", "status": "ready"})
+        state.mark("shared-dep:pxdesign", "ready", {})
+        return
+    if options.offline:
+        raise DependencyError(
+            "PXDesign dependencies are required but are not installed and --offline was set",
+            details={
+                "packages": _PXDESIGN_RUNTIME_DEPS,
+                "stderr": probe.stderr[-2000:],
+                "stdout": probe.stdout[-2000:],
+            },
+        )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-user",
+            *_PXDESIGN_RUNTIME_DEPS,
+        ],
+        cwd=None,
+    )
+    verify = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise DependencyError(
+            "PXDesign dependency installation did not make runtime imports available",
+            details={"stderr": verify.stderr[-2000:], "stdout": verify.stdout[-2000:]},
+        )
+    results.append({"unit": "shared-dep:pxdesign", "status": "installed"})
+    state.mark("shared-dep:pxdesign", "ready", {})
+
+
+_PXDESIGN_RUNTIME_DEPS = (
+    "ml-collections",
+    "optree",
 )
 
 
@@ -894,7 +1116,7 @@ def _ensure_esm3_shared_deps(
     results: list[dict[str, Any]],
 ) -> None:
     probe = subprocess.run(
-        [str(python), "-c", "import esm; print('ok')"],
+        [str(python), "-c", "import brotli, esm; print('ok')"],
         text=True,
         capture_output=True,
         check=False,
@@ -935,6 +1157,7 @@ def _ensure_esm3_shared_deps(
             "tokenizers",
             "einops",
             "biotite",
+            "brotli",
         ],
         cwd=None,
     )
@@ -943,7 +1166,7 @@ def _ensure_esm3_shared_deps(
         cwd=source,
     )
     verify = subprocess.run(
-        [str(python), "-c", "import esm; print('ok')"],
+        [str(python), "-c", "import brotli, esm; print('ok')"],
         text=True,
         capture_output=True,
         check=False,

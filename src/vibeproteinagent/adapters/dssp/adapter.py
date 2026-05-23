@@ -53,6 +53,48 @@ def _parse_dssp_ss(text: str) -> str:
     return "".join(chars)
 
 
+def _run_dssp_binary(binary: str, pdb_path: Path, output_path: Path, output_format: str) -> None:
+    """Run DSSP across both modern and legacy mkdssp CLIs.
+
+    Newer mkdssp accepts ``--output-format {dssp,mmcif} input output``. Older
+    DSSP 2.x builds only accept ``-i input -o output`` and always emit classic
+    DSSP text, which is still enough for the adapter's json/dssp modes.
+    """
+    modern_cmd = [
+        binary,
+        "--output-format",
+        output_format,
+        str(pdb_path),
+        str(output_path),
+    ]
+    modern = subprocess.run(
+        modern_cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if modern.returncode == 0:
+        return
+
+    stderr = modern.stderr.lower()
+    stdout = modern.stdout.lower()
+    unsupported_format_flag = "unknown option" in stderr or "unrecognised option" in stderr
+    unsupported_format_flag = unsupported_format_flag or "unknown option" in stdout
+    if output_format != "dssp" or not unsupported_format_flag:
+        modern.check_returncode()
+
+    legacy_cmd = [binary, "-i", str(pdb_path), "-o", str(output_path)]
+    legacy = subprocess.run(
+        legacy_cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    legacy.check_returncode()
+
+
 class DSSPInput(BaseModel):
     pdb_path: str = Field(..., min_length=1)
     format: str = Field("json", pattern=r"^(dssp|mmcif|json)$")
@@ -114,14 +156,7 @@ class DSSPAdapter(ToolAdapter):
         text_for_ss: str = ""
         ctx.emit_progress(0.25)
         if internal_format == "dssp":
-            cmd = [
-                self.binary_path,
-                "--output-format",
-                "dssp",
-                str(pdb_path),
-                str(classic_path),
-            ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+            _run_dssp_binary(self.binary_path, pdb_path, classic_path, "dssp")
             text_for_ss = classic_path.read_text()
             if params.format == "json":
                 ss = _parse_dssp_ss(text_for_ss)
@@ -131,20 +166,10 @@ class DSSPAdapter(ToolAdapter):
                     "format": "json",
                 }, indent=2))
         else:  # mmcif
-            cmd = [
-                self.binary_path,
-                "--output-format",
-                "mmcif",
-                str(pdb_path),
-                str(classic_path),
-            ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+            _run_dssp_binary(self.binary_path, pdb_path, classic_path, "mmcif")
             # Separate dssp text purely for SS-string extraction.
             classic_aux = out_dir / f"{pdb_path.stem}.dssp"
-            subprocess.run(
-                [self.binary_path, "--output-format", "dssp", str(pdb_path), str(classic_aux)],
-                check=True, capture_output=True, text=True, timeout=120,
-            )
+            _run_dssp_binary(self.binary_path, pdb_path, classic_aux, "dssp")
             text_for_ss = classic_aux.read_text()
 
         ctx.emit_progress(0.85)

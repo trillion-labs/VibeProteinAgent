@@ -383,19 +383,23 @@ def _collect_designs(
     designs: list[BoltzGenDesign] = []
     if params.design_only:
         design_dir = output_dir / "intermediate_designs"
-        if not design_dir.is_dir():
+        if design_dir.is_dir():
+            search_dir = design_dir
+        else:
+            search_dir = output_dir
+        if not search_dir.is_dir():
             raise RuntimeError(
-                f"BoltzGen design step did not produce {design_dir}. "
+                f"BoltzGen design step did not produce {design_dir} or {output_dir}. "
                 f"Inspect the worker log for the underlying failure."
             )
         cifs = sorted(
             fp
-            for fp in design_dir.glob("*.cif")
+            for fp in search_dir.glob("*.cif")
             if not fp.name.endswith("_native.cif")
         )
         if not cifs:
             raise RuntimeError(
-                f"BoltzGen produced no design CIFs under {design_dir}"
+                f"BoltzGen produced no design CIFs under {search_dir}"
             )
         for cif in cifs:
             designs.append(

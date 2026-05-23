@@ -1,6 +1,7 @@
 """Tests for the DSSP binary-wrapper adapter (CPU-only)."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from vibeproteinagent.adapters.dssp.adapter import (
     DSSPOutput,
     _find_binary,
     _parse_dssp_ss,
+    _run_dssp_binary,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +58,27 @@ def test_parse_dssp_ss_minimal():
     )
     ss = _parse_dssp_ss(body)
     assert ss == "-HE"
+
+
+def test_run_dssp_binary_falls_back_to_legacy_cli(monkeypatch, tmp_path):
+    pdb = tmp_path / "input.pdb"
+    out = tmp_path / "out.dssp"
+    pdb.write_text("HEADER test\n")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if "--output-format" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "unknown option output-format")
+        out.write_text("legacy dssp\n")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _run_dssp_binary("mkdssp", pdb, out, "dssp")
+
+    assert calls[0][:3] == ["mkdssp", "--output-format", "dssp"]
+    assert calls[1] == ["mkdssp", "-i", str(pdb), "-o", str(out)]
+    assert out.read_text() == "legacy dssp\n"
 
 
 def test_output_round_trip():

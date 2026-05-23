@@ -7441,7 +7441,7 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   font-variant-numeric:tabular-nums; text-align:right;
 }
 .wf-step-dot {
-  width:8px; height:8px; border-radius:50%; align-self:center;
+  width:8px; height:8px; border-radius:50%; align-self:baseline;
   background:var(--subtle);
 }
 .wf-step-dot.state-completed, .wf-step-dot.state-cached { background:var(--good); }
