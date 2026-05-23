@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from vibeproteinagent.adapters._remote.fasta import write_fasta
 from vibeproteinagent.adapters._remote.geneontology import (
+    evidence_letter_code,
     extract_uniprot_accessions,
     go_associations,
 )
@@ -68,18 +69,33 @@ class GOSequencesOutput(BaseModel):
 
 
 def _evidence_ok(row: dict[str, Any], params: GOSequencesInput) -> bool:
-    raw_evidence = row.get("evidence")
-    evidence = str(
-        raw_evidence.get("type", "")
-        if isinstance(raw_evidence, dict)
-        else row.get("evidence", "")
-    )
-    if params.exclude_iea and evidence.upper().endswith("IEA"):
+    """Apply the user's evidence-code filters against one association row.
+
+    The GO REST API expresses evidence as ECO identifiers
+    (e.g. ``"ECO:0000501"``) on the ``evidence`` field and an
+    ``evidence_types: [{id: ...}]`` list. The user, by convention,
+    expresses filters with three-letter GOC codes
+    (``"IEA"``, ``"IDA"``, ...). :func:`evidence_letter_code`
+    normalises whatever shape arrives into the matching letter code so
+    filters work regardless of which API form the server uses.
+
+    Unknown / unrecognised codes return ``""`` from the helper. We
+    treat that as "can't classify": ``exclude_iea`` lets it through
+    (we don't know it's IEA), but a ``evidence_codes`` allowlist
+    drops it (the user asked for specific codes and this isn't one).
+    """
+    letter = evidence_letter_code(row.get("evidence"))
+    if not letter:
+        # Try the alternative ``evidence_types`` payload before giving up.
+        evidence_types = row.get("evidence_types")
+        if isinstance(evidence_types, list) and evidence_types:
+            letter = evidence_letter_code(evidence_types[0])
+    if params.exclude_iea and letter == "IEA":
         return False
-    if params.evidence_codes and not any(
-        code.upper() in evidence.upper() for code in params.evidence_codes
-    ):
-        return False
+    if params.evidence_codes:
+        wanted = {str(code).strip().upper() for code in params.evidence_codes if code}
+        if letter not in wanted:
+            return False
     return True
 
 

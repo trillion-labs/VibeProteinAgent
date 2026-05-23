@@ -3,7 +3,7 @@ from __future__ import annotations
 from vibeproteinagent.adapters._remote.fasta import parse_fasta, write_fasta
 from vibeproteinagent.adapters._remote.http import HttpClient, HttpError, HttpResponse
 from vibeproteinagent.adapters._remote.temporal import before_cutoff
-from vibeproteinagent.adapters._remote.uniprot import first_public_date
+from vibeproteinagent.adapters._remote.uniprot import first_public_date, search_accessions
 
 
 def test_temporal_filter_is_strict():
@@ -19,6 +19,19 @@ def test_uniprot_first_public_date_shapes():
         == "2020-01-01"
     )
     assert first_public_date({"entryAudit": {"firstPublicDate": "2019-01-01"}}) == "2019-01-01"
+
+
+def test_uniprot_search_accessions_caps_page_size():
+    seen = {}
+
+    class Client:
+        def get_json(self, url, params):
+            seen["url"] = url
+            seen["params"] = params
+            return {"results": [{"primaryAccession": "P12345"}]}
+
+    assert search_accessions(Client(), "go:0052855", size=2000) == ["P12345"]
+    assert seen["params"]["size"] == 500
 
 
 def test_fasta_round_trip(tmp_path):

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from vibeproteinagent.adapters import ToolRegistry, validate_params
@@ -473,7 +473,8 @@ class AgentController:
             assumptions = plan.setdefault("assumptions", [])
             if isinstance(assumptions, list):
                 assumptions.append(
-                    "Provider plan did not match the available invocation inputs; used a validated local workflow template."
+                    "Provider plan did not match the available invocation inputs; "
+                    "used a validated local workflow template."
                 )
         self.session_store.add_plan(run_id, plan, status="validated")
         if not policy.submit:
@@ -525,9 +526,13 @@ class AgentController:
                 decision = await self._run_llm_entry(
                     phase=f"decision_round_{round_index}",
                     failures=entry_failures,
-                    factory=lambda attempt, round_index=round_index: DecisionEngine(provider).decide(
+                    factory=lambda attempt,
+                    round_index=round_index,
+                    outcome=outcome,
+                    current_plan=current_plan: DecisionEngine(provider).decide(
                         outcome.summary,
-                        success_criteria=current_plan.get("success_criteria") or {},
+                        success_criteria=current_plan.get("success_criteria")
+                        or {},
                         model=self.config.model_for_role("analyst"),
                         idempotency_key=f"{run_id}:decision:{round_index}:{attempt}",
                     ),
@@ -559,19 +564,32 @@ class AgentController:
             next_plan = next_round.get("plan") or next_round.get("workflow_plan")
             try:
                 if isinstance(next_plan, dict):
-                    if "workflow_plan" not in next_plan:
+                    if "workflow_plan" not in next_plan and "workflow_ref" not in next_plan:
                         next_plan = {
                             "mode": "agent_plan",
                             "workflow_plan": next_plan,
                             "success_criteria": current_plan.get("success_criteria") or {},
                         }
+                    if "workflow_ref" in next_plan:
+                        next_plan = planner._canonicalize_template_plan(
+                            {
+                                "request": next_plan.get("goal") or request,
+                                "workflow_templates": workflows,
+                                "tool_selection": {},
+                            },
+                            next_plan,
+                        )
                     current_plan = planner.validate_plan(next_plan)
                     planner.validate_invocation(current_plan, classification.params)
                 else:
                     current_plan = await self._run_llm_entry(
                         phase=f"next_round_plan_{round_index}",
                         failures=entry_failures,
-                        factory=lambda attempt, round_index=round_index: planner.draft_next_round_plan(
+                        factory=lambda attempt,
+                        round_index=round_index,
+                        current_plan=current_plan,
+                        outcome=outcome,
+                        decision=decision: planner.draft_next_round_plan(
                             previous_plan=current_plan,
                             summary=outcome.summary,
                             decision=decision,
@@ -678,6 +696,7 @@ class AgentController:
     ) -> WorkflowExecutionOutcome:
         planner = WorkflowPlanner(self.registry)
         planner.validate_invocation(plan, params)
+        runtime_params = planner.invocation_params(plan, params)
         warm_results = []
         if policy.warm:
             for tool in tool_names_from_plan(plan):
@@ -714,7 +733,7 @@ class AgentController:
                 },
             )
         executor = WorkflowExecutor(self.workspace, self.registry, sup)
-        workflow_id = executor.submit(workflow, params)
+        workflow_id = executor.submit(workflow, runtime_params)
         self.session_store.add_plan(run_id, plan, status="submitted", workflow_id=workflow_id)
 
         if policy.execute and sup is not None:
@@ -766,11 +785,12 @@ class AgentController:
             params or {},
             allow_internal_tools=allow_internal,
         )
+        runtime_params = planner.invocation_params(valid, params or {})
         workflow = planner.compile_workflow(valid)
         supervisor = SupervisorClient()
         sup = supervisor if supervisor.is_running() else None
         executor = WorkflowExecutor(self.workspace, self.registry, sup)
-        workflow_id = executor.submit(workflow, params or {})
+        workflow_id = executor.submit(workflow, runtime_params)
         state = "submitted"
         timeout_error: TimeoutError_ | None = None
         if sup is not None:

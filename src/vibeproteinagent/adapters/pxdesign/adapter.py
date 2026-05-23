@@ -61,7 +61,16 @@ PXDESIGN_VENDOR_DEFAULT = _REPO_ROOT / "vendor" / "pxdesign"
 PXDBENCH_VENDOR_DEFAULT = _REPO_ROOT / "vendor" / "pxdbench"
 PROTENIX_PXD_VENDOR_DEFAULT = _REPO_ROOT / "vendor" / "protenix-pxd"
 
-PXDESIGN_CKPT_DIR_DEFAULT = Path("/opt/vpa-data/pxdesign_ckpt")
+def _default_pxdesign_ckpt_dir() -> Path:
+    vpa_home = os.environ.get("VPA_HOME")
+    if vpa_home:
+        cache_dir = Path(vpa_home).expanduser() / "cache" / "pxdesign"
+        if cache_dir.exists():
+            return cache_dir
+    return Path("/opt/vpa-data/pxdesign_ckpt")
+
+
+PXDESIGN_CKPT_DIR_DEFAULT = _default_pxdesign_ckpt_dir()
 
 
 def _default_protenix_data_root() -> str:
@@ -73,6 +82,11 @@ def _default_protenix_data_root() -> str:
     ckpt_root = os.environ.get("VPA_PROTENIX_CKPT")
     if ckpt_root:
         common = Path(ckpt_root).expanduser() / "common"
+        if common.is_dir():
+            return str(common)
+    vpa_home = os.environ.get("VPA_HOME")
+    if vpa_home:
+        common = Path(vpa_home).expanduser() / "cache" / "protenix" / "common"
         if common.is_dir():
             return str(common)
     return "/opt/vpa-data/protenix_ckpt/common"

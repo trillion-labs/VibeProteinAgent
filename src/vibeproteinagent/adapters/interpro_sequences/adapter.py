@@ -28,6 +28,12 @@ def _keep_record(
     record: UniProtRecord,
     params: InterProSequencesInput,
 ) -> tuple[bool, str | None]:
+    # ``taxon_id`` and ``reviewed`` are now applied server-side via the
+    # InterPro URL path (see :func:`_remote.interpro._build_accession_url`)
+    # so the InterPro page only contains accessions that already match.
+    # We keep the same checks here as a defence-in-depth safety net — if
+    # the API ever changes its filter semantics, we still don't claim a
+    # human protein when it's actually from a different taxon.
     if params.taxon_id is not None and not _record_matches_taxon(record, params.taxon_id):
         return False, "taxon_filter"
     if (
@@ -48,11 +54,38 @@ def _keep_record(
         include_undated=params.include_undated,
     ):
         return False, "temporal_filter"
-    if not params.include_fragments:
-        desc = json.dumps(record.metadata).lower()
-        if "fragment" in desc:
-            return False, "fragment_filter"
+    if not params.include_fragments and _is_fragment_record(record.metadata):
+        return False, "fragment_filter"
     return True, None
+
+
+def _is_fragment_record(metadata: Any) -> bool:
+    """Return True iff the UniProt record is marked as a fragment.
+
+    The canonical place for this flag in UniProt JSON is
+    ``proteinDescription.flag``, which carries one of:
+
+    * ``"Fragment"``           — incomplete sequence (one end missing)
+    * ``"Fragments"``          — multiple non-contiguous pieces
+    * ``"Precursor"``          — proproteolytic precursor (NOT a fragment;
+                                  do NOT drop)
+    * ``"Fragment,Precursor"`` — both flags simultaneously
+
+    Only entries whose ``flag`` contains ``"fragment"`` (case-insensitive)
+    are dropped. Previous implementation did a substring search on the
+    full serialised metadata, which incorrectly rejected intact proteins
+    whose references, keywords, GO terms, or feature descriptions
+    happened to contain the word "fragment".
+    """
+    if not isinstance(metadata, dict):
+        return False
+    pd = metadata.get("proteinDescription")
+    if not isinstance(pd, dict):
+        return False
+    flag = pd.get("flag")
+    if isinstance(flag, str) and "fragment" in flag.lower():
+        return True
+    return False
 
 
 def _record_matches_taxon(record: UniProtRecord, taxon_id: int) -> bool:
@@ -144,6 +177,7 @@ class InterProSequencesAdapter(ToolAdapter):
             max_records=max_scan,
             page_size=params.page_size,
             taxon_id=params.taxon_id,
+            reviewed=params.reviewed,
         )
         ctx.emit_progress(0.25)
         kept: list[UniProtRecord] = []

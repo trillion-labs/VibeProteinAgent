@@ -13,7 +13,7 @@ class AgentConfig:
     planner_model: str | None = None
     summarizer_model: str | None = None
     temperature: float = 0.2
-    timeout_s: float = 60.0
+    timeout_s: float = 180.0
     max_rounds: int = 8
     max_entries: int = 3
     stream: bool = False
@@ -48,7 +48,7 @@ class AgentConfig:
             planner_model=os.environ.get("VPA_AGENT_PLANNER_MODEL") or None,
             summarizer_model=os.environ.get("VPA_AGENT_SUMMARIZER_MODEL") or None,
             temperature=float(os.environ.get("VPA_AGENT_TEMPERATURE", "0.2")),
-            timeout_s=float(os.environ.get("VPA_AGENT_TIMEOUT_S", "60")),
+            timeout_s=float(os.environ.get("VPA_AGENT_TIMEOUT_S", "180")),
             max_rounds=max_rounds or int(os.environ.get("VPA_AGENT_MAX_ROUNDS", "8")),
             max_entries=max_entries or int(os.environ.get("VPA_AGENT_MAX_ENTRIES", "3")),
             agent_profile=agent_profile or os.environ.get("VPA_AGENT_PROFILE", "planner"),

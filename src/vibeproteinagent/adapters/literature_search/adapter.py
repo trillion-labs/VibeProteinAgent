@@ -15,6 +15,19 @@ from vibeproteinagent.adapters._remote.temporal import before_cutoff, parse_date
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
 
+_GO_PHRASE_MAP: tuple[tuple[str, str], ...] = (
+    ("adp-dependent nad(p)h-hydrate dehydratase", "GO:0052855"),
+    ("adp-dependent nadph-hydrate dehydratase", "GO:0052855"),
+    ("adp-dependent nadh-hydrate dehydratase", "GO:0052855"),
+    ("atp-dependent nad(p)h-hydrate dehydratase", "GO:0047453"),
+    ("atp-dependent nadph-hydrate dehydratase", "GO:0047453"),
+    ("atp-dependent nadh-hydrate dehydratase", "GO:0047453"),
+    ("nad(p)hx epimerase", "GO:0052856"),
+    ("nadphx epimerase", "GO:0052856"),
+    ("nadhx epimerase", "GO:0052856"),
+    ("nad(p)h-hydrate epimerase", "GO:0052856"),
+)
+
 
 def _record_date(record: dict[str, Any]) -> str | None:
     for key in (
@@ -54,7 +67,12 @@ def _filter_dates(
     return out
 
 
-def _evidence(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _phrase_go_terms(text: str) -> set[str]:
+    normalized = re.sub(r"\s+", " ", text.casefold())
+    return {go_id for phrase, go_id in _GO_PHRASE_MAP if phrase in normalized}
+
+
+def _evidence(records: list[dict[str, Any]], *, seed_text: str = "") -> dict[str, Any]:
     patterns = {
         "temperatures_c": re.compile(r"\b([0-9]{2,3})\s*(?:deg|degrees|°)?\s*C\b", re.I),
         "ph_values": re.compile(r"\bpH\s*([0-9]+(?:\.[0-9]+)?)\b", re.I),
@@ -69,10 +87,15 @@ def _evidence(records: list[dict[str, Any]]) -> dict[str, Any]:
         "go_terms": re.compile(r"\bGO:[0-9]{7}\b"),
     }
     found: dict[str, set[str]] = {k: set() for k in patterns}
+    if seed_text:
+        for key, pat in patterns.items():
+            found[key].update(m.group(0) for m in pat.finditer(seed_text))
+        found["go_terms"].update(_phrase_go_terms(seed_text))
     for record in records:
         text = " ".join(str(record.get(k, "")) for k in ("title", "abstractText", "keywordList"))
         for key, pat in patterns.items():
             found[key].update(m.group(0) for m in pat.finditer(text))
+        found["go_terms"].update(_phrase_go_terms(text))
     return {key: sorted(values)[:100] for key, values in found.items()}
 
 
@@ -159,7 +182,14 @@ class LiteratureSearchAdapter(ToolAdapter):
                     _record_date(r) or "",
                 ]
                 fh.write("\t".join(row) + "\n")
-        evidence = _evidence(filtered)
+        evidence = _evidence(
+            filtered,
+            seed_text=" ".join(
+                part
+                for part in (query, params.functional_description or "")
+                if part
+            ),
+        )
         evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
         top = []
         for r in filtered[: min(10, len(filtered))]:

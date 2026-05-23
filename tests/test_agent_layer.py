@@ -12,11 +12,13 @@ from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.agents import AgentConfig, AgentController, AgentSessionStore, ModeRouter
 from vibeproteinagent.agents.execution import ExecutionPolicy
 from vibeproteinagent.agents.planning import WorkflowPlanner
+from vibeproteinagent.agents.planning.workflow_planner import _fallback_plan_from_prompt
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse, provider_from_config
 from vibeproteinagent.agents.provider.cli_agent import CliAgentProvider
 from vibeproteinagent.agents.tools.schemas import compact_tool_outline, compact_tool_schema
 from vibeproteinagent.cli.main import app
-from vibeproteinagent.core.errors import TimeoutError_
+from vibeproteinagent.core.errors import InvalidParamsError, TimeoutError_
+from vibeproteinagent.mcp.tools import SessionCtx, list_workflows
 from vibeproteinagent.workflows import WorkflowStore
 from vibeproteinagent.workspace import ArtifactStore, JobState, JobStore, Workspace
 
@@ -103,6 +105,30 @@ def test_mode_router_defaults_direct_tool_set_to_parallel(tmp_workspace: Workspa
     assert route.execution == {"type": "parallel"}
 
 
+def test_mode_router_keeps_design_chains_in_agent_planning(tmp_workspace: Workspace) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    route = ModeRouter(registry).classify(
+        "Use rfdiffusion, proteinmpnn, protenix_v2, structure_analysis, "
+        "protein_qc, and rank_designs to design and return an output sequence."
+    )
+
+    assert route.mode == "agent_plan"
+    assert route.requires_llm_planning is True
+
+
+def test_mode_router_result_word_inside_scientific_text_is_not_direct(
+    tmp_workspace: Workspace,
+) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    route = ModeRouter(registry).classify(
+        "Design an enzyme for damaged NAD(P)H that is a result of hydration."
+    )
+
+    assert route.mode == "agent_plan"
+
+
 def test_mode_router_fresh_analysis_request_uses_planning(tmp_workspace: Workspace) -> None:
     registry = ToolRegistry()
     registry.discover()
@@ -110,6 +136,315 @@ def test_mode_router_fresh_analysis_request_uses_planning(tmp_workspace: Workspa
 
     assert route.mode == "agent_plan"
     assert route.requires_llm_planning is True
+
+
+def test_template_recovery_handles_semantic_function_requests(
+    tmp_workspace: Workspace,
+) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+
+    plan = _fallback_plan_from_prompt(
+        {
+            "request": "Design a protein with NADPHX epimerase activity and Mg2+ binding.",
+            "workflow_templates": workflows,
+            "tool_selection": {},
+        },
+        "",
+    )
+
+    assert plan is not None
+    assert plan["workflow_plan"]["name"] == "semantic_constraint_to_family_sequences"
+    assert plan["workflow_ref"] == "semantic_constraint_to_family_sequences"
+    assert plan["params"]["query"].startswith("Design a protein")
+
+
+def test_template_recovery_handles_target_sequence_binder_requests(
+    tmp_workspace: Workspace,
+) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+    target_sequence = (
+        "MKAVEVANNILFSVMMFNGAQTVIQKISWLRTAIAFLKGYMETTGATKKELEQVEK"
+        "LKERVDEIATAVNWDVYAQYARGDFNLLSDDEYKEIQKALLVLEDIKEQIIVEM"
+        "LRVGLAQGQMGTLKISDYLDSLIKERK"
+    )
+    request = (
+        "Design a protein binder that targets a specific site.\n"
+        f"Sequence: {target_sequence}\n"
+        "Target binding site: Y73, Y76, Y128, F36, L132, V72, Y40, A35, Q25, G39"
+    )
+
+    plan = _fallback_plan_from_prompt(
+        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
+        "",
+    )
+
+    assert plan is not None
+    assert plan["workflow_plan"]["name"] == "target_sequence_binder_design_round"
+    params = plan["params"]
+    assert params["target_sequence"] == target_sequence
+    assert params["target_hotspots"] == [73, 76, 128, 36, 132, 72, 40, 35, 25, 39]
+
+
+def test_template_recovery_defaults_de_novo_design_length(
+    tmp_workspace: Workspace,
+) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+    request = (
+        "Use rfdiffusion, proteinmpnn, protenix_v2, structure_analysis, "
+        "protein_qc, and rank_designs to design a de novo soluble protein candidate."
+    )
+
+    plan = _fallback_plan_from_prompt(
+        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
+        "",
+    )
+
+    assert plan is not None
+    assert plan["workflow_plan"]["name"] == "rfdiffusion_backbone_design_round"
+    assert plan["params"]["length"] == 100
+
+
+def test_template_recovery_extracts_requested_de_novo_length(
+    tmp_workspace: Workspace,
+) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+
+    plan = _fallback_plan_from_prompt(
+        {
+            "request": "Design a de novo 85 aa soluble protein with RFdiffusion.",
+            "workflow_templates": workflows,
+            "tool_selection": {},
+        },
+        "",
+    )
+
+    assert plan is not None
+    assert plan["params"]["length"] == 85
+
+
+def test_template_recovery_canonicalizes_runtime_param_values(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner.descriptor_availability",
+        lambda *args, **kwargs: {"available": True},
+    )
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner._install_readiness",
+        lambda tool_name: {"install_ready": True},
+    )
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+    request = "Design a protein with NADPHX epimerase activity and Mg2+ binding."
+    raw_plan = {
+        "mode": "agent_plan",
+        "goal": request,
+        "assumptions": [],
+        "missing_inputs": [],
+        "required_tools": ["literature_search", "go_sequences", "sequence_analysis"],
+        "workflow_plan": {
+            "name": "semantic_constraint_to_family_sequences",
+            "version": "1.0.0",
+            "params": {"query": request, "max_sequences": 200},
+            "nodes": [],
+        },
+        "success_criteria": {},
+        "warm_tools": [],
+    }
+
+    planner = WorkflowPlanner(registry)
+    plan = planner._canonicalize_template_plan(
+        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
+        raw_plan,
+    )
+    validated = planner.validate_plan(plan)
+
+    params = validated["workflow_plan"]["params"]
+    assert validated["params"]["query"] == request
+    assert validated["params"]["max_sequences"] == 200
+    assert params["query"]["type"] == "str"
+    assert validated["workflow_plan"]["nodes"]
+
+
+def test_template_recovery_overrides_bad_provider_selection(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner.descriptor_availability",
+        lambda *args, **kwargs: {"available": True},
+    )
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner._install_readiness",
+        lambda tool_name: {"install_ready": True},
+    )
+
+    class FakeProvider:
+        async def chat(self, messages, **kwargs):
+            prompt = json.loads(messages[-1].content)
+            if prompt["output_contract"]["mode"] == "tool_selection":
+                return ProviderResponse(
+                    provider="fake",
+                    model="fake",
+                    content=json.dumps(
+                        {
+                            "mode": "tool_selection",
+                            "candidate_tools": ["mpnn_to_protenix_input"],
+                            "reason": "bad internal glue selection",
+                            "missing_inputs": [],
+                        }
+                    ),
+                )
+            return ProviderResponse(
+                provider="fake",
+                model="fake",
+                content=json.dumps({"mode": "agent_plan", "goal": "incomplete"}),
+            )
+
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+    request = "Design a protein with NADPHX epimerase activity and Mg2+ binding."
+
+    plan = asyncio.run(
+        WorkflowPlanner(registry, FakeProvider()).draft_plan(
+            request,
+            available_tools=[
+                {"name": "literature_search", "input_schema": {}},
+                {"name": "go_sequences", "input_schema": {}},
+                {"name": "sequence_analysis", "input_schema": {}},
+            ],
+            workflows=workflows,
+        )
+    )
+
+    assert plan["workflow_plan"]["name"] == "semantic_constraint_to_family_sequences"
+    assert plan["params"]["query"] == request
+
+
+def test_workflow_ref_contract_accepts_runtime_params(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner.descriptor_availability",
+        lambda *args, **kwargs: {"available": True},
+    )
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner._install_readiness",
+        lambda tool_name: {"install_ready": True},
+    )
+
+    class FakeProvider:
+        async def chat(self, messages, **kwargs):
+            prompt = json.loads(messages[-1].content)
+            if prompt["output_contract"]["mode"] == "tool_selection":
+                return ProviderResponse(
+                    provider="fake",
+                    model="fake",
+                    content=json.dumps(
+                        {
+                            "mode": "tool_selection",
+                            "candidate_tools": [
+                                "rfdiffusion",
+                                "proteinmpnn",
+                                "protenix_v2",
+                            ],
+                            "reason": "de novo backbone workflow",
+                            "missing_inputs": [],
+                        }
+                    ),
+                )
+            return ProviderResponse(
+                provider="fake",
+                model="fake",
+                content=json.dumps(
+                    {
+                        "mode": "agent_plan",
+                        "goal": "Design an 85 aa protein.",
+                        "assumptions": [],
+                        "missing_inputs": [],
+                        "required_tools": ["rfdiffusion", "proteinmpnn", "protenix_v2"],
+                        "workflow_ref": "rfdiffusion_backbone_design_round",
+                        "params": {"length": 85},
+                        "success_criteria": {"workflow_completes": True},
+                        "warm_tools": ["rfdiffusion", "proteinmpnn", "protenix_v2"],
+                        "estimated_llm_calls": 1,
+                    }
+                ),
+            )
+
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+
+    plan = asyncio.run(
+        WorkflowPlanner(registry, FakeProvider()).draft_plan(
+            "Design an 85 aa protein with RFdiffusion.",
+            available_tools=[
+                {"name": "rfdiffusion", "input_schema": {}},
+                {"name": "proteinmpnn", "input_schema": {}},
+                {"name": "protenix_v2", "input_schema": {}},
+                {"name": "structure_analysis", "input_schema": {}},
+                {"name": "protein_qc", "input_schema": {}},
+                {"name": "rank_designs", "input_schema": {}},
+            ],
+            workflows=workflows,
+        )
+    )
+
+    assert plan["workflow_ref"] == "rfdiffusion_backbone_design_round"
+    assert plan["params"] == {"length": 85}
+    assert plan["workflow_plan"]["params"]["length"]["type"] == "int"
+    WorkflowPlanner(registry).validate_invocation(plan, {})
+
+
+def test_workflow_ref_contract_rejects_wrong_runtime_param_type(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner.descriptor_availability",
+        lambda *args, **kwargs: {"available": True},
+    )
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.planning.workflow_planner._install_readiness",
+        lambda tool_name: {"install_ready": True},
+    )
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+    planner = WorkflowPlanner(registry)
+
+    plan = planner._canonicalize_template_plan(
+        {
+            "request": "Design a de novo protein.",
+            "workflow_templates": workflows,
+            "tool_selection": {},
+        },
+        {
+            "mode": "agent_plan",
+            "workflow_ref": "rfdiffusion_backbone_design_round",
+            "params": {"length": "eighty-five"},
+        },
+    )
+
+    with pytest.raises(InvalidParamsError, match="runtime param has the wrong type"):
+        planner.validate_invocation(plan, {})
 
 
 def test_agent_direct_tool_set_accepts_explicit_jobs(tmp_workspace: Workspace) -> None:

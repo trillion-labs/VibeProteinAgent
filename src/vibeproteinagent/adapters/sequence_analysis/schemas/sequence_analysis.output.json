@@ -5,6 +5,7 @@
   "required": [
     "sequence_length",
     "metrics",
+    "representative_sequences",
     "liabilities",
     "top_annotations",
     "artifacts",
@@ -13,6 +14,25 @@
   "properties": {
     "sequence_length": {"type": "integer", "minimum": 0},
     "metrics": {"type": "object"},
+    "representative_sequences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "sequence", "length"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 1},
+          "header": {"type": ["string", "null"]},
+          "sequence": {"type": "string"},
+          "length": {"type": "integer", "minimum": 0},
+          "gravy": {"type": ["number", "null"]},
+          "pI": {"type": ["number", "null"]},
+          "net_charge": {"type": ["number", "null"]},
+          "liability_count": {"type": "integer", "minimum": 0},
+          "liability_types": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
     "liabilities": {
       "type": "array",
       "items": {

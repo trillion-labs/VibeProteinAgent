@@ -96,7 +96,7 @@ class ModeRouter:
             )
 
         tool_names = self._mentioned_tools(text)
-        if len(tool_names) == 1 and _looks_execution_request(lower):
+        if len(tool_names) == 1 and _looks_direct_execution_request(lower):
             direct_jobs = _direct_jobs(tool_names, merged_params)
             return ModeClassification(
                 mode="direct_tool",
@@ -108,7 +108,7 @@ class ModeRouter:
                 direct_jobs=direct_jobs,
                 execution=_direct_execution(lower),
             )
-        if len(tool_names) > 1 and _looks_execution_request(lower):
+        if len(tool_names) > 1 and _looks_direct_execution_request(lower):
             direct_jobs = _direct_jobs(tool_names, merged_params)
             return ModeClassification(
                 mode="direct_tool_set",
@@ -199,9 +199,9 @@ def _workflow_ref_from_text(text: str) -> str | None:
 
 
 def _looks_execution_request(lower: str) -> bool:
-    return any(
-        word in lower
-        for word in (
+    return _has_any_word(
+        lower,
+        (
             "run",
             "submit",
             "execute",
@@ -209,20 +209,62 @@ def _looks_execution_request(lower: str) -> bool:
             "retry",
             "fetch",
             "result",
+            "results",
             "status",
             "inspect",
-        )
+        ),
     )
 
 
+def _looks_direct_execution_request(lower: str) -> bool:
+    """Return true only for explicit tool/job operations.
+
+    Scientific requests often contain words like "result" ("as a result of
+    hydration") or tool names ("use rfdiffusion then ProteinMPNN") while still
+    requiring a workflow plan. Keep direct mode for operator-style commands and
+    let design/generation objectives go through the planner.
+    """
+    if _has_scientific_design_intent(lower):
+        return False
+    return _looks_execution_request(lower)
+
+
+def _has_scientific_design_intent(lower: str) -> bool:
+    return _has_any_word(
+        lower,
+        (
+            "design",
+            "generate",
+            "generation",
+            "binder",
+            "binding",
+            "backbone",
+            "inverse-fold",
+            "inverse",
+            "refold",
+            "rank",
+            "specificity",
+            "activity",
+            "objective",
+            "constraint",
+            "constraints",
+        ),
+    )
+
+
+def _has_any_word(lower: str, words: tuple[str, ...]) -> bool:
+    tokens = set(re.findall(r"[a-z0-9_+-]+", lower))
+    return any(word in tokens for word in words)
+
+
 def _direct_action(lower: str) -> str:
-    if "result" in lower or "fetch" in lower or "output" in lower:
+    if _has_any_word(lower, ("result", "results", "fetch")):
         return "get_results"
-    if "status" in lower or "state" in lower:
+    if _has_any_word(lower, ("status", "state")):
         return "get_status"
-    if "warm" in lower or "preload" in lower:
+    if _has_any_word(lower, ("warm", "preload")):
         return "warm"
-    if "inspect" in lower or "info" in lower or "describe" in lower:
+    if _has_any_word(lower, ("inspect", "info", "describe")):
         return "tool_info"
     return "submit"
 

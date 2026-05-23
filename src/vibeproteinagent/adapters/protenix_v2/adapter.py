@@ -39,7 +39,18 @@ def _default_protenix_tree() -> str:
 
 
 PROTENIX_TREE_DEFAULT = _default_protenix_tree()
-PROTENIX_CKPT_DEFAULT = "/opt/vpa-data/protenix_ckpt"
+
+
+def _default_protenix_ckpt_dir() -> str:
+    vpa_home = os.environ.get("VPA_HOME")
+    if vpa_home:
+        cache_dir = Path(vpa_home).expanduser() / "cache" / "protenix"
+        if cache_dir.exists():
+            return str(cache_dir)
+    return "/opt/vpa-data/protenix_ckpt"
+
+
+PROTENIX_CKPT_DEFAULT = _default_protenix_ckpt_dir()
 PROTENIX_MODEL_NAME = os.environ.get(
     "VPA_PROTENIX_MODEL_NAME", "protenix_base_default_v1.0.0"
 )

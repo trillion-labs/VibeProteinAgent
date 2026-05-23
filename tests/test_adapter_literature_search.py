@@ -50,3 +50,21 @@ def test_literature_search_mocked_europepmc_temporal_filter(tmp_path, monkeypatc
     assert "GO:0003824" in out.constraint_evidence["go_terms"]
     evidence = json.loads(Path(out.artifacts["constraint_evidence_json"]).read_text())
     assert "IPR000001" in evidence["interpro_ids"]
+
+
+def test_literature_search_extracts_known_go_terms_from_query(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "search_europepmc", lambda *_args, **_kwargs: ([], []))
+    adapter = LiteratureSearchAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        LiteratureSearchInput(
+            query=(
+                "Design an ADP-dependent NAD(P)H-hydrate dehydratase "
+                "with NADPHX epimerase activity."
+            )
+        ),
+        null_context(tmp_path),
+    )
+
+    assert "GO:0052855" in out.constraint_evidence["go_terms"]
+    assert "GO:0052856" in out.constraint_evidence["go_terms"]

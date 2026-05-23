@@ -75,9 +75,10 @@ def fetch_accession(client: HttpClient, accession: str) -> UniProtRecord | None:
 
 
 def search_accessions(client: HttpClient, query: str, *, size: int = 100) -> list[str]:
+    page_size = min(max(1, int(size)), 500)
     data = client.get_json(
         f"{UNIPROT}/uniprotkb/search",
-        params={"query": query, "fields": "accession", "format": "json", "size": size},
+        params={"query": query, "fields": "accession", "format": "json", "size": page_size},
     )
     accessions: list[str] = []
     for item in data.get("results", []) if isinstance(data, dict) else []:

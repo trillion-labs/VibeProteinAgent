@@ -837,9 +837,17 @@ def _exec_verdict_callout(model: ReportModel) -> str:
     ptm = _as_unit(top.scores.get("ptm"))
     if ptm is not None and ptm < 0.5:
         cautions.append(f"pTM {ptm:.2f} below 0.5 — overall fold may be unreliable")
-    iptm = _as_unit(top.scores.get("iptm"))
-    if iptm is not None and iptm < 0.5:
-        cautions.append(f"ipTM {iptm:.2f} below 0.5 — interface unlikely to be trustworthy")
+    # ipTM is the "interface trustworthiness" call — only meaningful when
+    # the structure actually HAS an interface. Skip the caution on a
+    # single-chain output so we don't issue an "interface unlikely to be
+    # trustworthy" warning for a monomer that has no interface to begin
+    # with.
+    if not _is_monomer_candidate(top):
+        iptm = _as_unit(top.scores.get("iptm"))
+        if iptm is not None and iptm < 0.5:
+            cautions.append(
+                f"ipTM {iptm:.2f} below 0.5 — interface unlikely to be trustworthy"
+            )
     if top.qc_flags:
         cautions.append(f"{len(top.qc_flags)} QC flag(s) on the top candidate")
     n_err = sum(1 for w in model.warnings if w.level == "error")
@@ -1271,6 +1279,61 @@ def _chain_context_for(candidate: ReportCandidate) -> _ChainContext:
     return _ChainContext(binder_chain_id=binder_id, target_chains=targets)
 
 
+# Metrics that only carry meaning on a complex (two+ chains forming an
+# interface). Hidden from monomer candidate cards / cautions / hero
+# fallback because reporting them on a single-chain structure is
+# misleading at best — ipTM/ipSAE/DockQ are *defined* on the interface
+# between chains, sap_score / pae_interaction / iplddt likewise, and
+# binding affinity (dG, affinity*, *_probability) presupposes a binding
+# partner. Conservative — leaves plddt / ptm / sequence-design metrics
+# alone since those describe the chain itself.
+_INTERFACE_ONLY_METRICS: frozenset[str] = frozenset({
+    "iptm", "mean_iptm",
+    "ipsae",
+    "dockq",
+    "iplddt",
+    "pae_interaction",
+    "sap_score",
+    "interface_residues", "interface_contacts", "interface_size",
+    "binding_probability", "binder_probability",
+    "affinity", "affinity_value",
+    "affinity_pred_value",
+    "affinity_probability", "affinity_probability_binary",
+    "confidence_score",  # Boltz-2 affinity composite head, complex-only
+    "dg", "delta_g",
+})
+
+
+def _is_interface_only_metric(canonical: str) -> bool:
+    """True for metrics that only make sense on a complex / interface.
+
+    Matches both the explicit registry in :data:`_INTERFACE_ONLY_METRICS`
+    and any key with the prefixes ``interface_*`` or ``binder_*`` so
+    derived metrics (``interface_helix%``, ``binder_plddt``, ...) are
+    also caught.
+    """
+    if canonical in _INTERFACE_ONLY_METRICS:
+        return True
+    return canonical.startswith("interface_") or canonical.startswith("binder_")
+
+
+def _is_monomer_candidate(candidate: ReportCandidate) -> bool:
+    """Return True iff the candidate's structure has exactly one protein chain.
+
+    Used to gate interface-only metric rendering: a single-chain output
+    can't have an interface, so ipTM / ipSAE / DockQ / binding-affinity
+    rows are dropped from the candidate card and the executive verdict.
+    Candidates without a structure file are treated as NOT monomer (we
+    have no way to tell) — they fall through to the unfiltered path so
+    we don't accidentally hide complex metrics for a sequence-only
+    record that genuinely came from a binder-design tool.
+    """
+    if not candidate.structure_path:
+        return False
+    chains = _extract_chains_from_structure(Path(candidate.structure_path))
+    return len(chains) == 1
+
+
 def _structure_sequence_track(
     sequence: str,
     dom_id: str,
@@ -1404,7 +1467,13 @@ def _hero_candidate_score(candidate: ReportCandidate) -> str:
     """Top-right corner of the card — show the *most relevant* score prominently."""
     if candidate.score is not None:
         return f'<div class="card-score"><strong>{_h(_fmt(candidate.score))}</strong><span>score</span></div>'
-    for key, label in (("plddt", "pLDDT"), ("ptm", "pTM"), ("iptm", "ipTM")):
+    # ipTM only makes sense for complexes — skip it on monomer candidates
+    # so we don't surface an "interface" score for a single-chain output.
+    monomer = _is_monomer_candidate(candidate)
+    fallbacks = (("plddt", "pLDDT"), ("ptm", "pTM"))
+    if not monomer:
+        fallbacks = (*fallbacks, ("iptm", "ipTM"))
+    for key, label in fallbacks:
         value = candidate.scores.get(key)
         if value is None:
             continue
@@ -2237,15 +2306,45 @@ _WIDGETS_OWN_ARTIFACTS = frozenset({
 })
 
 
+# Tools whose job is purely to *transform* one tool's output into another
+# tool's input (format / schema bridges). They don't carry a user-visible
+# deliverable of their own — the output is a derivative file that the
+# downstream tool consumes — so the per-tool widget would render an empty
+# card with just the tool name + state. Skip those entirely. They still
+# appear in the Workflow DAG so the run's structure stays auditable.
+#
+# Add a new tool here when its only output is "convert X to Y format" —
+# i.e. nothing a human reviewer would want to inspect in the report.
+_TOOLS_WITHOUT_DELIVERABLE = frozenset({
+    "mpnn_to_protenix_input",
+    "sequence_to_protenix_input",
+    "noop",
+})
+
+
 def _node_details(nodes: list[WorkflowNodeSummary]) -> str:
     """Per-tool result widgets — each node gets a structured presentation
     chosen by tool name, with the raw JSON tucked into a collapsible
     "Raw output" details element at the bottom for reference only.
+
+    Tools listed in :data:`_TOOLS_WITHOUT_DELIVERABLE` (format/input bridges)
+    are omitted — their output is a derivative file the next tool consumes,
+    not something a human reviewer needs to inspect. Errors on those nodes
+    DO still surface (we don't want to swallow real failures), but a
+    successful pass-through stays out of the report.
     """
     if not nodes:
         return "<p class='empty'>No node details available.</p>"
     chunks = []
     for node in nodes:
+        tool_lc = (node.tool or "").lower()
+        is_passthrough = tool_lc in _TOOLS_WITHOUT_DELIVERABLE
+        node_failed = bool(node.error_code or node.error_message) or node.state in {"failed", "skipped"}
+        # Skip passthrough nodes that succeeded — nothing to show. If they
+        # failed, render them so the operator can see why the bridge step
+        # blocked the rest of the workflow.
+        if is_passthrough and not node_failed:
+            continue
         widget = _per_tool_widget(node)
         output_obj = node.output if isinstance(node.output, dict) else {}
         raw_json = _h(json.dumps(_compact(output_obj), indent=2, sort_keys=True))
@@ -2259,7 +2358,6 @@ def _node_details(nodes: list[WorkflowNodeSummary]) -> str:
         # already surfaces those files with friendlier labels — duplicating
         # them under both "Per-residue analyses" and "Artifacts" is just
         # visual noise.
-        tool_lc = (node.tool or "").lower()
         artifacts = "" if tool_lc in _WIDGETS_OWN_ARTIFACTS else _node_artifacts_list(node)
         chunks.append(
             f'<article class="node-block" data-tool="{_attr(node.tool)}">'
@@ -2273,6 +2371,8 @@ def _node_details(nodes: list[WorkflowNodeSummary]) -> str:
             f"<pre>{raw_json}</pre></details>"
             "</article>"
         )
+    if not chunks:
+        return "<p class='empty'>No tool results to display for this run.</p>"
     return "".join(chunks)
 
 
@@ -6545,10 +6645,17 @@ def _score_bars(candidate: ReportCandidate) -> str:
     if isinstance(candidate.source, dict):
         candidate_tool = str(candidate.source.get("tool") or "")
 
+    # Monomer candidates can't have an interface — drop ipTM / ipSAE /
+    # DockQ / binding-affinity rows entirely so the card doesn't claim a
+    # "weak interface" verdict for a single-chain structure.
+    monomer = _is_monomer_candidate(candidate)
+
     rows: list[str] = []
     for key in sorted(deduped.keys(), key=_priority):
         base_key = key.split(":", 1)[-1].lower()
         if base_key in _SCORE_BAR_SKIP:
+            continue
+        if monomer and _is_interface_only_metric(base_key):
             continue
         row = _score_bar_row(key, deduped[key], candidate_tool=candidate_tool)
         if row:
@@ -6819,67 +6926,122 @@ def _agent_user_block(query: str) -> str:
 </div>"""
 
 
+# Friendly humanised labels for the decision_label strings emitted by the
+# planner / DecisionEngine. Mapped on lookup; unknown labels fall back to
+# a snake_case → "Sentence case" best effort via :func:`_pretty_field_name`.
+_DECISION_LABEL_FRIENDLY: dict[str, str] = {
+    "completed_no_additional_round_recommended": "Workflow completed",
+    "completed_review_metrics":                   "Completed · review metrics",
+    "needs_next_round":                           "Needs another round",
+    "workflow_not_completed":                     "Workflow did not complete",
+    "tool_selection":                             "Tool selection",
+}
+
+
+def _humanize_decision_label(label: str) -> str:
+    if not label:
+        return ""
+    key = label.strip().lower()
+    if key in _DECISION_LABEL_FRIENDLY:
+        return _DECISION_LABEL_FRIENDLY[key]
+    return _pretty_field_name(label)
+
+
+def _plan_text_is_dump_of(plan_text: str, plan_structured: dict[str, Any] | None) -> bool:
+    """Return True when ``plan_text`` is just a JSON dump of the same plan
+    we already rendered structurally — in that case the prose render
+    would be a duplicate noise block at the bottom. Tolerant to whitespace
+    and key-order variations."""
+    if not plan_text or not isinstance(plan_structured, dict):
+        return False
+    stripped = plan_text.strip()
+    if not (stripped.startswith("{") or stripped.startswith("[")):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    # If parsed shares >=2 keys with plan_structured, treat as the same payload.
+    shared = set(parsed.keys()) & set(plan_structured.keys())
+    return len(shared) >= 2 or parsed == plan_structured
+
+
 def _agent_plan_block(transcript: AgentTranscript) -> str:
-    """Render the agent's plan, preferring structured outline over prose."""
+    """Render the agent's plan as a tight product-style summary card.
+
+    Layout principle: the "core" (goal · planned steps · tool chips)
+    stays prominent; everything else (assumptions, missing inputs,
+    success criteria, plan rationale) collapses into one expandable
+    "Plan details" element so the visible surface stays focused.
+
+    If ``plan_text`` is a JSON dump of the same plan we already
+    structured we skip the prose render entirely — otherwise we keep it
+    as the agent's free-form narrative.
+    """
     structured_html = ""
     if isinstance(transcript.plan_structured, dict):
         structured_html = _render_plan_structured(transcript.plan_structured)
     prose_html = ""
-    if transcript.plan_text:
-        prose_html = (
-            '<div class="conv-plan-prose">'
-            f'{_render_agent_prose(transcript.plan_text)}'
-            '</div>'
-        )
+    if transcript.plan_text and not _plan_text_is_dump_of(
+        transcript.plan_text, transcript.plan_structured,
+    ):
+        # Free-form narrative — keep it, but only if it doesn't start with a
+        # raw JSON character (which would also be a serialised payload we
+        # can't structurally lay out from plan_structured).
+        stripped = transcript.plan_text.strip()
+        if not stripped.startswith(("{", "[")):
+            prose_html = (
+                '<div class="conv-plan-prose">'
+                f'{_render_agent_prose(transcript.plan_text)}'
+                '</div>'
+            )
     if not structured_html and not prose_html:
         return ""
     return f"""<div class="conv-block conv-block-plan">
   <div class="conv-block-head">
     <span class="conv-role-badge conv-role-badge-agent">✦ Agent plan</span>
   </div>
-  {structured_html}
   {prose_html}
+  {structured_html}
 </div>"""
 
 
 def _render_plan_structured(plan: dict[str, Any]) -> str:
     """Render the ``agent_plans.plan_json`` dict as a polished outline.
 
-    Picks out the well-known fields the planner emits (goal, assumptions,
-    required_tools, workflow_plan, success_criteria) and lays them out as
-    a definition list. Unknown fields fall through into a final "raw"
-    section so nothing is silently dropped.
+    Visual hierarchy (top → bottom):
+
+    1. **Goal** — single lede paragraph.
+    2. **Planned steps** — numbered list of ``tool · reason`` rows
+       (the actual workflow the agent will execute).
+    3. **Tool chips** — required + warm-in-advance tools as two
+       side-by-side chip strips.
+    4. **Plan details** — collapsible ``<details>`` carrying
+       assumptions, missing inputs, success criteria, rationale,
+       mode, and any extra fields. Default closed so the visible card
+       stays compact.
+
+    Recognised keys (with synonyms): ``goal``, ``workflow_plan``,
+    ``required_tools`` / ``candidate_tools``, ``warm_tools``,
+    ``assumptions``, ``missing_inputs``, ``success_criteria``,
+    ``reason`` / ``rationale``, ``mode``. Anything else falls into
+    the collapsible "Other fields" sublist so the structured renderer
+    doesn't silently swallow data.
     """
     blocks: list[str] = []
+
+    # ---- (1) Goal — lede paragraph ----
     goal = plan.get("goal")
     if isinstance(goal, str) and goal.strip():
         blocks.append(
-            '<dl class="conv-plan-dl">'
-            '<dt>Goal</dt>'
-            f'<dd>{_render_agent_prose(goal.strip())}</dd>'
-            '</dl>'
+            '<p class="conv-plan-goal">'
+            f'{_render_agent_prose(goal.strip())}'
+            '</p>'
         )
-    for key, label in (
-        ("assumptions", "Assumptions"),
-        ("missing_inputs", "Missing inputs"),
-        ("required_tools", "Tools the plan needs"),
-        ("warm_tools", "Tools to warm"),
-        ("success_criteria", "Success criteria"),
-    ):
-        items = plan.get(key)
-        if isinstance(items, list) and items:
-            lis = "".join(
-                f"<li>{_render_agent_prose(str(item))}</li>"
-                for item in items
-                if item
-            )
-            if lis:
-                blocks.append(
-                    '<div class="conv-plan-list">'
-                    f'<h5 class="conv-plan-list-head">{_h(label)}</h5>'
-                    f'<ul>{lis}</ul>'
-                    '</div>'
-                )
+
+    # ---- (2) Planned steps ----
     workflow_plan = plan.get("workflow_plan")
     if isinstance(workflow_plan, list) and workflow_plan:
         steps = []
@@ -6891,16 +7053,128 @@ def _render_plan_structured(plan: dict[str, Any]) -> str:
             steps.append(
                 '<li>'
                 f'<code class="conv-plan-tool">{_h(tool)}</code>'
-                + (f'<span class="conv-plan-reason">{_render_agent_prose(str(reason))}</span>' if reason else "")
+                + (
+                    f'<span class="conv-plan-reason">{_render_agent_prose(str(reason))}</span>'
+                    if reason else ""
+                )
                 + '</li>'
             )
         if steps:
             blocks.append(
                 '<div class="conv-plan-list conv-plan-list-steps">'
-                f'<h5 class="conv-plan-list-head">Planned steps</h5>'
+                '<h5 class="conv-plan-list-head">Planned steps</h5>'
                 f'<ol>{"".join(steps)}</ol>'
                 '</div>'
             )
+
+    # ---- (3) Tool chips — required + warm in advance ----
+    # ``candidate_tools`` is a synonym for ``required_tools`` emitted by the
+    # tool-selection mode of the planner. Prefer the explicit required_tools
+    # when both are present; otherwise candidate_tools takes its place.
+    required = plan.get("required_tools")
+    if not (isinstance(required, list) and required):
+        required = plan.get("candidate_tools")
+    warm = plan.get("warm_tools")
+    tool_groups: list[tuple[str, list[Any]]] = []
+    if isinstance(required, list) and required:
+        tool_groups.append(("Required tools", required))
+    if isinstance(warm, list) and warm and warm != required:
+        tool_groups.append(("Warm in advance", warm))
+    if tool_groups:
+        cols = []
+        for label, items in tool_groups:
+            chips = "".join(
+                f'<code class="conv-plan-tool-chip">{_h(str(item))}</code>'
+                for item in items if item
+            )
+            if chips:
+                cols.append(
+                    '<div class="conv-plan-tools-col">'
+                    f'<h5 class="conv-plan-list-head">{_h(label)}</h5>'
+                    f'<div class="conv-plan-tool-chips">{chips}</div>'
+                    '</div>'
+                )
+        if cols:
+            blocks.append(
+                f'<div class="conv-plan-tools-row">{"".join(cols)}</div>'
+            )
+
+    # ---- (4) Plan details — collapsed by default ----
+    details_blocks: list[str] = []
+    # Rationale prose (the planner's "why this plan" field).
+    for key in ("reason", "rationale", "explanation"):
+        v = plan.get(key)
+        if isinstance(v, str) and v.strip():
+            details_blocks.append(
+                '<div class="conv-plan-detail-section">'
+                '<h5 class="conv-plan-list-head">Plan rationale</h5>'
+                f'<div class="conv-plan-rationale">{_render_agent_prose(v.strip())}</div>'
+                '</div>'
+            )
+            break
+    # Assumptions / missing inputs / success criteria as lists.
+    for key, label in (
+        ("assumptions",      "Assumptions"),
+        ("missing_inputs",   "Missing inputs"),
+        ("success_criteria", "Success criteria"),
+    ):
+        items = plan.get(key)
+        if isinstance(items, list) and items:
+            lis = "".join(
+                f"<li>{_render_agent_prose(_stringify_final_item(item))}</li>"
+                for item in items if item
+            )
+            if lis:
+                details_blocks.append(
+                    '<div class="conv-plan-detail-section">'
+                    f'<h5 class="conv-plan-list-head">{_h(label)}</h5>'
+                    f'<ul class="conv-plan-detail-list">{lis}</ul>'
+                    '</div>'
+                )
+    # Mode (small metadata chip).
+    mode = plan.get("mode")
+    if isinstance(mode, str) and mode.strip():
+        details_blocks.append(
+            '<div class="conv-plan-detail-section">'
+            '<h5 class="conv-plan-list-head">Mode</h5>'
+            f'<code class="conv-plan-meta">{_h(mode.strip())}</code>'
+            '</div>'
+        )
+    # Any other unknown fields → small extras block (collapsed as code).
+    known_keys = {
+        "goal", "workflow_plan", "required_tools", "candidate_tools",
+        "warm_tools", "reason", "rationale", "explanation",
+        "assumptions", "missing_inputs", "success_criteria", "mode",
+    }
+    extras_rows: list[str] = []
+    for k, v in plan.items():
+        if k in known_keys:
+            continue
+        rendered = _render_extra_value(v)
+        if rendered:
+            extras_rows.append(
+                f'<dt>{_h(_pretty_field_name(k))}</dt><dd>{rendered}</dd>'
+            )
+    if extras_rows:
+        details_blocks.append(
+            '<div class="conv-plan-detail-section">'
+            '<h5 class="conv-plan-list-head">Other fields</h5>'
+            f'<dl class="conv-final-dl">{"".join(extras_rows)}</dl>'
+            '</div>'
+        )
+
+    if details_blocks:
+        blocks.append(
+            '<details class="conv-plan-details">'
+            '<summary class="conv-plan-details-summary">'
+            '<span class="conv-plan-details-label">Plan details</span>'
+            f'<span class="conv-plan-details-meta">{len(details_blocks)} '
+            f'section{"s" if len(details_blocks) != 1 else ""}</span>'
+            '</summary>'
+            f'<div class="conv-plan-details-body">{"".join(details_blocks)}</div>'
+            '</details>'
+        )
+
     return "".join(blocks)
 
 
@@ -6911,8 +7185,266 @@ def _agent_final_block(final: str | None) -> str:
   <div class="conv-block-head">
     <span class="conv-role-badge conv-role-badge-final">✓ Final response</span>
   </div>
-  <div class="conv-final-body">{_render_agent_prose(final)}</div>
+  <div class="conv-final-body">{_render_agent_final_payload(final)}</div>
 </div>"""
+
+
+# Field-name aliases the structured-final renderer recognises. Agents that
+# don't follow our canonical names still land in the right section as long
+# as one of these synonyms shows up. Lowercase + underscore — the renderer
+# normalises keys before matching.
+_FINAL_DECISION_KEYS  = ("decision", "verdict", "status", "outcome")
+_FINAL_REASON_KEYS    = ("reason", "summary", "narrative", "explanation", "rationale", "message")
+_FINAL_CHANGES_KEYS   = ("changes", "recommendations", "action_items", "next_steps", "actions", "todo")
+_FINAL_NOTES_KEYS     = ("notes", "caveats", "warnings", "observations")
+_FINAL_METRICS_KEYS   = ("metrics_used", "metrics", "metrics_evaluated", "criteria_evaluated")
+_FINAL_NEXT_ROUND_KEYS = ("next_round", "recommendation", "next")
+
+
+def _render_agent_final_payload(text: str) -> str:
+    """Render the agent's final response with structured-JSON detection.
+
+    When ``text`` parses as a JSON object carrying any of the recognised
+    field names (decision / next_round / reason / changes / notes /
+    metrics_used / ...), we lay it out as a polished structured card
+    instead of dumping the raw JSON string. Free-form prose responses
+    fall through to ``_render_agent_prose`` unchanged.
+    """
+    stripped = (text or "").strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            data = json.loads(stripped)
+        except (ValueError, TypeError):
+            data = None
+        if isinstance(data, dict) and _looks_like_structured_final(data):
+            return _render_structured_final(data)
+    return _render_agent_prose(text)
+
+
+def _looks_like_structured_final(data: dict[str, Any]) -> bool:
+    """Return True iff ``data`` has at least one key the structured
+    renderer knows how to lay out. Keeps free-form JSON-like blobs from
+    being misidentified as structured payloads."""
+    known = {
+        *_FINAL_DECISION_KEYS, *_FINAL_REASON_KEYS, *_FINAL_CHANGES_KEYS,
+        *_FINAL_NOTES_KEYS, *_FINAL_METRICS_KEYS, *_FINAL_NEXT_ROUND_KEYS,
+    }
+    return any(k in data for k in known)
+
+
+def _pick_first(data: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    """Return ``data[k]`` for the first ``k`` in ``keys`` that's present."""
+    for k in keys:
+        if k in data:
+            return data[k]
+    return None
+
+
+def _render_structured_final(data: dict[str, Any]) -> str:
+    """Lay out a structured final-response payload as readable HTML.
+
+    Five logical sections, each rendered only when its data is present:
+      1. Header bar: decision verdict + next-round action pill
+      2. Reason / summary prose
+      3. Recommended changes — bulleted list
+      4. Notes / caveats — callout list
+      5. Metrics evaluated — chip strip
+      6. Anything else — collapsed key-value rows so nothing is silently dropped.
+    """
+    parts: list[str] = []
+
+    # ---- Header: decision label + next-round status ----
+    decision_label = _pick_first(data, _FINAL_DECISION_KEYS)
+    next_round = _pick_first(data, _FINAL_NEXT_ROUND_KEYS)
+    nr_pill = ""
+    nr_reason = ""
+    if isinstance(next_round, dict):
+        recommended = bool(next_round.get("recommended", False))
+        if recommended:
+            nr_pill = (
+                '<span class="conv-final-pill conv-final-pill-action">'
+                '↻ Next round recommended</span>'
+            )
+        else:
+            nr_pill = (
+                '<span class="conv-final-pill conv-final-pill-done">'
+                '✓ No further rounds needed</span>'
+            )
+        nr_reason_raw = next_round.get("reason")
+        if isinstance(nr_reason_raw, str) and nr_reason_raw.strip():
+            nr_reason = nr_reason_raw.strip()
+    header_bits: list[str] = []
+    if isinstance(decision_label, str) and decision_label.strip():
+        human = _humanize_decision_label(decision_label.strip())
+        # Humanised label as the eye-catching chip; raw underscore form
+        # lives in the title= for engineers who need the audit string.
+        header_bits.append(
+            f'<span class="conv-final-decision" title="{_attr(decision_label.strip())}">'
+            f'{_h(human)}</span>'
+        )
+    if nr_pill:
+        header_bits.append(nr_pill)
+    if header_bits:
+        parts.append(f'<div class="conv-final-header">{"".join(header_bits)}</div>')
+
+    # ---- Reason / summary prose ----
+    reason = nr_reason
+    if not reason:
+        candidate = _pick_first(data, _FINAL_REASON_KEYS)
+        if isinstance(candidate, str) and candidate.strip():
+            reason = candidate.strip()
+    if reason:
+        parts.append(
+            '<div class="conv-final-section">'
+            f'<h5 class="conv-final-section-head">{"Reason" if next_round else "Summary"}</h5>'
+            f'<div class="conv-final-section-body">{_render_agent_prose(reason)}</div>'
+            '</div>'
+        )
+
+    # ---- Recommended changes / action items ----
+    changes_value = _pick_first(data, _FINAL_CHANGES_KEYS)
+    if isinstance(changes_value, list) and changes_value:
+        lis = "".join(
+            f'<li>{_render_agent_prose(_stringify_final_item(item))}</li>'
+            for item in changes_value
+            if item not in (None, "")
+        )
+        if lis:
+            parts.append(
+                '<div class="conv-final-section">'
+                '<h5 class="conv-final-section-head">Recommended changes</h5>'
+                f'<ul class="conv-final-list">{lis}</ul>'
+                '</div>'
+            )
+
+    # ---- Notes / caveats ----
+    notes_value = _pick_first(data, _FINAL_NOTES_KEYS)
+    if isinstance(notes_value, list) and notes_value:
+        note_lis: list[str] = []
+        for n in notes_value:
+            if isinstance(n, dict):
+                level = str(n.get("level") or "note").lower()
+                msg = str(n.get("message") or n.get("text") or "").strip()
+                if not msg:
+                    continue
+                note_lis.append(
+                    f'<li class="conv-final-note conv-final-note-{_h(level)}">'
+                    f'<strong>{_h(level)}</strong> {_render_agent_prose(msg)}'
+                    '</li>'
+                )
+            else:
+                s = _stringify_final_item(n)
+                if s:
+                    note_lis.append(f'<li class="conv-final-note">{_render_agent_prose(s)}</li>')
+        if note_lis:
+            parts.append(
+                '<div class="conv-final-section">'
+                '<h5 class="conv-final-section-head">Notes &amp; caveats</h5>'
+                f'<ul class="conv-final-list conv-final-notes">{"".join(note_lis)}</ul>'
+                '</div>'
+            )
+
+    # ---- Metrics evaluated — chip strip ----
+    metrics_value = _pick_first(data, _FINAL_METRICS_KEYS)
+    if isinstance(metrics_value, list) and metrics_value:
+        chips = "".join(
+            f'<code class="conv-final-metric">{_h(str(m))}</code>'
+            for m in metrics_value[:60]
+            if m not in (None, "")
+        )
+        more = ""
+        if len(metrics_value) > 60:
+            more = (
+                f'<span class="conv-final-metric-more">+{len(metrics_value) - 60} more</span>'
+            )
+        if chips:
+            parts.append(
+                '<div class="conv-final-section">'
+                '<h5 class="conv-final-section-head">Metrics evaluated</h5>'
+                f'<div class="conv-final-metrics">{chips}{more}</div>'
+                '</div>'
+            )
+
+    # ---- Anything else — key/value rows so nothing is silently dropped ----
+    known_keys: set[str] = set()
+    for ks in (_FINAL_DECISION_KEYS, _FINAL_REASON_KEYS, _FINAL_CHANGES_KEYS,
+               _FINAL_NOTES_KEYS, _FINAL_METRICS_KEYS, _FINAL_NEXT_ROUND_KEYS):
+        known_keys.update(ks)
+    extras_rows: list[str] = []
+    for k, v in data.items():
+        if k in known_keys:
+            continue
+        rendered = _render_extra_value(v)
+        if rendered:
+            extras_rows.append(
+                f'<dt>{_h(_pretty_field_name(k))}</dt><dd>{rendered}</dd>'
+            )
+    if extras_rows:
+        parts.append(
+            '<div class="conv-final-section">'
+            '<h5 class="conv-final-section-head">Additional</h5>'
+            f'<dl class="conv-final-dl">{"".join(extras_rows)}</dl>'
+            '</div>'
+        )
+
+    if not parts:
+        # No recognised fields produced output — fall back to a pretty-
+        # printed JSON code block so at minimum the raw payload reads
+        # cleanly instead of as a single overflowing line.
+        return (
+            f'<code class="conv-codeblock">{_h(_pretty_json(data))}</code>'
+        )
+    return "".join(parts)
+
+
+def _stringify_final_item(item: Any) -> str:
+    """Coerce a list-item value to a short readable string."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        # Prefer ``message`` / ``text`` / ``description`` over JSON dump.
+        for k in ("message", "text", "description", "summary", "name"):
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return _pretty_json(item, max_len=400)
+    return str(item)
+
+
+def _render_extra_value(value: Any) -> str:
+    """Render an unknown extras value as HTML — short scalars inline,
+    medium lists as comma-joined, anything bigger as a code block."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return _h("yes" if value else "no")
+    if isinstance(value, (str, int, float)):
+        s = str(value).strip()
+        if not s:
+            return ""
+        return _h(s)
+    if isinstance(value, list):
+        if not value:
+            return ""
+        if all(isinstance(x, (str, int, float, bool)) for x in value) and len(value) <= 12:
+            return _h(", ".join(str(x) for x in value))
+        return f'<code class="conv-final-extra-payload">{_h(_pretty_json(value, max_len=600))}</code>'
+    if isinstance(value, dict):
+        if not value:
+            return ""
+        return f'<code class="conv-final-extra-payload">{_h(_pretty_json(value, max_len=600))}</code>'
+    return _h(str(value))
+
+
+def _pretty_field_name(key: str) -> str:
+    """Convert a snake_case key into a Sentence-case label."""
+    tokens = [t for t in str(key).replace("-", "_").split("_") if t]
+    if not tokens:
+        return str(key)
+    return " ".join(
+        t.upper() if t.isupper() and len(t) <= 4 else t.capitalize()
+        for t in tokens
+    )
 
 
 def _agent_full_transcript_block(
@@ -7123,11 +7655,11 @@ def _agent_step_timeline_block(steps: list[AgentStepSummary]) -> str:
 def _agent_decisions_block(decisions: list[AgentDecision]) -> str:
     """Per-round decision audit for multi-round agent runs.
 
-    Each decision becomes a compact row showing the round index, the
-    verdict label, whether another round was recommended, and the
-    reason text. Notes attached by the decision engine (e.g. LLM-fallback
-    warnings) collapse into a "notes" sublist when present. The block
-    is omitted entirely for single-round runs (no recorded decisions).
+    Each round renders as a compact card: round index, humanised verdict
+    label, continue/stop pill, reason prose, and a *collapsed* detail
+    drawer for the raw decision string + metrics + notes. The visible
+    surface keeps the eye on "did the agent decide to keep going and
+    why" without dumping every audit row inline.
     """
     if not decisions:
         return ""
@@ -7135,46 +7667,79 @@ def _agent_decisions_block(decisions: list[AgentDecision]) -> str:
     for d in decisions:
         verdict_cls = "go" if d.next_round_recommended else "stop"
         verdict_label = "Continue → next round" if d.next_round_recommended else "Stop"
-        notes_html = ""
+        human_label = _humanize_decision_label(d.decision_label) or d.decision_label
+
+        # Collapsed details: raw label + metrics + notes. Only build when
+        # there's at least one chunk to put inside; otherwise we skip the
+        # drawer entirely and the row stays as a clean two-line summary.
+        detail_chunks: list[str] = []
+        if d.decision_label and d.decision_label != human_label:
+            detail_chunks.append(
+                '<div class="conv-decision-detail-row">'
+                '<span class="conv-decision-detail-label">Raw label</span>'
+                f'<code class="conv-decision-raw">{_h(d.decision_label)}</code>'
+                '</div>'
+            )
+        if d.metrics_used:
+            shown = ", ".join(d.metrics_used[:8])
+            more = f" (+{len(d.metrics_used) - 8} more)" if len(d.metrics_used) > 8 else ""
+            detail_chunks.append(
+                '<div class="conv-decision-detail-row">'
+                '<span class="conv-decision-detail-label">Metrics weighed</span>'
+                f'<span class="conv-decision-metrics-list">{_h(shown)}{_h(more)}</span>'
+                '</div>'
+            )
         if d.notes:
             note_items: list[str] = []
             for entry in d.notes:
                 if isinstance(entry, dict):
-                    level = str(entry.get("level") or "note")
-                    msg = str(entry.get("message") or "")
+                    level = str(entry.get("level") or "note").lower()
+                    msg = str(entry.get("message") or "").strip()
                     code = entry.get("code")
-                    code_html = f' <code class="conv-decision-note-code">{_h(str(code))}</code>' if code else ""
+                    if not msg:
+                        continue
+                    code_html = (
+                        f' <code class="conv-decision-note-code">{_h(str(code))}</code>'
+                        if code else ""
+                    )
                     note_items.append(
                         f'<li class="conv-decision-note conv-decision-note-{_h(level)}">'
-                        f'<strong>{_h(level)}</strong> {_h(msg)}{code_html}</li>'
+                        f'<strong>{_h(level)}</strong> {_render_agent_prose(msg)}{code_html}</li>'
                     )
                 else:
-                    note_items.append(f'<li class="conv-decision-note">{_h(str(entry))}</li>')
-            notes_html = (
-                f'<ul class="conv-decision-notes">{"".join(note_items)}</ul>'
+                    s = _stringify_final_item(entry)
+                    if s:
+                        note_items.append(
+                            f'<li class="conv-decision-note">{_render_agent_prose(s)}</li>'
+                        )
+            if note_items:
+                detail_chunks.append(
+                    '<div class="conv-decision-detail-row">'
+                    '<span class="conv-decision-detail-label">Notes</span>'
+                    f'<ul class="conv-decision-notes">{"".join(note_items)}</ul>'
+                    '</div>'
+                )
+        details_html = ""
+        if detail_chunks:
+            details_html = (
+                '<details class="conv-decision-details">'
+                '<summary class="conv-decision-details-summary">More detail</summary>'
+                f'<div class="conv-decision-details-body">{"".join(detail_chunks)}</div>'
+                '</details>'
             )
-        metrics_html = ""
-        if d.metrics_used:
-            metrics_html = (
-                f'<div class="conv-decision-metrics">'
-                f'<span class="conv-decision-metrics-head">metrics weighed:</span> '
-                f'{_h(", ".join(d.metrics_used[:8]))}'
-                + (f' (+{len(d.metrics_used) - 8} more)' if len(d.metrics_used) > 8 else '')
-                + '</div>'
-            )
+
         rows.append(
             f'<li class="conv-decision-row">'
             f'<div class="conv-decision-head">'
             f'<span class="conv-decision-round">Round {d.round_index + 1}</span>'
-            f'<code class="conv-decision-label">{_h(d.decision_label)}</code>'
+            f'<span class="conv-decision-label conv-decision-label-friendly" title="{_attr(d.decision_label)}">{_h(human_label)}</span>'
             f'<span class="conv-decision-verdict conv-decision-verdict-{verdict_cls}">{verdict_label}</span>'
             '</div>'
             + (
                 f'<p class="conv-decision-reason">{_render_agent_prose(d.reason)}</p>'
                 if d.reason else ""
             )
-            + metrics_html
-            + notes_html
+            + details_html
             + '</li>'
         )
     return f"""<div class="conv-block conv-block-decisions">
@@ -7275,7 +7840,13 @@ def _render_agent_prose(text: str) -> str:
 
 def _why_candidate(candidate: ReportCandidate) -> str:
     bits = []
-    for key, label in (("plddt", "pLDDT"), ("ptm", "pTM"), ("iptm", "ipTM"), ("ipsae", "ipSAE")):
+    # ipTM / ipSAE are interface metrics — meaningless for a single-chain
+    # candidate. Drop them from the per-card "why" prose when monomer.
+    monomer = _is_monomer_candidate(candidate)
+    metric_specs = [("plddt", "pLDDT"), ("ptm", "pTM")]
+    if not monomer:
+        metric_specs.extend([("iptm", "ipTM"), ("ipsae", "ipSAE")])
+    for key, label in metric_specs:
         value = candidate.scores.get(key)
         if value is not None:
             quality = _quality_class(key, value)
@@ -7844,10 +8415,162 @@ body {
 .conv-plan-prose p { margin:0 0 8px; }
 .conv-plan-prose p:last-child { margin-bottom:0; }
 
+/* Goal as a lede paragraph — slightly larger, calm ink colour, no
+   list / dl chrome. Reads as the headline of the card. */
+.conv-plan-goal {
+  margin:0 0 14px;
+  font-size:14.5px; line-height:1.6; color:var(--ink);
+}
+.conv-plan-goal p { margin:0; }
+
+/* Required-tools + Warm chip strips in a side-by-side row. Falls back
+   to stacked when narrow. */
+.conv-plan-tools-row {
+  display:flex; flex-wrap:wrap; gap:18px 28px; margin:12px 0;
+}
+.conv-plan-tools-col {
+  flex:1 1 220px; min-width:0;
+}
+.conv-plan-tool-chips { display:flex; flex-wrap:wrap; gap:5px; }
+.conv-plan-tool-chip {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11.5px; font-weight:600; color:var(--accent);
+  background:var(--accent-soft); border:1px solid #d9cef3;
+  border-radius:5px; padding:2px 9px;
+}
+
+/* Collapsible "Plan details" drawer carrying assumptions, missing
+   inputs, success criteria, rationale, mode, extras. Default-closed
+   keeps the visible surface focused on goal + planned steps + tools. */
+.conv-plan-details {
+  margin-top:14px; padding-top:12px; border-top:1px dashed #f0eef8;
+}
+.conv-plan-details-summary {
+  cursor:pointer; user-select:none;
+  display:inline-flex; align-items:center; gap:10px;
+  padding:5px 10px; border-radius:7px;
+  font-size:12.5px; color:var(--muted);
+  list-style:none;
+}
+.conv-plan-details-summary::-webkit-details-marker { display:none; }
+.conv-plan-details-summary::before {
+  content:"▸"; color:var(--subtle); font-size:10px;
+  transition:transform 0.15s;
+}
+.conv-plan-details[open] > .conv-plan-details-summary::before {
+  transform:rotate(90deg); display:inline-block;
+}
+.conv-plan-details-summary:hover { background:#f7f5fb; color:var(--accent); }
+.conv-plan-details-label { font-weight:600; color:var(--ink); }
+.conv-plan-details-meta { color:var(--subtle); font-size:11.5px; }
+.conv-plan-details-body { margin-top:10px; }
+.conv-plan-detail-section { margin:10px 0; }
+.conv-plan-detail-section:first-child { margin-top:0; }
+.conv-plan-detail-list {
+  margin:0; padding-left:20px; font-size:13.5px; color:var(--ink); line-height:1.6;
+}
+.conv-plan-detail-list li { margin:3px 0; }
+.conv-plan-rationale {
+  font-size:13.5px; color:var(--ink); line-height:1.6;
+}
+.conv-plan-rationale p { margin:0 0 6px; }
+.conv-plan-rationale p:last-child { margin-bottom:0; }
+.conv-plan-meta {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11.5px; color:var(--ink);
+  background:#fbfafe; border:1px solid var(--line);
+  border-radius:5px; padding:2px 8px;
+}
+
 /* Final tier: prose, slightly heavier weight to read as the "answer". */
 .conv-final-body { font-size:14.5px; line-height:1.65; color:var(--ink); }
 .conv-final-body p { margin:0 0 10px; }
 .conv-final-body p:last-child { margin-bottom:0; }
+
+/* Structured final-response layout (when the agent emits a decision /
+   recommendation JSON payload instead of free-form prose). Visual goal:
+   read as a polished product summary — header pills for the verdict,
+   section subheads for reason / changes / notes / metrics, no raw JSON
+   dump. */
+.conv-final-header {
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  margin:0 0 12px;
+}
+.conv-final-decision {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; font-weight:700;
+  background:var(--good-soft); color:var(--good);
+  border:1px solid var(--good-line);
+  border-radius:5px; padding:2px 9px;
+}
+.conv-final-pill {
+  font-size:11px; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.06em;
+  padding:3px 11px; border-radius:var(--radius-pill);
+  border:1px solid transparent;
+}
+.conv-final-pill-action {
+  color:#92400e; background:#fef3c7; border-color:#fde68a;
+}
+.conv-final-pill-done {
+  color:var(--good); background:var(--good-soft); border-color:var(--good-line);
+}
+.conv-final-section { margin:12px 0; }
+.conv-final-section:first-of-type { margin-top:0; }
+.conv-final-section-head {
+  margin:0 0 6px; font-size:10.5px; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.08em;
+  color:var(--subtle);
+}
+.conv-final-section-body {
+  font-size:14px; line-height:1.65; color:var(--ink);
+}
+.conv-final-section-body p { margin:0 0 8px; }
+.conv-final-section-body p:last-child { margin-bottom:0; }
+.conv-final-list {
+  margin:0; padding-left:20px; font-size:13.5px; color:var(--ink);
+  line-height:1.6;
+}
+.conv-final-list li { margin:4px 0; }
+.conv-final-list li p { margin:0; }
+.conv-final-notes li { color:var(--muted); }
+.conv-final-note strong {
+  text-transform:uppercase; font-size:10.5px; font-weight:700;
+  letter-spacing:0.06em; margin-right:5px; color:var(--subtle);
+}
+.conv-final-note-warning strong { color:var(--warn); }
+.conv-final-note-error   strong { color:var(--poor); }
+.conv-final-metrics {
+  display:flex; flex-wrap:wrap; gap:5px;
+}
+.conv-final-metric {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11px; color:var(--ink);
+  background:#fbfafe; border:1px solid var(--line);
+  border-radius:5px; padding:2px 8px;
+}
+.conv-final-metric-more {
+  font-size:11px; color:var(--subtle); align-self:center;
+  padding:2px 4px;
+}
+.conv-final-dl { margin:0; }
+.conv-final-dl dt {
+  font-size:10.5px; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.06em;
+  color:var(--subtle); margin-bottom:2px;
+}
+.conv-final-dl dt + dt { margin-top:8px; }
+.conv-final-dl dd {
+  margin:0 0 8px; font-size:13.5px; color:var(--ink);
+  word-break:break-word;
+}
+.conv-final-extra-payload {
+  display:block; white-space:pre-wrap; word-break:break-word;
+  padding:8px 10px; max-height:200px; overflow:auto;
+  background:#0f0a1f; color:#ede9fe;
+  border-radius:6px; font-size:11.5px; line-height:1.5;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 /* Inline code block inside any agent prose. */
 .conv-codeblock {
@@ -8035,6 +8758,67 @@ body {
 .conv-decision-note-code {
   font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size:11px; color:var(--subtle);
+}
+
+/* Humanised verdict label (e.g. "Workflow completed"). Sits between
+   the round number and the continue/stop pill in the row head; raw
+   underscore form lives in the title= tooltip + the collapsed
+   "More detail" drawer. */
+.conv-decision-label-friendly {
+  font-size:13.5px; font-weight:600; color:var(--ink);
+  letter-spacing:-0.005em;
+}
+
+/* Collapsible "More detail" drawer per decision row — carries the raw
+   label, weighed metrics, and notes when present. Default-closed
+   keeps the row to a clean two-line summary. */
+.conv-decision-details {
+  margin-top:6px;
+}
+.conv-decision-details-summary {
+  cursor:pointer; user-select:none;
+  display:inline-flex; align-items:center; gap:6px;
+  padding:3px 8px; border-radius:6px;
+  font-size:11.5px; color:var(--muted);
+  list-style:none;
+}
+.conv-decision-details-summary::-webkit-details-marker { display:none; }
+.conv-decision-details-summary::before {
+  content:"▸"; color:var(--subtle); font-size:9px;
+  transition:transform 0.15s;
+}
+.conv-decision-details[open] > .conv-decision-details-summary::before {
+  transform:rotate(90deg); display:inline-block;
+}
+.conv-decision-details-summary:hover { background:#f7f5fb; color:var(--accent); }
+.conv-decision-details-body {
+  margin:6px 0 0; padding:6px 10px;
+  background:#fbfafe; border-radius:6px;
+}
+.conv-decision-detail-row {
+  display:flex; align-items:baseline; gap:10px;
+  padding:3px 0; font-size:12.5px;
+  flex-wrap:wrap;
+}
+.conv-decision-detail-row + .conv-decision-detail-row {
+  border-top:1px dashed #f0eef8;
+}
+.conv-decision-detail-label {
+  flex-shrink:0; min-width:110px;
+  font-size:10.5px; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.06em;
+  color:var(--subtle);
+}
+.conv-decision-raw {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11.5px; color:var(--ink);
+  background:#ffffff; border:1px solid var(--line);
+  border-radius:5px; padding:1px 8px;
+}
+.conv-decision-metrics-list {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11.5px; color:var(--muted);
+  word-break:break-word;
 }
 
 /* -------- Tool-call chip (interleaved in full transcript) -------- */
@@ -8403,6 +9187,10 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 }
 .exec-verdict-detail {
   font-size:13.5px; color:var(--muted); line-height:1.6; margin-top:4px;
+  /* Same defence as ``.warnings p`` — cautions can carry long error
+     strings (subprocess paths, hashes) that would otherwise overflow
+     the callout's right edge. */
+  overflow-wrap:anywhere; word-break:break-word;
 }
 .exec-verdict-good {
   background:var(--good-soft); border-color:var(--good-line);
@@ -10084,6 +10872,14 @@ code {
 .warnings p {
   border-left:4px solid var(--ok); padding:9px 12px; background:var(--ok-soft);
   margin:6px 0; border-radius:0 5px 5px 0;
+  /* Warning messages routinely embed long absolute file paths from
+     adapter subprocess failures. Without an explicit wrap rule the path
+     stays a single unbreakable token and overflows the callout box,
+     pushing the text past the card's right edge. ``overflow-wrap:
+     anywhere`` lets the browser break inside the path at any point;
+     ``word-break:break-word`` is the legacy alias kept for older
+     WebKit. */
+  overflow-wrap:anywhere; word-break:break-word;
 }
 .warnings p.error, p.error {
   border-left:4px solid var(--poor); background:var(--poor-soft); color:var(--poor);

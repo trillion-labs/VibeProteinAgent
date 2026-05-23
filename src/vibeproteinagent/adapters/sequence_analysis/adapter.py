@@ -91,6 +91,7 @@ class ResidueAnnotation(BaseModel):
 class SequenceAnalysisOutput(BaseModel):
     sequence_length: int
     metrics: dict[str, Any]
+    representative_sequences: list[dict[str, Any]] = Field(default_factory=list)
     liabilities: list[SequenceLiability]
     top_annotations: list[ResidueAnnotation]
     artifacts: dict[str, str | None]
@@ -453,6 +454,32 @@ def _write_per_sequence_metrics(
             )
 
 
+def _representative_sequences(
+    records: list[tuple[str | None, str]],
+    ph: float,
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    representatives = []
+    for idx, (header, sequence) in enumerate(records[:limit], start=1):
+        metrics = _metrics(sequence, ph)
+        liabilities = _liabilities(sequence, metrics)
+        representatives.append(
+            {
+                "index": idx,
+                "header": header,
+                "sequence": sequence,
+                "length": len(sequence),
+                "gravy": metrics.get("gravy"),
+                "pI": metrics.get("pI"),
+                "net_charge": metrics.get("net_charge"),
+                "liability_count": len(liabilities),
+                "liability_types": [item.type for item in liabilities],
+            }
+        )
+    return representatives
+
+
 def _family_summary(records: list[tuple[str | None, str]]) -> dict[str, Any]:
     lengths = [len(sequence) for _header, sequence in records]
     return {
@@ -556,6 +583,7 @@ class SequenceAnalysisAdapter(ToolAdapter):
         output = SequenceAnalysisOutput(
             sequence_length=len(sequence),
             metrics=metrics,
+            representative_sequences=_representative_sequences(records, params.ph),
             liabilities=liabilities,
             top_annotations=top_annotations,
             artifacts={
