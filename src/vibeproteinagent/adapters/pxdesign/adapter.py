@@ -439,8 +439,11 @@ def _extract_binder_sequence(cif_path: Path) -> str:
 
     PXDesign always writes the binder as the last polymer chain. We parse
     `_entity_poly_seq` rows for entity_id 2 (the second polymer = binder
-    when target is a single chain). If parsing fails for any reason, return
-    an empty string — the adapter still produces a usable design record.
+    when target is a single chain). Diffusion-only ``infer`` outputs can
+    contain PXDesign pseudo-residues such as ``xpb`` instead of designed
+    amino acids; if every binder monomer is unknown, return an empty string
+    rather than a misleading ``XXXXX`` sequence. The adapter still produces
+    a usable structure-only design record.
     """
     try:
         text = cif_path.read_text()
@@ -475,7 +478,9 @@ def _extract_binder_sequence(cif_path: Path) -> str:
                 continue
             if entity_id != "2":
                 continue
-            seq.append(_AA3_TO_1.get(mon_id, "X"))
+            seq.append(_AA3_TO_1.get(mon_id.upper(), "X"))
+    if seq and all(aa == "X" for aa in seq):
+        return ""
     return "".join(seq)
 
 

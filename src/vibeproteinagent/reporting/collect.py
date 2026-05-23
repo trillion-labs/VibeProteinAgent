@@ -494,6 +494,20 @@ def _normalize_candidates(
     return _dedupe_candidates(candidates)
 
 
+# Field names adapters use to surface a structure artifact path on a
+# candidate / output dict. Boltzgen writes ``cif_path``; Boltz-2 / Protenix
+# write ``predicted_cif`` / ``predicted_pdb``; everyone else writes
+# ``pdb_path`` or the generic ``structure_path``. Keep all three lookup
+# sites in this module in sync by reading from this single tuple.
+_STRUCTURE_PATH_KEYS: tuple[str, ...] = (
+    "structure_path",
+    "pdb_path",
+    "cif_path",
+    "predicted_pdb",
+    "predicted_cif",
+)
+
+
 def _ranked_candidates(
     nodes: list[WorkflowNodeSummary],
     artifacts: list[ReportArtifact],
@@ -507,7 +521,7 @@ def _ranked_candidates(
         for idx, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
-            structure_path = _first_str(row, "structure_path", "predicted_pdb", "predicted_cif")
+            structure_path = _first_str(row, *_STRUCTURE_PATH_KEYS)
             stable_structure_path = _stable_structure_path(structure_path, artifacts)
             candidate_id = str(row.get("candidate_id") or row.get("name") or idx + 1)
             out.append(
@@ -544,8 +558,7 @@ def _candidates_from_output(
         value = output.get(key)
         if isinstance(value, list):
             rows.extend(v for v in value if isinstance(v, dict))
-    structure_keys = ("predicted_pdb", "predicted_cif", "structure_path")
-    if not rows and any(key in output for key in structure_keys):
+    if not rows and any(key in output for key in _STRUCTURE_PATH_KEYS):
         rows.append(output)
 
     # Fallback: an adapter run with no structure output but real metrics
@@ -563,13 +576,7 @@ def _candidates_from_output(
 
     out: list[ReportCandidate] = []
     for idx, row in enumerate(rows):
-        structure_path = _first_str(
-            row,
-            "structure_path",
-            "pdb_path",
-            "predicted_pdb",
-            "predicted_cif",
-        )
+        structure_path = _first_str(row, *_STRUCTURE_PATH_KEYS)
         stable_structure_path = _stable_structure_path(structure_path, artifacts)
         candidate_id = str(
             row.get("candidate_id")

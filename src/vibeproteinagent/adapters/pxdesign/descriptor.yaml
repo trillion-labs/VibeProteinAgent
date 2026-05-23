@@ -1,7 +1,7 @@
 name: pxdesign
 version: "1.0.0"
 category: protein_design
-description: "Target-conditioned binder backbone diffusion against a protein target (optional hotspots). Modes: `infer` returns backbones only (sequence = `X`); `pipeline` adds AF2 initial-guess + ProteinMPNN + filtering for real designed sequences."
+description: "Target-conditioned binder backbone diffusion against a protein target (optional hotspots). Modes: `infer` returns backbone-only structures with sequence unavailable; `pipeline` adds AF2 initial-guess + ProteinMPNN + filtering for real designed sequences."
 runtime: python
 backend: pytorch
 gpu_required: true

@@ -1,6 +1,3 @@
-# SVG template strings are intentionally kept readable as literal snippets.
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import html
@@ -67,8 +64,12 @@ def _extract_plddt_per_residue(path: Path) -> list[float]:
     """Parse PDB B-factor column for CA atoms — that's pLDDT in AF/ESM3 output.
 
     Returns one value per residue (CA) along the chain, or empty list when
-    the file is missing/unreadable. CIF/mmCIF is skipped for now; the
-    standard ESM3/AlphaFold output is PDB.
+    the file is missing/unreadable, when the suffix is not PDB, or when the
+    B-factor column carries no real confidence signal (every value equal —
+    typically all 0.00 from generators like Proteina-Complexa that don't
+    fold/score, or a uniform placeholder). A flat trace is worse than no
+    trace: it implies "we measured pLDDT and it's terrible" when the truth
+    is "no pLDDT was ever computed."
     """
     if not path.is_file() or path.suffix.lower() not in {".pdb", ".ent"}:
         return []
@@ -86,6 +87,10 @@ def _extract_plddt_per_residue(path: Path) -> list[float]:
             values.append(float(line[60:66].strip()))
         except ValueError:
             continue
+    # Reject placeholder vectors: an all-equal B-factor column (most often
+    # all-zero) carries no information and should not be plotted.
+    if not values or max(values) - min(values) < 1e-6:
+        return []
     return values
 
 
@@ -189,7 +194,7 @@ def plddt_trace_svg(
     mean_v = sum(norm) / n
     subtitle = (
         f'<text x="{pad_l}" y="20" class="plddt-subtitle">'
-        f'mean pLDDT {mean_v:.1f} · n = {n} residues</text>'
+        f'mean pLDDT {mean_v:.1f} · n = {n} residues</text>'
     )
     xlabel = (
         f'<text x="{pad_l + plot_w / 2:.1f}" y="{height - 6}" text-anchor="middle" '
@@ -323,7 +328,7 @@ def score_distribution_svg(
 
     subtitle = (
         f'<text class="sd-subtitle" x="{pad_l}" y="20">'
-        f'n = {n} candidates · score {fmt(vmin)}–{fmt(vmax)}</text>'
+        f'n = {n} candidates · score {fmt(vmin)}-{fmt(vmax)}</text>'
     )
     xtitle = (
         f'<text class="sd-axis-title" x="{pad_l + plot_w / 2:.1f}" y="{height - 5}" '

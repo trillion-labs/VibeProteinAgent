@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -360,7 +361,7 @@ class BindCraftAdapter(ToolAdapter):
             raise RuntimeError(str(exc)) from exc
         ctx.emit_progress(0.92)
 
-        designs = _collect_designs(
+        designs, collect_warnings = _collect_designs(
             design_path=job_outputs,
             binder_length=params.binder_length,
         )
@@ -374,7 +375,7 @@ class BindCraftAdapter(ToolAdapter):
             position_mappings={
                 "target_hotspots": hotspot_resolution.to_audit()
             },
-            warnings=hotspot_resolution.warnings,
+            warnings=[*hotspot_resolution.warnings, *collect_warnings],
         )
 
     def estimate_vram(self, params: BindCraftInput) -> int:
@@ -605,11 +606,20 @@ def _build_env(
 
 def _collect_designs(
     *, design_path: Path, binder_length: int
-) -> list[BindCraftDesign]:
+) -> tuple[list[BindCraftDesign], list[str]]:
     """Walk BindCraft's output layout.
 
     BindCraft writes accepted binders to ``<design_path>/Accepted/`` and
     summary statistics to ``<design_path>/final_design_stats.csv``.
+
+    The accepted-PDB filenames carry a trailing ``_model{N}`` AF2-model index
+    (e.g. ``..._mpnn1_model2.pdb``) that the CSV's ``Design`` column omits
+    (``..._mpnn1``). We strip that suffix before the lookup; if the row is
+    still missing we fall back to parsing the binder sequence out of the PDB
+    chain B so the report doesn't silently render placeholder X's.
+
+    Returns ``(designs, warnings)`` so the caller can surface any
+    bookkeeping warnings on ``BindCraftOutput.warnings``.
     """
     accepted_dir = design_path / "Accepted"
     if not accepted_dir.is_dir():
@@ -625,20 +635,98 @@ def _collect_designs(
 
     stats = _load_final_stats(design_path / "final_design_stats.csv")
     designs: list[BindCraftDesign] = []
+    warnings: list[str] = []
     for pdb in pdbs:
-        meta = stats.get(pdb.stem, {})
+        # The CSV keys by the design name without BindCraft's AF2 model suffix
+        # (the trailing ``_model{N}`` it appends when saving the accepted PDB).
+        # Strip it so the lookup hits.
+        lookup_key = re.sub(r"_model\d+$", "", pdb.stem)
+        meta = stats.get(lookup_key) or stats.get(pdb.stem, {})
+
+        sequence = str(meta.get("Sequence", "")).strip()
+        if not sequence:
+            # CSV row missing — fall back to chain B of the PDB so the report
+            # surfaces the real sequence instead of placeholder X's.
+            sequence = _extract_binder_sequence_from_pdb(pdb, binder_chain="B")
+            if sequence:
+                warnings.append(
+                    f"BindCraft: no stats row for {pdb.name!s} "
+                    f"(tried keys {lookup_key!r}, {pdb.stem!r}); "
+                    f"recovered sequence from PDB chain B."
+                )
+            else:
+                sequence = "X" * binder_length
+                warnings.append(
+                    f"BindCraft: no stats row for {pdb.name!s} and chain-B "
+                    f"extraction failed; emitted placeholder sequence."
+                )
+
         designs.append(
             BindCraftDesign(
                 pdb_path=str(pdb),
-                sequence=str(meta.get("Sequence", "X" * binder_length)),
+                sequence=sequence,
                 binder_length=binder_length,
-                iptm=_as_float(meta.get("Average_i_pTM")),
-                plddt=_as_float(meta.get("Average_pLDDT")),
-                pae_interaction=_as_float(meta.get("Average_PAE_Interaction")),
-                sap_score=_as_float(meta.get("Binder_SAP_score")),
+                iptm=_first_float(meta, "Average_i_pTM"),
+                plddt=_first_float(meta, "Average_pLDDT"),
+                pae_interaction=_first_float(
+                    meta,
+                    "Average_PAE_Interaction",
+                    "Average_i_pAE",
+                    "Average_pAE",
+                ),
+                sap_score=_first_float(
+                    meta,
+                    "Binder_SAP_score",
+                    "Average_Binder_SAP_score",
+                ),
             )
         )
-    return designs
+    return designs, warnings
+
+
+# Three-letter → one-letter map for the 20 canonical amino acids. Anything
+# else (modified residues, ligands, etc.) is mapped to ``X``.
+_AA3_TO_1 = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLU": "E", "GLN": "Q", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
+
+
+def _extract_binder_sequence_from_pdb(pdb_path: Path, *, binder_chain: str) -> str:
+    """Parse the binder chain's amino-acid sequence from a PDB file.
+
+    Reads CA records on ``binder_chain`` in residue-sequence order. Used as a
+    fallback when ``final_design_stats.csv`` doesn't carry a row for this
+    design. Returns an empty string on any read/parse error so the caller can
+    decide on a further fallback.
+    """
+    try:
+        text = pdb_path.read_text()
+    except Exception:
+        return ""
+    seen: set[tuple[str, int, str]] = set()
+    seq: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith(("ATOM  ", "HETATM")):
+            continue
+        if line[12:16].strip() != "CA":
+            continue
+        if line[21:22] != binder_chain:
+            continue
+        resname = line[17:20].strip()
+        try:
+            resseq = int(line[22:26])
+        except ValueError:
+            continue
+        icode = line[26:27]
+        key = (binder_chain, resseq, icode)
+        if key in seen:
+            continue
+        seen.add(key)
+        seq.append(_AA3_TO_1.get(resname, "X"))
+    return "".join(seq)
 
 
 def _load_final_stats(csv_path: Path) -> dict[str, dict[str, str]]:
@@ -664,6 +752,14 @@ def _as_float(v: object) -> float | None:
         return float(v)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _first_float(row: dict[str, str], *keys: str) -> float | None:
+    for key in keys:
+        value = _as_float(row.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 __all__ = [

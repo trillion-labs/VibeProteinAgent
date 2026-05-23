@@ -211,8 +211,9 @@ def test_collect_designs_reads_accepted_pdbs(tmp_path):
         "binder_0,MKKLPLLFAA,0.71,0.88,8.2,15.4\n"
         "binder_1,AAAAAAAAAA,0.55,0.80,12.1,NA\n"
     )
-    designs = _collect_designs(design_path=tmp_path, binder_length=10)
+    designs, warnings = _collect_designs(design_path=tmp_path, binder_length=10)
     assert len(designs) == 2
+    assert warnings == []
     by_path = {Path(d.pdb_path).name: d for d in designs}
     assert by_path["binder_0.pdb"].sequence == "MKKLPLLFAA"
     assert by_path["binder_0.pdb"].iptm == pytest.approx(0.71)
@@ -221,6 +222,51 @@ def test_collect_designs_reads_accepted_pdbs(tmp_path):
     assert by_path["binder_0.pdb"].sap_score == pytest.approx(15.4)
     # NA collapses to None.
     assert by_path["binder_1.pdb"].sap_score is None
+
+
+def test_collect_designs_matches_bindcraft_model_suffix_to_stats(tmp_path):
+    accepted = tmp_path / "Accepted"
+    accepted.mkdir()
+    (accepted / "prodigy_3BZD_l30_s680367_mpnn1_model2.pdb").write_text("ATOM\nEND\n")
+    (tmp_path / "final_design_stats.csv").write_text(
+        "Design,Sequence,Average_i_pTM,Average_pLDDT,Average_i_pAE,Binder_SAP_score\n"
+        "prodigy_3BZD_l30_s680367_mpnn1,MKKLPLLFAAGGSSYYTTQQ,0.73,0.91,6.2,11.4\n"
+    )
+
+    designs, warnings = _collect_designs(design_path=tmp_path, binder_length=20)
+
+    assert warnings == []
+    assert len(designs) == 1
+    design = designs[0]
+    assert design.sequence == "MKKLPLLFAAGGSSYYTTQQ"
+    assert design.iptm == pytest.approx(0.73)
+    assert design.plddt == pytest.approx(0.91)
+    assert design.pae_interaction == pytest.approx(6.2)
+    assert design.sap_score == pytest.approx(11.4)
+
+
+def test_collect_designs_falls_back_to_chain_b_sequence_when_stats_missing(tmp_path):
+    accepted = tmp_path / "Accepted"
+    accepted.mkdir()
+    (accepted / "orphan_model1.pdb").write_text(
+        "\n".join(
+            [
+                "ATOM      1  CA  MET B   1       0.000   0.000   0.000  1.00 20.00           C",
+                "ATOM      2  CA  LYS B   2       1.000   0.000   0.000  1.00 20.00           C",
+                "ATOM      3  CA  GLY B   3       2.000   0.000   0.000  1.00 20.00           C",
+                "ATOM      4  CA  ALA A   1       3.000   0.000   0.000  1.00 20.00           C",
+                "END",
+            ]
+        )
+    )
+
+    designs, warnings = _collect_designs(design_path=tmp_path, binder_length=30)
+
+    assert len(designs) == 1
+    assert designs[0].sequence == "MKG"
+    assert designs[0].iptm is None
+    assert warnings
+    assert "recovered sequence from PDB chain B" in warnings[0]
 
 
 def test_collect_designs_raises_when_no_accepted_dir(tmp_path):

@@ -45,7 +45,7 @@
       "type": "string",
       "enum": ["infer", "pipeline"],
       "default": "infer",
-      "description": "Runtime mode. 'infer' (default) runs diffusion-only in-process and emits backbone-only outputs (sequence is filled with 'X' placeholders). 'pipeline' uses a persistent sidecar in the dedicated `pxdesign-pipeline-vpa` conda env to run AF2-IG initial guess + ProteinMPNN sequence design + filtering and produce real designed amino-acid sequences."
+      "description": "Runtime mode. 'infer' (default) runs diffusion-only in-process and emits backbone-only outputs with sequence unavailable. 'pipeline' uses a persistent sidecar in the dedicated `pxdesign-pipeline-vpa` conda env to run AF2-IG initial guess + ProteinMPNN sequence design + filtering and produce real designed amino-acid sequences."
     },
     "top_k_designs": {
       "type": "integer",

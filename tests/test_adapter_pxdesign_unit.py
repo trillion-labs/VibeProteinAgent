@@ -329,6 +329,35 @@ def test_collect_outputs_finds_designs(tmp_path: Path) -> None:
     assert designs[0].score == pytest.approx(0.7)
 
 
+def test_collect_outputs_treats_infer_pseudo_residues_as_no_sequence(
+    tmp_path: Path,
+) -> None:
+    """PXDesign infer emits backbone pseudo-residues, not designed AAs."""
+    task = "design_5o45_A_30aa"
+    seed = 29
+    pred_dir = tmp_path / task / f"seed_{seed}" / "predictions"
+    pred_dir.mkdir(parents=True)
+    cif_text = (
+        "data_test\n#\n"
+        "loop_\n"
+        "_entity_poly_seq.entity_id\n"
+        "_entity_poly_seq.hetero\n"
+        "_entity_poly_seq.mon_id\n"
+        "_entity_poly_seq.num\n"
+        "1 n MET 1\n"
+        "2 n xpb 1\n"
+        "2 n xpb 2\n"
+        "2 n xpb 3\n"
+        "#\n"
+    )
+    (pred_dir / f"{task}_sample_0.cif").write_text(cif_text)
+
+    designs = PXDesignAdapter._collect_outputs(tmp_path, task, seed, 30)
+
+    assert len(designs) == 1
+    assert designs[0].sequence == ""
+
+
 def test_collect_outputs_empty_returns_empty(tmp_path: Path) -> None:
     designs = PXDesignAdapter._collect_outputs(tmp_path, "no_task", 1, 50)
     assert designs == []

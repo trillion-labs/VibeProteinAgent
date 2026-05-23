@@ -12,7 +12,7 @@ import mimetypes
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1085,7 +1085,169 @@ def _extract_sequence_from_structure(path: Path) -> str:
     return ""
 
 
-def _structure_sequence_track(sequence: str, dom_id: str) -> str:
+def _extract_chains_from_structure(path: Path) -> list[tuple[str, str]]:
+    """Parse ``path`` into ``[(chain_id, one_letter_sequence), ...]``.
+
+    Used to identify binder vs target chains for binder-design tool outputs
+    (BindCraft, BoltzGen, etc.) where the PDB carries a target+binder
+    complex while the candidate's declared sequence is the binder only.
+
+    Returns the chains in the order their CA atoms first appear (matches
+    the natural author-ordering in the structure file). Empty list on any
+    parse failure or unsupported format. Only ATOM/CA records are read;
+    HETATM is skipped so cofactors don't pollute chain sequences.
+    """
+    if not path.is_file():
+        return []
+    suffix = path.suffix.lower()
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return []
+
+    # Insertion-ordered dict so chain order matches file order.
+    chains: dict[str, list[str]] = {}
+    seen: set[tuple[str, str]] = set()  # (chain, residue-key) dedupe
+
+    if suffix in {".pdb", ".ent"}:
+        for line in text.splitlines():
+            if not line.startswith("ATOM") or len(line) < 27:
+                continue
+            if line[12:16].strip() != "CA":
+                continue
+            chain = line[21:22].strip() or "?"
+            try:
+                resi = int(line[22:26])
+            except ValueError:
+                continue
+            icode = line[26:27]
+            key = (chain, f"{resi}{icode}")
+            if key in seen:
+                continue
+            seen.add(key)
+            resn = line[17:20].strip().upper()
+            chains.setdefault(chain, []).append(_AA3_TO_1.get(resn, "X"))
+        return [(cid, "".join(letters)) for cid, letters in chains.items()]
+
+    if suffix in {".cif", ".mmcif"}:
+        # Reuse the column-discovery pass from _extract_sequence_from_structure.
+        lines = text.splitlines()
+        cols: list[str] = []
+        in_header = False
+        in_loop = False
+        start = -1
+        for idx, raw in enumerate(lines):
+            stripped = raw.strip()
+            if stripped == "loop_":
+                in_header = True
+                in_loop = False
+                cols = []
+                continue
+            if in_header and stripped.startswith("_atom_site."):
+                cols.append(stripped.split(".", 1)[1].strip())
+                continue
+            if in_header and stripped.startswith("_") and not stripped.startswith("_atom_site."):
+                in_header = False
+                cols = []
+                continue
+            if in_header and cols and not stripped.startswith("_"):
+                in_header = False
+                in_loop = True
+                start = idx
+                break
+        if not (in_loop and cols and start >= 0):
+            return []
+        try:
+            grp = cols.index("group_PDB") if "group_PDB" in cols else -1
+            comp_idx = cols.index("label_comp_id") if "label_comp_id" in cols else cols.index("auth_comp_id")
+            atom_idx = cols.index("label_atom_id") if "label_atom_id" in cols else cols.index("auth_atom_id")
+            asym_idx = cols.index("label_asym_id") if "label_asym_id" in cols else cols.index("auth_asym_id")
+            seq_idx = cols.index("label_seq_id") if "label_seq_id" in cols else cols.index("auth_seq_id")
+        except ValueError:
+            return []
+        for raw in lines[start:]:
+            row = raw.strip()
+            if not row or row.startswith("#") or row.startswith("loop_") or row.startswith("_"):
+                break
+            parts = row.split()
+            if len(parts) < len(cols):
+                continue
+            if grp >= 0 and parts[grp] != "ATOM":
+                continue
+            if parts[atom_idx].strip('"').strip("'") != "CA":
+                continue
+            chain = parts[asym_idx]
+            resi = parts[seq_idx]
+            key = (chain, resi)
+            if key in seen:
+                continue
+            seen.add(key)
+            resn = parts[comp_idx].strip('"').strip("'").upper()
+            chains.setdefault(chain, []).append(_AA3_TO_1.get(resn, "X"))
+        return [(cid, "".join(letters)) for cid, letters in chains.items()]
+
+    return []
+
+
+@dataclass(frozen=True, slots=True)
+class _ChainContext:
+    """Per-candidate chain-composition hint.
+
+    Populated when the candidate's structure is a binder-in-complex (i.e.
+    multi-chain PDB/CIF where exactly one chain's sequence matches
+    ``candidate.sequence``). Used to surface "binder chain B · 30 aa,
+    target chain A · 109 aa" labelling so the obvious size mismatch
+    between the displayed sequence and the rendered complex stops looking
+    like a bug. Empty / default-constructed for single-chain structures
+    and for candidates without a sequence to anchor against.
+    """
+
+    binder_chain_id: str | None = None
+    # [(chain_id, residue_count), ...] in file order, excluding the binder.
+    target_chains: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def is_complex(self) -> bool:
+        return bool(self.binder_chain_id and self.target_chains)
+
+    def target_summary(self) -> str:
+        """e.g. ``'target chain A (109 aa)'`` or ``'target chains A (109 aa), C (8 aa)'``."""
+        if not self.target_chains:
+            return ""
+        parts = [f"chain {cid} ({n} aa)" for cid, n in self.target_chains]
+        if len(parts) == 1:
+            return f"target {parts[0]}"
+        return "target chains " + ", ".join(parts)
+
+
+def _chain_context_for(candidate: ReportCandidate) -> _ChainContext:
+    """Detect binder-in-complex layout for ``candidate``.
+
+    Returns an empty (non-complex) context unless the structure has 2+
+    chains AND exactly one of them is an exact sequence match for
+    ``candidate.sequence`` — the unambiguous "this chain is the
+    designed binder, the rest are target context" signal.
+    """
+    if not candidate.sequence or not candidate.structure_path:
+        return _ChainContext()
+    chains = _extract_chains_from_structure(Path(candidate.structure_path))
+    if len(chains) <= 1:
+        return _ChainContext()
+    matches = [cid for cid, cseq in chains if cseq == candidate.sequence]
+    if len(matches) != 1:
+        return _ChainContext()
+    binder_id = matches[0]
+    targets = tuple((cid, len(cseq)) for cid, cseq in chains if cid != binder_id)
+    if not targets:
+        return _ChainContext()
+    return _ChainContext(binder_chain_id=binder_id, target_chains=targets)
+
+
+def _structure_sequence_track(
+    sequence: str,
+    dom_id: str,
+    chain_context: _ChainContext | None = None,
+) -> str:
     """Inline residue-letter strip above the 3D viewer.
 
     Each letter is its own ``<span class="sst-cell" data-resi="N">`` so
@@ -1117,12 +1279,29 @@ def _structure_sequence_track(sequence: str, dom_id: str) -> str:
     meta_extra = (
         f' · ruler every {ruler_every} residues' if long_seq else ''
     )
+    # For binder-design complex outputs, prepend the binder-chain id and
+    # follow with a target-context note so the sequence track stops looking
+    # like it disagrees with the rendered structure size.
+    if chain_context and chain_context.is_complex:
+        label_html = (
+            f'<span class="sst-label">Binder · chain {_h(chain_context.binder_chain_id)}</span>'
+        )
+        meta_html = (
+            f'<span class="sst-meta">{len(sequence)} residues · '
+            f'hover the structure to highlight · '
+            f'complex also shows {_h(chain_context.target_summary())}{meta_extra}</span>'
+        )
+    else:
+        label_html = '<span class="sst-label">Sequence</span>'
+        meta_html = (
+            f'<span class="sst-meta">{len(sequence)} residues · '
+            f'hover the structure to highlight{meta_extra}</span>'
+        )
     return (
         f'<div class="structure-sequence-track" data-target="{_attr(dom_id)}">'
         '<div class="sst-head">'
-        '<span class="sst-label">Sequence</span>'
-        f'<span class="sst-meta">{len(sequence)} residues · '
-        f'hover the structure to highlight{meta_extra}</span>'
+        f'{label_html}'
+        f'{meta_html}'
         '</div>'
         f'<code class="sst-strip">{"".join(cells)}</code>'
         '</div>'
@@ -1149,24 +1328,45 @@ def _candidate_cards(
     cards = []
     for candidate in candidates:
         eyebrow = "Candidate" if single else f"Top #{candidate.rank or '?'}"
-        viewer = _viewer_block(candidate)
         score_html = _hero_candidate_score(candidate)
+        # Compute the binder/target chain context once so both the viewer
+        # block and the right-side sequence block use the same labelling.
+        chain_context = _chain_context_for(candidate)
+        info_html = f"""<div class="candidate-info-col">
+      {_score_bars(candidate)}
+      {_flag_badges(candidate)}
+      <p class="why"><strong>Why this one?</strong> {_h(_why_candidate(candidate))}</p>
+      {_candidate_sequence_block(candidate, chain_context)}
+      {_candidate_downloads(candidate)}
+    </div>"""
+        # Sequence-only tools (esm2_embedding, esm3_tiny, ligandmpnn_redesign,
+        # ...) don't emit a structure artifact. Drop the empty left viewer
+        # column for those so the card isn't half-empty; the info column
+        # expands to full width via the .candidate-grid--solo modifier.
+        # When structure_path *is* set we keep the two-column layout even if
+        # the file is missing on disk — the viewer block surfaces that error
+        # so the missing-file bug stays visible instead of getting hidden.
+        if candidate.structure_path:
+            viewer = _viewer_block(candidate, chain_context)
+            grid_html = (
+                f'<div class="candidate-grid">'
+                f'<div class="candidate-viewer-col">{viewer}</div>'
+                f'{info_html}'
+                f'</div>'
+            )
+        else:
+            grid_html = (
+                f'<div class="candidate-grid candidate-grid--solo">'
+                f'{info_html}'
+                f'</div>'
+            )
         cards.append(
             f"""<article class="candidate-card">
   <div class="candidate-head">
     <div><p class="eyebrow">{_h(eyebrow)}</p><h3>{_h(candidate.candidate_id)}</h3></div>
     {score_html}
   </div>
-  <div class="candidate-grid">
-    <div class="candidate-viewer-col">{viewer}</div>
-    <div class="candidate-info-col">
-      {_score_bars(candidate)}
-      {_flag_badges(candidate)}
-      <p class="why"><strong>Why this one?</strong> {_h(_why_candidate(candidate))}</p>
-      {_candidate_sequence_block(candidate)}
-      {_candidate_downloads(candidate)}
-    </div>
-  </div>
+  {grid_html}
 </article>"""
         )
     return "\n".join(cards)
@@ -1188,13 +1388,21 @@ def _hero_candidate_score(candidate: ReportCandidate) -> str:
     return ""
 
 
-def _viewer_block(candidate: ReportCandidate) -> str:
+def _viewer_block(
+    candidate: ReportCandidate,
+    chain_context: _ChainContext | None = None,
+) -> str:
     """Inline 3Dmol.js viewer block per the per-candidate structure file.
 
     HTML scaffold follows the spec at docs/agent_layer.md (3D-viz section):
     header strip with sidechain toggle + fullscreen button, then a single
     empty <div> that $3Dmol.createViewer fills with its WebGL canvas, plus
     an absolutely-positioned status overlay for loading / error states.
+
+    When ``chain_context`` flags a binder-design complex, the default
+    colour mode flips from pLDDT to Chain so the binder and target are
+    visually distinct on first paint, and the header hint calls out the
+    complex composition.
     """
     if not candidate.structure_path:
         return "<div class='viewer-empty'>No structure artifact linked.</div>"
@@ -1212,18 +1420,39 @@ def _viewer_block(candidate: ReportCandidate) -> str:
     # for adapters (Boltz-2 etc.) that don't echo the input sequence in
     # ranked-candidates rows.
     sequence_str = candidate.sequence or _extract_sequence_from_structure(path)
+    is_complex = bool(chain_context and chain_context.is_complex)
+    default_colour = "chain" if is_complex else "plddt"
+    # Order options so the default one is the first (and only) ``selected``.
+    plddt_option = '<option value="plddt">pLDDT (AlphaFold)</option>'
+    spectrum_option = '<option value="spectrum">N to C spectrum</option>'
+    chain_option = '<option value="chain">Chain</option>'
+    if default_colour == "chain":
+        chain_option = '<option value="chain" selected>Chain</option>'
+    else:
+        plddt_option = '<option value="plddt" selected>pLDDT (AlphaFold)</option>'
+    if is_complex:
+        # Explicit complex-composition hint that subsumes the generic
+        # Pick-mode pointer. Reads more naturally than two separate hints.
+        hint_text = (
+            f"Binder chain {chain_context.binder_chain_id} in complex with "
+            f"{chain_context.target_summary()}. Turn on Pick, then hover "
+            f"residues for an instant residue card."
+        )
+    else:
+        hint_text = "Turn on Pick, then hover residues for an instant residue card."
     return f"""<section class="structure-section" data-target="{_attr(dom_id)}" data-format="{_attr(fmt)}"
          data-candidate-id="{_attr(candidate.candidate_id)}"
          data-structure-name="{_attr(structure_label)}"
-         data-sequence="{_attr(sequence_str)}">
+         data-sequence="{_attr(sequence_str)}"
+         data-default-colour="{_attr(default_colour)}">
   <header class="structure-header">
     <span class="structure-title">3D structure</span>
-    <span class="structure-hint">Turn on Pick, then hover residues for an instant residue card.</span>
+    <span class="structure-hint">{_h(hint_text)}</span>
     <label class="structure-control"><span>Colour</span>
       <select class="structure-color" data-target="{_attr(dom_id)}">
-        <option value="plddt" selected>pLDDT (AlphaFold)</option>
-        <option value="spectrum">N to C spectrum</option>
-        <option value="chain">Chain</option>
+        {plddt_option}
+        {spectrum_option}
+        {chain_option}
       </select>
     </label>
     <label class="structure-control">
@@ -1237,9 +1466,9 @@ def _viewer_block(candidate: ReportCandidate) -> str:
             data-target="{_attr(dom_id)}" aria-label="Toggle fullscreen"
             title="Expand (press Esc to exit)">&#x2922; Expand</button>
   </header>
-  {_structure_sequence_track(sequence_str, dom_id)}
+  {_structure_sequence_track(sequence_str, dom_id, chain_context)}
   <div class="structure-viewer" id="{_attr(dom_id)}" data-structure-id="{_attr(dom_id)}"></div>
-  <div class="structure-legend" data-legend="plddt">
+  <div class="structure-legend" data-legend="{_attr(default_colour)}">
     <span class="legend-text">Very low</span>
     <span class="legend-gradient"></span>
     <span class="legend-text">Very high</span>
@@ -1259,20 +1488,40 @@ def _viewer_block(candidate: ReportCandidate) -> str:
 </section>"""
 
 
-def _candidate_sequence_block(candidate: ReportCandidate) -> str:
+def _candidate_sequence_block(
+    candidate: ReportCandidate,
+    chain_context: _ChainContext | None = None,
+) -> str:
     if not candidate.sequence:
         return ""
+    is_complex = bool(chain_context and chain_context.is_complex)
+    # When the structure is a binder-design complex, surface the binder
+    # chain id in the head and add a small caption pointing at the target
+    # so the reader sees the sequence-vs-structure size gap is intentional.
+    head_suffix = (
+        f' · binder chain {_h(chain_context.binder_chain_id)}'
+        if is_complex
+        else ''
+    )
+    target_note = (
+        f"<p class='note'>Structure also shows {_h(chain_context.target_summary())}.</p>"
+        if is_complex
+        else ""
+    )
+    truncation_note = (
+        f"<p class='note'>… {len(candidate.sequence) - 240} more residues hidden</p>"
+        if len(candidate.sequence) > 240
+        else ""
+    )
     return (
         '<div class="sequence-block">'
         f'<div class="sequence-head"><strong>Sequence</strong> · {len(candidate.sequence)} aa'
+        f'{head_suffix}'
         f' <button class="copy-btn" data-copy="{_attr(candidate.sequence)}">Copy</button></div>'
         f"<code class='msa-seq'>{_colored_sequence(candidate.sequence[:240])}</code>"
-        + (
-            f"<p class='note'>… {len(candidate.sequence) - 240} more residues hidden</p>"
-            if len(candidate.sequence) > 240
-            else ""
-        )
-        + "</div>"
+        f"{truncation_note}"
+        f"{target_note}"
+        "</div>"
     )
 
 
@@ -1727,7 +1976,7 @@ def _wf_node_inputs_from_output(node: WorkflowNodeSummary) -> list[tuple[str, st
         add("backend", out.get("backend"))
         df = out.get("date_filter")
         if isinstance(df, dict) and (df.get("published_after") or df.get("published_before")):
-            add("dates", f"{df.get('published_after') or '…'} – {df.get('published_before') or '…'}")
+            add("dates", f"{df.get('published_after') or '...'} - {df.get('published_before') or '...'}")
     elif tool == "template_select":
         add("engine", out.get("engine"))
         add("query kind", out.get("query_kind"))
@@ -1785,7 +2034,7 @@ def _workflow_composition(model: ReportModel) -> str:
         mode_key, mode_label = "tool", "Single tool run"
         lead = "This run executed a single tool."
     elif kind == "agent" or name.lower().startswith("agent"):
-        mode_key, mode_label = "agent", "LLM agent–composed"
+        mode_key, mode_label = "agent", "LLM agent-composed"
         lead = (
             "An LLM agent selected and ordered these steps automatically — no "
             "explicit user plan is recorded with the run. The steps below are "
@@ -2652,7 +2901,7 @@ def _sequence_retrieval_widget(output: dict[str, Any]) -> str:
         # fixed-pitch residue track; every row shares a single horizontal
         # scrollbar and a column ruler so long sequences never overflow.
         rows: list[str] = []
-        for (header, seq), mask in zip(records, masks):
+        for (header, seq), mask in zip(records, masks, strict=False):
             acc = header.split()[0] if header else "?"
             meta = metadata.get(acc, {})
             length = meta.get("length") or len(seq)
@@ -2774,7 +3023,7 @@ def _dssp_ss_strip(chain_label: str, first_resi: int, ss_string: str) -> str:
 
 def _format_position_list(positions: list[Any], *, cap: int = 40) -> str:
     """Render a sorted residue-position list, collapsing consecutive runs
-    into ``start–end`` ranges (e.g. ``[5,6,7,9] -> "5–7, 9"``)."""
+    into ``start-end`` ranges (e.g. ``[5,6,7,9] -> "5-7, 9"``)."""
     nums = sorted(
         {int(p) for p in positions if isinstance(p, (int, float)) and not isinstance(p, bool)}
     )
@@ -2786,11 +3035,11 @@ def _format_position_list(positions: list[Any], *, cap: int = 40) -> str:
         if n == prev + 1:
             prev = n
             continue
-        runs.append(str(start) if start == prev else f"{start}–{prev}")
+        runs.append(str(start) if start == prev else f"{start}-{prev}")
         start = prev = n
-    runs.append(str(start) if start == prev else f"{start}–{prev}")
+    runs.append(str(start) if start == prev else f"{start}-{prev}")
     if len(runs) > cap:
-        return ", ".join(runs[:cap]) + f", … (+{len(runs) - cap} more)"
+        return ", ".join(runs[:cap]) + f", ... (+{len(runs) - cap} more)"
     return ", ".join(runs)
 
 
@@ -3998,7 +4247,7 @@ def _sequence_edit_widget(output: dict[str, Any]) -> str:
         _stat("Mutant", f"{int(mut_len)} aa")
     if wt_len is not None and mut_len is not None:
         delta = int(mut_len) - int(wt_len)
-        _stat("Length Δ", f"+{delta}" if delta >= 0 else f"−{abs(delta)}")
+        _stat("Length delta", f"+{delta}" if delta >= 0 else f"-{abs(delta)}")
     mismatch = output.get("mismatch_count")
     if mismatch is not None:
         _stat("Changed residues", str(int(mismatch)))
@@ -4433,7 +4682,7 @@ def _vina_energy_html(pose: dict[str, Any]) -> str:
     """Vina score-term breakdown — diverging bars about a zero axis."""
     terms = [
         ("Intermolecular", pose.get("inter"),
-         "Receptor–ligand interaction energy — the actual binding contribution."),
+         "Receptor-ligand interaction energy - the actual binding contribution."),
         ("Intramolecular", pose.get("intra"),
          "Ligand internal (strain) energy in the bound conformation."),
         ("Unbound reference", pose.get("unbound"),
@@ -4470,7 +4719,7 @@ def _vina_energy_html(pose: dict[str, Any]) -> str:
     return (
         f'<div class="vina-energy">{"".join(rows)}{result}</div>'
         '<p class="vina-caption">Vina score = (intermolecular + intramolecular) '
-        "− unbound reference. Negative terms (blue) are favourable; positive "
+        "- unbound reference. Negative terms (blue) are favourable; positive "
         "terms (amber) are penalties.</p>"
     )
 
@@ -4602,7 +4851,7 @@ def _vina_widget(output: dict[str, Any]) -> str:
         cards.append(_score_card(
             "Ligand efficiency",
             f"{le:.3f}",
-            "Binding free energy per heavy atom (−ΔG / N) — a medicinal-"
+            "Binding free energy per heavy atom (-dG / N) - a medicinal-"
             "chemistry yardstick; ≈0.3 kcal/mol per atom marks a useful hit.",
             leq,
             gauge={"value": le, "lo": 0.0, "hi": 0.5},
@@ -5697,7 +5946,7 @@ def _literature_search_widget(output: dict[str, Any]) -> str:
     pb = date_filter.get("published_before")
     if pa or pb:
         stats.append(
-            f'<span class="lit-stat">dates {_h(str(pa or "…"))} – {_h(str(pb or "…"))}</span>'
+            f'<span class="lit-stat">dates {_h(str(pa or "..."))} - {_h(str(pb or "..."))}</span>'
         )
 
     query_html = (
@@ -7532,6 +7781,17 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   display:grid; grid-template-columns: minmax(360px, 1.3fr) minmax(260px, 1fr);
   gap:22px; margin-top:16px;
 }
+/* Sequence-only tools (no structure artifact): collapse the grid to a
+   single full-width info column instead of leaving an empty viewer slot
+   on the left that just says "No structure artifact linked." */
+.candidate-grid--solo { grid-template-columns: 1fr; }
+/* CSS Grid items default to ``min-width:auto`` (= grow to fit content),
+   so a long sequence span or a wide score-bar makes the whole column
+   blow past its track and overflow the card. Pin both columns to
+   ``min-width:0`` so the track width wins; the sequence block's own
+   ``overflow-x:auto`` then kicks in and gives a horizontal scrollbar
+   instead of pushing siblings (score bars, bar tracks, ...) off-card. */
+.candidate-viewer-col, .candidate-info-col { min-width:0; }
 
 /* Inline 3D viewer (3Dmol.js host) */
 .structure-section {
@@ -9162,11 +9422,27 @@ def _js() -> str:
       }
     } catch (e) { /* selectedAtoms may not be available in some versions */ }
 
+    // Honour a per-section default colour (set by the Python renderer for
+    // binder-design complexes — defaults binder/target to chain colouring so
+    // the two are visually distinct from the first paint). Falls back to the
+    // pLDDT-detection heuristic otherwise. pLDDT default is still gated on
+    // having real B-factor data so a placeholder zero column stays muted.
+    const sectionEarly = container.closest('.structure-section');
+    const defaultColour = (sectionEarly && sectionEarly.dataset.defaultColour) || '';
+    let initialColour;
+    if (defaultColour === 'plddt' && !hasPlddt) {
+      initialColour = 'spectrum';
+    } else if (defaultColour) {
+      initialColour = defaultColour;
+    } else {
+      initialColour = hasPlddt ? 'plddt' : 'spectrum';
+    }
+
     // Per-viewer state: current colour mode + transient picker state.
     const state = {
       viewer,
       payload,
-      colourMode: hasPlddt ? 'plddt' : 'spectrum',
+      colourMode: initialColour,
       sidechains: false,
       pickerActive: false,
       hoverKey: null,   // transient hover highlight {resi, chain}
