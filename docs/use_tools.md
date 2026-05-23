@@ -25,6 +25,11 @@ npx vibeproteinagent install preflight --tools boltz2_affinity,rfdiffusion,prote
 npx vibeproteinagent install --tools boltz2_affinity,rfdiffusion,proteinmpnn --cuda-profile auto --yes
 ```
 
+Boltz-2 affinity and BoltzGen are fetched as upstream source checkouts plus
+model/cache artifacts during install. If your lab already maintains shared
+copies, point `VPA_BOLTZ_TREE`, `VPA_BOLTZ_CACHE`, `VPA_BOLTZGEN_TREE`, and
+`VPA_BOLTZGEN_CACHE` at those locations before running VPA.
+
 For ESM3 or other gated Hugging Face model downloads, export a credential before
 installing or before the first run:
 

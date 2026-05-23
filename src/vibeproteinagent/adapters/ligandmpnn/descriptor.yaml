@@ -1,7 +1,7 @@
 name: ligandmpnn
 version: "1.0.0"
 category: inverse_folding
-description: "Inverse folding that designs sequences for a fixed protein backbone, conditioning on nearby small-molecule, cofactor, or metal atoms in the same PDB. Variants: `ligand_mpnn` (default), `protein_mpnn`, `soluble_mpnn`, `ca_mpnn`. Prefer over `proteinmpnn` when ligands matter."
+description: "Ligand-aware inverse folding for fixed backbones. redesigned_positions are FASTA/sequence 1-indexed when sequence/fasta_path is provided; redesigned_residues is explicit PDB residue-id syntax."
 runtime: python
 backend: pytorch
 gpu_required: true

@@ -35,17 +35,42 @@
     "target_residues": {
       "type": ["string", "null"],
       "pattern": "^[0-9]+-[0-9]+$",
-      "default": null
+      "default": null,
+      "description": "Inclusive FASTA/sequence 1-indexed range when target_sequence/target_fasta_path is provided; otherwise legacy structure residue range."
     },
     "target_hotspots": {
       "type": "array",
       "items": {"type": ["integer", "string"]},
+      "default": [],
+      "description": "Integer values are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; string values such as A10 are explicit structure residue IDs."
+    },
+    "target_hotspot_residue_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
       "default": []
+    },
+    "target_sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Full FASTA/sequence for target_residues and integer target_hotspots sequence-to-structure mapping."
+    },
+    "target_fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "FASTA file for target_residues and integer target_hotspots sequence-to-structure mapping.",
+      "vpa:digest": "sha256-if-path"
+    },
+    "position_basis": {
+      "type": "string",
+      "enum": ["auto", "sequence", "structure"],
+      "default": "auto"
     },
     "contigs": {
       "type": ["array", "null"],
       "items": {"type": "string", "minLength": 1},
-      "default": null
+      "default": null,
+      "description": "Raw RFdiffusion-native contig syntax. Prefer target_residues for sequence-indexed target ranges."
     },
     "length_min": {"type": "integer", "minimum": 20, "maximum": 5000, "default": 100},
     "length_max": {"type": ["integer", "null"], "minimum": 20, "maximum": 5000, "default": null},
@@ -58,9 +83,24 @@
     "partial_T": {"type": ["integer", "null"], "minimum": 1, "maximum": 200, "default": null},
     "noise_scale_ca": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
     "noise_scale_frame": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
-    "inpaint_seq": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
-    "inpaint_str": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
-    "provide_seq": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
+    "inpaint_seq": {
+      "type": ["array", "null"],
+      "items": {"type": "string"},
+      "default": null,
+      "description": "RFdiffusion inpaint_seq selectors. Simple integer/range selectors are sequence-mapped when target_sequence/target_fasta_path is provided; complex selectors remain native syntax."
+    },
+    "inpaint_str": {
+      "type": ["array", "null"],
+      "items": {"type": "string"},
+      "default": null,
+      "description": "RFdiffusion inpaint_str selectors. Simple integer/range selectors are sequence-mapped when target_sequence/target_fasta_path is provided; complex selectors remain native syntax."
+    },
+    "provide_seq": {
+      "type": ["array", "null"],
+      "items": {"type": "string"},
+      "default": null,
+      "description": "RFdiffusion provide_seq selectors. Simple integer/range selectors are sequence-mapped when target_sequence/target_fasta_path is provided; complex selectors remain native syntax."
+    },
     "contig_length": {"type": ["string", "null"], "pattern": "^[0-9]+-[0-9]+$", "default": null},
     "checkpoint_path": {
       "type": ["string", "null"],

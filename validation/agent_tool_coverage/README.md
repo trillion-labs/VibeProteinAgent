@@ -22,10 +22,14 @@ Run from the repository root so the relative fixture paths in
 If the host has no system Python, use the installed VPA runtime directly:
 
 ```bash
-source "$HOME/.vibeproteinagent/env.sh"
+export VPA_HOME="${VPA_HOME:-/shared/projects/vpa/.vibeproteinagent}"
+source "$VPA_HOME/env.sh"
 export PATH="$VPA_HOME/envs/vpa/bin:$PATH"
 vpa --help
 ```
+
+On a multi-node cluster, `VPA_HOME` should be on shared storage. Do not let each
+node create its own local `~/.vibeproteinagent` cache.
 
 For full-profile sidecars, these exports are often written by install. If
 validation reports a sidecar env is missing even though install completed, set
@@ -46,7 +50,8 @@ export VPA_HF_CREDENTIAL="<huggingface-token>"
 If you prefer a real micromamba activation:
 
 ```bash
-source "$HOME/.vibeproteinagent/env.sh"
+export VPA_HOME="${VPA_HOME:-/shared/projects/vpa/.vibeproteinagent}"
+source "$VPA_HOME/env.sh"
 eval "$("$VPA_HOME/bootstrap/bin/micromamba" shell hook -s bash)"
 micromamba activate "$VPA_HOME/envs/vpa"
 vpa --help

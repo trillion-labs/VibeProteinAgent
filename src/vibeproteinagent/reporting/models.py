@@ -45,6 +45,10 @@ class WorkflowNodeSummary:
     job_id: str | None
     upstream: list[str] = field(default_factory=list)
     params_hash: str | None = None
+    # Resolved input parameters the node ran with — threaded through from the
+    # backing job record so the report can show *how* each step was invoked,
+    # not just a params hash. May be empty for older payloads.
+    params: dict[str, Any] = field(default_factory=dict)
     cache_key: str | None = None
     output: Any | None = None
     artifacts: list[ReportArtifact] = field(default_factory=list)

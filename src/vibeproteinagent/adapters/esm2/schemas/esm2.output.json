@@ -37,7 +37,7 @@
     },
     "filled_positions": {
       "type": "array",
-      "items": {"type": "integer", "minimum": 0},
+      "items": {"type": "integer", "minimum": 1},
       "default": []
     },
     "generation_strategy": {

@@ -1,7 +1,7 @@
 name: bindcraft
 version: "1.0.0"
 category: protein_design
-description: "End-to-end protein binder design against a target PDB: hallucinates the binder via AlphaFold2-multimer backprop, redesigns with ProteinMPNN, and filters with PyRosetta interface metrics. Returns ready-to-test binder sequences plus predicted complexes, not just backbones."
+description: "End-to-end binder design against a target PDB. Integer target_hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; target_hotspot_residue_ids are explicit PDB IDs."
 runtime: python
 backend: jax
 gpu_required: true

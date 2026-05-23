@@ -18,9 +18,17 @@
     "return_attention": {"type": "boolean", "default": false},
     "mask_positions": {
       "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "uniqueItems": true,
+      "default": [],
+      "description": "FASTA/sequence 1-indexed positions to mask."
+    },
+    "mask_indices_zero_based": {
+      "type": "array",
       "items": {"type": "integer", "minimum": 0},
       "uniqueItems": true,
-      "default": []
+      "default": [],
+      "description": "Advanced compatibility field for zero-based mask indices."
     }
   },
   "additionalProperties": false,

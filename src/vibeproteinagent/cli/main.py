@@ -20,6 +20,7 @@ from vibeproteinagent.cli.commands.workflow import workflow_app
 from vibeproteinagent.cli.commands.workspace import workspace_app
 from vibeproteinagent.cli.output import print_envelope_ok
 from vibeproteinagent.cli.render import render_version
+from vibeproteinagent.core.config import load_vpa_env_file
 from vibeproteinagent.core.log import Verbosity, detect_style, set_cli_state
 from vibeproteinagent.install.cli import install_app
 
@@ -44,6 +45,7 @@ def _root(
     ),
 ) -> None:
     """Configure global output mode for the invocation."""
+    load_vpa_env_file()
     verbosity = Verbosity.NORMAL
     if quiet:
         verbosity = Verbosity.QUIET

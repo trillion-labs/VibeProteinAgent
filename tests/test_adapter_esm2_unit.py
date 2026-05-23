@@ -51,7 +51,7 @@ def test_embedding_input_rejects_template_mask_characters():
 def test_sequence_generation_accepts_partial_template():
     p = ESM2Input(mode="sequence_generation", sequence="MKX?L", mask_positions=[1])
     assert p.sequence == "MKX?L"
-    assert _masked_positions(p.sequence, p.mask_positions) == [1, 2, 3]
+    assert _masked_positions(p.sequence, p.mask_positions) == [1, 3, 4]
 
 
 def test_output_round_trip():
@@ -107,7 +107,7 @@ def test_sequence_generation_uses_masked_lm_logits(tmp_path):
     out = adapter.run(params, null_context(tmp_path))
     assert out.mode == "sequence_generation"
     assert out.generated_sequences == ["ACAAD"]
-    assert out.filled_positions == [2, 3]
+    assert out.filled_positions == [3, 4]
     assert out.generation_strategy == "esm2_mlm_argmax"
     assert out.fallback_used is False
     assert out.per_residue_embeddings_npz is None

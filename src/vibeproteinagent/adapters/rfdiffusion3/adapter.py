@@ -26,6 +26,11 @@ from pydantic import BaseModel, Field
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.residue_mapping import (
+    PositionBasis,
+    parse_structure_residue_refs,
+    resolve_positions,
+)
 
 # --------------------------------------------------------------------------- paths
 
@@ -78,6 +83,10 @@ class RFdiffusion3Input(BaseModel):
     target_pdb: str = Field(..., min_length=1)
     target_chain: str = Field(default="A", min_length=1, max_length=1)
     target_hotspots: list[int] = Field(default_factory=list)
+    target_hotspot_residue_ids: list[str] = Field(default_factory=list)
+    target_sequence: str | None = None
+    target_fasta_path: str | None = Field(default=None, min_length=1)
+    position_basis: PositionBasis = "auto"
     binder_length: int = Field(default=60, ge=30, le=200)
     num_designs: int = Field(default=8, ge=1, le=64)
     num_diffusion_steps: int = Field(default=200, ge=10, le=200)
@@ -95,6 +104,8 @@ class RFdiffusion3Output(BaseModel):
     designs: list[RFdiffusion3Design]
     runtime_ms: int
     num_designs_returned: int
+    position_mappings: dict[str, object] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- adapter
@@ -134,7 +145,10 @@ class RFdiffusion3Adapter(ToolAdapter):
         staged_target = job_inputs / target.name
         shutil.copyfile(target, staged_target)
 
-        spec = _build_input_spec(params, staged_target)
+        spec, position_mappings, mapping_warnings = _build_input_spec_with_mappings(
+            params,
+            staged_target,
+        )
         inputs_path = job_inputs / "rfd3_inputs.json"
         inputs_path.write_text(json.dumps({"design": spec}, indent=2))
 
@@ -170,6 +184,8 @@ class RFdiffusion3Adapter(ToolAdapter):
             designs=designs,
             runtime_ms=_format_runtime_ms(t0),
             num_designs_returned=len(designs),
+            position_mappings=position_mappings,
+            warnings=mapping_warnings,
         )
 
     def estimate_vram(self, params: RFdiffusion3Input) -> int:
@@ -277,9 +293,26 @@ def _target_residue_span(pdb: Path, chain: str) -> tuple[int, int]:
 
 
 def _build_input_spec(params: RFdiffusion3Input, staged_target: Path) -> dict[str, object]:
+    return _build_input_spec_with_mappings(params, staged_target)[0]
+
+
+def _build_input_spec_with_mappings(
+    params: RFdiffusion3Input,
+    staged_target: Path,
+) -> tuple[dict[str, object], dict[str, object], list[str]]:
     start, end = _target_residue_span(staged_target, params.target_chain)
+    hotspot_resolution = resolve_positions(
+        residues=parse_structure_residue_refs(staged_target, params.target_chain),
+        positions=params.target_hotspots,
+        explicit_residue_ids=params.target_hotspot_residue_ids,
+        chain_id=params.target_chain,
+        sequence=params.target_sequence,
+        fasta_path=params.target_fasta_path,
+        position_basis=params.position_basis,
+        label="target_hotspots",
+    )
     hotspots = {
-        f"{params.target_chain}{residue}": "CA" for residue in params.target_hotspots
+        residue_id: "CA" for residue_id in hotspot_resolution.residue_ids
     }
     spec: dict[str, object] = {
         "dialect": 2,
@@ -293,7 +326,10 @@ def _build_input_spec(params: RFdiffusion3Input, staged_target: Path) -> dict[st
     if hotspots:
         spec["infer_ori_strategy"] = "hotspots"
         spec["select_hotspots"] = hotspots
-    return spec
+    mappings = {
+        "target_hotspots": hotspot_resolution.to_audit()
+    }
+    return spec, mappings, hotspot_resolution.warnings
 
 
 def _collect_designs(out_dir: Path, fallback_length: int) -> list[RFdiffusion3Design]:

@@ -12,6 +12,12 @@ from vibeproteinagent.adapters import _proteina_complexa_common as common
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.adapters.proteina_complexa import availability_skip_reason
+from vibeproteinagent.adapters.residue_mapping import (
+    PositionBasis,
+    parse_residue_id,
+    parse_structure_residue_refs,
+    resolve_positions,
+)
 
 ProteinaComplexaMode = Literal["protein_binder", "ligand_binder", "motif"]
 ProteinaComplexaSearchAlgorithm = Literal[
@@ -68,10 +74,17 @@ class ProteinaComplexaInput(BaseModel):
     )
     target_chain: str = Field(default="A", min_length=1, max_length=1)
     target_pocket_residues: list[int] = Field(default_factory=list)
+    target_pocket_residue_ids: list[str] = Field(default_factory=list)
+    target_sequence: str | None = None
+    target_fasta_path: str | None = Field(default=None, min_length=1)
     ligand_smiles: str | None = Field(default=None, min_length=1)
     motif_pdb: str | None = Field(default=None, min_length=1)
     motif_chain: str = Field(default="A", min_length=1, max_length=1)
     motif_residues: list[int] = Field(default_factory=list)
+    motif_residue_ids: list[str] = Field(default_factory=list)
+    motif_sequence: str | None = None
+    motif_fasta_path: str | None = Field(default=None, min_length=1)
+    position_basis: PositionBasis = "auto"
     total_length: int | None = Field(default=None, ge=30, le=400)
     binder_length: int = Field(default=80, ge=30, le=200)
     num_designs: int | None = Field(default=None, ge=1, le=128)
@@ -112,7 +125,7 @@ class ProteinaComplexaInput(BaseModel):
             missing = []
             if not self.target_pdb:
                 missing.append("target_pdb")
-            if not self.target_pocket_residues:
+            if not self.target_pocket_residues and not self.target_pocket_residue_ids:
                 missing.append("target_pocket_residues")
             if not self.ligand_smiles:
                 missing.append("ligand_smiles")
@@ -124,7 +137,7 @@ class ProteinaComplexaInput(BaseModel):
             missing = []
             if not self.motif_pdb:
                 missing.append("motif_pdb")
-            if not self.motif_residues:
+            if not self.motif_residues and not self.motif_residue_ids:
                 missing.append("motif_residues")
             if self.total_length is None:
                 missing.append("total_length")
@@ -154,6 +167,8 @@ class ProteinaComplexaOutput(BaseModel):
     runtime_ms: int
     num_designs_returned: int
     seeds_used: list[int]
+    position_mappings: dict[str, object] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 @register_adapter("descriptor.yaml")
@@ -191,6 +206,7 @@ class ProteinaComplexaAdapter(ToolAdapter):
             )
 
         prepared_input, task_name = _prepare_mode_input(params, ctx.job_dir)
+        position_mappings, mapping_warnings = _position_mapping_audit(params)
         run_name = params.run_name or f"vpa_{ctx.job_id}"
         overrides = _build_overrides(
             params=params,
@@ -230,6 +246,8 @@ class ProteinaComplexaAdapter(ToolAdapter):
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
             seeds_used=[params.seed] if params.seed is not None else [],
+            position_mappings=position_mappings,
+            warnings=mapping_warnings,
         )
 
     def estimate_vram(self, params: ProteinaComplexaInput) -> int:
@@ -329,7 +347,7 @@ def _ligand_binder_overrides(
     target: Path,
 ) -> list[str]:
     task_name = common.hydra_task_key(target, prefix="ligand_target")
-    pocket_csv = ",".join(str(i) for i in params.target_pocket_residues)
+    pocket_csv = ",".join(_target_pocket_labels(params, target))
     base = f"++generation.target_dict_cfg.{task_name}"
     return [
         *_base_overrides(params.mode, run_name),
@@ -358,12 +376,13 @@ def _motif_overrides(
 ) -> list[str]:
     assert params.total_length is not None
     task_name = common.hydra_task_key(motif, prefix="motif")
+    motif_residues = _resolved_motif_resseqs(params)
     contig = common.motif_contig_string(
         chain=params.motif_chain,
-        residues=params.motif_residues,
+        residues=motif_residues,
         total_length=params.total_length,
     )
-    segment_order = common.motif_segment_order(params.motif_residues)
+    segment_order = common.motif_segment_order(motif_residues)
     base = f"++generation.motif_dict_cfg.{task_name}"
     return [
         *_base_overrides(params.mode, run_name),
@@ -451,7 +470,7 @@ def _prepare_motif_only_pdb(params: ProteinaComplexaInput, job_dir: Path) -> Pat
     source = Path(params.motif_pdb).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(f"motif_pdb not found: {source}")
-    residues = set(params.motif_residues)
+    residues = set(_resolved_motif_resseqs(params))
     selected: list[str] = []
     for line in source.read_text().splitlines(keepends=True):
         if not line.startswith(("ATOM  ", "HETATM")):
@@ -473,6 +492,85 @@ def _prepare_motif_only_pdb(params: ProteinaComplexaInput, job_dir: Path) -> Pat
     prepared = job_dir / f"{source.stem}_motif_only.pdb"
     prepared.write_text("".join(selected) + "TER\nEND\n")
     return prepared
+
+
+def _target_pocket_labels(params: ProteinaComplexaInput, target: Path) -> list[str]:
+    refs = parse_structure_residue_refs(target, params.target_chain)
+    if not refs:
+        return [
+            *[str(pos) for pos in params.target_pocket_residues],
+            *params.target_pocket_residue_ids,
+        ]
+    resolution = resolve_positions(
+        residues=refs,
+        positions=params.target_pocket_residues,
+        explicit_residue_ids=params.target_pocket_residue_ids,
+        chain_id=params.target_chain,
+        sequence=params.target_sequence,
+        fasta_path=params.target_fasta_path,
+        position_basis=params.position_basis,
+        label="target_pocket_residues",
+    )
+    return resolution.residue_ids
+
+
+def _resolved_motif_resseqs(params: ProteinaComplexaInput) -> list[int]:
+    assert params.motif_pdb is not None
+    source = Path(params.motif_pdb).expanduser().resolve()
+    resolution = resolve_positions(
+        residues=parse_structure_residue_refs(source, params.motif_chain),
+        positions=params.motif_residues,
+        explicit_residue_ids=params.motif_residue_ids,
+        chain_id=params.motif_chain,
+        sequence=params.motif_sequence,
+        fasta_path=params.motif_fasta_path,
+        position_basis=params.position_basis,
+        label="motif_residues",
+    )
+    return [
+        parse_residue_id(residue_id, default_chain=params.motif_chain).resseq
+        for residue_id in resolution.residue_ids
+    ]
+
+
+def _position_mapping_audit(params: ProteinaComplexaInput) -> tuple[dict[str, object], list[str]]:
+    mappings: dict[str, object] = {}
+    warnings: list[str] = []
+    if params.mode == "motif" and params.motif_pdb:
+        source = Path(params.motif_pdb).expanduser().resolve()
+        resolution = resolve_positions(
+            residues=parse_structure_residue_refs(source, params.motif_chain),
+            positions=params.motif_residues,
+            explicit_residue_ids=params.motif_residue_ids,
+            chain_id=params.motif_chain,
+            sequence=params.motif_sequence,
+            fasta_path=params.motif_fasta_path,
+            position_basis=params.position_basis,
+            label="motif_residues",
+        )
+        mappings["motif_residues"] = resolution.to_audit()
+        warnings.extend(resolution.warnings)
+    if params.mode == "ligand_binder" and params.target_pdb:
+        target = Path(params.target_pdb).expanduser().resolve()
+        refs = parse_structure_residue_refs(target, params.target_chain)
+        if refs:
+            resolution = resolve_positions(
+                residues=refs,
+                positions=params.target_pocket_residues,
+                explicit_residue_ids=params.target_pocket_residue_ids,
+                chain_id=params.target_chain,
+                sequence=params.target_sequence,
+                fasta_path=params.target_fasta_path,
+                position_basis=params.position_basis,
+                label="target_pocket_residues",
+            )
+            mappings["target_pocket_residues"] = resolution.to_audit()
+            warnings.extend(resolution.warnings)
+        elif params.target_sequence or params.target_fasta_path:
+            warnings.append(
+                "target_pocket_residues could not be sequence-mapped because target_pdb has no protein residues"
+            )
+    return mappings, warnings
 
 
 def _collect_designs(

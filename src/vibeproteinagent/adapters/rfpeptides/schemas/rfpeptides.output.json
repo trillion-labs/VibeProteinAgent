@@ -37,7 +37,9 @@
       }
     },
     "runtime_ms": {"type": "integer", "minimum": 0},
-    "num_designs_returned": {"type": "integer", "minimum": 0}
+    "num_designs_returned": {"type": "integer", "minimum": 0},
+    "position_mappings": {"type": "object", "additionalProperties": true, "default": {}},
+    "warnings": {"type": "array", "items": {"type": "string"}, "default": []}
   },
   "additionalProperties": false
 }

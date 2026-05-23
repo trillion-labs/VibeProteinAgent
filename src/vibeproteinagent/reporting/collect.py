@@ -201,6 +201,7 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
             job_id=node.job_id,
             upstream=node.upstream,
             params_hash=node.params_hash,
+            params=params_by_node.get(node.node_id, {}),
             cache_key=node.cache_key,
             output=node.output,
             artifacts=artifacts,
@@ -272,6 +273,7 @@ def _node_from_job(job: JobRecord, artifacts: list[ReportArtifact]) -> WorkflowN
         state=job.state.value,
         job_id=job.job_id,
         params_hash=job.params_hash,
+        params=job.params if isinstance(job.params, dict) else {},
         output=job.output,
         artifacts=artifacts,
         error_code=job.error_code,
@@ -488,7 +490,7 @@ def _normalize_candidates(
                 node_params=params_by_node.get(node.node_id),
             )
         )
-    _attach_qc_and_analysis(candidates, nodes)
+    _attach_qc_and_analysis(candidates, nodes, merge_global_metrics=False)
     return _dedupe_candidates(candidates)
 
 
@@ -526,7 +528,7 @@ def _ranked_candidates(
                     artifacts=_matching_artifacts(stable_structure_path, artifacts),
                 )
             )
-    _attach_qc_and_analysis(out, nodes)
+    _attach_qc_and_analysis(out, nodes, merge_global_metrics=True)
     return _dedupe_candidates(sorted(out, key=lambda c: (c.rank or 999999, -(c.score or 0.0))))
 
 
@@ -616,45 +618,44 @@ def _structure_candidates(
 def _attach_qc_and_analysis(
     candidates: list[ReportCandidate],
     nodes: list[WorkflowNodeSummary],
+    *,
+    merge_global_metrics: bool,
 ) -> None:
-    """Merge tool-level signals (flags, liabilities, *and* every numeric
-    metric the workflow emits) into each candidate's score map.
+    """Merge tool-level signals into candidate score maps.
 
-    Previously this only pulled ``protein_qc`` metrics and
-    ``structure_analysis`` liabilities. That meant a Boltz-2 run could
-    produce per-complex affinity, binder probability, model confidence,
-    pTM, ipTM, ipLDDT — and none of it showed on the candidate cards.
-    Now every metric-producing node contributes its scalars; when two
-    tools emit the same metric (e.g. both Boltz-2 and ESM3 emit pLDDT),
-    later entries are namespaced as ``tool:metric`` so the reader can
-    tell which model produced which number.
+    Ranked candidates are already an aggregate product of the workflow, so they
+    can receive global QC/analysis context. Output-derived candidates are more
+    often independent catalog entries; for those, attach metrics only from the
+    candidate's source node to avoid cross-contaminating flat runs such as
+    Boltz2 + BoltzGen + Protenix smoke catalogs.
     """
     qc_flags: list[str] = []
     liabilities: list[Any] = []
-    # (tool, scores) pairs in node order so provenance disambiguation is
+    # (node_id, tool, scores) tuples in node order so provenance disambiguation is
     # deterministic across runs.
-    per_tool_metrics: list[tuple[str, dict[str, Any]]] = []
+    per_tool_metrics: list[tuple[str, str, dict[str, Any]]] = []
     for node in nodes:
         output = node.output if isinstance(node.output, dict) else {}
         if not isinstance(output, dict):
             continue
+        node_id = node.node_id
         tool = (node.tool or "").lower()
         if tool == "protein_qc":
             qc_flags.extend(_string_list(output.get("flags")))
             metrics = output.get("metrics")
             if isinstance(metrics, dict):
-                per_tool_metrics.append((tool, _score_map(metrics)))
+                per_tool_metrics.append((node_id, tool, _score_map(metrics)))
         elif tool == "structure_analysis":
             liabilities.extend(_list(output.get("liabilities")))
             # structure_analysis also publishes scalars (helix_pct, sheet_pct,
             # buried_polar_count, etc.) — surface those too.
-            per_tool_metrics.append((tool, _score_map(output)))
+            per_tool_metrics.append((node_id, tool, _score_map(output)))
         else:
             # Any other tool: extract its top-level numeric scalars (filtered
             # by ``_SCORE_KEYS``), plus anything inside nested metric dicts.
             tool_scores = _score_map(output)
             if tool_scores:
-                per_tool_metrics.append((tool, tool_scores))
+                per_tool_metrics.append((node_id, tool, tool_scores))
 
     if not qc_flags and not liabilities and not per_tool_metrics:
         return
@@ -662,7 +663,7 @@ def _attach_qc_and_analysis(
     # Count how many tools emit each canonical metric key so we can decide
     # which keys need a ``tool:`` prefix to keep them distinguishable.
     emitter_counts: dict[str, int] = {}
-    for _tool, scores in per_tool_metrics:
+    for _node_id, _tool, scores in per_tool_metrics:
         for key in scores:
             emitter_counts[key] = emitter_counts.get(key, 0) + 1
 
@@ -679,6 +680,9 @@ def _attach_qc_and_analysis(
     })
 
     for idx, candidate in enumerate(list(candidates)):
+        source = candidate.source if isinstance(candidate.source, dict) else {}
+        candidate_node_id = str(source.get("node_id") or "")
+        candidate_tool = str(source.get("tool") or "").lower()
         # Pre-existing candidate.scores (from ranked_candidates row) are
         # treated as ground truth — they win when their key is "clean"
         # (i.e. no tool prefix needed). Tool-emitted metrics fill in
@@ -686,7 +690,12 @@ def _attach_qc_and_analysis(
         # candidate ends up with both ``plddt`` (whatever the ranker
         # recorded) and e.g. ``boltz2_affinity:plddt`` (Boltz-2's own).
         merged_scores: dict[str, float | int | str | None] = {}
-        for tool, scores in per_tool_metrics:
+        for node_id, tool, scores in per_tool_metrics:
+            if not merge_global_metrics:
+                same_node = node_id == candidate_node_id
+                fallback_same_tool = not candidate_node_id and tool == candidate_tool
+                if not same_node and not fallback_same_tool:
+                    continue
             for key, value in scores.items():
                 already_in_candidate = key in candidate.scores
                 shared = emitter_counts.get(key, 0) > 1
@@ -970,15 +979,24 @@ def _row_identity(query: str, row: str) -> float:
 
 
 def _warnings_from_job(job: JobRecord, *, source: str | None = None) -> list[ReportWarning]:
-    if not (job.error_code or job.error_message):
-        return []
-    return [
-        ReportWarning(
-            level="error",
-            message=job.error_message or job.error_code or "job failed",
-            source=source or job.job_id,
+    warnings: list[ReportWarning] = []
+    warning_source = source or job.job_id
+    if job.error_code or job.error_message:
+        warnings.append(
+            ReportWarning(
+                level="error",
+                message=job.error_message or job.error_code or "job failed",
+                source=warning_source,
+            )
         )
-    ]
+    output = job.output if isinstance(job.output, dict) else {}
+    for message in _string_list(output.get("warnings")):
+        if not message:
+            continue
+        warnings.append(
+            ReportWarning(level="warning", message=message, source=warning_source)
+        )
+    return warnings
 
 
 def _raw_job_summary(job: JobRecord, artifacts: list[ReportArtifact]) -> dict[str, Any]:

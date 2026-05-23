@@ -37,6 +37,12 @@ from pydantic import BaseModel, Field
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.residue_mapping import (
+    PositionBasis,
+    parse_structure_residue_refs,
+    resolve_position_range,
+    resolve_positions,
+)
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
 # --------------------------------------------------------------------------- paths
@@ -132,6 +138,10 @@ class RFPeptidesInput(BaseModel):
     target_chain: str = Field(default="A", min_length=1, max_length=1)
     target_residues: str | None = Field(default=None, pattern=r"^[0-9]+-[0-9]+$")
     target_hotspots: list[int] = Field(default_factory=list)
+    target_hotspot_residue_ids: list[str] = Field(default_factory=list)
+    target_sequence: str | None = None
+    target_fasta_path: str | None = Field(default=None, min_length=1)
+    position_basis: PositionBasis = "auto"
     peptide_length: int = Field(default=10, ge=5, le=50)
     num_designs: int = Field(default=10, ge=1, le=64)
     num_diffusion_steps: int = Field(default=50, ge=10, le=200)
@@ -151,6 +161,8 @@ class RFPeptidesOutput(BaseModel):
     designs: list[RFPeptidesDesign]
     runtime_ms: int
     num_designs_returned: int
+    position_mappings: dict[str, object] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- adapter
@@ -201,13 +213,16 @@ class RFPeptidesAdapter(ToolAdapter):
             staged_target = job_inputs / src.name
             shutil.copyfile(src, staged_target)
 
-        contigs = _build_contigs(params, staged_target)
+        contigs, position_mappings, mapping_warnings, resolved_hotspots = (
+            _build_contigs_with_mappings(params, staged_target)
+        )
         cmd = _build_cmd(
             params=params,
             output_prefix=job_outputs / "design",
             target_pdb=staged_target,
             contigs=contigs,
             weights_dir=RFPEPTIDES_WEIGHTS,
+            resolved_hotspots=resolved_hotspots,
         )
         env = _build_env(params.seed)
 
@@ -237,6 +252,8 @@ class RFPeptidesAdapter(ToolAdapter):
             designs=designs,
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
+            position_mappings=position_mappings,
+            warnings=mapping_warnings,
         )
 
     def estimate_vram(self, params: RFPeptidesInput) -> int:
@@ -255,21 +272,47 @@ class RFPeptidesAdapter(ToolAdapter):
 
 
 def _build_contigs(params: RFPeptidesInput, staged_target: Path | None) -> str:
+    return _build_contigs_with_mappings(params, staged_target)[0]
+
+
+def _build_contigs_with_mappings(
+    params: RFPeptidesInput,
+    staged_target: Path | None,
+) -> tuple[str, dict[str, object], list[str], list[str] | None]:
     """Build the ``contigmap.contigs`` string.
 
     Monomer: ``[<L>-<L>]``.
     Binder:  ``[<L>-<L> <chain><start>-<end>/0]``.
     """
     length = params.peptide_length
+    mappings: dict[str, object] = {}
+    warnings: list[str] = []
+    resolved_hotspots: list[str] | None = None
     if staged_target is None:
-        return f"[{length}-{length}]"
+        return f"[{length}-{length}]", mappings, warnings, resolved_hotspots
     chain = params.target_chain.upper()
+    if _has_target_hotspots(params):
+        hotspot_resolution = _resolve_target_hotspots(params, staged_target)
+        resolved_hotspots = hotspot_resolution.residue_ids
+        warnings.extend(hotspot_resolution.warnings)
+        mappings["target_hotspots"] = hotspot_resolution.to_audit()
     if params.target_residues is not None:
-        return f"[{length}-{length} {chain}{params.target_residues}/0]"
+        span, resolution = resolve_position_range(
+            residues=parse_structure_residue_refs(staged_target, chain),
+            range_text=params.target_residues,
+            chain_id=chain,
+            sequence=params.target_sequence,
+            fasta_path=params.target_fasta_path,
+            position_basis=params.position_basis,
+            label="target_residues",
+        )
+        warnings.extend(resolution.warnings)
+        mappings["target_residues"] = resolution.to_audit()
+        return f"[{length}-{length} {span}/0]", mappings, warnings, resolved_hotspots
     # Default to full chain (RFdiffusion accepts ``A1-XXX`` ranges only). We
     # use a generous open-ended range — RFdiffusion parses ``Achain1-9999``
     # by capping at the chain length.
-    return f"[{length}-{length} {chain}1-9999/0]"
+    return f"[{length}-{length} {chain}1-9999/0]", mappings, warnings, resolved_hotspots
 
 
 def _build_cmd(
@@ -279,6 +322,7 @@ def _build_cmd(
     target_pdb: Path | None,
     contigs: str,
     weights_dir: Path,
+    resolved_hotspots: list[str] | None = None,
 ) -> list[str]:
     """Build the ``python -c '<preload>; runpy.run_path(...)'`` command.
 
@@ -318,12 +362,15 @@ def _build_cmd(
                 [
                     "ppi.hotspot_res=["
                     + ",".join(
-                        f"\\'{params.target_chain.upper()}{i}\\'"
-                        for i in params.target_hotspots
+                        f"\\'{item}\\'"
+                        for item in (
+                            resolved_hotspots
+                            or _resolve_target_hotspots(params, target_pdb).residue_ids
+                        )
                     )
                     + "]"
                 ]
-                if params.target_hotspots and target_pdb is not None
+                if _has_target_hotspots(params) and target_pdb is not None
                 else []
             )
         )
@@ -333,6 +380,31 @@ def _build_cmd(
         + ", run_name='__main__')"
     )
     return [sys.executable, "-c", preload]
+
+
+def _resolve_target_hotspots(params: RFPeptidesInput, target_pdb: Path | None):
+    if target_pdb is None:
+        return resolve_positions(
+            residues=[],
+            positions=[],
+            chain_id=params.target_chain,
+            explicit_residue_ids=[],
+            label="target_hotspots",
+        )
+    return resolve_positions(
+        residues=parse_structure_residue_refs(target_pdb, params.target_chain),
+        positions=params.target_hotspots,
+        explicit_residue_ids=params.target_hotspot_residue_ids,
+        chain_id=params.target_chain,
+        sequence=params.target_sequence,
+        fasta_path=params.target_fasta_path,
+        position_basis=params.position_basis,
+        label="target_hotspots",
+    )
+
+
+def _has_target_hotspots(params: RFPeptidesInput) -> bool:
+    return bool(params.target_hotspots or params.target_hotspot_residue_ids)
 
 
 def _build_env(seed: int | None) -> dict[str, str]:

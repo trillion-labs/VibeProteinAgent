@@ -10,6 +10,12 @@ from pydantic import BaseModel, Field
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.residue_mapping import (
+    PositionBasis,
+    parse_residue_id,
+    parse_structure_residue_refs,
+    resolve_positions,
+)
 
 # vendor/ligandmpnn/ holds the upstream package under `ligandmpnn_vendor/`.
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -62,6 +68,10 @@ class LigandMPNNInput(BaseModel):
             "designable."
         ),
     )
+    redesigned_positions: list[int] = Field(default_factory=list)
+    sequence: str | None = None
+    fasta_path: str | None = Field(default=None, min_length=1)
+    position_basis: PositionBasis = "auto"
 
 
 class LigandMPNNDesign(BaseModel):
@@ -75,6 +85,8 @@ class LigandMPNNOutput(BaseModel):
     designs_fasta: str
     num_residues: int
     runtime_ms: int
+    position_mappings: dict[str, object] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 def _resolve_checkpoint(weights_dir: Path, model_type: str) -> Path:
@@ -180,8 +192,12 @@ class LigandMPNNAdapter(ToolAdapter):
             chain_mask = torch.ones(len(chain_letters), dtype=torch.float32, device=self.device)
 
         # Optional: further narrow designable positions by `redesigned_residues`.
-        if params.redesigned_residues:
-            wanted = set(params.redesigned_residues.split())
+        redesigned_resolution = _resolve_redesigned_positions(params, Path(pdb_path))
+        if redesigned_resolution is not None:
+            wanted = {
+                _ligandmpnn_residue_key(residue_id, params.chains[0] if params.chains else "A")
+                for residue_id in redesigned_resolution.residue_ids
+            }
             # residue id format used by LigandMPNN: f"{chain}{resnum}"
             r_idx = protein["R_idx"].detach().cpu().tolist()
             keep_mask = torch.zeros_like(chain_mask)
@@ -297,6 +313,10 @@ class LigandMPNNAdapter(ToolAdapter):
             designs_fasta=str(fasta_path),
             num_residues=int(L),
             runtime_ms=runtime_ms,
+            position_mappings={
+                "redesigned_positions": redesigned_resolution.to_audit()
+            } if redesigned_resolution is not None else {},
+            warnings=redesigned_resolution.warnings if redesigned_resolution is not None else [],
         )
 
     def estimate_vram(self, params: LigandMPNNInput) -> int:
@@ -319,3 +339,25 @@ __all__ = [
     "LigandMPNNInput",
     "LigandMPNNOutput",
 ]
+
+
+def _resolve_redesigned_positions(params: LigandMPNNInput, pdb_path: Path):
+    explicit = params.redesigned_residues.split() if params.redesigned_residues else []
+    if not explicit and not params.redesigned_positions:
+        return None
+    chain = params.chains[0] if params.chains else "A"
+    return resolve_positions(
+        residues=parse_structure_residue_refs(pdb_path, chain if params.chains else None),
+        positions=params.redesigned_positions,
+        explicit_residue_ids=explicit,
+        chain_id=chain,
+        sequence=params.sequence,
+        fasta_path=params.fasta_path,
+        position_basis=params.position_basis,
+        label="redesigned_positions",
+    )
+
+
+def _ligandmpnn_residue_key(residue_id: str, default_chain: str) -> str:
+    ref = parse_residue_id(residue_id, default_chain=default_chain)
+    return f"{ref.chain_id}{ref.resseq}"

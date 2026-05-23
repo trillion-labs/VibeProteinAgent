@@ -39,13 +39,18 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, Field
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.residue_mapping import (
+    PositionBasis,
+    parse_structure_residue_refs,
+    resolve_positions,
+)
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.core.errors import VPAError
 from vibeproteinagent.workers.sidecar import PersistentPythonSidecar, SidecarRuntimeSpec
@@ -223,6 +228,10 @@ class BindCraftInput(BaseModel):
     target_pdb: str = Field(..., min_length=1)
     target_chain: str = Field(default="A", min_length=1)
     target_hotspots: list[int] = Field(default_factory=list)
+    target_hotspot_residue_ids: list[str] = Field(default_factory=list)
+    target_sequence: str | None = None
+    target_fasta_path: str | None = Field(default=None, min_length=1)
+    position_basis: PositionBasis = "auto"
     binder_length: int = Field(default=60, ge=30, le=150)
     num_designs: int = Field(default=10, ge=1, le=32)
     num_recycles: int = Field(default=1, ge=0, le=8)
@@ -246,6 +255,8 @@ class BindCraftOutput(BaseModel):
     runtime_ms: int
     num_designs_returned: int
     seeds_used: list[int]
+    position_mappings: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- adapter
@@ -312,9 +323,16 @@ class BindCraftAdapter(ToolAdapter):
         filters_json = job_inputs / "filters.json"
         advanced_json = job_inputs / "advanced.json"
 
+        hotspot_resolution = _resolve_target_hotspots(params, staged_target)
         settings_json.write_text(
             json.dumps(
-                _build_target_settings(params, staged_target, job_outputs), indent=2
+                _build_target_settings(
+                    params,
+                    staged_target,
+                    job_outputs,
+                    resolved_hotspots=hotspot_resolution.residue_ids,
+                ),
+                indent=2,
             )
         )
         filters_json.write_text(
@@ -353,6 +371,10 @@ class BindCraftAdapter(ToolAdapter):
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
             seeds_used=[params.seed] if params.seed is not None else [],
+            position_mappings={
+                "target_hotspots": hotspot_resolution.to_audit()
+            },
+            warnings=hotspot_resolution.warnings,
         )
 
     def estimate_vram(self, params: BindCraftInput) -> int:
@@ -410,10 +432,17 @@ class BindCraftAdapter(ToolAdapter):
 
 
 def _build_target_settings(
-    params: BindCraftInput, staged_target: Path, design_path: Path
+    params: BindCraftInput,
+    staged_target: Path,
+    design_path: Path,
+    *,
+    resolved_hotspots: list[str] | None = None,
 ) -> dict:
     """Materialise the ``settings_target/*.json`` BindCraft consumes."""
-    hotspots_csv = ",".join(str(i) for i in params.target_hotspots)
+    hotspots = resolved_hotspots
+    if hotspots is None:
+        hotspots = _resolve_target_hotspots(params, staged_target).residue_ids
+    hotspots_csv = ",".join(hotspots)
     return {
         "design_path": str(design_path) + os.sep,
         "binder_name": staged_target.stem,
@@ -423,6 +452,28 @@ def _build_target_settings(
         "lengths": [params.binder_length, params.binder_length],
         "number_of_final_designs": params.num_designs,
     }
+
+
+def _resolve_target_hotspots(params: BindCraftInput, target_pdb: Path):
+    resolution = resolve_positions(
+        residues=parse_structure_residue_refs(target_pdb, params.target_chain),
+        positions=params.target_hotspots,
+        explicit_residue_ids=params.target_hotspot_residue_ids,
+        chain_id=params.target_chain,
+        sequence=params.target_sequence,
+        fasta_path=params.target_fasta_path,
+        position_basis=params.position_basis,
+        label="target_hotspots",
+    )
+    # BindCraft settings already carry the target chain separately; plain
+    # numeric hotspot labels preserve the existing single-chain adapter contract.
+    if len(params.target_chain) == 1:
+        chain = params.target_chain
+        resolution.residue_ids = [
+            residue_id[1:] if residue_id.startswith(chain) else residue_id
+            for residue_id in resolution.residue_ids
+        ]
+    return resolution
 
 
 def _build_filters(tree: Path, mode: Literal["default", "permissive"] = "default") -> dict:

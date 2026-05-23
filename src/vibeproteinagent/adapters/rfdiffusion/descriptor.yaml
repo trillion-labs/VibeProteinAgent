@@ -1,7 +1,7 @@
 name: rfdiffusion
 version: "1.0.0"
 category: protein_design
-description: "Diffusion-based protein backbone generation with selectable modes: unconditional, motif_scaffolding, symmetric_motif_scaffolding, partial_diffusion, binder_backbone_design, fold_conditioning, symmetric_oligomer. Backbone-only — pair with an inverse-folding tool for sequences."
+description: "RFdiffusion backbone generation. Integer target_residues/target_hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; raw contigs remain RFdiffusion-native structure syntax."
 runtime: python
 backend: pytorch
 gpu_required: true

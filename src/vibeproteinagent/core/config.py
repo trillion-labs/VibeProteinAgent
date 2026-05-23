@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 
 VPA_HOME_ENV = "VPA_HOME"
@@ -15,6 +16,36 @@ def vpa_home() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".vibeproteinagent"
+
+
+def load_vpa_env_file(*, override: bool = False) -> None:
+    """Load simple ``export KEY=value`` entries from ``$VPA_HOME/env.sh``.
+
+    This mirrors the shell snippet printed by the installer for users who invoke
+    ``vpa`` through the npm shim or an absolute binary path without sourcing the
+    activation file first. Existing environment variables win by default so a
+    caller can still override a cache/source location for one command.
+    """
+    env_file = vpa_home() / "env.sh"
+    if not env_file.is_file():
+        return
+    for raw_line in env_file.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or not line.startswith("export "):
+            continue
+        try:
+            parts = shlex.split(line[len("export "):], posix=True)
+        except ValueError:
+            continue
+        for part in parts:
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            if not key:
+                continue
+            if key in os.environ and not override and key != "PATH":
+                continue
+            os.environ[key] = os.path.expandvars(value)
 
 
 def workspaces_root() -> Path:

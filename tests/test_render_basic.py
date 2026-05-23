@@ -5,6 +5,8 @@ from io import StringIO
 from rich.console import Console
 
 from vibeproteinagent.cli.render import (
+    render_agent_plan_validation,
+    render_agent_result,
     render_daemon_start,
     render_daemon_status,
     render_doctor,
@@ -253,6 +255,80 @@ def test_render_doctor_plain() -> None:
     assert "python" in out and "3.12.13" in out
     assert "B200" in out
     assert "\x1b[" not in out
+
+
+def test_render_agent_result_plain_is_concise() -> None:
+    c, buf = _plain_console()
+    render_agent_result(
+        {
+            "workspace": "my_test",
+            "run_id": "arun_1234567890abcdef",
+            "mode": "agent_plan",
+            "state": "completed",
+            "workflow_ids": ["wf_abcdef1234567890"],
+            "job_ids": ["job_ok", "job_fail"],
+            "summary": {
+                "nodes": [
+                    {
+                        "node_id": "design",
+                        "tool": "boltzgen",
+                        "state": "completed",
+                        "job_id": "job_ok",
+                        "output": {"large": "payload" * 100},
+                    },
+                    {
+                        "node_id": "score",
+                        "tool": "protenix_v2",
+                        "state": "failed",
+                        "job_id": "job_fail",
+                        "error_code": "E_TOOL_FAILED",
+                        "error_message": "checkpoint missing",
+                    },
+                ],
+                "artifacts": {"job_ok": {"huge": "metadata"}},
+            },
+        },
+        style=LogStyle.PLAIN,
+        console=c,
+    )
+    out = buf.getvalue()
+    assert "my_test" in out
+    assert "wf_abcdef1234567890" in out
+    assert "boltzgen" in out
+    assert "E_TOOL_FAILED: checkpoint missing" in out
+    assert "payloadpayload" not in out
+    assert "metadata" not in out
+
+
+def test_render_agent_plan_validation_plain_summarises_nodes() -> None:
+    c, buf = _plain_console()
+    render_agent_plan_validation(
+        {
+            "workspace": "my_test",
+            "valid": True,
+            "plan": {
+                "required_tools": ["boltzgen"],
+                "workflow_plan": {
+                    "name": "coverage",
+                    "nodes": [
+                        {
+                            "id": "design",
+                            "tool": "boltzgen",
+                            "on_failure": "continue",
+                            "max_parallel": 2,
+                        }
+                    ],
+                },
+            },
+        },
+        style=LogStyle.PLAIN,
+        console=c,
+    )
+    out = buf.getvalue()
+    assert "Agent plan valid" in out
+    assert "coverage" in out
+    assert "boltzgen" in out
+    assert "max_parallel" in out
 
 
 def test_render_workspace_list_marks_active() -> None:

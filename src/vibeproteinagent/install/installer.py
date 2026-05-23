@@ -7,7 +7,9 @@ import os.path
 import shlex
 import shutil
 import subprocess
+import tarfile
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from vibeproteinagent.install.cuda import (
 )
 from vibeproteinagent.install.manifest import (
     InstallManifest,
+    InstallSource,
     InstallTool,
     InstallWeight,
     load_manifest,
@@ -434,6 +437,20 @@ def _tool_steps(tool: InstallTool, paths: InstallPaths) -> list[dict[str, str]]:
                 "action": "ensure Boltz-2 runtime Python dependencies in the shared env",
             }
         )
+    if tool.name == "boltzgen":
+        steps.append(
+            {
+                "unit": "shared-dep:boltzgen",
+                "action": "ensure BoltzGen runtime Python dependencies in the shared env",
+            }
+        )
+    for source in tool.sources:
+        steps.append(
+            {
+                "unit": f"source:{tool.name}:{source.name}",
+                "action": f"ensure source checkout {_source_path(paths, source)}",
+            }
+        )
     if tool.sidecar:
         steps.append(
             {
@@ -669,6 +686,8 @@ def _ensure_selected_shared_deps(
 ) -> None:
     if "boltz2_affinity" in selection.tool_names:
         _ensure_boltz2_affinity_shared_deps(python, options, state, results)
+    if "boltzgen" in selection.tool_names:
+        _ensure_boltzgen_shared_deps(python, options, state, results)
     if "esm3" in selection.tool_names:
         _ensure_esm3_shared_deps(python, options, state, results)
     if "ligandmpnn" in selection.tool_names:
@@ -775,6 +794,7 @@ _BOLTZ2_AFFINITY_NUMERIC_DEPS = (
 _BOLTZ2_AFFINITY_RUNTIME_DEPS = (
     "hydra-core==1.3.2",
     "pytorch-lightning==2.5.0",
+    "rdkit>=2024.3.2",
     "dm-tree==0.1.8",
     "einx==0.3.0",
     "fairscale==0.4.13",
@@ -789,6 +809,81 @@ _BOLTZ2_AFFINITY_RUNTIME_DEPS = (
 _BOLTZ2_AFFINITY_SHARED_DEPS = (
     *_BOLTZ2_AFFINITY_NUMERIC_DEPS,
     *_BOLTZ2_AFFINITY_RUNTIME_DEPS,
+)
+
+
+def _ensure_boltzgen_shared_deps(
+    python: Path,
+    options: InstallOptions,
+    state: InstallState,
+    results: list[dict[str, Any]],
+) -> None:
+    probe_code = (
+        "import biotite, edit_distance, gemmi, huggingface_hub, hydra, hydride, "
+        "logomaker, matplotlib, pandas, pdbeccdutils, pydssp, pytorch_lightning, "
+        "sklearn; "
+        "print('ok')"
+    )
+    probe = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode == 0 and not options.force:
+        results.append({"unit": "shared-dep:boltzgen", "status": "ready"})
+        state.mark("shared-dep:boltzgen", "ready", {})
+        return
+    if options.offline:
+        raise DependencyError(
+            "BoltzGen dependencies are required but are not installed and --offline was set",
+            details={"stderr": probe.stderr[-2000:], "stdout": probe.stdout[-2000:]},
+        )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-user",
+            *_BOLTZGEN_RUNTIME_DEPS,
+        ],
+        cwd=None,
+    )
+    verify = subprocess.run(
+        [str(python), "-c", probe_code],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise DependencyError(
+            "BoltzGen dependency installation did not make runtime imports available",
+            details={"stderr": verify.stderr[-2000:], "stdout": verify.stdout[-2000:]},
+        )
+    results.append({"unit": "shared-dep:boltzgen", "status": "installed"})
+    state.mark("shared-dep:boltzgen", "ready", {})
+
+
+_BOLTZGEN_RUNTIME_DEPS = (
+    "matplotlib",
+    "hydride",
+    "biotite",
+    "pydssp",
+    "logomaker",
+    "gemmi>=0.6.5",
+    "scikit-learn",
+    "hydra-core",
+    "edit_distance",
+    "pytorch-lightning",
+    "pandas",
+    "pdbeccdutils",
+    "rdkit>=2024.3.2",
+    "einx",
+    "einops",
+    "mashumaro",
+    "nvidia-ml-py>=12.535.133",
+    "huggingface_hub",
 )
 
 
@@ -1138,6 +1233,8 @@ def _ensure_tool_units(
     *,
     required: bool,
 ) -> None:
+    for source in tool.sources:
+        _ensure_source(tool, source, paths, options, state, results, required=required)
     if tool.sidecar:
         _ensure_sidecar(tool, paths, options, state, results, required=required)
     for weight in tool.weights:
@@ -1151,6 +1248,108 @@ def _ensure_tool_units(
             )
         results.append({"unit": f"binary:{tool.name}", "status": status, "binary": tool.binary})
         state.mark(f"binary:{tool.name}", status, {"binary": tool.binary})
+
+
+def _ensure_source(
+    tool: InstallTool,
+    source: InstallSource,
+    paths: InstallPaths,
+    options: InstallOptions,
+    state: InstallState,
+    results: list[dict[str, Any]],
+    *,
+    required: bool,
+) -> None:
+    path = _source_path(paths, source)
+    ready_path = _source_ready_path(paths, source)
+    if ready_path is not None and not options.force and not options.repair:
+        results.append(
+            {
+                "unit": f"source:{tool.name}:{source.name}",
+                "status": "ready",
+                "path": str(ready_path),
+            }
+        )
+        state.mark(
+            f"source:{tool.name}:{source.name}",
+            "ready",
+            {"path": str(ready_path), "repo": source.repo, "ref": source.ref},
+        )
+        return
+    if not source.required and not required:
+        results.append(
+            {
+                "unit": f"source:{tool.name}:{source.name}",
+                "status": "skipped",
+                "path": str(path),
+            }
+        )
+        state.mark(f"source:{tool.name}:{source.name}", "skipped", {"path": str(path)})
+        return
+    if options.offline:
+        raise DependencyError(
+            (
+                f"source checkout '{source.name}' for tool '{tool.name}' "
+                "is missing and --offline was set"
+            ),
+            details={"tool": tool.name, "source": source.name, "path": str(path)},
+        )
+    git = shutil.which("git")
+    if git is None:
+        raise DependencyError(
+            "git is required to fetch source checkouts",
+            details={"tool": tool.name, "source": source.name, "repo": source.repo},
+        )
+    if path.exists():
+        if path.is_symlink() or path.is_file():
+            if options.force or options.repair:
+                path.unlink()
+            else:
+                raise DependencyError(
+                    f"source target exists but is not a directory: {path}",
+                    details={"tool": tool.name, "source": source.name, "path": str(path)},
+                )
+        elif any(path.iterdir()):
+            if options.force or options.repair:
+                shutil.rmtree(path)
+            else:
+                raise DependencyError(
+                    f"source target exists but is not a valid checkout: {path}",
+                    details={
+                        "tool": tool.name,
+                        "source": source.name,
+                        "path": str(path),
+                        "hint": "rerun with --repair or set the matching VPA_*_TREE env var",
+                    },
+                )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _run([git, "clone", source.repo, str(path)], cwd=None)
+    if source.ref:
+        _run([git, "-C", str(path), "checkout", source.ref], cwd=None)
+    if not _source_ready(path, source):
+        raise DependencyError(
+            f"source checkout '{source.name}' for tool '{tool.name}' is not usable",
+            details={
+                "tool": tool.name,
+                "source": source.name,
+                "path": str(path),
+                "markers": list(source.markers),
+            },
+        )
+    results.append(
+        {
+            "unit": f"source:{tool.name}:{source.name}",
+            "status": "cloned",
+            "path": str(path),
+            "repo": source.repo,
+            "ref": source.ref,
+        }
+    )
+    state.mark(
+        f"source:{tool.name}:{source.name}",
+        "ready",
+        {"path": str(path), "repo": source.repo, "ref": source.ref},
+    )
 
 
 def _ensure_tool_readiness(
@@ -1237,6 +1436,16 @@ def _env_exports(
     options: InstallOptions | None = None,
 ) -> dict[str, str]:
     grouped: dict[str, list[str]] = {}
+    for tool in selection.tools:
+        for source in tool.sources:
+            if not source.env_var:
+                continue
+            env_path = _env_source_path(source)
+            if env_path is not None and _source_ready(env_path, source):
+                export_path = env_path
+            else:
+                export_path = _source_path(paths, source)
+            grouped.setdefault(source.env_var, []).append(str(export_path))
     for tool in selection.tools:
         for weight in tool.weights:
             if not weight.env_var:
@@ -1520,6 +1729,33 @@ def _ensure_weight(
         )
         state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
         return
+    if weight.hf_repo_id:
+        if options.offline:
+            raise DependencyError(
+                f"required Hugging Face cache '{weight.name}' is missing and --offline was set",
+                details={
+                    "tool": tool.name,
+                    "weight": weight.name,
+                    "repo_id": weight.hf_repo_id,
+                    "path": str(path),
+                },
+            )
+        _download_hf_snapshot(paths.shared_env / "bin" / "python", weight, path)
+        if not _weight_ready(path, weight):
+            raise DependencyError(
+                f"Hugging Face cache '{weight.name}' did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {
+                "unit": f"weight:{tool.name}:{weight.name}",
+                "status": "downloaded",
+                "path": str(path),
+                "repo_id": weight.hf_repo_id,
+            }
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
     if not weight.url:
         status = "missing"
         if weight.required and required:
@@ -1538,9 +1774,18 @@ def _ensure_weight(
             details={"tool": tool.name, "weight": weight.name, "path": str(path)},
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".download")
+    tmp = path.parent / f".{path.name}.download"
     urllib.request.urlretrieve(weight.url, tmp)
-    tmp.replace(path)
+    if weight.unpack:
+        if path.exists():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        _extract_archive(tmp, path.parent, weight.unpack)
+        tmp.unlink(missing_ok=True)
+    else:
+        tmp.replace(path)
     if not _weight_ready(path, weight):
         raise DependencyError(
             f"checksum verification failed for weight '{weight.name}'",
@@ -1555,9 +1800,98 @@ def _ensure_weight(
 def _weight_ready(path: Path, weight: InstallWeight) -> bool:
     if not path.exists():
         return False
+    if weight.unpack:
+        return path.is_dir() and any(path.iterdir())
+    if path.is_dir():
+        return any(path.iterdir())
     if weight.sha256 and path.is_file():
         return _sha256(path) == weight.sha256
     return True
+
+
+def _download_hf_snapshot(python: Path, weight: InstallWeight, path: Path) -> None:
+    cache_dir = _hf_cache_dir_for_weight(path)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    code = """
+import json
+import sys
+from huggingface_hub import snapshot_download
+
+repo_id, repo_type, cache_dir = sys.argv[1:4]
+snapshot_download(repo_id=repo_id, repo_type=repo_type or None, cache_dir=cache_dir)
+print(json.dumps({"ok": True}))
+"""
+    proc = subprocess.run(
+        [
+            str(python),
+            "-c",
+            code,
+            weight.hf_repo_id or "",
+            weight.hf_repo_type or "",
+            str(cache_dir),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise DependencyError(
+            f"failed to download Hugging Face cache '{weight.name}'",
+            details={
+                "repo_id": weight.hf_repo_id,
+                "repo_type": weight.hf_repo_type,
+                "cache_dir": str(cache_dir),
+                "stderr": proc.stderr[-2000:],
+                "stdout": proc.stdout[-2000:],
+            },
+        )
+
+
+def _hf_cache_dir_for_weight(path: Path) -> Path:
+    name = path.name
+    if name.startswith(("models--", "datasets--", "spaces--")):
+        return path.parent
+    return path
+
+
+def _extract_archive(archive: Path, destination: Path, kind: str) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    if kind == "tar":
+        with tarfile.open(archive) as tf:
+            _safe_extract_tar(tf, destination)
+        return
+    if kind == "zip":
+        with zipfile.ZipFile(archive) as zf:
+            _safe_extract_zip(zf, destination)
+        return
+    raise DependencyError(
+        "unsupported archive type",
+        details={"archive": str(archive), "kind": kind},
+    )
+
+
+def _safe_extract_tar(tf: tarfile.TarFile, destination: Path) -> None:
+    root = destination.resolve()
+    for member in tf.getmembers():
+        target = (destination / member.name).resolve()
+        if not target.is_relative_to(root):
+            raise DependencyError(
+                "refusing to extract archive member outside destination",
+                details={"member": member.name, "destination": str(destination)},
+            )
+    tf.extractall(destination, filter="data")
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path) -> None:
+    root = destination.resolve()
+    for member in zf.infolist():
+        target = (destination / member.filename).resolve()
+        if not target.is_relative_to(root):
+            raise DependencyError(
+                "refusing to extract archive member outside destination",
+                details={"member": member.filename, "destination": str(destination)},
+            )
+    zf.extractall(destination)
 
 
 def _manifest_readiness(
@@ -1571,6 +1905,20 @@ def _manifest_readiness(
         return {"ready": False, "reason": "tool is missing from install manifest"}
     missing: list[dict[str, str]] = []
     env_override_ready = False
+    for source in spec.sources:
+        if not (source.required and required):
+            continue
+        ready_path = _source_ready_path(paths, source)
+        if ready_path is not None:
+            if ready_path != _source_path(paths, source):
+                env_override_ready = True
+            continue
+        missing.append(
+            {
+                "unit": f"source:{name}:{source.name}",
+                "path": str(_source_path(paths, source)),
+            }
+        )
     for weight in spec.weights:
         if not (weight.required and required):
             continue
@@ -1747,6 +2095,36 @@ def _weight_path(paths: InstallPaths, weight: InstallWeight) -> Path:
     except ValueError:
         return paths.root / raw
     return paths.cache_dir / relative_to_cache
+
+
+def _source_path(paths: InstallPaths, source: InstallSource) -> Path:
+    raw = Path(source.path)
+    return raw if raw.is_absolute() else paths.root / raw
+
+
+def _source_ready_path(paths: InstallPaths, source: InstallSource) -> Path | None:
+    env_path = _env_source_path(source)
+    if env_path is not None and _source_ready(env_path, source):
+        return env_path
+    manifest_path = _source_path(paths, source)
+    if _source_ready(manifest_path, source):
+        return manifest_path
+    return None
+
+
+def _env_source_path(source: InstallSource) -> Path | None:
+    if not source.env_var:
+        return None
+    raw = os.environ.get(source.env_var)
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _source_ready(path: Path, source: InstallSource) -> bool:
+    if not path.is_dir():
+        return False
+    return all((path / marker).exists() for marker in source.markers)
 
 
 def _is_strict_tool(tool: InstallTool, options: InstallOptions) -> bool:

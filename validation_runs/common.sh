@@ -12,6 +12,14 @@ if [[ -f "${VALIDATION_DIR}/local.env" ]]; then
   set +a
 fi
 
+if [[ -n "${VPA_SHARED_HOME:-}" && -z "${VPA_HOME:-}" ]]; then
+  export VPA_HOME="${VPA_SHARED_HOME}"
+fi
+if [[ -f "${VPA_HOME:-${HOME}/.vibeproteinagent}/env.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${VPA_HOME:-${HOME}/.vibeproteinagent}/env.sh"
+fi
+
 if [[ -z "${VPA_REPO_ROOT:-}" ]]; then
   VPA_REPO_ROOT="$(cd "${VALIDATION_DIR}/.." && pwd)"
 fi
@@ -79,7 +87,7 @@ init_scenario() {
   export VPA_VALIDATION_RUN_DIR="${VPA_VALIDATION_RUN_ROOT}/${stamp}_${scenario}"
   mkdir -p "${VPA_VALIDATION_RUN_DIR}/logs" "${VPA_VALIDATION_RUN_DIR}/tmp"
 
-  if [[ "${VPA_VALIDATION_ISOLATED:-1}" == "1" ]]; then
+  if [[ "${VPA_VALIDATION_ISOLATED:-0}" == "1" ]]; then
     export VPA_HOME="${VPA_VALIDATION_RUN_DIR}/vpa_home"
     export VPA_RUNTIME_DIR="${VPA_VALIDATION_RUN_DIR}/runtime"
     export VPA_WORKSPACE="validation_${scenario}_${stamp}"

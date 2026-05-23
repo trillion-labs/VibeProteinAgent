@@ -19,8 +19,22 @@ class InstallWeight:
     url: str | None = None
     sha256: str | None = None
     source_path: str | None = None
+    unpack: str | None = None
+    hf_repo_id: str | None = None
+    hf_repo_type: str | None = None
     required: bool = True
     modes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class InstallSource:
+    name: str
+    path: str
+    repo: str
+    ref: str | None = None
+    env_var: str | None = None
+    markers: tuple[str, ...] = ()
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -36,6 +50,7 @@ class InstallTool:
     runtime: str
     required: bool = True
     depends_on: tuple[str, ...] = ()
+    sources: tuple[InstallSource, ...] = ()
     weights: tuple[InstallWeight, ...] = ()
     sidecar: InstallSidecar | None = None
     binary: str | None = None
@@ -109,6 +124,16 @@ class InstallManifest:
                             "weight": weight.name,
                             "env_value": weight.env_value,
                             "allowed": ["path", "parent"],
+                        },
+                    )
+                if weight.unpack not in (None, "tar", "zip"):
+                    raise InvalidParamsError(
+                        f"tool '{tool.name}' weight '{weight.name}' has invalid unpack",
+                        details={
+                            "tool": tool.name,
+                            "weight": weight.name,
+                            "unpack": weight.unpack,
+                            "allowed": ["tar", "zip"],
                         },
                     )
 
@@ -188,11 +213,13 @@ def _parse_tool(name: str, value: Any, defaults: dict[str, Any]) -> InstallTool:
             install_script=str(side["install_script"]) if side.get("install_script") else None,
         )
     weights = tuple(_parse_weight(name, item) for item in (raw.get("weights") or ()))
+    sources = tuple(_parse_source(name, item) for item in (raw.get("sources") or ()))
     return InstallTool(
         name=name,
         runtime=str(raw.get("runtime", "shared")),
         required=bool(raw.get("required", True)),
         depends_on=tuple(str(item) for item in (raw.get("depends_on") or ())),
+        sources=sources,
         weights=weights,
         sidecar=sidecar,
         binary=str(raw["binary"]) if raw.get("binary") else None,
@@ -211,8 +238,24 @@ def _parse_weight(tool_name: str, value: Any) -> InstallWeight:
         url=str(raw["url"]) if raw.get("url") else None,
         sha256=str(raw["sha256"]) if raw.get("sha256") else None,
         source_path=str(raw["source_path"]) if raw.get("source_path") else None,
+        unpack=str(raw["unpack"]) if raw.get("unpack") else None,
+        hf_repo_id=str(raw["hf_repo_id"]) if raw.get("hf_repo_id") else None,
+        hf_repo_type=str(raw["hf_repo_type"]) if raw.get("hf_repo_type") else None,
         required=bool(raw.get("required", True)),
         modes=tuple(str(item) for item in (raw.get("modes") or ())),
+    )
+
+
+def _parse_source(tool_name: str, value: Any) -> InstallSource:
+    raw = _mapping(value, f"tools.{tool_name}.sources[]")
+    return InstallSource(
+        name=str(raw["name"]),
+        path=str(raw["path"]),
+        repo=str(raw["repo"]),
+        ref=str(raw["ref"]) if raw.get("ref") else None,
+        env_var=str(raw["env_var"]) if raw.get("env_var") else None,
+        markers=tuple(str(item) for item in (raw.get("markers") or ())),
+        required=bool(raw.get("required", True)),
     )
 
 

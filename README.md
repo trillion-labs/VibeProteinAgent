@@ -67,6 +67,9 @@ keys are recorded; reports turn the result into something humans can inspect.
 External users should use the npm/npx bootstrapper. It creates
 `~/.vibeproteinagent`, installs the VPA conda env, selected sidecars, and model
 weights. Use `VPA_HOME=/path/to/root` if you want a different install location.
+On a multi-node cluster, put `VPA_HOME` on shared storage before installing, for
+example `export VPA_HOME=/shared/projects/vpa/.vibeproteinagent`, so every node
+reuses the same envs, sidecars, workspaces, and checkpoint/cache directories.
 
 ```bash
 # Optional for ESM3 or other gated Hugging Face downloads.
@@ -109,6 +112,12 @@ If you already have validated sidecar environments, pass
 `VPA_BINDCRAFT_ENV_PATH`, `VPA_PROTEINA_COMPLEXA_VENV`,
 `VPA_PXDESIGN_PIPELINE_ENV`, or `VPA_RFDIFFUSION3_ENV`. VPA will link/reuse
 those envs instead of resolving a fresh fragile sidecar when possible.
+
+Boltz-2 affinity and BoltzGen are not vendored into this repository. When
+selected, `vpa install` fetches their source checkouts into
+`$VPA_HOME/sidecars/` and their public checkpoint/cache artifacts into
+`$VPA_HOME/cache/`, then writes the matching `VPA_BOLTZ_*` and
+`VPA_BOLTZGEN_*` exports into `$VPA_HOME/env.sh`.
 
 ### Credentials
 

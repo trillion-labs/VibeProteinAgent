@@ -8,6 +8,12 @@ from vibeproteinagent.agents import AgentConfig, AgentController, AgentSessionSt
 from vibeproteinagent.agents.execution import ExecutionPolicy
 from vibeproteinagent.agents.execution.controller import load_plan_or_workflow
 from vibeproteinagent.cli.output import fail_from_exception, print_envelope_ok
+from vibeproteinagent.cli.render import (
+    render_agent_plan_validation,
+    render_agent_result,
+    render_agent_runs,
+    render_agent_show,
+)
 from vibeproteinagent.core.types import load_params_file, parse_kv_pairs
 from vibeproteinagent.workspace import Workspace
 
@@ -116,7 +122,8 @@ def agent_run(
                 max_wait_s=max_wait_s,
             ),
         )
-        print_envelope_ok(data, json_mode=json_)
+        data["workspace"] = ws.name
+        print_envelope_ok(data, json_mode=json_, render=render_agent_result)
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
 
@@ -161,7 +168,8 @@ def agent_ask(
             params=parse_kv_pairs(param),
             policy=ExecutionPolicy(submit=False, execute=False, warm=False, max_wait_s=0),
         )
-        print_envelope_ok(data, json_mode=json_)
+        data["workspace"] = ws.name
+        print_envelope_ok(data, json_mode=json_, render=render_agent_result)
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
 
@@ -178,7 +186,11 @@ def agent_validate_plan(
         controller = AgentController(ws)
         plan = load_plan_or_workflow(path)
         valid = controller.validate_plan(plan)
-        print_envelope_ok({"valid": True, "plan": valid}, json_mode=json_)
+        print_envelope_ok(
+            {"valid": True, "plan": valid, "workspace": ws.name},
+            json_mode=json_,
+            render=render_agent_plan_validation,
+        )
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
 
@@ -199,7 +211,8 @@ def agent_submit_plan(
         plan = load_plan_or_workflow(path)
         params = _merge_params(params_file=params_file, param=param, target=None)
         data = controller.submit_plan(plan, params, max_wait_s=max_wait_s)
-        print_envelope_ok(data, json_mode=json_)
+        data["workspace"] = ws.name
+        print_envelope_ok(data, json_mode=json_, render=render_agent_result)
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
 
@@ -217,7 +230,11 @@ def agent_runs(
             r.model_dump()
             for r in AgentSessionStore(ws).list_runs(limit=limit)
         ]
-        print_envelope_ok({"runs": rows}, json_mode=json_)
+        print_envelope_ok(
+            {"runs": rows, "workspace": ws.name},
+            json_mode=json_,
+            render=render_agent_runs,
+        )
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
 
@@ -232,6 +249,7 @@ def agent_show(
     try:
         ws = _ensure_workspace(workspace_name)
         details = AgentSessionStore(ws).get_run_details(run_id)
-        print_envelope_ok(details, json_mode=json_)
+        details["workspace"] = ws.name
+        print_envelope_ok(details, json_mode=json_, render=render_agent_show)
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)

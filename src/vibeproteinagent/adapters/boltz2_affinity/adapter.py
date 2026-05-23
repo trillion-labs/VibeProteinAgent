@@ -1,9 +1,9 @@
 """Boltz-2 + affinity adapter.
 
 Pointer-style adapter — the Boltz Python source lives on disk at
-``$VPA_BOLTZ_TREE`` (default ``/opt/vpa-data/boltz``) and the
+``$VPA_BOLTZ_TREE`` (default ``$VPA_HOME/sidecars/boltz``) and the
 model checkpoints + CCD molecule cache live at ``$VPA_BOLTZ_CACHE`` (default
-``/opt/vpa-data/boltz_cache``). See ``vendor/boltz2-affinity/
+``$VPA_HOME/cache/boltz``). See ``vendor/boltz2-affinity/
 UPSTREAM.md`` for the full provenance.
 
 Why pointer-only: Boltz ships ~4.3 GiB of checkpoints + ~1.8 GiB of CCD
@@ -44,12 +44,13 @@ from vibeproteinagent.adapters.msa_policy import (
     yaml_file_has_prepared_msa,
 )
 from vibeproteinagent.core.compat import ensure_rdkit_allchem_descriptors
+from vibeproteinagent.core.config import vpa_home
 from vibeproteinagent.core.torch_compat import allow_full_torch_load
 
 # --------------------------------------------------------------------------- paths
 
-BOLTZ_TREE_DEFAULT = "/opt/vpa-data/boltz"
-BOLTZ_CACHE_DEFAULT = "/opt/vpa-data/boltz_cache"
+BOLTZ_TREE_DEFAULT = str(vpa_home() / "sidecars" / "boltz")
+BOLTZ_CACHE_DEFAULT = str(vpa_home() / "cache" / "boltz")
 
 BOLTZ_TREE = Path(os.environ.get("VPA_BOLTZ_TREE", BOLTZ_TREE_DEFAULT)).expanduser()
 BOLTZ_CACHE = Path(os.environ.get("VPA_BOLTZ_CACHE", BOLTZ_CACHE_DEFAULT)).expanduser()

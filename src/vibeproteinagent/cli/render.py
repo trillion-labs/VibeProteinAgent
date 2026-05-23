@@ -100,6 +100,40 @@ def _short(s: str | None, n: int = 12) -> str:
     return s if len(s) <= n else s[-n:]
 
 
+def _clip(value: Any, limit: int = 96) -> str:
+    text = "-" if value is None else str(value)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def _state_style(state: str) -> str:
+    normalized = state.lower()
+    if normalized in {"completed", "success", "succeeded", "cached", "valid"}:
+        return "green"
+    if normalized in {"failed", "error", "cancelled", "invalid"}:
+        return "red"
+    if normalized in {"running", "submitted", "queued"}:
+        return "cyan"
+    if normalized in {"skipped", "pending"}:
+        return "yellow"
+    return "white"
+
+
+def _state_icon(state: str, style: LogStyle | None) -> str:
+    normalized = state.lower()
+    if normalized in {"completed", "success", "succeeded", "cached", "valid"}:
+        return "✅" if _is_pretty(style) else "[ok]"
+    if normalized in {"failed", "error", "cancelled", "invalid"}:
+        return "❌" if _is_pretty(style) else "[err]"
+    if normalized in {"running", "submitted", "queued"}:
+        return "⏳" if _is_pretty(style) else "[..]"
+    if normalized in {"skipped", "pending"}:
+        return "⚠️" if _is_pretty(style) else "[warn]"
+    return "•" if _is_pretty(style) else "-"
+
+
 # ---------------------------------------------------------------- tools
 
 
@@ -777,6 +811,269 @@ def render_generic(
             c.print(f"  {k} = {v!r}")
 
 
+# ---------------------------------------------------------------- agent
+
+
+def _agent_workflow_ids(data: dict[str, Any]) -> list[str]:
+    ids = data.get("workflow_ids")
+    if isinstance(ids, list):
+        return [str(v) for v in ids if v]
+    one = data.get("workflow_id") or (data.get("result") or {}).get("workflow_id")
+    return [str(one)] if one else []
+
+
+def _agent_nodes(data: dict[str, Any]) -> list[dict[str, Any]]:
+    summary = data.get("summary")
+    if not isinstance(summary, dict):
+        return []
+    nodes = summary.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    return [n for n in nodes if isinstance(n, dict)]
+
+
+def _agent_state(data: dict[str, Any]) -> str:
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    return str(data.get("state") or result.get("state") or "unknown")
+
+
+def _agent_failed_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        node
+        for node in nodes
+        if str(node.get("state") or "").lower() in {"failed", "error", "cancelled"}
+        or node.get("error_code")
+        or node.get("error_message")
+    ]
+
+
+def _agent_failure_reason(node: dict[str, Any]) -> str:
+    parts = [node.get("error_code"), node.get("error_message")]
+    details = node.get("error_details")
+    if not any(parts) and isinstance(details, dict):
+        parts = [details.get("code"), details.get("message") or details.get("reason")]
+    return _clip(": ".join(str(p) for p in parts if p), 112)
+
+
+def _render_agent_nodes_table(
+    nodes: list[dict[str, Any]],
+    *,
+    style: LogStyle | None,
+    console: Console,
+) -> None:
+    if not nodes:
+        return
+    t = _table("Tool results", style)
+    t.add_column("status")
+    t.add_column("node")
+    t.add_column("tool")
+    t.add_column("job")
+    t.add_column("reason", overflow="fold")
+    for node in nodes:
+        state = str(node.get("state") or "unknown")
+        state_text = f"{_state_icon(state, style)} {state}"
+        if _is_pretty(style):
+            state_text = f"[{_state_style(state)}]{state_text}[/]"
+        t.add_row(
+            state_text,
+            str(node.get("node_id") or "-"),
+            str(node.get("tool") or "-"),
+            _short(str(node.get("job_id") or ""), 14),
+            _agent_failure_reason(node) if _agent_failure_reason(node) != "-" else "",
+        )
+    console.print(t)
+
+
+def _render_agent_jobs_table(
+    job_ids: list[str],
+    *,
+    style: LogStyle | None,
+    console: Console,
+) -> None:
+    if not job_ids:
+        return
+    t = _table("Jobs", style)
+    t.add_column("job")
+    for job_id in job_ids:
+        t.add_row(job_id)
+    console.print(t)
+
+
+def render_agent_result(
+    data: dict[str, Any],
+    style: LogStyle | None = None,
+    console: Console | None = None,
+) -> None:
+    """Render a concise human summary for ``vpa agent run/submit-plan``."""
+    style = style or get_style()
+    c = _console_for(style, console)
+    state = _agent_state(data)
+    state_color = _state_style(state)
+    workspace = str(data.get("workspace") or "-")
+    run_id = str(data.get("run_id") or "-")
+    workflow_ids = _agent_workflow_ids(data)
+    job_ids = [str(v) for v in (data.get("job_ids") or []) if v]
+    nodes = _agent_nodes(data)
+    failed_nodes = _agent_failed_nodes(nodes)
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    error = result.get("error") or data.get("error")
+
+    title = f"{_state_icon(state, style)} Agent {state}"
+    if _is_pretty(style):
+        rows = Table.grid(padding=(0, 2))
+        rows.add_column(style="dim")
+        rows.add_column()
+        rows.add_row("Workspace", workspace)
+        rows.add_row("Run", run_id)
+        rows.add_row("Workflow", ", ".join(workflow_ids) if workflow_ids else "-")
+        rows.add_row("Jobs", str(len(job_ids)))
+        if error:
+            rows.add_row("Error", _clip(error, 120))
+        c.print(Panel(rows, title=f"🧬 {title}", border_style=state_color))
+    else:
+        c.print(f"{title}  workspace={workspace}  run={run_id}")
+        workflow_text = ", ".join(workflow_ids) if workflow_ids else "-"
+        c.print(f"  workflow={workflow_text}  jobs={len(job_ids)}")
+        if error:
+            c.print(f"  error={_clip(error, 120)}")
+
+    _render_agent_nodes_table(nodes, style=style, console=c)
+    if job_ids and not nodes:
+        _render_agent_jobs_table(job_ids, style=style, console=c)
+
+    if failed_nodes:
+        fail_table = _table("Failures", style)
+        fail_table.add_column("node")
+        fail_table.add_column("tool")
+        fail_table.add_column("reason", overflow="fold")
+        for node in failed_nodes:
+            fail_table.add_row(
+                str(node.get("node_id") or "-"),
+                str(node.get("tool") or "-"),
+                _agent_failure_reason(node),
+            )
+        c.print(fail_table)
+
+    if workflow_ids and workspace != "-":
+        report_command = (
+            f"vpa report {workflow_ids[0]} --workspace {workspace} --out report.html"
+        )
+        c.print(
+            f"[dim]Report:[/] {report_command}"
+            if _is_pretty(style)
+            else f"Report: {report_command}"
+        )
+
+
+def render_agent_plan_validation(
+    data: dict[str, Any],
+    style: LogStyle | None = None,
+    console: Console | None = None,
+) -> None:
+    """Render ``vpa agent validate-plan`` without dumping the full plan."""
+    style = style or get_style()
+    c = _console_for(style, console)
+    valid = bool(data.get("valid"))
+    plan = data.get("plan") if isinstance(data.get("plan"), dict) else {}
+    workflow = plan.get("workflow_plan") if isinstance(plan.get("workflow_plan"), dict) else {}
+    nodes = workflow.get("nodes") if isinstance(workflow.get("nodes"), list) else []
+    tools = plan.get("required_tools") if isinstance(plan.get("required_tools"), list) else []
+    valid_state = "valid" if valid else "invalid"
+    title = f"{_state_icon(valid_state, style)} Agent plan {valid_state}"
+
+    if _is_pretty(style):
+        rows = Table.grid(padding=(0, 2))
+        rows.add_column(style="dim")
+        rows.add_column()
+        rows.add_row("Workspace", str(data.get("workspace") or "-"))
+        rows.add_row("Workflow", str(workflow.get("name") or "-"))
+        rows.add_row("Nodes", str(len(nodes)))
+        rows.add_row("Required tools", ", ".join(str(t) for t in tools) or "-")
+        c.print(Panel(rows, title=f"🧪 {title}", border_style="green" if valid else "red"))
+    else:
+        c.print(f"{title}  workspace={data.get('workspace') or '-'}")
+        c.print(f"  workflow={workflow.get('name') or '-'}  nodes={len(nodes)}")
+        c.print(f"  required_tools={', '.join(str(t) for t in tools) or '-'}")
+
+    if nodes:
+        t = _table("Plan nodes", style)
+        t.add_column("node")
+        t.add_column("tool")
+        t.add_column("on_failure")
+        t.add_column("max_parallel", justify="right")
+        for node in nodes[:12]:
+            if not isinstance(node, dict):
+                continue
+            t.add_row(
+                str(node.get("id") or "-"),
+                str(node.get("tool") or "-"),
+                str(node.get("on_failure") or "-"),
+                str(node.get("max_parallel") or "-"),
+            )
+        c.print(t)
+        if len(nodes) > 12:
+            c.print(f"  ... {len(nodes) - 12} more nodes")
+
+
+def render_agent_runs(
+    data: dict[str, Any],
+    style: LogStyle | None = None,
+    console: Console | None = None,
+) -> None:
+    """Render ``vpa agent runs`` as a compact run table."""
+    style = style or get_style()
+    c = _console_for(style, console)
+    rows = data.get("runs") if isinstance(data.get("runs"), list) else []
+    if not rows:
+        c.print("No agent runs.")
+        return
+    t = _table("Agent runs", style)
+    t.add_column("run")
+    t.add_column("state")
+    t.add_column("mode")
+    t.add_column("workflow")
+    t.add_column("updated")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        state = str(row.get("state") or "-")
+        state_text = f"{_state_icon(state, style)} {state}"
+        if _is_pretty(style):
+            state_text = f"[{_state_style(state)}]{state_text}[/]"
+        workflow_ids = row.get("workflow_ids") or []
+        if isinstance(workflow_ids, list):
+            workflow = ", ".join(str(v) for v in workflow_ids)
+        else:
+            workflow = "-"
+        t.add_row(
+            _short(str(row.get("run_id") or ""), 14),
+            state_text,
+            str(row.get("mode") or "-"),
+            workflow or "-",
+            str(row.get("updated_at") or row.get("created_at") or "-"),
+        )
+    c.print(t)
+
+
+def render_agent_show(
+    data: dict[str, Any],
+    style: LogStyle | None = None,
+    console: Console | None = None,
+) -> None:
+    """Render a persisted agent run, preferring its final report when present."""
+    style = style or get_style()
+    c = _console_for(style, console)
+    run = data.get("run") if isinstance(data.get("run"), dict) else data
+    final_report = data.get("final_report") or run.get("final_report")
+    if isinstance(final_report, dict):
+        merged = dict(final_report)
+        if data.get("workspace") and not merged.get("workspace"):
+            merged["workspace"] = data["workspace"]
+        render_agent_result(merged, style=style, console=c)
+        return
+    render_agent_runs({"runs": [run], "workspace": data.get("workspace")}, style=style, console=c)
+
+
 def render_error(
     code: str,
     message: str,
@@ -854,6 +1151,10 @@ def render_run_progress(
 
 
 __all__ = [
+    "render_agent_plan_validation",
+    "render_agent_result",
+    "render_agent_runs",
+    "render_agent_show",
     "render_daemon_start",
     "render_daemon_status",
     "render_daemon_stop",

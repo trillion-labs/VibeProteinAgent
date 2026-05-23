@@ -9,6 +9,8 @@ from typer.testing import CliRunner
 from vibeproteinagent.cli.main import app
 from vibeproteinagent.mcp.tools import __all__ as mcp_tool_exports
 from vibeproteinagent.reporting import collect_report_model
+from vibeproteinagent.reporting.collect import _normalize_candidates
+from vibeproteinagent.reporting.models import WorkflowNodeSummary
 from vibeproteinagent.workflows import WorkflowStore
 from vibeproteinagent.workspace import ArtifactStore, JobState, JobStore, Workspace
 
@@ -168,6 +170,95 @@ def test_report_workflow_uses_ranked_candidates_qc_and_msa(
     # the candidate cards and the All Designs table cover those sequences.
     assert "MSA / Sequence Context" not in html
     assert "Reproducibility" in html
+
+
+def test_output_derived_flat_candidates_keep_source_metrics_separate() -> None:
+    nodes = [
+        WorkflowNodeSummary(
+            node_id="boltz2_affinity",
+            tool="boltz2_affinity",
+            version="*",
+            state="completed",
+            job_id="job_boltz",
+            output={
+                "predicted_cif": "/tmp/boltz.cif",
+                "affinity_pred_value": 1.2,
+                "confidence_score": 0.8,
+                "runtime_ms": 100,
+            },
+        ),
+        WorkflowNodeSummary(
+            node_id="boltzgen_design_only",
+            tool="boltzgen",
+            version="*",
+            state="completed",
+            job_id="job_boltzgen",
+            output={
+                "designs": [{"candidate_id": "boltzgen-1", "length": 20}],
+                "runtime_ms": 200,
+            },
+        ),
+        WorkflowNodeSummary(
+            node_id="protenix_v2",
+            tool="protenix_v2",
+            version="*",
+            state="completed",
+            job_id="job_protenix",
+            output={
+                "predicted_cif": "/tmp/protenix.cif",
+                "metrics": {"plddt": 81.0, "ptm": 0.61, "ranking_score": 0.14},
+                "runtime_ms": 300,
+            },
+        ),
+    ]
+
+    candidates = _normalize_candidates(nodes, [])
+    by_id = {candidate.candidate_id: candidate for candidate in candidates}
+
+    assert "boltz2_affinity:affinity_pred_value" in by_id["boltz2_affinity-1"].scores
+    assert "protenix_v2:plddt" not in by_id["boltz2_affinity-1"].scores
+    assert "boltzgen:runtime_ms" not in by_id["boltz2_affinity-1"].scores
+
+    assert "boltzgen:runtime_ms" in by_id["boltzgen-1"].scores
+    assert "boltz2_affinity:affinity_pred_value" not in by_id["boltzgen-1"].scores
+    assert "protenix_v2:plddt" not in by_id["boltzgen-1"].scores
+
+    assert "protenix_v2:plddt" in by_id["protenix_v2-1"].scores
+    assert "boltz2_affinity:affinity_pred_value" not in by_id["protenix_v2-1"].scores
+
+
+def test_ranked_candidates_keep_global_qc_context() -> None:
+    nodes = [
+        WorkflowNodeSummary(
+            node_id="rank",
+            tool="rank_designs",
+            version="*",
+            state="completed",
+            job_id="job_rank",
+            output={
+                "ranked_candidates": [
+                    {"candidate_id": "design_1", "rank": 1, "score": 1.0, "plddt": 88.0}
+                ]
+            },
+        ),
+        WorkflowNodeSummary(
+            node_id="qc",
+            tool="protein_qc",
+            version="*",
+            state="completed",
+            job_id="job_qc",
+            output={
+                "flags": ["high_instability_index"],
+                "metrics": {"instability_index": 55.0},
+            },
+        ),
+    ]
+
+    candidates = _normalize_candidates(nodes, [])
+
+    assert candidates[0].candidate_id == "design_1"
+    assert "high_instability_index" in candidates[0].qc_flags
+    assert candidates[0].scores["instability_index"] == 55.0
 
 
 def test_report_bundle_writes_directory(

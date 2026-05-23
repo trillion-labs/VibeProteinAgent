@@ -19,3 +19,11 @@ if [[ -f "${VPA_REPO_ROOT}/validation_runs/local.env" ]]; then
   source "${VPA_REPO_ROOT}/validation_runs/local.env"
   set +a
 fi
+
+if [[ -n "${VPA_SHARED_HOME:-}" && -z "${VPA_HOME:-}" ]]; then
+  export VPA_HOME="${VPA_SHARED_HOME}"
+fi
+if [[ -f "${VPA_HOME:-${HOME}/.vibeproteinagent}/env.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${VPA_HOME:-${HOME}/.vibeproteinagent}/env.sh"
+fi

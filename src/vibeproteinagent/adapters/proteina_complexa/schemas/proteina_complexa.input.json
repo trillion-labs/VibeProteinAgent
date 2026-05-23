@@ -25,7 +25,23 @@
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "default": [],
-      "description": "ligand_binder only: target-chain residue indices around the ligand pocket."
+      "description": "ligand_binder only: FASTA/sequence 1-indexed target positions when target_sequence/target_fasta_path is provided; otherwise legacy structure residue numbers."
+    },
+    "target_pocket_residue_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "default": [],
+      "description": "ligand_binder only: explicit structure residue IDs such as A10 or B82A."
+    },
+    "target_sequence": {
+      "type": ["string", "null"],
+      "default": null
+    },
+    "target_fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "vpa:digest": "sha256-if-path"
     },
     "ligand_smiles": {
       "type": ["string", "null"],
@@ -50,7 +66,28 @@
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "default": [],
-      "description": "motif only: residue indices on motif_chain to preserve."
+      "description": "motif only: FASTA/sequence 1-indexed positions to preserve when motif_sequence/motif_fasta_path is provided; otherwise legacy structure residue numbers."
+    },
+    "motif_residue_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "default": [],
+      "description": "motif only: explicit structure residue IDs such as A10 or B82A."
+    },
+    "motif_sequence": {
+      "type": ["string", "null"],
+      "default": null
+    },
+    "motif_fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "position_basis": {
+      "type": "string",
+      "enum": ["auto", "sequence", "structure"],
+      "default": "auto"
     },
     "total_length": {
       "type": ["integer", "null"],
@@ -111,19 +148,33 @@
     {
       "if": {"properties": {"mode": {"const": "ligand_binder"}}},
       "then": {
-        "required": ["target_pdb", "target_pocket_residues", "ligand_smiles"],
-        "properties": {
-          "target_pocket_residues": {"minItems": 1}
-        }
+        "required": ["target_pdb", "ligand_smiles"],
+        "anyOf": [
+          {
+            "required": ["target_pocket_residues"],
+            "properties": {"target_pocket_residues": {"minItems": 1}}
+          },
+          {
+            "required": ["target_pocket_residue_ids"],
+            "properties": {"target_pocket_residue_ids": {"minItems": 1}}
+          }
+        ]
       }
     },
     {
       "if": {"properties": {"mode": {"const": "motif"}}},
       "then": {
-        "required": ["motif_pdb", "motif_residues", "total_length"],
-        "properties": {
-          "motif_residues": {"minItems": 1}
-        }
+        "required": ["motif_pdb", "total_length"],
+        "anyOf": [
+          {
+            "required": ["motif_residues"],
+            "properties": {"motif_residues": {"minItems": 1}}
+          },
+          {
+            "required": ["motif_residue_ids"],
+            "properties": {"motif_residue_ids": {"minItems": 1}}
+          }
+        ]
       }
     }
   ],

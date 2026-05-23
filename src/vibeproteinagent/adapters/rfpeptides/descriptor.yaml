@@ -1,7 +1,7 @@
 name: rfpeptides
 version: "1.1.0"
 category: protein_design
-description: "Generates head-to-tail cyclic (macrocyclic) peptide backbones, 5–50 residues. Monomer-macrocycle mode when no target is given; target-bound macrocyclic-binder mode with a target PDB and optional hotspots. Backbone only — pair with sequence design for amino acids."
+description: "Generates cyclic peptide backbones. Target hotspot/range integers are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; explicit residue-id fields use PDB numbering."
 runtime: python
 backend: pytorch
 gpu_required: true

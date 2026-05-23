@@ -1,7 +1,7 @@
 name: rfdiffusion3
 version: "0.1.0+foundry"
 category: protein_design
-description: "Target-conditioned binder backbone diffusion using the newer RFdiffusion3 model. Requires a target PDB, target chain, and optional hotspots; backbones only — pair with an inverse-folding tool for sequences. For motif/symmetric/partial-diffusion modes use `rfdiffusion`."
+description: "RFdiffusion3 target-conditioned binder backbones. Integer hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; target_hotspot_residue_ids are PDB IDs."
 runtime: python
 backend: pytorch
 gpu_required: true

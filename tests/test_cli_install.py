@@ -26,6 +26,26 @@ def test_cli_install_selective_dry_run(
     assert any(step["unit"] == "cuda:profile" for step in data["steps"])
 
 
+def test_cli_install_boltz_tools_fetch_sources_and_caches(
+    runner: CliRunner,
+    isolated_vpa_home: Path,
+) -> None:
+    res = runner.invoke(
+        app,
+        ["install", "--tools", "boltz2_affinity,boltzgen", "--dry-run", "--json"],
+    )
+    assert res.exit_code == 0, res.stdout
+    data = json.loads(res.stdout)["data"]
+    units = {step["unit"] for step in data["steps"]}
+
+    assert "source:boltz2_affinity:boltz_source" in units
+    assert "source:boltzgen:boltzgen_source" in units
+    assert "weight:boltz2_affinity:boltz_mols" in units
+    assert "weight:boltzgen:boltzgen_model_cache" in units
+    assert data["env_exports"]["VPA_BOLTZ_TREE"].endswith("/sidecars/boltz")
+    assert data["env_exports"]["VPA_BOLTZGEN_TREE"].endswith("/sidecars/boltzgen")
+
+
 def test_cli_install_full_profile_includes_all_tools(
     runner: CliRunner,
     isolated_vpa_home: Path,

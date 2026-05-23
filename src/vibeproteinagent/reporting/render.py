@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import base64
+import functools
 import html
 import json
 import math
 import mimetypes
+import re
 import shutil
 from collections.abc import Callable
 from dataclasses import asdict, replace
@@ -372,8 +374,9 @@ def render_report_html(
     workflow_section = (
         f"""<section id="workflow" class="card">
   <header class="card-header"><div><p class="card-eyebrow">Pipeline</p><h2 class="card-title">Workflow graph</h2></div></header>
-  <p class="widget-explainer">Each node ran as an independent VPA job. Colour shows completion state; arrows trace data dependencies.</p>
+  <p class="widget-explainer">Colour shows each node's completion state; arrows trace data dependencies between jobs.</p>
   {_workflow_svg(model.graph.nodes)}
+  {_workflow_composition(model)}
 </section>"""
         if show_workflow else ""
     )
@@ -1545,6 +1548,315 @@ def _dag_status_circle(state_class: str, cx: float, cy: float, step_num: int) ->
     )
 
 
+def _fmt_param_value(value: Any) -> str:
+    """Compact one-line rendering of a single input-parameter value."""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return _fmt(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return ""
+        # File-path-like strings collapse to their basename.
+        if "/" in s and len(s) > 24:
+            return Path(s).name
+        return s if len(s) <= 52 else s[:48] + "…"
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        if all(isinstance(x, (str, int, float, bool)) for x in value):
+            joined = ", ".join(str(x) for x in value[:8])
+            if len(value) > 8:
+                joined += f" +{len(value) - 8}"
+            return joined if len(joined) <= 60 else f"{len(value)} items"
+        return f"{len(value)} items"
+    if isinstance(value, dict):
+        return f"{len(value)} fields" if value else ""
+    return _short(str(value), 52)
+
+
+# Structure-prediction tools that accept MSA / template input parameters —
+# the workflow panel surfaces *how the MSA was done* for these. New tools
+# are also picked up automatically when their params carry one of these keys.
+_WF_MSA_AWARE_TOOLS = frozenset({"protenix_v2", "boltz2_affinity"})
+_WF_MSA_KEYS = frozenset({
+    "use_msa", "msa_backend", "use_rna_msa", "use_template",
+    "msa_paths", "msa_index_csv", "msa",
+})
+# Documented input-parameter defaults for the MSA-aware predictors. A run
+# that recorded no resolved params still has a known *effective* config —
+# these let the panel show it (tagged "default" so it reads as inferred).
+_WF_MSA_DEFAULTS: dict[str, Any] = {
+    "use_msa": False,
+    "msa_backend": "auto",
+    "use_rna_msa": False,
+    "use_template": False,
+}
+
+
+def _wf_msa_info(node: WorkflowNodeSummary) -> list[tuple[str, str]]:
+    """How a structure-prediction node handled its MSA / templates.
+
+    Uses the recorded ``use_msa`` / ``msa_backend`` / ``use_template`` input
+    parameters when present. When a run recorded no params the documented
+    tool defaults are shown instead (tagged ``default``); boltz2_affinity's
+    echoed ``msa_paths`` give direct evidence when available."""
+    params = node.params if isinstance(node.params, dict) else {}
+    out = node.output if isinstance(node.output, dict) else {}
+    tool = (node.tool or "").lower()
+    if tool not in _WF_MSA_AWARE_TOOLS and not any(
+        k in params for k in _WF_MSA_DEFAULTS
+    ):
+        return []
+    items: list[tuple[str, str]] = []
+
+    # ---- MSA ----
+    if "use_msa" in params:
+        if params.get("use_msa"):
+            backend = params.get("msa_backend") or _WF_MSA_DEFAULTS["msa_backend"]
+            items.append(("MSA", f"enabled · {backend} backend"))
+        else:
+            items.append(("MSA", "off — single-sequence"))
+    else:
+        mp = out.get("msa_paths")
+        if isinstance(mp, list) and mp:
+            items.append(
+                ("MSA", f"{len(mp)} alignment{'s' if len(mp) != 1 else ''} used")
+            )
+        elif isinstance(mp, list) or out.get("msa_index_csv"):
+            # boltz2_affinity echoed its MSA inputs — empty means single-sequence.
+            items.append((
+                "MSA",
+                "MSA index supplied" if out.get("msa_index_csv")
+                else "off — single-sequence",
+            ))
+        else:
+            items.append(("MSA", "off — single-sequence (default)"))
+
+    # ---- templates ----
+    if "use_template" in params:
+        items.append(("Templates", "enabled" if params.get("use_template") else "off"))
+    elif tool in _WF_MSA_AWARE_TOOLS:
+        items.append(("Templates", "off (default)"))
+
+    # ---- RNA MSA — only surfaced when actually enabled ----
+    if params.get("use_rna_msa"):
+        items.append(("RNA MSA", "enabled"))
+
+    return items
+
+
+def _wf_node_inputs(node: WorkflowNodeSummary) -> list[tuple[str, str]]:
+    """Input parameters a node ran with, as ``(label, value)`` pairs.
+
+    Prefers the resolved ``params`` recorded on the node (threaded through
+    from the job record). Falls back to values the tool echoes in its own
+    output for older report payloads that predate per-node params. For
+    structure-prediction tools the MSA configuration is always surfaced
+    first via :func:`_wf_msa_info`.
+    """
+    msa = _wf_msa_info(node)
+    params = node.params if isinstance(node.params, dict) else {}
+    items: list[tuple[str, str]] = []
+    if params:
+        for key, value in params.items():
+            # MSA keys are rendered by _wf_msa_info — don't double them here.
+            if value is None or str(key).startswith("_") or key in _WF_MSA_KEYS:
+                continue
+            shown = _fmt_param_value(value)
+            if shown:
+                items.append((str(key).replace("_", " "), shown))
+            if len(items) >= 12:
+                break
+    if not items:
+        items = _wf_node_inputs_from_output(node)
+    return msa + items
+
+
+def _wf_node_inputs_from_output(node: WorkflowNodeSummary) -> list[tuple[str, str]]:
+    """Best-effort recovery of input parameters from a tool's *output*.
+
+    Used only when a node carries no recorded ``params`` (legacy payloads):
+    most tools echo their key inputs back in their output (``go_sequences``
+    returns its ``go_id``, ``sequence_edit`` its ``mutations``, …).
+    """
+    out = node.output if isinstance(node.output, dict) else {}
+    tool = (node.tool or "").lower()
+    items: list[tuple[str, str]] = []
+
+    def add(label: str, value: Any) -> None:
+        if value is None:
+            return
+        s = str(value).strip()
+        if s and s.lower() != "none":
+            items.append((label, s))
+
+    if tool == "sequence_edit":
+        add("operation", out.get("operation"))
+        muts = out.get("mutations")
+        if isinstance(muts, list) and muts:
+            shown = ", ".join(str(m) for m in muts[:8])
+            if len(muts) > 8:
+                shown += f" +{len(muts) - 8}"
+            add("mutations", shown)
+    elif tool == "structure_analysis":
+        if out.get("structure_path"):
+            add("structure", Path(str(out["structure_path"])).name)
+        scope = out.get("annotation_scope")
+        if isinstance(scope, dict) and isinstance(scope.get("requested_positions"), list):
+            rp = scope["requested_positions"]
+            if rp:
+                add("selected positions", _format_position_list(rp))
+        chains = out.get("chains")
+        if isinstance(chains, list) and chains:
+            add("chains", ", ".join(str(c) for c in chains))
+    elif tool == "go_sequences":
+        add("GO term", out.get("go_id"))
+        summ = out.get("summary")
+        if isinstance(summ, dict):
+            add("max scan", summ.get("max_scan_accessions"))
+    elif tool == "interpro_sequences":
+        add("InterPro entry", out.get("interpro_id"))
+        summ = out.get("summary")
+        if isinstance(summ, dict):
+            add("max scan", summ.get("max_scan_accessions"))
+    elif tool == "literature_search":
+        if out.get("query"):
+            add("query", _short(str(out["query"]), 64))
+        add("backend", out.get("backend"))
+        df = out.get("date_filter")
+        if isinstance(df, dict) and (df.get("published_after") or df.get("published_before")):
+            add("dates", f"{df.get('published_after') or '…'} – {df.get('published_before') or '…'}")
+    elif tool == "template_select":
+        add("engine", out.get("engine"))
+        add("query kind", out.get("query_kind"))
+    elif tool == "colabdesign_utils":
+        add("action", out.get("action"))
+    elif tool == "sequence_analysis":
+        m = out.get("metrics")
+        if isinstance(m, dict):
+            add("mode", m.get("analysis_mode"))
+    elif tool == "tmalign":
+        if out.get("length_a") is not None:
+            add("structure A", f"{out['length_a']} aa")
+        if out.get("length_b") is not None:
+            add("structure B", f"{out['length_b']} aa")
+    elif tool == "rank_designs":
+        if out.get("candidate_count") is not None:
+            add("candidates", out.get("candidate_count"))
+
+    # Generic fallback: surface any unambiguous run-config keys the tool
+    # echoes (model name, mode, seed, sample count, …) when no tool-specific
+    # extractor matched.
+    if not items:
+        seen: set[str] = set()
+        for key, label in (
+            ("model_name", "model"), ("mode", "mode"), ("task_name", "task"),
+            ("num_samples", "samples"), ("seed", "seed"), ("seed_used", "seed"),
+            ("seeds_used", "seeds"),
+        ):
+            if key in out and out[key] is not None and label not in seen:
+                shown = _fmt_param_value(out[key])
+                if shown:
+                    items.append((label, shown))
+                    seen.add(label)
+    return items
+
+
+def _workflow_composition(model: ReportModel) -> str:
+    """Explanatory panel for the Workflow section.
+
+    The bare DAG shows *what* ran but not *how* it was driven. This panel
+    lists every step in recorded execution order and, for each, the input
+    parameters recovered from its output plus any upstream dependency — so
+    the run's flow is legible without prior knowledge of the run.
+    """
+    nodes = model.graph.nodes
+    if len(nodes) < 2:
+        return ""
+    summary = model.summary
+    kind = (summary.kind or "").lower()
+    name = summary.name or ""
+    by_id = {n.node_id: n for n in nodes}
+    edges = sum(len([u for u in (n.upstream or []) if u in by_id]) for n in nodes)
+
+    if kind == "tool":
+        mode_key, mode_label = "tool", "Single tool run"
+        lead = "This run executed a single tool."
+    elif kind == "agent" or name.lower().startswith("agent"):
+        mode_key, mode_label = "agent", "LLM agent–composed"
+        lead = (
+            "An LLM agent selected and ordered these steps automatically — no "
+            "explicit user plan is recorded with the run. The steps below are "
+            "listed in execution order; each shows the input parameters "
+            "recovered from its output."
+        )
+    else:
+        mode_key, mode_label = "workflow", "Predefined workflow"
+        lead = (
+            "This run followed a predefined workflow. The steps below are "
+            "listed in execution order; each shows its input parameters and "
+            "any upstream dependency."
+        )
+    if edges > 0:
+        lead += " A 'consumes' tag marks which earlier step's output a tool reads."
+    else:
+        lead += (
+            " The tools ran independently — there are no data dependencies "
+            "between them, characteristic of a coverage / catalog run that "
+            "exercises each tool in isolation."
+        )
+
+    stats = [f'<span class="wf-comp-stat"><b>{len(nodes)}</b> steps</span>']
+    if edges > 0:
+        stats.append(
+            f'<span class="wf-comp-stat"><b>{edges}</b> data '
+            f'dependenc{"y" if edges == 1 else "ies"}</span>'
+        )
+    else:
+        stats.append('<span class="wf-comp-stat"><b>independent</b> execution</span>')
+
+    pad = len(str(len(nodes)))
+    rows: list[str] = []
+    for i, n in enumerate(nodes, 1):
+        chips: list[str] = []
+        ups = [by_id[u].tool for u in (n.upstream or []) if u in by_id]
+        if ups:
+            chips.append(
+                '<span class="wf-param wf-param-dep">consumes '
+                f'{_h(", ".join(ups))}</span>'
+            )
+        for label, value in _wf_node_inputs(n):
+            chips.append(
+                f'<span class="wf-param"><b>{_h(label)}</b>{_h(value)}</span>'
+            )
+        params_html = (
+            f'<span class="wf-step-params">{"".join(chips)}</span>'
+            if chips
+            else '<span class="wf-step-params wf-step-noparam">'
+            "no input parameters recorded</span>"
+        )
+        rows.append(
+            '<div class="wf-step">'
+            f'<span class="wf-step-num">{i:0{pad}d}</span>'
+            f'<span class="wf-step-dot state-{_state_class(n.state)}"></span>'
+            f'<span class="wf-step-tool">{_h(n.tool)}</span>'
+            f"{params_html}</div>"
+        )
+
+    return (
+        '<div class="wf-comp">'
+        '<h3 class="wf-comp-title">How this pipeline was composed</h3>'
+        '<div class="wf-comp-head">'
+        f'<span class="wf-comp-mode wf-mode-{mode_key}">{_h(mode_label)}</span>'
+        f'<p class="wf-comp-lead">{_h(lead)}</p></div>'
+        f'<div class="wf-comp-stats">{"".join(stats)}</div>'
+        f'<div class="wf-steps">{"".join(rows)}</div>'
+        "</div>"
+    )
+
+
 def _plots_html(plots: list[PlotSpec]) -> str:
     if not plots:
         return "<p class='empty'>No numeric distributions were detected.</p>"
@@ -2039,14 +2351,33 @@ def _per_tool_widget(node: WorkflowNodeSummary) -> str:
     tool = (node.tool or "").lower()
     specialised: Callable[[dict[str, Any]], str] | None = {
         "protein_qc": _qc_widget,
+        "dssp": _dssp_widget,
+        "ipsae": _metrics_only_widget,
+        "mmseqs2_gpu": _metrics_only_widget,
+        "tmalign": _metrics_only_widget,
+        "vina": _vina_widget,
+        "template_select": _template_select_widget,
+        "pxmeter": _pxmeter_widget,
+        "go_sequences": _sequence_retrieval_widget,
+        "interpro_sequences": _sequence_retrieval_widget,
+        "literature_search": _literature_search_widget,
         "structure_analysis": _structure_analysis_widget,
         "sequence_analysis": _sequence_analysis_widget,
         "sequence_edit": _sequence_edit_widget,
         "rank_designs": _rank_designs_widget,
         "boltz2_affinity": _boltz2_widget,
-        "proteinmpnn": _proteinmpnn_widget,
         "protenix_v2": _protenix_widget,
-        "esm3": _esm3_widget,
+        "proteinmpnn": functools.partial(_mpnn_widget, tool="proteinmpnn"),
+        "ligandmpnn": functools.partial(_mpnn_widget, tool="ligandmpnn"),
+        "bindcraft": functools.partial(_design_widget, tool="bindcraft"),
+        "pxdesign": functools.partial(_design_widget, tool="pxdesign"),
+        "rfdiffusion": functools.partial(_design_widget, tool="rfdiffusion"),
+        "rfdiffusion3": functools.partial(_design_widget, tool="rfdiffusion3"),
+        "rfpeptides": functools.partial(_design_widget, tool="rfpeptides"),
+        "boltzgen": functools.partial(_design_widget, tool="boltzgen"),
+        "proteina_complexa": functools.partial(_design_widget, tool="proteina_complexa"),
+        "esm2": functools.partial(_esm_widget, tool="esm2"),
+        "esm3": functools.partial(_esm_widget, tool="esm3"),
     }.get(tool)
     if specialised is not None:
         html_str = specialised(output)
@@ -2119,6 +2450,657 @@ def _qc_widget(output: dict[str, Any]) -> str:
         '<div class="widget widget-qc">'
         '<h4 class="widget-title">Quality Control</h4>'
         f"{explainer}{cards_html}{flags_html}</div>"
+    )
+
+
+def _read_fasta_file(path: Any, *, cap: int = 60) -> list[tuple[str, str]]:
+    """Read a FASTA file -> list of ``(header, sequence)`` tuples (capped)."""
+    if not isinstance(path, str):
+        return []
+    p = Path(path)
+    if not p.is_file():
+        return []
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    records: list[tuple[str, str]] = []
+    header: str | None = None
+    seq: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(">"):
+            if header is not None:
+                records.append((header, "".join(seq)))
+                if len(records) >= cap:
+                    return records
+            header = line[1:].strip()
+            seq = []
+        elif header is not None:
+            seq.append(line.strip())
+    if header is not None:
+        records.append((header, "".join(seq)))
+    return records
+
+
+def _read_metadata_jsonl(path: Any) -> dict[str, dict[str, Any]]:
+    """Read a per-line JSON metadata file -> ``{accession: record}``."""
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(path, str):
+        return out
+    p = Path(path)
+    if not p.is_file():
+        return out
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("accession"):
+            out[str(obj["accession"])] = obj
+    return out
+
+
+def _cross_overlap_positions(sequences: list[str], k: int = 10) -> list[set[int]]:
+    """Per sequence, the residue indices covered by an exact k-mer that also
+    occurs in a *different* retrieved sequence.
+
+    Only cross-sequence overlap is flagged — a stretch identical between two
+    of the retrieved proteins. ``k`` is 10: long enough that an exact match
+    between distinct proteins is very unlikely to arise by chance, so the
+    shaded region instead marks a span plausibly under shared functional
+    constraint (roughly the length of a short conserved motif / one
+    secondary-structure element). Stretches that merely repeat *within* a
+    single sequence are deliberately ignored — they carry no cross-sequence
+    functional signal.
+    """
+    masks: list[set[int]] = [set() for _ in sequences]
+    if len(sequences) < 2:
+        return masks
+    owners: dict[str, set[int]] = {}
+    for si, s in enumerate(sequences):
+        for i in range(len(s) - k + 1):
+            owners.setdefault(s[i : i + k], set()).add(si)
+    shared = {km for km, idxs in owners.items() if len(idxs) >= 2}
+    if not shared:
+        return masks
+    for si, s in enumerate(sequences):
+        for i in range(len(s) - k + 1):
+            if s[i : i + k] in shared:
+                masks[si].update(range(i, i + k))
+    return masks
+
+
+def _render_residues_html(seq: str, overlap: set[int]) -> str:
+    """Render a residue string, wrapping cross-sequence overlap runs in a span."""
+    parts: list[str] = []
+    buf: list[str] = []
+    run = False
+
+    def _flush(highlight: bool) -> None:
+        if not buf:
+            return
+        chunk = _h("".join(buf))
+        parts.append(
+            f'<span class="seqret-hl">{chunk}</span>' if highlight else chunk
+        )
+        buf.clear()
+
+    for i, ch in enumerate(seq):
+        hl = i in overlap
+        if hl != run:
+            _flush(run)
+            run = hl
+        buf.append(ch)
+    _flush(run)
+    return "".join(parts)
+
+
+def _seq_ruler(n: int) -> str:
+    """Monospace column ruler — a position number ending on every 10th
+    column, padded with spaces so it lines up under the residue track."""
+    chars = [" "] * n
+    for pos in range(10, n + 1, 10):
+        label = str(pos)
+        start = pos - len(label)
+        for j, ch in enumerate(label):
+            if 0 <= start + j < n:
+                chars[start + j] = ch
+    return _h("".join(chars))
+
+
+def _sequence_retrieval_widget(output: dict[str, Any]) -> str:
+    """Widget for go_sequences / interpro_sequences — a professional view of
+    the retrieved UniProt sequences.
+
+    Shows the retrieval query + summary stats, then one card per kept
+    sequence with its accession, length and the residue string; stretches
+    shared across the retrieved set are lightly shaded. When the FASTA file
+    is unavailable (e.g. the workspace was cleaned up) it degrades to the
+    summary plus a short note.
+    """
+    if not output:
+        return ""
+    summary = output.get("summary") if isinstance(output.get("summary"), dict) else {}
+    query_id = output.get("go_id") or output.get("interpro_id") or ""
+    query_label = output.get("go_label")
+    is_go = bool(output.get("go_id"))
+
+    kept = _num(output.get("kept_sequences"))
+    candidates = (
+        _num(summary.get("candidate_accessions"))
+        or _num(output.get("resolved_uniprot_accessions"))
+        or _num(output.get("retrieved_accessions"))
+    )
+    runtime = _num(output.get("runtime_ms"))
+    l_min, l_med, l_max = (
+        _num(summary.get("length_min")),
+        _num(summary.get("length_median")),
+        _num(summary.get("length_max")),
+    )
+
+    stats: list[str] = []
+    if kept is not None:
+        stats.append(f'<span class="seqret-stat"><b>{int(kept)}</b> sequences kept</span>')
+    if candidates is not None:
+        stats.append(
+            f'<span class="seqret-stat"><b>{int(candidates)}</b> candidates scanned</span>'
+        )
+    if l_min is not None and l_max is not None:
+        med = f" · median {int(l_med)}" if l_med is not None else ""
+        stats.append(
+            f'<span class="seqret-stat">length <b>{int(l_min)}-{int(l_max)}</b>{med} aa</span>'
+        )
+    if runtime is not None:
+        stats.append(f'<span class="seqret-stat"><b>{int(runtime)}</b> ms</span>')
+
+    query_html = ""
+    if query_id:
+        label = (
+            f'<span class="seqret-query-label">{_h(str(query_label))}</span>'
+            if query_label else ""
+        )
+        query_html = (
+            f'<div class="seqret-query"><span class="seqret-query-id">'
+            f'{_h(str(query_id))}</span>{label}</div>'
+        )
+    summary_html = (
+        '<div class="seqret-summary">'
+        f'{query_html}<div class="seqret-stats">{"".join(stats)}</div>'
+        '</div>'
+    )
+
+    records = _read_fasta_file(output.get("fasta_path"))
+    metadata = _read_metadata_jsonl(output.get("metadata_jsonl"))
+    list_html = ""
+    note = ""
+    if records:
+        seqs = [s for _, s in records]
+        masks = (
+            _cross_overlap_positions(seqs)
+            if sum(len(s) for s in seqs) <= 200_000
+            else [set() for _ in seqs]
+        )
+        max_len = max(len(s) for s in seqs)
+        # One MSA-style row per sequence: a pinned accession label plus a
+        # fixed-pitch residue track; every row shares a single horizontal
+        # scrollbar and a column ruler so long sequences never overflow.
+        rows: list[str] = []
+        for (header, seq), mask in zip(records, masks):
+            acc = header.split()[0] if header else "?"
+            meta = metadata.get(acc, {})
+            length = meta.get("length") or len(seq)
+            dot = (
+                '<span class="seqret-rev" title="reviewed entry"></span>'
+                if meta.get("reviewed") is True else ""
+            )
+            label = (
+                f'<span class="seqret-row-label">{dot}'
+                f'<span class="seqret-row-acc">{_h(acc)}</span>'
+                f'<span class="seqret-row-len">{int(length)} aa</span></span>'
+            )
+            rows.append(
+                f'<div class="seqret-row">{label}'
+                f'<code class="seqret-row-seq">'
+                f"{_render_residues_html(seq, mask)}</code></div>"
+            )
+        rows.append(
+            '<div class="seqret-row seqret-row-ruler">'
+            '<span class="seqret-row-label"></span>'
+            f'<code class="seqret-row-seq">{_seq_ruler(max_len)}</code></div>'
+        )
+        legend = (
+            '<div class="seqret-legend"><span>'
+            '<span class="seqret-legend-pip seqret-hl"></span>'
+            'cross-sequence overlap — a stretch of ≥10 residues identical '
+            'in another retrieved sequence</span></div>'
+            if any(masks) else ""
+        )
+        list_html = (
+            f'<div class="seqret-align-head">Retrieved sequences · {len(records)} shown</div>'
+            f'<div class="seqret-align-scroll">{"".join(rows)}</div>{legend}'
+        )
+    elif kept == 0:
+        dropped = summary.get("dropped") if isinstance(summary.get("dropped"), dict) else {}
+        reason = (
+            " — " + ", ".join(f"{v} {str(k).replace('_', ' ')}" for k, v in dropped.items())
+            if dropped else ""
+        )
+        note = f'<p class="note">No sequences passed the retrieval filters{reason}.</p>'
+    else:
+        note = (
+            '<p class="note">The retrieved FASTA is not embedded in this report. '
+            "Re-run <code>vpa report</code> with the source workspace present to list "
+            "the sequences here.</p>"
+        )
+
+    source = "GO term" if is_go else "InterPro family"
+    explainer = (
+        '<p class="widget-explainer">'
+        f"Retrieves UniProt protein sequences linked to the queried {source}, applies "
+        "review / temporal / taxonomy filters, and writes a FASTA set. Each kept sequence "
+        "is listed below; yellow-shaded residues mark a cross-sequence overlap — a stretch "
+        "of at least 10 residues that is identical in another retrieved sequence, flagging "
+        "a region plausibly under shared functional constraint. Stretches that merely "
+        "repeat within a single sequence are not flagged."
+        "</p>"
+    )
+    return (
+        '<div class="widget widget-seqret">'
+        '<h4 class="widget-title">Retrieved sequences</h4>'
+        f"{explainer}{summary_html}{list_html}{note}"
+        "</div>"
+    )
+
+
+# DSSP 8-state secondary-structure codes -> 3-state buckets for the SS bar.
+# H/G/I = helices, E/B = strands; turn / bend / polyproline / coil -> loop.
+_DSSP_SS_3STATE: dict[str, str] = {
+    "H": "helix", "G": "helix", "I": "helix",
+    "E": "sheet", "B": "sheet",
+}
+
+
+def _dssp_ss_strip(chain_label: str, first_resi: int, ss_string: str) -> str:
+    """One white strip-block: a colour-coded SS bar + residue-index ruler.
+
+    Mirrors the structure_analysis strip styling so the two widgets read
+    consistently; wrapped in a single horizontally-scrolling container.
+    """
+    n = len(ss_string)
+    if n == 0:
+        return ""
+    last = first_resi + n - 1
+    ss_cells: list[str] = []
+    ruler_cells: list[str] = []
+    for i, code in enumerate(ss_string):
+        ri = first_resi + i
+        bucket = _DSSP_SS_3STATE.get(code.upper(), "loop")
+        tip = f"{ri} · {bucket} · DSSP '{code}'"
+        ss_cells.append(
+            f'<span class="strip-cell ss-{bucket}" title="{_attr(tip)}"></span>'
+        )
+        show = ri in (first_resi, last) or (ri % 10 == 0 and abs(ri - last) > 2)
+        ruler_cells.append(
+            f'<span class="strip-cell strip-ruler-cell">{ri if show else "&nbsp;"}</span>'
+        )
+    head = (
+        f"Chain {_h(chain_label)} · residues {first_resi}-{last}"
+        if chain_label else f"Residues {first_resi}-{last}"
+    )
+    return (
+        '<div class="strip-block">'
+        f'<div class="strip-head">{head}</div>'
+        '<div class="strip-scroll">'
+        '<div class="strip-row"><span class="strip-label">SS</span>'
+        f'<div class="strip-cells">{"".join(ss_cells)}</div></div>'
+        '<div class="strip-row strip-ruler"><span class="strip-label"></span>'
+        f'<div class="strip-cells">{"".join(ruler_cells)}</div></div>'
+        '</div>'
+        '<div class="strip-legend">'
+        '<span class="legend-pip ss-helix"></span>helix'
+        '<span class="legend-pip ss-sheet"></span>sheet'
+        '<span class="legend-pip ss-loop"></span>loop'
+        '</div>'
+        '</div>'
+    )
+
+
+def _format_position_list(positions: list[Any], *, cap: int = 40) -> str:
+    """Render a sorted residue-position list, collapsing consecutive runs
+    into ``start–end`` ranges (e.g. ``[5,6,7,9] -> "5–7, 9"``)."""
+    nums = sorted(
+        {int(p) for p in positions if isinstance(p, (int, float)) and not isinstance(p, bool)}
+    )
+    if not nums:
+        return ""
+    runs: list[str] = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        runs.append(str(start) if start == prev else f"{start}–{prev}")
+        start = prev = n
+    runs.append(str(start) if start == prev else f"{start}–{prev}")
+    if len(runs) > cap:
+        return ", ".join(runs[:cap]) + f", … (+{len(runs) - cap} more)"
+    return ", ".join(runs)
+
+
+def _selected_positions_note(scope: Any, warnings: Any = None) -> str:
+    """Context callout for tools run with an explicit residue-position
+    selection. When a tool annotates only a requested subset of positions,
+    the report otherwise shows just a handful of residues with no hint of
+    *why* — this note makes the input selection explicit and, when the tool
+    warned that some requested positions were absent, names them."""
+    if not isinstance(scope, dict):
+        return ""
+    if scope.get("annotation_scope") != "requested_positions":
+        return ""
+    requested = scope.get("requested_positions")
+    if not isinstance(requested, list) or not requested:
+        return ""
+    pos_txt = _format_position_list(requested)
+    if not pos_txt:
+        return ""
+    n_req = len(requested)
+    annotated = scope.get("annotated_residue_count")
+    summary_n = scope.get("summary_residue_count")
+
+    # Requested positions absent from the parsed structure — mined from the
+    # tool's own warning text so the reader sees exactly which ones dropped.
+    missing: list[int] = []
+    if isinstance(warnings, list):
+        for w in warnings:
+            ws = str(w)
+            if "missing from parsed structure" in ws.lower():
+                tail = ws.rsplit(":", 1)[-1]
+                missing.extend(int(n) for n in re.findall(r"\d+", tail))
+    missing = sorted(set(missing))
+    missing_txt = _format_position_list(missing)
+
+    detail = (
+        f"The per-residue annotation below is restricted to the {n_req} "
+        f"position{'s' if n_req != 1 else ''} requested as an input parameter."
+    )
+    if missing_txt:
+        noun = "Position" if len(missing) == 1 else "Positions"
+        verb = "is" if len(missing) == 1 else "are"
+        detail += f" {noun} {missing_txt} {verb} absent from the parsed structure"
+        if isinstance(annotated, int):
+            detail += f", so {annotated} of {n_req} could be annotated"
+        detail += "."
+    elif isinstance(annotated, int) and annotated != n_req:
+        detail += (
+            f" Only {annotated} of {n_req} "
+            f"{'was' if annotated == 1 else 'were'} present in the structure."
+        )
+    if isinstance(summary_n, int) and summary_n:
+        detail += f" The summary cards above still cover all {summary_n} residues."
+
+    missing_chip = (
+        f'<span class="scope-note-missing">not in structure: {_h(missing_txt)}</span>'
+        if missing_txt else ""
+    )
+    return (
+        '<div class="scope-note">'
+        '<span class="scope-note-label">Input-selected residues</span>'
+        f'<span class="scope-note-pos">{_h(pos_txt)}</span>'
+        f"{missing_chip}"
+        f'<p class="scope-note-detail">{_h(detail)}</p>'
+        "</div>"
+    )
+
+
+def _fmt_evalue(value: Any) -> str:
+    """Compact E-value formatting — scientific for the tiny/huge magnitudes
+    typical of homology search, 3 sig figs otherwise."""
+    e = _num(value)
+    if e is None:
+        return "—"
+    if e == 0:
+        return "0"
+    if e < 1e-3 or e >= 1e4:
+        return f"{e:.2e}"
+    return f"{e:.3g}"
+
+
+def _template_card(rank: int, t: dict[str, Any]) -> str:
+    """One ranked template panel — header, identity / coverage bars and the
+    E-value / length chips."""
+    tid = str(t.get("template_id") or t.get("description") or f"template_{rank}")
+    desc = str(t.get("description") or "")
+    badges: list[str] = []
+    for key in ("source", "release_date"):
+        val = t.get(key)
+        if val:
+            badges.append(f'<span class="tmpl-badge">{_h(str(val))}</span>')
+    badge_html = (
+        f'<span class="tmpl-badges">{"".join(badges)}</span>' if badges else ""
+    )
+    desc_html = (
+        f'<span class="tmpl-desc">{_h(desc)}</span>'
+        if desc and desc != tid else ""
+    )
+    head = (
+        '<div class="tmpl-card-head">'
+        f'<span class="tmpl-rank">#{rank}</span>'
+        f'<span class="tmpl-id">{_h(tid)}</span>'
+        f"{desc_html}{badge_html}</div>"
+    )
+
+    bars: list[str] = []
+    for label, frac in (("Identity", _num(t.get("identity"))),
+                        ("Coverage", _num(t.get("coverage")))):
+        if frac is None:
+            continue
+        pct = max(0.0, min(100.0, frac * 100.0))
+        quality = "good" if pct >= 70 else ("ok" if pct >= 40 else "poor")
+        colour = _QUALITY_COLOR[quality]
+        bars.append(
+            '<div class="tmpl-bar-row">'
+            f'<span class="tmpl-bar-label">{label}</span>'
+            '<div class="tmpl-bar-track">'
+            f'<i style="width:{pct:.1f}%;background:{colour}"></i></div>'
+            f'<span class="tmpl-bar-val">{pct:.1f}%</span></div>'
+        )
+    chips: list[str] = []
+    if t.get("evalue") is not None:
+        chips.append(
+            f'<span class="tmpl-chip">E-value <b>{_h(_fmt_evalue(t.get("evalue")))}</b></span>'
+        )
+    if t.get("length") is not None:
+        chips.append(
+            f'<span class="tmpl-chip">Length <b>{_h(str(t.get("length")))} aa</b></span>'
+        )
+    chip_html = f'<div class="tmpl-chips">{"".join(chips)}</div>' if chips else ""
+    metrics = (
+        f'<div class="tmpl-metrics">{"".join(bars)}{chip_html}</div>'
+        if bars or chip_html else ""
+    )
+    return f'<div class="tmpl-card">{head}{metrics}</div>'
+
+
+def _template_sequences_html(
+    templates: list[dict[str, Any]], seqs: dict[str, str]
+) -> str:
+    """MSA-style comparison strip — every template sequence stacked in one
+    horizontally-scrollable container with a shared position ruler."""
+    present: list[tuple[dict[str, Any], str]] = []
+    for t in templates:
+        tid = str(t.get("template_id") or "")
+        seq = seqs.get(tid) or seqs.get(str(t.get("description") or ""))
+        if seq:
+            present.append((t, seq))
+    if not present:
+        return ""
+    max_len = max(len(s) for _, s in present)
+    rows: list[str] = []
+    for t, seq in present:
+        tid = str(t.get("template_id") or t.get("description") or "?")
+        ident = _num(t.get("identity"))
+        badge = (
+            f'<span class="tmpl-seq-id">{ident * 100:.0f}% id</span>'
+            if ident is not None else ""
+        )
+        rows.append(
+            '<div class="tmpl-seq-row">'
+            '<span class="tmpl-seq-label">'
+            f'<span class="tmpl-seq-name">{_h(tid)}</span>{badge}</span>'
+            f'<code class="tmpl-seq-track">{_h(seq)}</code></div>'
+        )
+    rows.append(
+        '<div class="tmpl-seq-row tmpl-seq-ruler">'
+        '<span class="tmpl-seq-label"></span>'
+        f'<code class="tmpl-seq-track">{_seq_ruler(max_len)}</code></div>'
+    )
+    return (
+        '<h5 class="widget-subhead">Template sequences</h5>'
+        f'<div class="tmpl-seq-scroll">{"".join(rows)}</div>'
+    )
+
+
+def _template_select_widget(output: dict[str, Any]) -> str:
+    """template_select widget — ranked modelling templates with their
+    alignment metrics (identity / coverage / E-value) plus a side-by-side
+    comparison of the template sequences parsed from the FASTA artifact."""
+    if not output:
+        return ""
+    templates = output.get("top_templates")
+    if not isinstance(templates, list) or not templates:
+        loaded = _load_json_artifact(output.get("templates_json"))
+        if isinstance(loaded, list):
+            templates = loaded
+    templates = [t for t in (templates or []) if isinstance(t, dict)]
+
+    explainer = (
+        '<p class="widget-explainer">'
+        "<strong>Template select</strong> searches for known structures / "
+        "sequences homologous to the query and ranks them as modelling "
+        "templates. Each card carries the alignment metrics — sequence "
+        "identity, query coverage and E-value; the strip below compares the "
+        "template sequences side by side."
+        "</p>"
+    )
+    if not templates:
+        return (
+            '<div class="widget widget-tmpl">'
+            '<h4 class="widget-title">Template selection</h4>'
+            f'{explainer}<p class="empty">No templates were selected.</p></div>'
+        )
+
+    meta_bits: list[str] = []
+    if output.get("engine"):
+        meta_bits.append(f'{output["engine"]} engine')
+    if output.get("query_kind"):
+        meta_bits.append(f'{output["query_kind"]} query')
+    meta_bits.append(
+        f"{len(templates)} template{'s' if len(templates) != 1 else ''}"
+    )
+    rt = _num(output.get("runtime_ms"))
+    if rt is not None:
+        meta_bits.append(_duration(int(rt)))
+    meta = f'<p class="note">{_h(" · ".join(meta_bits))}</p>'
+
+    # Template sequences keyed by FASTA header (the template id).
+    seqs: dict[str, str] = {}
+    arts = output.get("artifacts") if isinstance(output.get("artifacts"), dict) else {}
+    fasta_path = arts.get("template_sequences_fasta") if isinstance(arts, dict) else None
+    for header, seq in _read_fasta_file(fasta_path):
+        key = header.split()[0] if header else ""
+        if key:
+            seqs[key] = seq
+
+    cards = "".join(_template_card(i + 1, t) for i, t in enumerate(templates))
+    seq_html = _template_sequences_html(templates, seqs)
+    note = ""
+    if not seq_html and isinstance(fasta_path, str):
+        note = (
+            '<p class="note">Template sequences are not embedded in this '
+            "report.</p>"
+        )
+    return (
+        '<div class="widget widget-tmpl">'
+        '<h4 class="widget-title">Template selection</h4>'
+        f'{explainer}{meta}<div class="tmpl-list">{cards}</div>{seq_html}{note}</div>'
+    )
+
+
+def _dssp_widget(output: dict[str, Any]) -> str:
+    """DSSP widget — helix / sheet / coil gauges plus a per-residue SS bar.
+
+    The SS bar colours every residue by secondary-structure type with a
+    residue ruler underneath. Multi-chain DSSP output
+    (``secondary_structure_by_chain``) renders one white sub-block per
+    chain; each strip scrolls left/right for long sequences.
+    """
+    if not output:
+        return ""
+    # Fraction gauges — kept; the bar is added alongside, not instead.
+    cards: list[str] = []
+    for key in ("helix_fraction", "sheet_fraction", "coil_fraction"):
+        if key in output:
+            card = _auto_score_card(key, output[key])
+            if card:
+                cards.append(card)
+    cards_html = _card_grid(cards)
+
+    # Context footer (residue count, runtime) — sits between the gauges and
+    # the SS bar so the bar lands directly under the headline numbers.
+    footer_rows: list[str] = []
+    for key, value in output.items():
+        if (
+            key in _FOOTER_METRIC_KEYS
+            and value is not None
+            and not isinstance(value, (list, dict, bool))
+        ):
+            footer_rows.append(_kv_row(_pretty_metric_name(key.lower()), str(value)))
+    footer_html = (
+        f'<table class="kv-table"><tbody>{"".join(footer_rows)}</tbody></table>'
+        if footer_rows else ""
+    )
+
+    # SS bar(s): one strip-block per chain when chain-resolved data exists,
+    # otherwise a single strip from the flat secondary-structure string.
+    strips: list[str] = []
+    by_chain = output.get("secondary_structure_by_chain")
+    if isinstance(by_chain, list) and by_chain:
+        for entry in by_chain:
+            if not isinstance(entry, dict):
+                continue
+            ss = str(entry.get("secondary_structure") or "")
+            if ss:
+                strips.append(_dssp_ss_strip(str(entry.get("chain_id") or "?"), 1, ss))
+    else:
+        ss_string = output.get("secondary_structure_string")
+        if isinstance(ss_string, str) and ss_string:
+            strips.append(_dssp_ss_strip("", 1, ss_string))
+
+    if not cards_html and not strips:
+        return ""
+
+    explainer = (
+        '<p class="widget-explainer">'
+        "<strong>DSSP</strong> assigns a secondary-structure state to every residue from the "
+        "backbone hydrogen-bond pattern. The cards summarise the helix / sheet / coil split; the "
+        "bar below colours each residue by SS type along the chain."
+        "</p>"
+    )
+    scope_note = _selected_positions_note(
+        output.get("annotation_scope"), output.get("warnings")
+    )
+    return (
+        '<div class="widget widget-dssp">'
+        '<h4 class="widget-title">Secondary structure (DSSP)</h4>'
+        f"{explainer}{scope_note}{cards_html}{footer_html}{''.join(strips)}"
+        "</div>"
     )
 
 
@@ -2309,12 +3291,13 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
         + (f" · annotated {annotated} residues" if annotated else "")
         + "</p>"
     ) if chains else ""
+    scope_note = _selected_positions_note(scope, output.get("warnings"))
 
     return (
         '<div class="widget widget-struct">'
         '<h4 class="widget-title">Structure analysis</h4>'
         f"{explainer}"
-        f"{chains_label}"
+        f"{chains_label}{scope_note}"
         f"{cards_html}{ruler_html}{residue_table_html}{artifact_links}"
         "</div>"
     )
@@ -2511,6 +3494,7 @@ def _structure_ruler_html(
             f'<div class="strip-block">'
             f'<div class="strip-head">Chain {_h(chain) or "?"} · residues '
             f'{first_resseq}-{last_resseq}</div>'
+            f'<div class="strip-scroll">'
             f'<div class="strip-row"><span class="strip-label">SS</span>'
             f'<div class="strip-cells">{"".join(ss_cells)}</div></div>'
             f'<div class="strip-row"><span class="strip-label">Burial</span>'
@@ -2526,6 +3510,7 @@ def _structure_ruler_html(
             )
             + f'<div class="strip-row strip-ruler"><span class="strip-label"></span>'
             f'<div class="strip-cells">{"".join(ruler_cells)}</div></div>'
+            f'</div>'  # close .strip-scroll
             f'<div class="strip-legend">'
             '<span class="legend-pip ss-helix"></span>helix'
             '<span class="legend-pip ss-sheet"></span>sheet'
@@ -2594,98 +3579,529 @@ def _residue_annotations_table(rows: list[dict[str, Any]]) -> str:
     )
 
 
-def _sequence_analysis_widget(output: dict[str, Any]) -> str:
-    rows: list[str] = []
-    summary = output.get("summary") if isinstance(output.get("summary"), dict) else {}
-    if isinstance(summary, dict):
-        for key, label in (
-            ("length", "Length"),
-            ("molecular_weight", "Molecular weight (Da)"),
-            ("isoelectric_point", "pI"),
-            ("instability_index", "Instability index"),
-            ("aromaticity", "Aromaticity"),
-            ("gravy", "GRAVY"),
-        ):
-            value = summary.get(key)
-            if value is None:
-                continue
-            rows.append(_kv_row(label, _fmt(value)))
-    aa_comp = output.get("aa_composition") if isinstance(output.get("aa_composition"), dict) else None
-    composition_html = ""
-    if isinstance(aa_comp, dict) and aa_comp:
-        # Compose a small horizontal bar chart of amino acid composition.
-        total = sum(_num(v) or 0 for v in aa_comp.values()) or 1.0
-        bars: list[str] = []
-        for aa, count in sorted(aa_comp.items(), key=lambda kv: -(_num(kv[1]) or 0))[:20]:
-            n = _num(count) or 0.0
-            frac = n / total
-            bars.append(
-                f'<div class="aa-bar-row"><span class="aa-bar-label aa aa-{_aa_class(aa)}">{_h(aa)}</span>'
-                f'<div class="aa-bar-track"><i style="width:{frac * 100:.1f}%"></i></div>'
-                f'<span class="aa-bar-count">{_fmt(n)}</span></div>'
-            )
-        if bars:
-            composition_html = (
-                '<h5 class="widget-subhead">Amino-acid composition</h5>'
-                f'<div class="aa-bars">{"".join(bars)}</div>'
-            )
-    table_html = (
-        f'<table class="kv-table"><tbody>{"".join(rows)}</tbody></table>'
-        if rows
-        else ""
+# Headline sequence-analysis properties: key -> (label, explainer, lo, hi).
+# ``lo``/``hi`` None => frame ring (count / signed value with no fixed range).
+_SEQANA_PROP_SPECS: dict[str, tuple[str, str, float | None, float | None]] = {
+    "length": ("Length", "Total residue count.", None, None),
+    "molecular_weight": (
+        "Molecular weight (Da)", "Mass of the chain in daltons.", None, None,
+    ),
+    "pI": (
+        "Isoelectric point",
+        "pH of net-zero charge. Typical soluble proteins span pI 4-9.",
+        0.0, 14.0,
+    ),
+    "gravy": (
+        "GRAVY",
+        "Grand average of hydropathy (Kyte-Doolittle). Negative = hydrophilic / soluble.",
+        -2.0, 2.0,
+    ),
+    "net_charge": ("Net charge", "Net charge estimated at pH 7.", None, None),
+    "instability_index": (
+        "Instability index",
+        "Guruprasad heuristic. <40 predicts a protein stable in vitro.",
+        0.0, 80.0,
+    ),
+}
+
+
+def _seqana_prop_card(key: str, value: Any) -> str | None:
+    """One headline-property gauge card for the sequence-analysis widget."""
+    num = _num(value)
+    if num is None:
+        return None
+    spec = _SEQANA_PROP_SPECS.get(key)
+    if spec is None:
+        return None
+    label, explainer, lo, hi = spec
+    quality = _quality_class(key.lower(), num)
+    gauge = (
+        {"value": num, "frame": True}
+        if lo is None
+        else {"value": num, "lo": lo, "hi": hi}
     )
+    return _score_card(label, _fmt(num), explainer, quality, gauge=gauge)
+
+
+_AA_LOGO_NICE_PCT = (0.5, 1, 2, 2.5, 5, 7.5, 10, 12.5, 15, 20, 25, 30, 40, 50, 75, 100)
+
+# Amino-acid property groups, in the legend order, paired with the human
+# label and the _aa_class key — used to caption the sequence-logo colours.
+_AA_LOGO_LEGEND = (
+    ("hydro", "Hydrophobic"),
+    ("pos", "Basic"),
+    ("neg", "Acidic"),
+    ("polar", "Polar"),
+    ("special", "Cys / Gly / Pro"),
+)
+
+
+def _aa_logo_ceiling_pct(max_pct: float) -> float:
+    """Smallest 'nice' percentage at or above the largest composition bar."""
+    for step in _AA_LOGO_NICE_PCT:
+        if max_pct <= step + 1e-9:
+            return float(step)
+    return 100.0
+
+
+def _aa_logo_svg(fractions: dict[str, float]) -> str:
+    """Render the amino-acid distribution as a single-row sequence logo:
+    one column per residue type, each drawn as its one-letter glyph scaled
+    vertically by its composition frequency and filled with the report's
+    amino-acid palette (see the .aa-logo-glyph CSS)."""
+    items = [
+        (str(aa), _num(f) or 0.0)
+        for aa, f in fractions.items()
+        if isinstance(aa, str) and aa.strip() and (_num(f) or 0.0) > 0
+    ]
+    if not items:
+        return ""
+    items.sort(key=lambda kv: (-kv[1], kv[0]))
+
+    col_w, glyph_w = 38, 25
+    plot_h, pad_t = 158, 16
+    pad_l, pad_r = 58, 16
+    xaxis_h, xtitle_h = 24, 22
+    n = len(items)
+    base_y = pad_t + plot_h
+    total_w = pad_l + n * col_w + pad_r
+    total_h = base_y + xaxis_h + xtitle_h
+
+    max_f = max(f for _, f in items)
+    ceil_pct = _aa_logo_ceiling_pct(max_f * 100.0)
+    ceil_f = ceil_pct / 100.0
+    cap = 0.72 * 100.0  # cap height of a 100px-font glyph
+
+    parts: list[str] = [
+        f'<svg class="aa-logo-svg" viewBox="0 0 {total_w} {total_h}" '
+        f'preserveAspectRatio="xMidYMid meet" role="img" '
+        f'style="max-width:{total_w}px" '
+        f'aria-label="Amino-acid distribution sequence logo">'
+    ]
+    # y-axis — gridlines, percentage ticks and rotated title.
+    yc = pad_t + plot_h / 2
+    for t in (0.0, 0.5, 1.0):
+        gy = base_y - t * plot_h
+        parts.append(
+            f'<line class="aa-logo-grid" x1="{pad_l}" y1="{gy:.1f}" '
+            f'x2="{total_w - pad_r}" y2="{gy:.1f}"/>'
+        )
+        parts.append(
+            f'<text class="aa-logo-ytick" x="{pad_l - 9}" y="{gy + 3.4:.1f}" '
+            f'text-anchor="end">{ceil_pct * t:g}%</text>'
+        )
+    parts.append(
+        f'<text class="aa-logo-axis-title" x="15" y="{yc:.1f}" '
+        f'text-anchor="middle" transform="rotate(-90 15 {yc:.1f})">Frequency</text>'
+    )
+    parts.append(
+        f'<line class="aa-logo-baseline" x1="{pad_l}" y1="{base_y}" '
+        f'x2="{total_w - pad_r}" y2="{base_y}"/>'
+    )
+    # glyph columns — each letter scaled vertically by its frequency.
+    for i, (aa, frac) in enumerate(items):
+        cx = pad_l + i * col_w + col_w / 2
+        h = (frac / ceil_f) * plot_h if ceil_f else 0.0
+        sy = h / cap if cap else 0.0
+        cls = _aa_class(aa)
+        parts.append(
+            f'<g transform="translate({cx:.2f} {base_y}) scale(1 {sy:.4f})">'
+            f"<title>{_h(aa)} — {frac * 100:.1f}%</title>"
+            f'<text class="aa-logo-glyph g-{cls}" x="0" y="0" '
+            f'text-anchor="middle" textLength="{glyph_w}" '
+            f'lengthAdjust="spacingAndGlyphs" font-size="100">{_h(aa)}</text></g>'
+        )
+        parts.append(
+            f'<text class="aa-logo-xtick" x="{cx:.2f}" y="{base_y + 16:.1f}" '
+            f'text-anchor="middle">{_h(aa)}</text>'
+        )
+    parts.append(
+        f'<text class="aa-logo-axis-title" '
+        f'x="{pad_l + (total_w - pad_l - pad_r) / 2:.1f}" y="{total_h - 5}" '
+        f'text-anchor="middle">Amino acid</text>'
+    )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _sequence_analysis_widget(output: dict[str, Any]) -> str:
+    """Sequence-analysis widget — biochemical descriptors of a residue string,
+    grouped into key properties, composition, AA distribution and sampled
+    per-residue annotation sections."""
+    if not isinstance(output, dict):
+        return ""
+    metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
     explainer = (
         '<p class="widget-explainer">'
-        "<strong>Sequence analysis</strong> derives compositional and biochemical descriptors from the residue "
-        "string alone: length, MW, pI, instability index, aromaticity, GRAVY and amino-acid distribution. "
-        "These are deterministic and computed via BioPython's <code>ProteinAnalysis</code>."
+        "<strong>Sequence analysis</strong> derives deterministic biochemical descriptors "
+        "from the residue string alone — size, charge, hydropathy, stability and "
+        "composition — via BioPython's <code>ProteinAnalysis</code>."
         "</p>"
+    )
+    if not metrics:
+        return (
+            '<div class="widget widget-seqana">'
+            '<h4 class="widget-title">Sequence analysis</h4>'
+            f'{explainer}<p class="empty">No sequence metrics were emitted.</p></div>'
+        )
+
+    # ---- meta line ----
+    meta_bits: list[str] = []
+    if metrics.get("analysis_mode"):
+        meta_bits.append(str(metrics["analysis_mode"]).replace("_", " "))
+    if metrics.get("metric_backend"):
+        meta_bits.append(f'{metrics["metric_backend"]} backend')
+    length = metrics.get("length", output.get("sequence_length"))
+    if length is not None:
+        noncanon = _num(metrics.get("noncanonical_residue_count")) or 0
+        meta_bits.append(
+            f"{length} residues ({int(noncanon)} non-canonical)"
+            if noncanon else f"{length} residues"
+        )
+    meta = f'<p class="note">{_h(" · ".join(meta_bits))}</p>' if meta_bits else ""
+
+    # ---- key properties (gauge cards) ----
+    prop_cards = [
+        card
+        for key in ("length", "molecular_weight", "pI", "gravy", "net_charge", "instability_index")
+        if (card := _seqana_prop_card(key, metrics.get(key))) is not None
+    ]
+    props_html = (
+        '<h5 class="widget-subhead">Key properties</h5>' + _card_grid(prop_cards)
+        if prop_cards else ""
+    )
+
+    # ---- residue composition (labelled bars) ----
+    comp_rows: list[str] = []
+    for key, label in (
+        ("hydrophobic_fraction", "Hydrophobic"),
+        ("polar_fraction", "Polar"),
+        ("charged_fraction", "Charged"),
+        ("aromatic_fraction", "Aromatic"),
+        ("cysteine_fraction", "Cysteine"),
+        ("glycine_fraction", "Glycine"),
+        ("proline_fraction", "Proline"),
+    ):
+        v = _num(metrics.get(key))
+        if v is None:
+            continue
+        pct = max(0.0, min(100.0, v * 100))
+        comp_rows.append(
+            f'<div class="seqana-comp-row"><span class="seqana-comp-label">{label}</span>'
+            f'<div class="seqana-comp-track"><i style="width:{pct:.1f}%"></i></div>'
+            f'<span class="seqana-comp-pct">{pct:.0f}%</span></div>'
+        )
+    comp_html = (
+        '<h5 class="widget-subhead">Residue composition</h5>'
+        f'<div class="seqana-comp">{"".join(comp_rows)}</div>'
+        if comp_rows else ""
+    )
+
+    # ---- amino-acid distribution (sequence logo) ----
+    aa_fracs = (
+        metrics.get("amino_acid_fractions")
+        if isinstance(metrics.get("amino_acid_fractions"), dict) else {}
+    )
+    aa_counts = (
+        metrics.get("amino_acid_counts")
+        if isinstance(metrics.get("amino_acid_counts"), dict) else {}
+    )
+    fractions: dict[str, float] = {}
+    if aa_fracs:
+        fractions = {str(k): (_num(v) or 0.0) for k, v in aa_fracs.items()}
+    elif aa_counts:
+        total = sum((_num(v) or 0.0) for v in aa_counts.values()) or 1.0
+        fractions = {str(k): (_num(v) or 0.0) / total for k, v in aa_counts.items()}
+    aa_html = ""
+    logo_svg = _aa_logo_svg(fractions)
+    if logo_svg:
+        legend = "".join(
+            f'<span class="aa-logo-legend-item">'
+            f'<span class="aa-logo-legend-pip g-{cls}"></span>{label}</span>'
+            for cls, label in _AA_LOGO_LEGEND
+        )
+        aa_html = (
+            '<h5 class="widget-subhead">Amino-acid distribution</h5>'
+            f'<div class="aa-logo">{logo_svg}</div>'
+            f'<div class="aa-logo-legend">{legend}</div>'
+        )
+
+    # ---- sampled per-residue annotations ----
+    anns = output.get("top_annotations") if isinstance(output.get("top_annotations"), list) else []
+    ann_html = ""
+    ann_rows: list[str] = []
+    for a in anns:
+        if not isinstance(a, dict):
+            continue
+        flags = a.get("caution_flags") or []
+        flag_html = "".join(
+            f'<span class="seqana-flag">{_h(str(f).replace("_", " "))}</span>' for f in flags
+        ) or '<span class="seqana-muted">—</span>'
+        res = str(a.get("residue") or "")
+        ann_rows.append(
+            "<tr>"
+            f'<td>{_h(str(a.get("position", "")))}</td>'
+            f'<td><span class="aa aa-{_aa_class(res)}">{_h(res)}</span></td>'
+            f'<td>{_h(str(a.get("biochemical_class", "")))}</td>'
+            f'<td>{_h(str(a.get("charge_class", "")))}</td>'
+            f'<td>{_h(str(a.get("hydrophobicity_class", "")))}</td>'
+            f"<td>{flag_html}</td>"
+            "</tr>"
+        )
+    if ann_rows:
+        ann_html = (
+            f'<h5 class="widget-subhead">Sampled residue annotations ({len(ann_rows)})</h5>'
+            '<div class="table-wrap"><table><thead><tr><th>Pos</th><th>Residue</th>'
+            '<th>Class</th><th>Charge</th><th>Hydrophobicity</th><th>Caution flags</th>'
+            f'</tr></thead><tbody>{"".join(ann_rows)}</tbody></table></div>'
+        )
+
+    liabs = output.get("liabilities") if isinstance(output.get("liabilities"), list) else []
+    liab_html = (
+        f'<p class="note">{len(liabs)} sequence-liability flag(s) recorded — '
+        "see the raw output below.</p>"
+        if liabs else ""
+    )
+
+    scope_note = _selected_positions_note(
+        output.get("annotation_scope"), output.get("warnings")
     )
     return (
         '<div class="widget widget-seqana">'
         '<h4 class="widget-title">Sequence analysis</h4>'
-        f"{explainer}{table_html}{composition_html}</div>"
+        f"{explainer}{meta}{scope_note}{props_html}{comp_html}{aa_html}{ann_html}{liab_html}"
+        "</div>"
     )
 
 
+_SEQEDIT_OP_LABELS = {
+    "mutate_residues": "Mutate residues",
+    "insert_residues": "Insert residues",
+    "delete_residues": "Delete residues",
+    "replace_region": "Replace region",
+    "truncate": "Truncate",
+}
+
+
+def _seqedit_parse_mutation(token: Any) -> dict[str, Any]:
+    """Parse a substitution token like 'F5A' into wild-type residue,
+    1-based position and mutant residue. Non-substitution tokens degrade
+    to a raw label."""
+    m = re.match(r"^\s*([A-Za-z*])\s*(\d+)\s*([A-Za-z*])\s*$", str(token))
+    if m:
+        return {
+            "raw": f"{m.group(1).upper()}{m.group(2)}{m.group(3).upper()}",
+            "wt": m.group(1).upper(),
+            "pos": int(m.group(2)),
+            "mut": m.group(3).upper(),
+        }
+    return {"raw": str(token).strip(), "wt": None, "pos": None, "mut": None}
+
+
+def _seqedit_residue_track(seq: str, diff: set[int], cls: str) -> str:
+    """Monospace residue string with every changed column wrapped in a
+    `cls` span; unchanged runs are emitted as a single escaped chunk."""
+    parts: list[str] = []
+    buf: list[str] = []
+
+    def _flush() -> None:
+        if buf:
+            parts.append(_h("".join(buf)))
+            buf.clear()
+
+    for i, ch in enumerate(seq):
+        if i in diff:
+            _flush()
+            parts.append(f'<span class="{cls}">{_h(ch)}</span>')
+        else:
+            buf.append(ch)
+    _flush()
+    return "".join(parts)
+
+
 def _sequence_edit_widget(output: dict[str, Any]) -> str:
-    wt = output.get("wild_type_sequence") or output.get("original_sequence")
+    """Widget for sequence_edit — a professional wild-type vs mutant view.
+
+    Surfaces the edit operation, the applied mutations as colour-coded
+    chips and length / mismatch stats, then an MSA-style two-row alignment
+    (wild-type above, mutant below, with a column ruler) inside a single
+    horizontal scrollbar. Every changed column is highlighted in a
+    striking colour. When the wild-type sequence is not stored in the
+    output it is reconstructed from the mutant sequence and the
+    substitution tokens.
+    """
+    if not output:
+        return ""
+
     mutant = output.get("mutant_sequence") or output.get("edited_sequence")
-    mutations = output.get("mutations")
-    metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
-    rows: list[str] = []
-    if isinstance(metrics, dict):
-        for k, v in metrics.items():
-            rows.append(_kv_row(_pretty_metric_name(k), _h(_compact_inline(v))))
-    if isinstance(mutations, list) and mutations:
-        rows.append(
-            _kv_row(
-                "Mutations applied",
-                ", ".join(
-                    str(m.get("change") if isinstance(m, dict) else m)
-                    for m in mutations[:12]
-                ),
-            )
+    wt = output.get("wild_type_sequence") or output.get("original_sequence")
+    raw_muts = (
+        output.get("mutations") if isinstance(output.get("mutations"), list) else []
+    )
+    parsed = [
+        _seqedit_parse_mutation(m.get("change") if isinstance(m, dict) else m)
+        for m in raw_muts
+    ]
+
+    # Reconstruct the wild-type sequence when only the mutant is stored:
+    # revert every substitution position back to its original residue.
+    wt_reconstructed = False
+    if (not isinstance(wt, str) or not wt) and isinstance(mutant, str) and parsed:
+        chars = list(mutant)
+        ok = True
+        for p in parsed:
+            idx = (p["pos"] or 0) - 1
+            if p["wt"] is None or not 0 <= idx < len(chars):
+                ok = False
+                break
+            chars[idx] = p["wt"]
+        if ok:
+            wt = "".join(chars)
+            wt_reconstructed = True
+
+    has_wt = isinstance(wt, str) and bool(wt)
+    has_mut = isinstance(mutant, str) and bool(mutant)
+
+    # Changed columns (0-based). Prefer a direct wild-type/mutant diff;
+    # fall back to the explicit `changed_positions` list otherwise.
+    diff: set[int] = set()
+    if has_wt and has_mut:
+        diff = {i for i in range(min(len(wt), len(mutant))) if wt[i] != mutant[i]}
+    if not diff:
+        for p in output.get("changed_positions") or []:
+            if isinstance(p, int) and p >= 1:
+                diff.add(p - 1)
+
+    # ---- summary chips -------------------------------------------------
+    operation = str(output.get("operation") or "").strip()
+    op_html = (
+        f'<span class="seqedit-op">'
+        f'{_h(_SEQEDIT_OP_LABELS.get(operation, operation.replace("_", " ").title()))}'
+        "</span>"
+        if operation
+        else ""
+    )
+    wt_len = output.get("wild_type_length")
+    mut_len = output.get("mutant_length")
+    if wt_len is None and has_wt:
+        wt_len = len(wt)
+    if mut_len is None and has_mut:
+        mut_len = len(mutant)
+    stats: list[str] = []
+
+    def _stat(label: str, value: str) -> None:
+        stats.append(f'<span class="seqedit-stat">{label} <b>{_h(value)}</b></span>')
+
+    if wt_len is not None:
+        _stat("Wild-type", f"{int(wt_len)} aa")
+    if mut_len is not None:
+        _stat("Mutant", f"{int(mut_len)} aa")
+    if wt_len is not None and mut_len is not None:
+        delta = int(mut_len) - int(wt_len)
+        _stat("Length Δ", f"+{delta}" if delta >= 0 else f"−{abs(delta)}")
+    mismatch = output.get("mismatch_count")
+    if mismatch is not None:
+        _stat("Changed residues", str(int(mismatch)))
+    elif diff:
+        _stat("Changed residues", str(len(diff)))
+    is_consistent = output.get("is_consistent")
+    if is_consistent is True:
+        _stat("Consistency", "verified")
+    elif is_consistent is False:
+        _stat("Consistency", "mismatch")
+    summary_html = (
+        '<div class="seqedit-summary">'
+        f'{op_html}<div class="seqedit-stats">{"".join(stats)}</div></div>'
+        if op_html or stats
+        else ""
+    )
+
+    # ---- mutation chips ----------------------------------------------
+    muts_html = ""
+    if parsed:
+        chips: list[str] = []
+        for p in parsed:
+            if p["wt"] is not None:
+                chips.append(
+                    '<span class="seqedit-mut-chip">'
+                    f'<b class="sm-from">{_h(p["wt"])}</b>'
+                    f'<span class="sm-pos">{p["pos"]}</span>'
+                    f'<b class="sm-to">{_h(p["mut"])}</b></span>'
+                )
+            else:
+                chips.append(
+                    f'<span class="seqedit-mut-chip">{_h(p["raw"])}</span>'
+                )
+        muts_html = (
+            '<div class="seqedit-align-head">Mutations applied</div>'
+            f'<div class="seqedit-muts">{"".join(chips)}</div>'
         )
+
+    # ---- alignment ----------------------------------------------------
     alignment_html = ""
-    if isinstance(wt, str) and isinstance(mutant, str) and wt and mutant:
-        alignment_html = _wt_mut_alignment_html(wt, mutant)
-    table_html = (
-        f'<table class="kv-table"><tbody>{"".join(rows)}</tbody></table>'
-        if rows
+    if has_wt or has_mut:
+        max_len = max(len(wt or ""), len(mutant or ""))
+        rows: list[str] = [
+            '<div class="seqedit-row seqedit-row-ruler">'
+            '<span class="seqedit-row-label"></span>'
+            f'<code class="seqedit-row-seq">{_seq_ruler(max_len)}</code></div>'
+        ]
+        if has_wt:
+            rows.append(
+                '<div class="seqedit-row seqedit-row-wt">'
+                '<span class="seqedit-row-label">WT</span>'
+                '<code class="seqedit-row-seq">'
+                f"{_seqedit_residue_track(wt, diff, 'seqedit-diff-old')}</code></div>"
+            )
+        if has_mut:
+            rows.append(
+                '<div class="seqedit-row seqedit-row-mut">'
+                '<span class="seqedit-row-label">Mutant</span>'
+                '<code class="seqedit-row-seq">'
+                f"{_seqedit_residue_track(mutant, diff, 'seqedit-diff-new')}</code></div>"
+            )
+        legend = (
+            '<div class="seqedit-legend">'
+            '<span><span class="seqedit-legend-pip seqedit-diff-old"></span>'
+            "wild-type residue at a changed position</span>"
+            '<span><span class="seqedit-legend-pip seqedit-diff-new"></span>'
+            "substituted (mutant) residue</span></div>"
+            if diff
+            else ""
+        )
+        alignment_html = (
+            '<div class="seqedit-align-head">Wild-type vs mutant</div>'
+            f'<div class="seqedit-align-scroll">{"".join(rows)}</div>{legend}'
+        )
+    else:
+        alignment_html = (
+            '<p class="note">No sequence data was emitted for this edit.</p>'
+        )
+
+    # ---- warnings -----------------------------------------------------
+    warnings = output.get("warnings") if isinstance(output.get("warnings"), list) else []
+    warn_html = "".join(
+        f'<div class="seqedit-warn">{_h(str(w))}</div>' for w in warnings
+    )
+
+    recon_note = (
+        " The wild-type row is reconstructed from the mutant sequence and the "
+        "substitution list."
+        if wt_reconstructed
         else ""
     )
     explainer = (
         '<p class="widget-explainer">'
-        "<strong>Sequence edit</strong> applies the requested mutations (substitutions, insertions, deletions) "
-        "and reports the resulting sequence with side-by-side diff against the wild-type. Each highlighted "
-        "column below is a position where the two sequences differ."
+        "<strong>Sequence edit</strong> applies the requested residue mutations "
+        "and reports the resulting sequence. Below, the wild-type and mutant are "
+        "aligned with a column ruler; every changed column is highlighted."
+        f"{recon_note}"
         "</p>"
     )
     return (
         '<div class="widget widget-seqedit">'
         '<h4 class="widget-title">Sequence edit</h4>'
-        f"{explainer}{table_html}{alignment_html}</div>"
+        f"{explainer}{summary_html}{muts_html}{alignment_html}{warn_html}</div>"
     )
 
 
@@ -2814,102 +4230,857 @@ def _boltz2_widget(output: dict[str, Any]) -> str:
     )
 
 
-def _proteinmpnn_widget(output: dict[str, Any]) -> str:
-    designs = output.get("designs") if isinstance(output.get("designs"), list) else []
-    num_residues = output.get("num_residues")
-    runtime_ms = output.get("runtime_ms")
-    head_rows: list[str] = []
-    if num_residues is not None:
-        head_rows.append(_kv_row("Designed residues", _fmt(num_residues)))
-    if runtime_ms is not None:
-        head_rows.append(_kv_row("Runtime", _duration(runtime_ms)))
-    if designs:
-        head_rows.append(_kv_row("Designs emitted", str(len(designs))))
-    table_html = ""
-    if designs:
-        rows = []
-        for idx, d in enumerate(designs[:10]):
-            if not isinstance(d, dict):
+# ---- AutoDock Vina docking widget --------------------------------------
+
+# AutoDock atom-type -> chemical element. PDBQT keeps only polar hydrogens
+# (HD/HS) and uses aromatic-carbon (A) and H-bond-acceptor (NA/OA/SA)
+# subtypes that a plain element symbol would otherwise lose.
+_PDBQT_ELEMENT = {
+    "A": "C", "C": "C", "CA": "C", "CG0": "C", "CG1": "C", "G0": "C", "G1": "C",
+    "N": "N", "NA": "N", "NS": "N", "NX": "N",
+    "O": "O", "OA": "O", "OS": "O", "OX": "O",
+    "S": "S", "SA": "S",
+    "H": "H", "HD": "H", "HS": "H",
+    "P": "P", "F": "F", "CL": "Cl", "BR": "Br", "I": "I", "SI": "Si",
+    "MG": "Mg", "MN": "Mn", "ZN": "Zn", "FE": "Fe",
+}
+_PDBQT_ACCEPTOR_TYPES = {"NA", "NS", "OA", "OS", "SA"}
+_PDBQT_DONOR_H_TYPES = {"HD", "HS"}
+
+# Element swatch colours for the ligand-composition bar — brand-aligned and
+# mutually distinct rather than literal CPK colouring.
+_VINA_ELEMENT_COLOR = {
+    "C": "#4b4565", "N": "#4cc4e4", "O": "#cc0980", "H": "#c9bbed",
+    "S": "#f39e3a", "P": "#6b1ea8", "F": "#2bb59a", "Cl": "#2bb59a",
+    "Br": "#a3553a", "I": "#7c2d8a",
+}
+
+
+def _pdbqt_floats(text: str) -> list[float]:
+    """Pull every numeric token out of a PDBQT REMARK line."""
+    out: list[float] = []
+    for tok in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text):
+        try:
+            out.append(float(tok))
+        except ValueError:
+            pass
+    return out
+
+
+def _pdbqt_element(atype: str) -> str:
+    """Map an AutoDock atom type to its chemical element symbol."""
+    t = (atype or "").strip().upper()
+    if t in _PDBQT_ELEMENT:
+        return _PDBQT_ELEMENT[t]
+    return (t[:1] + t[1:2].lower()) if t else "?"
+
+
+def _parse_pdbqt(text: str) -> list[dict[str, Any]]:
+    """Parse a Vina docked .pdbqt into an ordered list of pose dicts, each
+    carrying its scoring REMARKs and ligand atom records."""
+    poses: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+
+    def _fresh() -> dict[str, Any]:
+        return {
+            "affinity": None, "rmsd_lb": None, "rmsd_ub": None,
+            "inter": None, "intra": None, "inter_intra": None,
+            "unbound": None, "torsions": None, "torsdof": None, "atoms": [],
+        }
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.startswith("MODEL"):
+            cur = _fresh()
+        elif line.startswith("ENDMDL"):
+            if cur is not None:
+                poses.append(cur)
+            cur = None
+        elif line.startswith("REMARK"):
+            if cur is None:
+                cur = _fresh()
+            body = line[6:].strip()
+            up = body.upper()
+            nums = _pdbqt_floats(body)
+            if up.startswith("VINA RESULT"):
+                if len(nums) > 0:
+                    cur["affinity"] = nums[0]
+                if len(nums) > 1:
+                    cur["rmsd_lb"] = nums[1]
+                if len(nums) > 2:
+                    cur["rmsd_ub"] = nums[2]
+            elif up.startswith("INTER + INTRA"):
+                cur["inter_intra"] = nums[-1] if nums else None
+            elif up.startswith("INTER:"):
+                cur["inter"] = nums[-1] if nums else None
+            elif up.startswith("INTRA:"):
+                cur["intra"] = nums[-1] if nums else None
+            elif up.startswith("UNBOUND"):
+                cur["unbound"] = nums[-1] if nums else None
+            elif "ACTIVE TORSIONS" in up:
+                cur["torsions"] = int(nums[0]) if nums else None
+        elif line.startswith(("ATOM", "HETATM")):
+            if cur is None:
+                cur = _fresh()
+            toks = line.split()
+            if len(toks) >= 4:
+                charge: float | None = None
+                try:
+                    charge = float(toks[-2])
+                except (ValueError, IndexError):
+                    charge = None
+                cur["atoms"].append({"type": toks[-1], "charge": charge})
+        elif line.startswith("TORSDOF"):
+            if cur is not None:
+                n = _pdbqt_floats(line)
+                cur["torsdof"] = int(n[0]) if n else None
+    if cur is not None and (cur["atoms"] or cur["affinity"] is not None):
+        poses.append(cur)
+    return poses
+
+
+def _pdbqt_ligand_profile(atoms: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-atom PDBQT records into ligand-level descriptors."""
+    elements: dict[str, int] = {}
+    donors = acceptors = aromatic = 0
+    charge_sum = 0.0
+    have_charge = False
+    for a in atoms:
+        t = (a.get("type") or "").strip().upper()
+        el = _pdbqt_element(t)
+        elements[el] = elements.get(el, 0) + 1
+        if t in _PDBQT_DONOR_H_TYPES:
+            donors += 1
+        if t in _PDBQT_ACCEPTOR_TYPES:
+            acceptors += 1
+        if t == "A":
+            aromatic += 1
+        c = a.get("charge")
+        if isinstance(c, (int, float)):
+            charge_sum += c
+            have_charge = True
+    heavy = sum(c for el, c in elements.items() if el != "H")
+    return {
+        "elements": elements, "donors": donors, "acceptors": acceptors,
+        "aromatic": aromatic, "heavy": heavy, "total": len(atoms),
+        "charge_sum": charge_sum if have_charge else None,
+    }
+
+
+def _vina_affinity_quality(aff: float | None) -> str:
+    """Quality bucket for a Vina affinity (kcal/mol; more negative = better)."""
+    if aff is None:
+        return "neutral"
+    if aff <= -8.0:
+        return "good"
+    if aff <= -6.0:
+        return "ok"
+    return "poor"
+
+
+def _vina_formula(elements: dict[str, int]) -> str:
+    """Heavy-atom molecular formula in Hill order, with HTML subscripts."""
+    heavy = {el: c for el, c in elements.items() if el != "H" and c > 0}
+    if not heavy:
+        return "—"
+    order = (["C"] if "C" in heavy else []) + sorted(e for e in heavy if e != "C")
+    return "".join(
+        _h(el) + (f"<sub>{heavy[el]}</sub>" if heavy[el] != 1 else "")
+        for el in order
+    )
+
+
+def _vina_poses_html(modes: list[dict[str, Any]]) -> str:
+    """Ranked binding-pose list — an affinity bar + RMSD spread per pose."""
+    affs = [_num(m.get("affinity_kcal_mol")) for m in modes]
+    valid = [a for a in affs if a is not None]
+    best = min(valid) if valid else 0.0
+    denom = abs(best) if best < 0 else 0.0
+    rows: list[str] = []
+    for idx, m in enumerate(modes):
+        rank = m.get("rank", idx + 1)
+        aff = _num(m.get("affinity_kcal_mol"))
+        quality = _vina_affinity_quality(aff)
+        colour = _QUALITY_COLOR.get(quality, _QUALITY_COLOR["neutral"])
+        width = (abs(aff) / denom * 100.0) if (aff is not None and aff < 0 and denom) else 0.0
+        lb, ub = _num(m.get("rmsd_lb")), _num(m.get("rmsd_ub"))
+        rmsd = (
+            f'RMSD <b>{lb:.2f}</b> / <b>{ub:.2f}</b> Å'
+            if lb is not None and ub is not None else "—"
+        )
+        aff_txt = f"{aff:+.2f}" if aff is not None else "—"
+        rows.append(
+            '<div class="vina-pose">'
+            f'<span class="vina-pose-rank">#{_h(str(rank))}</span>'
+            '<div class="vina-pose-bar-track">'
+            f'<i class="vina-pose-bar" style="width:{width:.1f}%;'
+            f'background:{colour}"></i></div>'
+            f'<span class="vina-pose-aff" style="color:{colour}">{aff_txt} '
+            '<small>kcal/mol</small></span>'
+            f'<span class="vina-pose-rmsd">{rmsd}</span></div>'
+        )
+    head = (
+        '<div class="vina-pose vina-pose-head">'
+        '<span class="vina-pose-rank">Pose</span>'
+        '<span>Binding affinity</span>'
+        '<span class="vina-pose-aff">score</span>'
+        '<span class="vina-pose-rmsd">RMSD l.b. / u.b.</span></div>'
+    )
+    return f'<div class="vina-poses">{head}{"".join(rows)}</div>'
+
+
+def _vina_energy_html(pose: dict[str, Any]) -> str:
+    """Vina score-term breakdown — diverging bars about a zero axis."""
+    terms = [
+        ("Intermolecular", pose.get("inter"),
+         "Receptor–ligand interaction energy — the actual binding contribution."),
+        ("Intramolecular", pose.get("intra"),
+         "Ligand internal (strain) energy in the bound conformation."),
+        ("Unbound reference", pose.get("unbound"),
+         "Ligand energy in the free state, subtracted as the scoring reference."),
+    ]
+    present = [(lbl, _num(v), ex) for lbl, v, ex in terms if _num(v) is not None]
+    if not present:
+        return ""
+    maxabs = max((abs(v) for _, v, _ in present), default=1.0) or 1.0
+    rows: list[str] = []
+    for label, v, expl in present:
+        mag = min(50.0, abs(v) / maxabs * 50.0)
+        left, cls = (50.0 - mag, "neg") if v < 0 else (50.0, "pos")
+        rows.append(
+            '<div class="vina-ed-row">'
+            f'<span class="vina-ed-label" title="{_attr(expl)}">{_h(label)}</span>'
+            '<div class="vina-ed-track"><span class="vina-ed-axis"></span>'
+            f'<i class="vina-ed-fill vina-ed-{cls}" '
+            f'style="left:{left:.1f}%;width:{mag:.1f}%"></i></div>'
+            f'<span class="vina-ed-val">{v:+.3f}</span></div>'
+        )
+    affinity = _num(pose.get("affinity"))
+    ii, unb = _num(pose.get("inter_intra")), _num(pose.get("unbound"))
+    if affinity is None and ii is not None and unb is not None:
+        affinity = ii - unb
+    result = ""
+    if affinity is not None:
+        result = (
+            '<div class="vina-ed-result">'
+            '<span class="vina-ed-result-label">Predicted binding free energy</span>'
+            f'<span class="vina-ed-result-val">{affinity:+.2f} '
+            '<small>kcal/mol</small></span></div>'
+        )
+    return (
+        f'<div class="vina-energy">{"".join(rows)}{result}</div>'
+        '<p class="vina-caption">Vina score = (intermolecular + intramolecular) '
+        "− unbound reference. Negative terms (blue) are favourable; positive "
+        "terms (amber) are penalties.</p>"
+    )
+
+
+def _vina_ligand_html(profile: dict[str, Any], rotatable: int | None) -> str:
+    """Docked-ligand profile — descriptor tiles + atom-composition bar."""
+    elements = profile["elements"]
+    tiles: list[str] = []
+
+    def _tile(label: str, value_html: str) -> None:
+        tiles.append(
+            f'<div class="vina-desc"><span class="vina-desc-val">{value_html}</span>'
+            f'<span class="vina-desc-label">{_h(label)}</span></div>'
+        )
+
+    _tile("Formula (heavy atoms)", _vina_formula(elements))
+    _tile("Heavy atoms", _h(str(profile["heavy"])))
+    _tile("H-bond donors", _h(str(profile["donors"])))
+    _tile("H-bond acceptors", _h(str(profile["acceptors"])))
+    _tile("Aromatic carbons", _h(str(profile["aromatic"])))
+    if rotatable is not None:
+        _tile("Rotatable bonds", _h(str(rotatable)))
+    if profile["charge_sum"] is not None:
+        # Collapse floating-point noise (and negative zero) to a clean 0.00.
+        cs = profile["charge_sum"]
+        cs = 0.0 if abs(cs) < 5e-3 else cs
+        _tile("Net partial charge", _h(f"{cs:+.2f} e"))
+    desc = f'<div class="vina-desc-grid">{"".join(tiles)}</div>'
+
+    total = sum(elements.values()) or 1
+    order = sorted(elements.items(), key=lambda kv: (-kv[1], kv[0]))
+    segs: list[str] = []
+    legend: list[str] = []
+    for el, count in order:
+        pct = count / total * 100.0
+        colour = _VINA_ELEMENT_COLOR.get(el, "#9a8fc4")
+        segs.append(
+            f'<span class="vina-el-seg" style="width:{pct:.2f}%;'
+            f'background:{colour}" title="{_attr(f"{el}: {count}")}"></span>'
+        )
+        legend.append(
+            '<span class="vina-el-legend-item">'
+            f'<span class="vina-el-pip" style="background:{colour}"></span>'
+            f'{_h(el)} <b>{count}</b></span>'
+        )
+    comp = (
+        '<div class="vina-el-head">Atom composition</div>'
+        f'<div class="vina-el-bar">{"".join(segs)}</div>'
+        f'<div class="vina-el-legend">{"".join(legend)}</div>'
+    )
+    return desc + comp
+
+
+def _vina_widget(output: dict[str, Any]) -> str:
+    """AutoDock Vina docking widget — top-pose affinity cards, a ranked
+    pose list, the Vina score-term breakdown and a profile of the docked
+    ligand parsed from the .pdbqt artifact."""
+    if not output:
+        return ""
+    explainer = (
+        '<p class="widget-explainer">'
+        "<strong>AutoDock Vina</strong> docks a small-molecule ligand into the "
+        "receptor and scores each binding pose by predicted free energy "
+        "(kcal/mol — more negative is tighter). The cards summarise the top "
+        "pose; the sections below break down the scoring terms and profile the "
+        "docked ligand."
+        "</p>"
+    )
+
+    modes = output.get("modes") if isinstance(output.get("modes"), list) else []
+    modes = [m for m in modes if isinstance(m, dict)]
+
+    # Parse the docked .pdbqt artifact for per-pose energy terms + ligand atoms.
+    pq_poses: list[dict[str, Any]] = []
+    pdbqt_path = output.get("docked_pdbqt")
+    if isinstance(pdbqt_path, str):
+        p = Path(pdbqt_path)
+        if p.is_file():
+            try:
+                pq_poses = _parse_pdbqt(
+                    p.read_text(encoding="utf-8", errors="replace")
+                )
+            except OSError:
+                pq_poses = []
+
+    # Fall back to pdbqt-derived poses when the structured `modes` list is empty.
+    if not modes and pq_poses:
+        modes = [
+            {
+                "rank": i + 1,
+                "affinity_kcal_mol": pq.get("affinity"),
+                "rmsd_lb": pq.get("rmsd_lb"),
+                "rmsd_ub": pq.get("rmsd_ub"),
+            }
+            for i, pq in enumerate(pq_poses)
+        ]
+
+    best_aff = _num(output.get("best_affinity_kcal_mol"))
+    if best_aff is None:
+        cand = [_num(m.get("affinity_kcal_mol")) for m in modes]
+        cand = [c for c in cand if c is not None]
+        best_aff = min(cand) if cand else None
+
+    best_pose = pq_poses[0] if pq_poses else None
+    profile = (
+        _pdbqt_ligand_profile(best_pose["atoms"])
+        if best_pose and best_pose.get("atoms") else None
+    )
+    rotatable = None
+    if best_pose:
+        rotatable = best_pose.get("torsdof")
+        if rotatable is None:
+            rotatable = best_pose.get("torsions")
+
+    # ---- summary cards ----
+    cards: list[str] = []
+    if best_aff is not None:
+        cards.append(_score_card(
+            "Best affinity (kcal/mol)",
+            _fmt(best_aff),
+            "Predicted free energy of binding for the top-ranked pose. More "
+            "negative is tighter; weak / non-binders sit near 0.",
+            _vina_affinity_quality(best_aff),
+            gauge={"value": best_aff, "frame": True},
+        ))
+    if profile and best_aff is not None and profile["heavy"]:
+        le = -best_aff / profile["heavy"]
+        leq = "good" if le >= 0.35 else ("ok" if le >= 0.25 else "poor")
+        cards.append(_score_card(
+            "Ligand efficiency",
+            f"{le:.3f}",
+            "Binding free energy per heavy atom (−ΔG / N) — a medicinal-"
+            "chemistry yardstick; ≈0.3 kcal/mol per atom marks a useful hit.",
+            leq,
+            gauge={"value": le, "lo": 0.0, "hi": 0.5},
+        ))
+    if modes:
+        cards.append(_score_card(
+            "Binding poses",
+            str(len(modes)),
+            "Distinct docked conformations Vina retained and scored.",
+            "neutral",
+            gauge={"value": len(modes), "frame": True},
+        ))
+    cards_html = _card_grid(cards) if cards else ""
+
+    runtime = _num(output.get("runtime_ms"))
+    meta_bits: list[str] = []
+    if modes:
+        meta_bits.append(f"{len(modes)} pose{'s' if len(modes) != 1 else ''}")
+    if runtime is not None:
+        meta_bits.append(f"docked in {_duration(int(runtime))}")
+    meta = (
+        f'<p class="note">{_h(" · ".join(meta_bits))}</p>' if meta_bits else ""
+    )
+
+    poses_html = (
+        '<h5 class="widget-subhead">Binding poses</h5>' + _vina_poses_html(modes)
+        if modes else ""
+    )
+    energy_html = ""
+    if best_pose:
+        ed = _vina_energy_html(best_pose)
+        if ed:
+            energy_html = (
+                '<h5 class="widget-subhead">Top-pose score breakdown</h5>' + ed
+            )
+    ligand_html = (
+        '<h5 class="widget-subhead">Docked ligand profile</h5>'
+        + _vina_ligand_html(profile, rotatable)
+        if profile else ""
+    )
+    note = ""
+    if not pq_poses and isinstance(pdbqt_path, str):
+        note = (
+            '<p class="note">The docked .pdbqt is not embedded in this report — '
+            "per-pose energy terms and the ligand profile are unavailable.</p>"
+        )
+
+    body = cards_html + poses_html + energy_html + ligand_html + note
+    if not body:
+        return ""
+    return (
+        '<div class="widget widget-vina">'
+        '<h4 class="widget-title">Molecular docking · AutoDock Vina</h4>'
+        f"{explainer}{meta}{body}</div>"
+    )
+
+
+# ---- Generative protein-design widgets ---------------------------------
+
+# Per-tool title + explainer for the shared generative-design widget.
+_DESIGN_TOOL_INFO: dict[str, tuple[str, str]] = {
+    "bindcraft": (
+        "BindCraft binder design",
+        "<strong>BindCraft</strong> generates de-novo binders against the target "
+        "and validates each with AlphaFold2. Every accepted design below carries "
+        "its interface confidence (ipTM), binder pLDDT, interaction PAE and "
+        "surface-aggregation propensity (SAP).",
+    ),
+    "pxdesign": (
+        "PXDesign",
+        "<strong>PXDesign</strong> samples binder backbones and sequences for the "
+        "target with the Protenix design stack; each sample is emitted as a "
+        "predicted structure.",
+    ),
+    "rfdiffusion": (
+        "RFdiffusion backbones",
+        "<strong>RFdiffusion</strong> generates de-novo protein backbones by "
+        "diffusion. Backbones carry glycine placeholders — sequence design happens "
+        "downstream (e.g. ProteinMPNN).",
+    ),
+    "rfdiffusion3": (
+        "RFdiffusion3 backbones",
+        "<strong>RFdiffusion3</strong> is the latest-generation diffusion backbone "
+        "generator; each design is emitted as a predicted structure.",
+    ),
+    "rfpeptides": (
+        "RFpeptides macrocycles",
+        "<strong>RFpeptides</strong> designs cyclic-peptide backbones with "
+        "RFdiffusion. Backbones carry glycine placeholders — sequences are designed "
+        "downstream.",
+    ),
+    "boltzgen": (
+        "BoltzGen designs",
+        "<strong>BoltzGen</strong> generates binder backbones — and, after the "
+        "full pipeline, sequences plus a refolded complex — with the Boltz model "
+        "family. Affinity / confidence columns appear only once the "
+        "corresponding pipeline stages have run.",
+    ),
+    "proteina_complexa": (
+        "Proteina complex design",
+        "<strong>Proteina</strong> designs protein / ligand / motif complexes "
+        "(mode shown below). Validation columns — refold RMSD, designability, "
+        "ipTM — populate only when the design was scored.",
+    ),
+}
+
+# Optional per-design numeric columns, in display order. Only the columns a
+# given tool actually emits (non-null for ≥1 design) are rendered.
+_DESIGN_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("plddt", "pLDDT"),
+    ("scaffold_plddt", "Scaffold pLDDT"),
+    ("iptm", "ipTM"),
+    ("confidence", "Confidence"),
+    ("pae_interaction", "Interaction PAE"),
+    ("designability", "Designability"),
+    ("binder_refold_rmsd", "Refold RMSD (Å)"),
+    ("motif_rmsd", "Motif RMSD (Å)"),
+    ("ligand_rmsd", "Ligand RMSD (Å)"),
+    ("ligand_contacts", "Ligand contacts"),
+    ("sap_score", "SAP"),
+    ("affinity_pred_value", "Affinity (pIC50)"),
+    ("affinity_probability_binary", "Binding prob."),
+    ("score", "Score"),
+)
+
+
+def _is_placeholder_seq(seq: Any) -> bool:
+    """True when a 'sequence' is absent or a single-character placeholder
+    (the X / G fillers backbone-only design tools emit)."""
+    if not isinstance(seq, str) or not seq.strip():
+        return True
+    return len(set(seq.strip().upper())) <= 1
+
+
+def _design_metric_quality(key: str, num: float) -> str:
+    """Quality bucket for a per-design metric cell."""
+    if key in ("plddt", "scaffold_plddt"):
+        v = num * 100 if num <= 1.5 else num
+        return "good" if v >= 70 else ("ok" if v >= 50 else "poor")
+    if key in ("iptm", "confidence", "designability", "affinity_probability_binary"):
+        return "good" if num >= 0.7 else ("ok" if num >= 0.5 else "poor")
+    if key == "pae_interaction":
+        return "good" if num <= 10 else ("ok" if num <= 20 else "poor")
+    if key in ("binder_refold_rmsd", "motif_rmsd", "ligand_rmsd"):
+        return "good" if num <= 2 else ("ok" if num <= 4 else "poor")
+    if key == "sap_score":
+        return "good" if num <= 35 else ("ok" if num <= 50 else "poor")
+    return "neutral"
+
+
+def _dsn_chip(label: str, value: Any) -> str:
+    return f'<span class="dsn-chip">{_h(label)} <b>{_h(str(value))}</b></span>'
+
+
+def _design_widget(output: dict[str, Any], *, tool: str) -> str:
+    """Shared widget for the generative structure-design tools — a summary
+    chip row plus a per-design results table (length, whatever scoring
+    columns the tool emits, sequence, and the design structure file)."""
+    if not isinstance(output, dict):
+        return ""
+    designs = [d for d in (output.get("designs") or []) if isinstance(d, dict)]
+    title, body = _DESIGN_TOOL_INFO.get(
+        tool,
+        (f"{tool} designs",
+         f"<strong>{_h(tool)}</strong> emitted the protein designs below."),
+    )
+    explainer = f'<p class="widget-explainer">{body}</p>'
+
+    # ---- summary chips ----
+    chips: list[str] = []
+    n_designs = output.get("num_designs_returned")
+    if n_designs is None:
+        n_designs = len(designs)
+    chips.append(_dsn_chip("designs", n_designs))
+    if output.get("mode"):
+        chips.append(_dsn_chip("mode", output["mode"]))
+    if tool == "rfdiffusion":
+        contigs = output.get("contigs")
+        if isinstance(contigs, list) and contigs:
+            chips.append(_dsn_chip("contigs", ", ".join(str(c) for c in contigs)))
+        if output.get("num_requested") is not None:
+            chips.append(_dsn_chip("requested", output["num_requested"]))
+    if tool == "pxdesign":
+        if output.get("num_samples") is not None:
+            chips.append(_dsn_chip("samples", output["num_samples"]))
+        if output.get("seed") is not None:
+            chips.append(_dsn_chip("seed", output["seed"]))
+        if output.get("task_name"):
+            chips.append(_dsn_chip("task", output["task_name"]))
+    seeds = output.get("seeds_used")
+    if isinstance(seeds, list) and seeds:
+        chips.append(_dsn_chip(
+            "seed" + ("s" if len(seeds) > 1 else ""),
+            ", ".join(str(s) for s in seeds),
+        ))
+    rt = _num(output.get("runtime_ms"))
+    if rt is not None:
+        chips.append(f'<span class="dsn-chip">{_h(_duration(int(rt)))}</span>')
+    chips_html = f'<div class="dsn-chips">{"".join(chips)}</div>'
+
+    # ---- per-design table ----
+    if not designs:
+        return (
+            '<div class="widget widget-design">'
+            f'<h4 class="widget-title">{_h(title)}</h4>'
+            f'{explainer}{chips_html}'
+            '<p class="empty">No designs were emitted.</p></div>'
+        )
+    present = [
+        (key, label) for key, label in _DESIGN_COLUMNS
+        if any(_num(d.get(key)) is not None for d in designs)
+    ]
+    has_seq = any(not _is_placeholder_seq(d.get("sequence")) for d in designs)
+    head = "<th>#</th><th>Length</th>"
+    head += "".join(f"<th>{_h(label)}</th>" for _, label in present)
+    if has_seq:
+        head += "<th>Sequence</th>"
+    head += "<th>Structure</th>"
+
+    body_rows: list[str] = []
+    for i, d in enumerate(designs, 1):
+        length = d.get("length")
+        if length is None:
+            length = d.get("binder_length")
+        cells = [
+            f"<td>{i}</td>",
+            f"<td>{_h(_fmt(length)) if length is not None else '—'} aa</td>"
+            if length is not None else "<td>—</td>",
+        ]
+        for key, _ in present:
+            num = _num(d.get(key))
+            if num is None:
+                cells.append("<td>—</td>")
                 continue
+            quality = _design_metric_quality(key, num)
+            cls = f' class="quality-{quality}"' if quality in ("good", "ok", "poor") else ""
+            cells.append(f"<td{cls}>{_h(_fmt(num))}</td>")
+        if has_seq:
+            seq = d.get("sequence")
+            if _is_placeholder_seq(seq):
+                cells.append('<td><span class="dsn-muted">backbone only</span></td>')
+            else:
+                cells.append(f'<td><code class="dsn-seq">{_h(seq)}</code></td>')
+        # Show the structure file name only — the node's artifact list below
+        # already carries the downloadable copy, so don't re-embed it here.
+        struct = d.get("pdb_path") or d.get("cif_path")
+        if isinstance(struct, str):
+            cells.append(
+                f'<td><span class="dsn-file">{_h(Path(struct).name)}</span></td>'
+            )
+        else:
+            cells.append("<td>—</td>")
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    table_html = (
+        '<div class="table-wrap"><table><thead><tr>'
+        f'{head}</tr></thead><tbody>{"".join(body_rows)}</tbody></table></div>'
+    )
+    return (
+        '<div class="widget widget-design">'
+        f'<h4 class="widget-title">{_h(title)}</h4>'
+        f"{explainer}{chips_html}{table_html}</div>"
+    )
+
+
+_MPNN_TOOL_INFO: dict[str, tuple[str, str]] = {
+    "proteinmpnn": (
+        "ProteinMPNN designs",
+        "<strong>ProteinMPNN</strong> samples sequences over a fixed backbone "
+        "(inverse folding). A lower score is a higher likelihood under the "
+        "trained model. Sequence recovery — the fraction of positions matching "
+        "the native sequence — is only available when a reference sequence was "
+        "supplied.",
+    ),
+    "ligandmpnn": (
+        "LigandMPNN designs",
+        "<strong>LigandMPNN</strong> redesigns a sequence over a fixed backbone "
+        "while accounting for bound ligands and context. A lower score is a "
+        "higher likelihood under the model. Sequence recovery — the fraction of "
+        "positions matching the native sequence — is only available when a "
+        "reference sequence was supplied.",
+    ),
+}
+
+
+def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
+    """Shared widget for the MPNN inverse-folding tools (ProteinMPNN /
+    LigandMPNN).
+
+    A score / sequence-recovery table is shown only when recovery was
+    actually computed — i.e. a native reference sequence was available. When
+    no recovery is present the table is omitted entirely and the per-design
+    score is folded into the sequence labels instead.
+    """
+    if not isinstance(output, dict):
+        return ""
+    designs = [d for d in (output.get("designs") or []) if isinstance(d, dict)]
+    title, body = _MPNN_TOOL_INFO.get(
+        tool,
+        (f"{tool} designs",
+         f"<strong>{_h(tool)}</strong> emitted the sequence designs below."),
+    )
+    explainer = f'<p class="widget-explainer">{body}</p>'
+
+    chips: list[str] = [_dsn_chip("designs", len(designs))]
+    if output.get("num_residues") is not None:
+        chips.append(_dsn_chip("residues", output["num_residues"]))
+    rt = _num(output.get("runtime_ms"))
+    if rt is not None:
+        chips.append(f'<span class="dsn-chip">{_h(_duration(int(rt)))}</span>')
+    chips_html = f'<div class="dsn-chips">{"".join(chips)}</div>'
+
+    if not designs:
+        return (
+            f'<div class="widget widget-mpnn">'
+            f'<h4 class="widget-title">{_h(title)}</h4>'
+            f'{explainer}{chips_html}'
+            '<p class="empty">No designs were emitted.</p></div>'
+        )
+
+    # The recovery table appears only when at least one design carries a
+    # non-null seq_recovery (a native reference was available to score against).
+    has_recovery = any(_num(d.get("seq_recovery")) is not None for d in designs)
+
+    table_html = ""
+    if has_recovery:
+        rows: list[str] = []
+        for i, d in enumerate(designs, 1):
+            score = _num(d.get("score"))
+            rec = _num(d.get("seq_recovery"))
+            if rec is not None:
+                pct = max(0.0, min(100.0, rec * 100))
+                quality = "good" if pct >= 50 else ("ok" if pct >= 30 else "poor")
+                rec_cell = (
+                    '<td><div class="dsn-bar-cell">'
+                    f'<div class="dsn-bar"><i class="metric-{quality}" '
+                    f'style="width:{pct:.0f}%"></i></div>'
+                    f'<span>{pct:.0f}%</span></div></td>'
+                )
+            else:
+                rec_cell = "<td>—</td>"
             rows.append(
-                "<tr>"
-                f"<td>{idx + 1}</td>"
-                f"<td><code>{_h((d.get('sequence') or '')[:80])}</code></td>"
-                f"<td>{_h(_fmt(d.get('score')))}</td>"
-                f"<td>{_h(_fmt(d.get('seq_recovery')))}</td>"
-                "</tr>"
+                f"<tr><td>{i}</td>"
+                f"<td>{_h(_fmt(score)) if score is not None else '—'}</td>"
+                f"{rec_cell}</tr>"
             )
         table_html = (
+            '<h5 class="widget-subhead">Score &amp; sequence recovery</h5>'
             '<div class="table-wrap"><table><thead><tr>'
-            "<th>#</th><th>Sequence (first 80 aa)</th><th>Score</th><th>Seq recov.</th>"
+            "<th>#</th><th>Score</th><th>Sequence recovery</th>"
             f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
         )
-    explainer = (
-        '<p class="widget-explainer">'
-        "<strong>ProteinMPNN</strong> samples sequences over a fixed backbone. Lower score = higher likelihood "
-        "under the trained model. Sequence-recovery vs the WT/native sequence is a sanity proxy when redesigning "
-        "an existing protein."
-        "</p>"
-    )
-    summary_html = (
-        f'<table class="kv-table"><tbody>{"".join(head_rows)}</tbody></table>' if head_rows else ""
-    )
-    return (
-        '<div class="widget widget-mpnn">'
-        '<h4 class="widget-title">ProteinMPNN designs</h4>'
-        f"{explainer}{summary_html}{table_html}</div>"
-    )
 
-
-def _protenix_widget(output: dict[str, Any]) -> str:
-    cards: list[str] = []
-    for key, label, tip, lo, hi in (
-        ("mean_plddt", "Mean pLDDT", "Per-residue confidence (0-1 or 0-100).", 0.0, 100.0),
-        ("plddt", "Mean pLDDT", "Per-residue confidence (0-1 or 0-100).", 0.0, 100.0),
-        ("ptm", "pTM", "Predicted TM-score.", 0.0, 1.0),
-        ("iptm", "ipTM", "Interface pTM.", 0.0, 1.0),
-        ("ranking_confidence", "Ranking confidence", "Composite confidence head.", 0.0, 1.0),
-    ):
-        value = output.get(key)
-        if value is None:
-            continue
-        num = _num(value) or 0.0
-        # Protenix may emit pLDDT as 0-1 — auto-scale the gauge hi to match.
-        gauge_hi = hi
-        if key in {"plddt", "mean_plddt"} and num <= 1.5:
-            gauge_hi = 1.0
-        cards.append(_score_card(
-            label, _fmt(value), tip, _quality_class(key, value),
-            gauge={"value": num, "lo": lo, "hi": gauge_hi},
-        ))
-    cards_html = _card_grid(cards)
-    cif_path = output.get("predicted_cif") or output.get("predicted_pdb")
-    art_html = ""
-    if isinstance(cif_path, str):
-        kind = Path(cif_path).suffix.lstrip(".") or "structure"
-        art_html = (
-            '<div class="node-block-artifacts">'
-            '<span class="artifact-section-label">Predicted structure</span>'
-            f'<div class="artifact-row">'
-            f'{_download_link(cif_path, Path(cif_path).name, kind=kind)}</div></div>'
+    # Designed sequences, MSA-style scroll. With no recovery table the
+    # per-design score rides along in the sequence label so it isn't lost.
+    present = [(i, d) for i, d in enumerate(designs, 1) if d.get("sequence")]
+    seq_html = ""
+    if present:
+        max_len = max(len(d["sequence"]) for _, d in present)
+        seq_rows: list[str] = []
+        for i, d in present:
+            badge = ""
+            if not has_recovery:
+                score = _num(d.get("score"))
+                if score is not None:
+                    badge = f'<span class="tmpl-seq-id">score {_h(_fmt(score))}</span>'
+            seq_rows.append(
+                '<div class="tmpl-seq-row">'
+                '<span class="tmpl-seq-label">'
+                f'<span class="tmpl-seq-name">Design {i}</span>{badge}</span>'
+                f'<code class="tmpl-seq-track">{_h(d["sequence"])}</code></div>'
+            )
+        seq_rows.append(
+            '<div class="tmpl-seq-row tmpl-seq-ruler">'
+            '<span class="tmpl-seq-label"></span>'
+            f'<code class="tmpl-seq-track">{_seq_ruler(max_len)}</code></div>'
         )
-    explainer = (
-        '<p class="widget-explainer">'
-        "<strong>Protenix v2</strong> is an AlphaFold-3-class structure predictor for protein / complex inputs. "
-        "The cards show the confidence heads; the structure file is linked below for inspection in PyMOL / "
-        "ChimeraX."
-        "</p>"
-    )
+        seq_html = (
+            '<h5 class="widget-subhead">Designed sequences</h5>'
+            f'<div class="tmpl-seq-scroll">{"".join(seq_rows)}</div>'
+        )
     return (
-        '<div class="widget widget-protenix">'
-        '<h4 class="widget-title">Protenix structure prediction</h4>'
-        f"{explainer}{cards_html}{art_html}</div>"
+        f'<div class="widget widget-mpnn">'
+        f'<h4 class="widget-title">{_h(title)}</h4>'
+        f"{explainer}{chips_html}{table_html}{seq_html}</div>"
     )
 
 
-def _esm3_widget(output: dict[str, Any]) -> str:
-    cs = output.get("confidence_scores") if isinstance(output.get("confidence_scores"), dict) else {}
+def _lerp_hex(a: str, b: str, t: float) -> str:
+    """Linear blend between two #rrggbb colours."""
+    t = max(0.0, min(1.0, t))
+    ar, ag, ab = int(a[1:3], 16), int(a[3:5], 16), int(a[5:7], 16)
+    br, bg, bb = int(b[1:3], 16), int(b[3:5], 16), int(b[5:7], 16)
+    return (
+        f"#{round(ar + (br - ar) * t):02x}"
+        f"{round(ag + (bg - ag) * t):02x}"
+        f"{round(ab + (bb - ab) * t):02x}"
+    )
+
+
+def _embedding_strip_svg(vec: list[Any]) -> str:
+    """Render an embedding vector as a 1-D diverging-colour 'fingerprint'
+    strip — negative dims cool, positive dims warm, scaled robustly so a
+    single outlier dimension doesn't wash the strip out."""
+    nums = [float(x) for x in vec if isinstance(x, (int, float))]
+    if not nums:
+        return ""
+    n = len(nums)
+    mags = sorted(abs(x) for x in nums)
+    scale = mags[int(0.95 * (n - 1))] or mags[-1] or 1.0
+    width, height = 100.0, 8.0  # viewBox units; CSS stretches to full width
+    bw = width / n
+    rects: list[str] = []
+    for i, x in enumerate(nums):
+        t = max(-1.0, min(1.0, x / scale)) if scale else 0.0
+        colour = (
+            _lerp_hex("#ece8fb", "#cc0980", t) if t >= 0
+            else _lerp_hex("#ece8fb", "#1f9bd0", -t)
+        )
+        rects.append(
+            f'<rect x="{i * bw:.4f}" y="0" width="{bw:.4f}" '
+            f'height="{height}" fill="{colour}"/>'
+        )
+    return (
+        f'<svg class="esm-emb-svg" viewBox="0 0 {width} {height}" '
+        f'preserveAspectRatio="none" aria-hidden="true">{"".join(rects)}</svg>'
+    )
+
+
+_ESM_TOOL_INFO: dict[str, tuple[str, str]] = {
+    "esm2": (
+        "ESM-2 protein language model",
+        "<strong>ESM-2</strong> is a protein language model. In embedding mode it "
+        "returns a per-residue embedding tensor and a pooled whole-sequence "
+        "vector; in generation mode it fills masked positions with sampled "
+        "residues.",
+    ),
+    "esm3": (
+        "ESM3 multi-track model",
+        "<strong>ESM3</strong> jointly reasons over sequence, structure and "
+        "function tracks. It returns per-residue embeddings and, when run as a "
+        "predictor, a structure with confidence heads.",
+    ),
+}
+
+
+def _esm_widget(output: dict[str, Any], *, tool: str) -> str:
+    """Shared widget for the ESM language models (ESM-2 / ESM3) — run
+    summary, an embedding-fingerprint strip for the pooled vector,
+    confidence cards and any generated sequences."""
+    if not isinstance(output, dict):
+        return ""
+    title, body = _ESM_TOOL_INFO.get(
+        tool, (f"{tool} output", f"<strong>{_h(tool)}</strong> output.")
+    )
+    explainer = f'<p class="widget-explainer">{body}</p>'
+
+    chips: list[str] = []
+    if output.get("model_name"):
+        chips.append(_dsn_chip("model", output["model_name"]))
+    if output.get("mode"):
+        chips.append(_dsn_chip("mode", output["mode"]))
+    if output.get("num_residues") is not None:
+        chips.append(_dsn_chip("residues", output["num_residues"]))
+    pooled = output.get("pooled_embedding")
+    if isinstance(pooled, list) and pooled:
+        chips.append(_dsn_chip("embedding dim", len(pooled)))
+    if output.get("generation_strategy"):
+        chips.append(_dsn_chip("strategy", output["generation_strategy"]))
+    if output.get("fallback_used"):
+        chips.append('<span class="dsn-chip dsn-chip-warn">fallback used</span>')
+    rt = _num(output.get("runtime_ms"))
+    if rt is not None:
+        chips.append(f'<span class="dsn-chip">{_h(_duration(int(rt)))}</span>')
+    chips_html = f'<div class="dsn-chips">{"".join(chips)}</div>' if chips else ""
+
+    # Confidence cards (ESM3 predictor mode).
     cards: list[str] = []
+    cs = output.get("confidence_scores")
     if isinstance(cs, dict):
         for key, label, tip in (
             ("mean_plddt", "Mean pLDDT", "Per-residue confidence averaged over the chain."),
@@ -2921,33 +5092,154 @@ def _esm3_widget(output: dict[str, Any]) -> str:
             num = _num(value) or 0.0
             gauge_hi = 1.0 if num <= 1.5 else 100.0
             cards.append(_score_card(
-                label, _fmt(value), tip, _quality_class(key.replace("mean_", ""), value),
+                label, _fmt(value), tip,
+                _quality_class(key.replace("mean_", ""), value),
                 gauge={"value": num, "lo": 0.0, "hi": gauge_hi},
             ))
-    rows: list[str] = []
-    for k in ("model_name", "num_residues", "runtime_ms"):
-        v = output.get(k)
-        if v is None:
-            continue
-        rows.append(_kv_row(_pretty_metric_name(k), _h(_compact_inline(v))))
-    table_html = (
-        f'<table class="kv-table"><tbody>{"".join(rows)}</tbody></table>' if rows else ""
+    cards_html = _card_grid(cards) if cards else ""
+
+    # Pooled-embedding fingerprint.
+    emb_html = ""
+    if isinstance(pooled, list) and pooled:
+        strip = _embedding_strip_svg(pooled)
+        if strip:
+            emb_html = (
+                f'<h5 class="widget-subhead">Pooled embedding · {len(pooled)} dims</h5>'
+                f'<div class="esm-emb">{strip}</div>'
+                '<div class="esm-emb-legend">'
+                '<span><span class="esm-emb-pip" style="background:#1f9bd0"></span>'
+                'negative</span>'
+                '<span><span class="esm-emb-pip" style="background:#ece8fb"></span>'
+                '~zero</span>'
+                '<span><span class="esm-emb-pip" style="background:#cc0980"></span>'
+                'positive</span></div>'
+            )
+
+    # Generated sequences (ESM-2 sequence-generation mode).
+    gen = output.get("generated_sequences")
+    gen_html = ""
+    if isinstance(gen, list) and gen:
+        rows = []
+        max_len = max(len(str(s)) for s in gen)
+        for i, s in enumerate(gen, 1):
+            rows.append(
+                '<div class="tmpl-seq-row">'
+                f'<span class="tmpl-seq-label"><span class="tmpl-seq-name">Seq {i}</span></span>'
+                f'<code class="tmpl-seq-track">{_h(str(s))}</code></div>'
+            )
+        rows.append(
+            '<div class="tmpl-seq-row tmpl-seq-ruler">'
+            '<span class="tmpl-seq-label"></span>'
+            f'<code class="tmpl-seq-track">{_seq_ruler(max_len)}</code></div>'
+        )
+        filled = output.get("filled_positions")
+        cap = ""
+        if isinstance(filled, list) and filled:
+            cap = (
+                '<p class="note">Filled positions: '
+                f'{_h(_format_position_list(filled))}</p>'
+            )
+        gen_html = (
+            '<h5 class="widget-subhead">Generated sequences</h5>'
+            f'<div class="tmpl-seq-scroll">{"".join(rows)}</div>{cap}'
+        )
+
+    return (
+        '<div class="widget widget-esm">'
+        f'<h4 class="widget-title">{_h(title)}</h4>'
+        f"{explainer}{chips_html}{cards_html}{emb_html}{gen_html}</div>"
     )
+
+
+def _protenix_widget(output: dict[str, Any]) -> str:
+    """Protenix v2 structure-prediction widget — confidence gauges for the
+    top-ranked prediction plus a per-seed prediction table."""
+    if not isinstance(output, dict):
+        return ""
     explainer = (
         '<p class="widget-explainer">'
-        "<strong>ESM3</strong> jointly handles sequence, structure and function tracks. The card shows the "
-        "confidence heads; per-residue embeddings + the predicted structure are surfaced via the artifact list."
+        "<strong>Protenix v2</strong> is an AlphaFold-3-class structure predictor "
+        "for protein / complex inputs. The cards show the top-ranked prediction's "
+        "confidence heads; the table breaks the result out per sampling seed."
         "</p>"
     )
+    metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
+
+    # ---- confidence cards (top-ranked prediction) ----
+    cards: list[str] = []
+    for key, label, tip, lo, hi in (
+        ("plddt", "Mean pLDDT", "Per-residue confidence (0-100). >=70 confident.", 0.0, 100.0),
+        ("ptm", "pTM", "Predicted TM-score (0-1). >0.5 = likely-correct fold.", 0.0, 1.0),
+        ("iptm", "ipTM", "Interface pTM (0-1). >0.6 trustworthy for interfaces.", 0.0, 1.0),
+        ("ranking_score", "Ranking score", "Composite head Protenix ranks seeds by.", 0.0, 1.0),
+    ):
+        value = metrics.get(key, output.get(key))
+        if value is None:
+            continue
+        num = _num(value) or 0.0
+        gauge_hi = 1.0 if (key == "plddt" and num <= 1.5) else hi
+        cards.append(_score_card(
+            label, _fmt(value), tip, _quality_class(key, value),
+            gauge={"value": num, "lo": lo, "hi": gauge_hi},
+        ))
     cards_html = _card_grid(cards)
+
+    # ---- summary chips ----
+    chips: list[str] = []
+    seeds = output.get("seeds_used")
+    if isinstance(seeds, list) and seeds:
+        chips.append(_dsn_chip(
+            "seed" + ("s" if len(seeds) > 1 else ""),
+            ", ".join(str(s) for s in seeds),
+        ))
+    preds = [p for p in (output.get("all_predictions") or []) if isinstance(p, dict)]
+    if preds:
+        chips.append(_dsn_chip("predictions", len(preds)))
+    rt = _num(output.get("runtime_ms"))
+    if rt is not None:
+        chips.append(f'<span class="dsn-chip">{_h(_duration(int(rt)))}</span>')
+    chips_html = f'<div class="dsn-chips">{"".join(chips)}</div>' if chips else ""
+
+    # ---- per-seed predictions table ----
+    table_html = ""
+    if preds:
+        rows: list[str] = []
+        for p in preds:
+            cells = [
+                f"<td>{_h(_fmt(p.get('seed')))}</td>"
+                if p.get("seed") is not None else "<td>—</td>",
+                f"<td>{_h(_fmt(p.get('rank')))}</td>"
+                if p.get("rank") is not None else "<td>—</td>",
+            ]
+            for key in ("plddt", "iptm", "ptm", "ranking_score"):
+                num = _num(p.get(key))
+                if num is None:
+                    cells.append("<td>—</td>")
+                    continue
+                quality = _quality_class(key, num)
+                cls = f' class="quality-{quality}"' if quality in ("good", "ok", "poor") else ""
+                cells.append(f"<td{cls}>{_h(_fmt(num))}</td>")
+            cif = p.get("cif_path")
+            cells.append(
+                f'<td><span class="dsn-file">{_h(Path(str(cif)).name)}</span></td>'
+                if isinstance(cif, str) else "<td>—</td>"
+            )
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        table_html = (
+            '<h5 class="widget-subhead">Per-seed predictions</h5>'
+            '<div class="table-wrap"><table><thead><tr>'
+            "<th>Seed</th><th>Rank</th><th>pLDDT</th><th>ipTM</th><th>pTM</th>"
+            "<th>Ranking score</th><th>Structure</th>"
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+        )
     return (
-        '<div class="widget widget-esm3">'
-        '<h4 class="widget-title">ESM3 output</h4>'
-        f"{explainer}{cards_html}{table_html}</div>"
+        '<div class="widget widget-protenix">'
+        '<h4 class="widget-title">Protenix structure prediction</h4>'
+        f"{explainer}{chips_html}{cards_html}{table_html}</div>"
     )
 
 
-def _generic_metric_widget(output: dict[str, Any]) -> str:
+def _generic_metric_widget(output: dict[str, Any], *, include_shape: bool = True) -> str:
     """Last-resort widget for tools without a specialised renderer.
 
     Any adapter that emits scalars with recognised metric names (see
@@ -3027,8 +5319,11 @@ def _generic_metric_widget(output: dict[str, Any]) -> str:
         return _output_shape_widget(output)
 
     # Cards were produced; if there's also complex output, append a brief
-    # inventory so sequences / lists don't disappear silently.
-    shape_html = _output_shape_widget(output) if has_complex_output else ""
+    # inventory so sequences / lists don't disappear silently. Tools that opt
+    # out (``include_shape=False``) skip this block entirely.
+    shape_html = (
+        _output_shape_widget(output) if has_complex_output and include_shape else ""
+    )
 
     cards_html = (
         _card_grid(cards)
@@ -3049,6 +5344,390 @@ def _generic_metric_widget(output: dict[str, Any]) -> str:
         '<div class="widget widget-generic">'
         '<h4 class="widget-title">Summary</h4>'
         f"{explainer}{cards_html}{footer_html}{shape_html}</div>"
+    )
+
+
+def _metrics_only_widget(output: dict[str, Any]) -> str:
+    """Generic metric widget with the output-shape inventory suppressed.
+
+    Used by tools (ipSAE, MMseqs2-GPU) whose payload shape — raw residue-index
+    lists, hit-table file paths — is noise rather than a useful summary; only
+    the metric gauges and the context footer are kept.
+    """
+    return _generic_metric_widget(output, include_shape=False)
+
+
+# PXMeter metric specs: key -> (label, explainer, lo, hi). ``lo``/``hi`` None
+# means a frame ring (unbounded distance metric — no defensible 0..max range).
+_PXMETER_SPECS: dict[str, tuple[str, str, float | None, float | None]] = {
+    "lddt": (
+        "lDDT",
+        "Local Distance Difference Test (0-1). Higher = closer to the reference.",
+        0.0, 1.0,
+    ),
+    "bb_lddt": (
+        "Backbone lDDT",
+        "lDDT restricted to backbone atoms (0-1).",
+        0.0, 1.0,
+    ),
+    "dockq": (
+        "DockQ",
+        "Interface quality (0-1). >0.23 acceptable, >0.49 medium, >0.80 high.",
+        0.0, 1.0,
+    ),
+    "fnat": (
+        "fnat",
+        "Fraction of native interface contacts recovered (0-1).",
+        0.0, 1.0,
+    ),
+    "f1": (
+        "F1",
+        "F1 score over interface contacts (0-1).",
+        0.0, 1.0,
+    ),
+    "fnonnat": (
+        "fnonnat",
+        "Fraction of model interface contacts absent from the reference (0-1). "
+        "Lower = better.",
+        0.0, 1.0,
+    ),
+    "irmsd": (
+        "iRMSD (Å)",
+        "Interface RMSD after superposition. Lower = better; <2 A is high quality.",
+        None, None,
+    ),
+    "lrmsd": (
+        "LRMSD (Å)",
+        "Ligand RMSD after receptor superposition. Lower = better.",
+        None, None,
+    ),
+}
+
+
+def _px_metric_card(key: str, value: Any) -> str | None:
+    """Build one PXMeter gauge card, or ``None`` for a non-numeric / unknown key."""
+    num = _num(value)
+    if num is None:
+        return None
+    spec = _PXMETER_SPECS.get(key.lower())
+    if spec is None:
+        return None
+    label, explainer, lo, hi = spec
+    quality = _quality_class(key.lower(), num)
+    gauge = (
+        {"value": num, "frame": True}
+        if lo is None
+        else {"value": num, "lo": lo, "hi": hi}
+    )
+    return _score_card(label, _fmt(num), explainer, quality, gauge=gauge)
+
+
+def _px_section(title: str, subtitle: str, metrics: dict[str, Any]) -> str:
+    """One PXMeter section (Complex / Chain X / Interface X,Y) — a heading,
+    a grid of metric gauges, and (for interfaces) a context line."""
+    cards: list[str] = []
+    for key in ("lddt", "bb_lddt", "dockq"):
+        if key in metrics:
+            card = _px_metric_card(key, metrics[key])
+            if card:
+                cards.append(card)
+    info = metrics.get("dockq_info") if isinstance(metrics.get("dockq_info"), dict) else {}
+    for key in ("fnat", "F1", "fnonnat", "iRMSD", "LRMSD"):
+        if key in info:
+            card = _px_metric_card(key, info[key])
+            if card:
+                cards.append(card)
+    if not cards:
+        return ""
+    context = ""
+    if info:
+        bits: list[str] = []
+        if info.get("class1") and info.get("len1") is not None:
+            bits.append(f'{info["class1"]} · {info["len1"]} aa')
+        if info.get("class2") and info.get("len2") is not None:
+            bits.append(f'{info["class2"]} · {info["len2"]} aa')
+        nat_c, nat_t = info.get("nat_correct"), info.get("nat_total")
+        if nat_c is not None and nat_t:
+            bits.append(f"{nat_c}/{nat_t} native contacts recovered")
+        if bits:
+            context = f'<p class="px-context">{_h(" · ".join(str(b) for b in bits))}</p>'
+    sub_html = (
+        f'<span class="px-section-sub">{_h(subtitle)}</span>' if subtitle else ""
+    )
+    return (
+        '<section class="px-section">'
+        f'<div class="px-section-head"><h5 class="px-section-title">{_h(title)}</h5>'
+        f'{sub_html}</div>{_card_grid(cards)}{context}'
+        "</section>"
+    )
+
+
+def _pxmeter_widget(output: dict[str, Any]) -> str:
+    """PXMeter widget — structure-accuracy gauges grouped into Complex, per
+    Chain, and per Interface sections, read from the PXMeter report JSON."""
+    if not output:
+        return ""
+    explainer = (
+        '<p class="widget-explainer">'
+        "<strong>PXMeter</strong> scores a predicted structure against a reference — "
+        "for the whole complex, each chain, and each chain-chain interface. Every "
+        "metric below is shown as a gauge."
+        "</p>"
+    )
+    report = _load_json_artifact(output.get("report_json_path"))
+    if not isinstance(report, dict):
+        # Report JSON unavailable — fall back to the flat per-run lDDT.
+        metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
+        card = _px_metric_card("lddt", metrics.get("lddt"))
+        body = (
+            _card_grid([card]) if card
+            else '<p class="note">The PXMeter report is not embedded in this report.</p>'
+        )
+        return (
+            '<div class="widget widget-pxmeter">'
+            '<h4 class="widget-title">Structure accuracy (PXMeter)</h4>'
+            f"{explainer}{body}</div>"
+        )
+
+    sections: list[str] = []
+    cx = report.get("complex")
+    if isinstance(cx, dict):
+        sections.append(_px_section("Complex", "whole structure vs reference", cx))
+    chains = report.get("chain")
+    ref_info = report.get("ref_chain_info") if isinstance(report.get("ref_chain_info"), dict) else {}
+    if isinstance(chains, dict):
+        for cid, cmetrics in chains.items():
+            if isinstance(cmetrics, dict):
+                etype = ""
+                if isinstance(ref_info.get(cid), dict):
+                    etype = str(ref_info[cid].get("entity_type") or "")
+                sections.append(_px_section(f"Chain {cid}", etype, cmetrics))
+    ifaces = report.get("interface")
+    if isinstance(ifaces, dict):
+        for iid, imetrics in ifaces.items():
+            if isinstance(imetrics, dict):
+                sections.append(
+                    _px_section(f"Interface {iid}", "chain-chain interface", imetrics)
+                )
+    entry = report.get("entry_id")
+    header = (
+        f'<p class="note">Scored against reference entry <code>{_h(str(entry))}</code>.</p>'
+        if entry else ""
+    )
+    if not sections:
+        sections.append('<p class="note">The PXMeter report carried no metrics.</p>')
+    return (
+        '<div class="widget widget-pxmeter">'
+        '<h4 class="widget-title">Structure accuracy (PXMeter)</h4>'
+        f"{explainer}{header}{''.join(sections)}"
+        "</div>"
+    )
+
+
+def _lit_normalize(r: dict[str, Any]) -> dict[str, Any]:
+    """Normalise a EuropePMC result (or a tool ``top_records`` entry) into a
+    common record shape used by the literature-search cards."""
+    return {
+        "title": str(r.get("title") or "").strip().rstrip("."),
+        "authors": str(r.get("authorString") or r.get("authors") or "").strip(),
+        "journal": str(r.get("journalTitle") or r.get("journal") or "").strip(),
+        "volume": str(r.get("journalVolume") or "").strip(),
+        "issue": str(r.get("issue") or "").strip(),
+        "page": str(r.get("pageInfo") or "").strip(),
+        "year": str(r.get("pubYear") or r.get("year") or "").strip(),
+        "doi": (str(r["doi"]).strip() or None) if r.get("doi") else None,
+        "pmid": (str(r["pmid"]).strip() or None) if r.get("pmid") else None,
+        "pmcid": (str(r["pmcid"]).strip() or None) if r.get("pmcid") else None,
+        "source": (str(r.get("source")).strip() or None) if r.get("source") else None,
+        "open_access": str(r.get("isOpenAccess") or "").upper() == "Y",
+        "cited_by": r.get("citedByCount"),
+        "date": str(r.get("firstPublicationDate") or r.get("first_publication_date") or ""),
+        "snippet": str(r.get("abstract_snippet") or r.get("abstractText") or "").strip(),
+    }
+
+
+def _lit_records_from_raw(raw_pages: Any) -> list[dict[str, Any]]:
+    """Flatten EuropePMC raw search pages into a list of normalised records."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(raw_pages, list):
+        return out
+    for page in raw_pages:
+        if not isinstance(page, dict):
+            continue
+        results = page.get("resultList")
+        results = results.get("result") if isinstance(results, dict) else None
+        if isinstance(results, list):
+            out.extend(_lit_normalize(r) for r in results if isinstance(r, dict))
+    return out
+
+
+def _lit_record_link(rec: dict[str, Any]) -> str:
+    """Best canonical URL for a record — DOI first, then PMC, then PubMed."""
+    if rec.get("doi"):
+        return f"https://doi.org/{rec['doi']}"
+    if rec.get("pmcid"):
+        return f"https://europepmc.org/article/PMC/{rec['pmcid']}"
+    if rec.get("pmid"):
+        return f"https://europepmc.org/article/MED/{rec['pmid']}"
+    return ""
+
+
+def _lit_card(rec: dict[str, Any], idx: int) -> str:
+    """Render one literature result as a structured card."""
+    title = _h(rec.get("title") or "Untitled record")
+    link = _lit_record_link(rec)
+    title_html = (
+        f'<a class="lit-title" href="{_attr(link)}" target="_blank" '
+        f'rel="noopener noreferrer">{title}</a>'
+        if link else f'<span class="lit-title">{title}</span>'
+    )
+    oa = (
+        '<span class="lit-badge lit-oa">Open access</span>'
+        if rec.get("open_access") else ""
+    )
+    cite: list[str] = []
+    if rec.get("journal"):
+        cite.append(f'<em class="lit-journal">{_h(rec["journal"])}</em>')
+    vip = rec.get("volume") or ""
+    if rec.get("issue"):
+        vip += f'({rec["issue"]})'
+    if rec.get("page"):
+        vip += f':{rec["page"]}'
+    if vip:
+        cite.append(_h(vip))
+    if rec.get("year"):
+        cite.append(_h(str(rec["year"])))
+    cited = rec.get("cited_by")
+    if isinstance(cited, int) and cited > 0:
+        cite.append(f"cited by {cited}")
+    chips: list[str] = []
+    if rec.get("doi"):
+        chips.append(
+            f'<a class="lit-id" href="https://doi.org/{_attr(rec["doi"])}" '
+            f'target="_blank" rel="noopener noreferrer">DOI</a>'
+        )
+    if rec.get("pmid"):
+        chips.append(
+            f'<a class="lit-id" href="https://europepmc.org/article/MED/'
+            f'{_attr(rec["pmid"])}" target="_blank" rel="noopener noreferrer">'
+            f'PMID {_h(rec["pmid"])}</a>'
+        )
+    if rec.get("pmcid"):
+        chips.append(
+            f'<a class="lit-id" href="https://europepmc.org/article/PMC/'
+            f'{_attr(rec["pmcid"])}" target="_blank" rel="noopener noreferrer">'
+            f'{_h(rec["pmcid"])}</a>'
+        )
+    snippet = (
+        f'<p class="lit-snippet">{_h(rec["snippet"])}</p>'
+        if rec.get("snippet") else ""
+    )
+    return (
+        '<article class="lit-card">'
+        f'<div class="lit-card-num">{idx}</div>'
+        '<div class="lit-card-body">'
+        f'<div class="lit-card-head">{title_html}{oa}</div>'
+        + (f'<div class="lit-authors">{_h(rec["authors"])}</div>' if rec.get("authors") else "")
+        + (f'<div class="lit-cite">{" · ".join(cite)}</div>' if cite else "")
+        + snippet
+        + (f'<div class="lit-ids">{"".join(chips)}</div>' if chips else "")
+        + "</div></article>"
+    )
+
+
+def _literature_search_widget(output: dict[str, Any]) -> str:
+    """Literature-search widget — query / backend summary plus a structured
+    card per retrieved record (title + link + citation + snippet)."""
+    if not output:
+        return ""
+    query = output.get("query")
+    backend = output.get("backend")
+    runtime = _num(output.get("runtime_ms"))
+    result_count = _num(output.get("result_count"))
+    date_filter = (
+        output.get("date_filter") if isinstance(output.get("date_filter"), dict) else {}
+    )
+
+    # Prefer the rich raw EuropePMC pages; fall back to the curated top_records.
+    raw_pages = None
+    artifacts = output.get("artifacts")
+    if isinstance(artifacts, dict):
+        raw_pages = _load_json_artifact(artifacts.get("raw_pages_json"))
+    records = _lit_records_from_raw(raw_pages)
+    top = output.get("top_records") if isinstance(output.get("top_records"), list) else []
+    if not records:
+        records = [_lit_normalize(r) for r in top if isinstance(r, dict)]
+    else:
+        # Carry over abstract snippets from top_records (keyed by id).
+        snip: dict[str, str] = {}
+        for r in top:
+            if not isinstance(r, dict):
+                continue
+            s = str(r.get("abstract_snippet") or "").strip()
+            if not s:
+                continue
+            for key in (r.get("pmid"), r.get("doi"), str(r.get("title") or "").lower()):
+                if key:
+                    snip[str(key)] = s
+        for rec in records:
+            if rec["snippet"]:
+                continue
+            for key in (rec.get("pmid"), rec.get("doi"), rec["title"].lower()):
+                if key and str(key) in snip:
+                    rec["snippet"] = snip[str(key)]
+                    break
+
+    hit_count = None
+    if isinstance(raw_pages, list) and raw_pages and isinstance(raw_pages[0], dict):
+        hit_count = raw_pages[0].get("hitCount")
+
+    stats: list[str] = []
+    if backend:
+        stats.append(f'<span class="lit-stat">backend <b>{_h(str(backend))}</b></span>')
+    if hit_count is not None:
+        stats.append(
+            f'<span class="lit-stat"><b>{len(records)}</b> shown · '
+            f'<b>{int(_num(hit_count) or 0)}</b> total hits</span>'
+        )
+    elif result_count is not None:
+        stats.append(f'<span class="lit-stat"><b>{int(result_count)}</b> results</span>')
+    if runtime is not None:
+        stats.append(f'<span class="lit-stat"><b>{int(runtime)}</b> ms</span>')
+    pa = date_filter.get("published_after")
+    pb = date_filter.get("published_before")
+    if pa or pb:
+        stats.append(
+            f'<span class="lit-stat">dates {_h(str(pa or "…"))} – {_h(str(pb or "…"))}</span>'
+        )
+
+    query_html = (
+        '<div class="lit-query"><span class="lit-query-label">Search query</span>'
+        f'<code class="lit-query-text">{_h(str(query))}</code></div>'
+        if query else ""
+    )
+    summary_html = (
+        '<div class="lit-summary">'
+        f'{query_html}<div class="lit-stats">{"".join(stats)}</div>'
+        '</div>'
+    )
+    if records:
+        cards = "".join(_lit_card(rec, i + 1) for i, rec in enumerate(records))
+        body = f'<div class="lit-list">{cards}</div>'
+    else:
+        body = '<p class="note">No literature records were returned for this query.</p>'
+
+    explainer = (
+        '<p class="widget-explainer">'
+        "<strong>Literature search</strong> queries a scientific-literature backend and "
+        "returns the top matching publications. Each card links out to the article; the "
+        "snippet, when the backend provides one, shows the opening of the abstract."
+        "</p>"
+    )
+    return (
+        '<div class="widget widget-lit">'
+        '<h4 class="widget-title">Literature search</h4>'
+        f"{explainer}{summary_html}{body}"
+        "</div>"
     )
 
 
@@ -3511,32 +6190,6 @@ def _score_card(
     )
 
 
-def _wt_mut_alignment_html(wt: str, mutant: str) -> str:
-    n = min(len(wt), len(mutant))
-    wt_cells: list[str] = []
-    mut_cells: list[str] = []
-    ruler_cells: list[str] = []
-    for idx in range(n):
-        col = idx + 1
-        ruler_cells.append(
-            f'<span class="aa-bar-label">{col if col % 10 == 0 or col == 1 else "·"}</span>'
-        )
-        differ = wt[idx] != mutant[idx]
-        wt_cells.append(
-            f'<span class="aa aa-{_aa_class(wt[idx])}{" diff" if differ else ""}">{_h(wt[idx])}</span>'
-        )
-        mut_cells.append(
-            f'<span class="aa aa-{_aa_class(mutant[idx])}{" diff" if differ else ""}">{_h(mutant[idx])}</span>'
-        )
-    return (
-        '<div class="wt-mut-align">'
-        f'<div class="wt-mut-row wt-mut-ruler"><span class="wt-mut-label">col</span><code>{"".join(ruler_cells)}</code></div>'
-        f'<div class="wt-mut-row"><span class="wt-mut-label">WT</span><code>{"".join(wt_cells)}</code></div>'
-        f'<div class="wt-mut-row"><span class="wt-mut-label">Mut</span><code>{"".join(mut_cells)}</code></div>'
-        "</div>"
-    )
-
-
 def _compact_inline(value: Any) -> str:
     if value is None:
         return ""
@@ -3878,7 +6531,8 @@ def _quality_class(key: str, value: Any) -> str:
     if num is None:
         return "neutral"
     k = key.lower()
-    if k in {"plddt", "mean_plddt", "ptm", "iptm", "dockq", "ipsae", "seq_recovery", "recovery"}:
+    if k in {"plddt", "mean_plddt", "ptm", "iptm", "dockq", "ipsae", "seq_recovery",
+             "recovery", "lddt", "bb_lddt"}:
         scaled = num * 100 if num <= 1.5 else num
         if scaled >= 70:
             return "good"
@@ -4386,6 +7040,31 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 .widget-explainer { margin:0 0 14px; font-size:14px; color:var(--muted); line-height:1.6; max-width:880px; }
 .widget-explainer code { font-size:12.5px; background:var(--accent-soft); padding:1px 5px; border-radius:3px; }
 
+/* Input-selection context callout — shown for tools run with an explicit
+   residue-position parameter, so a short annotated subset isn't confusing. */
+.scope-note {
+  margin:11px 0 14px; padding:11px 14px;
+  background:var(--accent-soft); border:1px solid #d9cef3;
+  border-radius:9px;
+}
+.scope-note-label {
+  font-size:10.5px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.05em; color:var(--accent); margin-right:9px;
+}
+.scope-note-pos {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12.5px; font-weight:700; color:var(--ink);
+}
+.scope-note-missing {
+  margin-left:8px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:10.5px; font-weight:700; color:var(--ok);
+  background:var(--ok-soft); border:1px solid var(--ok-line);
+  border-radius:999px; padding:1px 9px;
+}
+.scope-note-detail {
+  margin:6px 0 0; font-size:12px; color:var(--muted); line-height:1.55;
+}
+
 /* HERO METRICS — tile-style stat cards (donut-less, clean) */
 .metric-grid {
   display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
@@ -4710,6 +7389,84 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 /* Render the SVG at its natural pixel size (width/height attributes) so nodes
    stay legible no matter how many tools ran; .dag-wrap scrolls horizontally. */
 .dag { display:block; }
+
+/* Workflow-composition panel — explains how / why the pipeline was
+   assembled: run mode, dependency stages (or independent steps) and the
+   role of each tool, so the DAG above is understandable on its own. */
+.wf-comp { margin-top:20px; padding-top:18px; border-top:1px solid var(--line); }
+.wf-comp-title {
+  margin:0 0 10px; font-size:15px; font-weight:600; color:var(--ink);
+}
+.wf-comp-mode {
+  display:inline-block; margin-bottom:9px;
+  font-size:10.5px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.05em; border-radius:999px; padding:3px 12px;
+}
+.wf-mode-agent {
+  color:var(--accent); background:var(--accent-soft); border:1px solid #d9cef3;
+}
+.wf-mode-workflow {
+  color:#0c4a63; background:#e5f4fd; border:1px solid #bfe6f5;
+}
+.wf-mode-tool {
+  color:#7c2d12; background:#fcebdd; border:1px solid #f3d3b8;
+}
+.wf-comp-lead {
+  margin:0; font-size:13px; color:var(--muted); line-height:1.6; max-width:900px;
+}
+.wf-comp-stats { display:flex; flex-wrap:wrap; gap:8px; margin:13px 0; }
+.wf-comp-stat {
+  font-size:11.5px; color:var(--muted);
+  background:#fbfafe; border:1px solid var(--line);
+  border-radius:999px; padding:3px 11px;
+}
+.wf-comp-stat b {
+  color:var(--ink); font-weight:700; font-variant-numeric:tabular-nums;
+}
+/* Ordered execution list — every step in run order with its recovered
+   input parameters and any upstream dependency. */
+.wf-steps {
+  display:flex; flex-direction:column;
+  background:#fbfafe; border:1px solid var(--line); border-radius:10px;
+  padding:4px 14px;
+}
+.wf-step {
+  display:grid; grid-template-columns:28px 10px 176px 1fr;
+  align-items:baseline; gap:11px; padding:9px 0;
+}
+.wf-step + .wf-step { border-top:1px solid #f0eef8; }
+.wf-step-num {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11px; font-weight:700; color:var(--subtle);
+  font-variant-numeric:tabular-nums; text-align:right;
+}
+.wf-step-dot {
+  width:8px; height:8px; border-radius:50%; align-self:center;
+  background:var(--subtle);
+}
+.wf-step-dot.state-completed, .wf-step-dot.state-cached { background:var(--good); }
+.wf-step-dot.state-failed { background:var(--poor); }
+.wf-step-dot.state-running { background:var(--accent-bright); }
+.wf-step-tool {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12.5px; font-weight:700; color:var(--ink); word-break:break-word;
+}
+.wf-step-params { display:flex; flex-wrap:wrap; gap:6px; }
+.wf-param {
+  font-size:11px; color:var(--muted);
+  background:#ffffff; border:1px solid var(--line);
+  border-radius:6px; padding:2px 8px;
+}
+.wf-param b { color:var(--ink); font-weight:700; margin-right:5px; }
+.wf-param-dep {
+  color:var(--accent); background:var(--accent-soft); border-color:#d9cef3;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-weight:700;
+}
+.wf-step-noparam { color:var(--subtle); font-size:11.5px; font-style:italic; }
+@media (max-width:640px) {
+  .wf-step { grid-template-columns:28px 10px 1fr; }
+  .wf-step-params { grid-column:3; }
+}
 /* Workflow DAG edges — bright violet line with a filled chevron at the
    target, so the directional cue reads at a glance instead of fading
    into the lavender background. */
@@ -5359,15 +8116,28 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 .artifact-name { font-weight:500; }
 .artifact-meta { color:var(--muted); font-size:12px; }
 
-/* Per-residue strips (structure_analysis widget) */
+/* Per-residue strips (structure_analysis + DSSP widgets). One white card
+   per chain; all rows live in a single horizontally-scrolling container so
+   the SS / burial / liability / ruler tracks always stay aligned. */
 .strip-block { margin:16px 0 18px; background:#ffffff; border:1px solid var(--line); border-radius:10px; padding:12px 16px; box-shadow:var(--shadow-tile); }
 .strip-head { font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; font-weight:600; margin-bottom:9px; }
-.strip-row { display:grid; grid-template-columns:84px 1fr; gap:9px; align-items:center; padding:2px 0; }
-.strip-label { color:var(--muted); font-size:12.5px; text-transform:uppercase; letter-spacing:0.05em; font-weight:600; text-align:right; }
-.strip-cells { display:flex; flex-wrap:nowrap; overflow-x:auto; background:#fbf9fe; border:1px solid var(--line); border-radius:5px; padding:1px; min-width:0; }
+.strip-scroll { overflow-x:auto; padding-bottom:7px; }
+.strip-scroll::-webkit-scrollbar { height:11px; }
+.strip-scroll::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
+.strip-scroll::-webkit-scrollbar-thumb {
+  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
+}
+.strip-scroll::-webkit-scrollbar-thumb:hover { background:#8574c0; }
+.strip-row { display:flex; align-items:center; gap:9px; padding:2px 0; width:max-content; }
+.strip-label {
+  position:sticky; left:0; z-index:1; flex-shrink:0; width:84px;
+  background:#ffffff; color:var(--muted); font-size:12.5px;
+  text-transform:uppercase; letter-spacing:0.05em; font-weight:600; text-align:right;
+}
+.strip-cells { display:flex; flex-wrap:nowrap; background:#fbf9fe; border:1px solid var(--line); border-radius:5px; padding:1px; }
 .strip-cell { display:inline-block; width:6px; min-width:6px; height:14px; }
 .strip-cell + .strip-cell { margin-left:1px; }
-.strip-row.strip-ruler .strip-cells { background:transparent; border:none; padding:0; }
+.strip-row.strip-ruler .strip-cells { background:transparent; border:1px solid transparent; padding:1px; }
 .strip-ruler-cell { font-size:9px; color:var(--muted); height:11px; line-height:11px; text-align:center; }
 .strip-empty { background:transparent !important; }
 /* Liability flag — brand orange so it grabs attention as a warning cue
@@ -5390,6 +8160,157 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 /* SS / burial chip in the per-residue table */
 .ss-chip { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; color:#fff; }
 .ss-chip.ss-loop, .ss-chip.burial-exposed, .ss-chip.burial-na { color:#333; }
+/* Retrieved-sequences widget (go_sequences / interpro_sequences).
+   Sequences render MSA-style: one pinned-label row each, fixed-pitch
+   residue track, a column ruler, and a single horizontal scrollbar. */
+.seqret-summary {
+  display:flex; flex-wrap:wrap; align-items:center;
+  gap:8px 9px; margin:11px 0 14px;
+}
+.seqret-query-id {
+  font-family:ui-monospace, monospace; font-size:12.5px; font-weight:700;
+  color:var(--accent); background:var(--accent-soft);
+  padding:3px 10px; border-radius:999px;
+}
+.seqret-query-label { font-size:12px; color:var(--muted); margin-right:4px; }
+.seqret-stats { display:flex; flex-wrap:wrap; gap:8px 9px; }
+.seqret-stat {
+  font-size:11.5px; color:var(--muted);
+  background:#fbfafe; border:1px solid var(--line);
+  border-radius:999px; padding:3px 11px; white-space:nowrap;
+}
+.seqret-stat b {
+  color:var(--ink); font-weight:700; font-variant-numeric:tabular-nums;
+}
+.seqret-align-head {
+  font-size:11.5px; color:var(--subtle); margin:2px 0 7px;
+  text-transform:uppercase; letter-spacing:0.04em; font-weight:600;
+}
+.seqret-align-scroll {
+  overflow-x:auto; padding-bottom:8px;
+  background:#fbfafe; border:1px solid var(--line); border-radius:9px;
+}
+.seqret-align-scroll::-webkit-scrollbar { height:12px; }
+.seqret-align-scroll::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
+.seqret-align-scroll::-webkit-scrollbar-thumb {
+  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
+}
+.seqret-align-scroll::-webkit-scrollbar-thumb:hover { background:#8574c0; }
+.seqret-row { display:flex; align-items:stretch; width:max-content; }
+.seqret-row + .seqret-row { border-top:1px solid #f0eef8; }
+.seqret-row-label {
+  position:sticky; left:0; z-index:1; flex-shrink:0;
+  display:flex; align-items:center; gap:6px;
+  width:138px; padding:5px 10px;
+  background:#ffffff; border-right:1px solid var(--line);
+}
+.seqret-rev {
+  flex-shrink:0; width:6px; height:6px; border-radius:50%;
+  background:var(--good);
+}
+.seqret-row-acc {
+  font-family:ui-monospace, monospace; font-size:11.5px;
+  font-weight:700; color:var(--ink);
+}
+.seqret-row-len {
+  margin-left:auto; font-size:10px; color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+.seqret-row-seq {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; line-height:2; letter-spacing:1.6px;
+  white-space:pre; color:var(--ink); padding:0 10px;
+}
+.seqret-row-ruler .seqret-row-seq { color:var(--subtle); }
+.seqret-row-ruler .seqret-row-label { background:#fbfafe; }
+/* Cross-sequence overlap — a >=10-residue stretch identical between two
+   retrieved sequences, i.e. a region plausibly under shared functional
+   constraint. Internal repeats are intentionally not highlighted. */
+.seqret-hl {
+  background:#fbe98a; border-radius:2px;
+  box-shadow:0 0 0 1px #fbe98a;
+}
+.seqret-legend {
+  display:flex; flex-wrap:wrap; gap:6px 16px; margin:8px 0 0;
+  font-size:11px; color:var(--muted);
+}
+.seqret-legend-pip {
+  display:inline-block; width:11px; height:11px; border-radius:3px;
+  margin-right:5px; vertical-align:-1px;
+}
+/* Literature-search widget */
+.lit-summary {
+  display:flex; flex-direction:column; gap:9px;
+  margin:11px 0 14px; padding:12px 14px;
+  background:#fbfafe; border:1px solid var(--line); border-radius:10px;
+}
+.lit-query { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; }
+.lit-query-label {
+  font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em;
+  font-weight:700; color:var(--subtle);
+}
+.lit-query-text {
+  font-family:ui-monospace, monospace; font-size:12.5px; color:var(--ink);
+  background:#ffffff; border:1px solid var(--line); border-radius:6px; padding:3px 9px;
+}
+.lit-stats { display:flex; flex-wrap:wrap; gap:6px 9px; }
+.lit-stat {
+  font-size:11.5px; color:var(--muted);
+  background:#ffffff; border:1px solid var(--line);
+  border-radius:999px; padding:3px 11px;
+}
+.lit-stat b { color:var(--ink); font-weight:700; }
+.lit-list { display:flex; flex-direction:column; gap:9px; }
+.lit-card {
+  display:flex; gap:12px;
+  border:1px solid var(--line); border-radius:10px;
+  background:#ffffff; box-shadow:var(--shadow-tile); padding:13px 15px;
+}
+.lit-card-num {
+  flex-shrink:0; width:24px; height:24px; border-radius:7px;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--accent-soft); color:var(--accent);
+  font-size:12px; font-weight:700; font-variant-numeric:tabular-nums;
+}
+.lit-card-body { flex:1; min-width:0; }
+.lit-card-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; }
+.lit-title {
+  font-size:14px; font-weight:600; color:var(--ink);
+  line-height:1.4; text-decoration:none; letter-spacing:-0.005em;
+}
+a.lit-title:hover { color:var(--accent); text-decoration:underline; }
+.lit-badge {
+  font-size:9.5px; text-transform:uppercase; letter-spacing:0.05em;
+  font-weight:700; border-radius:999px; padding:1px 8px;
+}
+.lit-oa { color:var(--good); background:var(--good-soft); border:1px solid var(--good-line); }
+.lit-authors {
+  font-size:11.5px; color:var(--muted); margin-top:4px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.lit-cite { font-size:11.5px; color:var(--subtle); margin-top:3px; }
+.lit-journal { color:var(--muted); font-style:italic; }
+.lit-snippet {
+  font-size:12px; color:var(--muted); line-height:1.5; margin:7px 0 0;
+  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+}
+.lit-ids { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.lit-id {
+  font-size:10.5px; font-weight:600; color:var(--accent);
+  background:var(--accent-soft); border-radius:6px; padding:2px 8px; text-decoration:none;
+}
+.lit-id:hover { background:var(--accent); color:#ffffff; }
+/* PXMeter widget — accuracy sections (complex / per chain / per interface). */
+.px-section { margin:16px 0 0; }
+.px-section-head {
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:9px; margin:0 0 9px;
+}
+.px-section-title {
+  margin:0; font-size:12px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.06em; color:var(--ink);
+}
+.px-section-sub { font-size:11.5px; color:var(--muted); }
+.px-context { margin:8px 0 0; font-size:11.5px; color:var(--muted); }
 .residue-annotations { background:#ffffff; border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin:14px 0; box-shadow:var(--shadow-tile); }
 .residue-annotations summary { color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:0.05em; font-weight:600; }
 .residue-annotations summary:hover { color:var(--accent); }
@@ -5444,6 +8365,11 @@ td.quality-poor { color:var(--poor); font-weight:600; }
   display:flex; align-items:center; justify-content:center;
 }
 .qc-card-body { min-width:0; flex:1; }
+/* protein_qc gauge cards stack vertically — donut centred on top, text below. */
+.widget-qc .qc-card.has-gauge {
+  flex-direction:column; align-items:center; text-align:center; gap:12px;
+}
+.widget-qc .qc-card.has-gauge .qc-card-body { flex:0 1 auto; }
 /* Plain (no-gauge) variant — keep the small accent strip for state cue. */
 .qc-card:not(.has-gauge)::before {
   content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
@@ -5536,31 +8462,416 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 .qc-flag strong { display:block; font-size:14px; color:var(--warn); margin-bottom:4px; }
 .qc-flag-explain { font-size:13px; color:#92400e; line-height:1.5; }
 
-/* WT vs Mut alignment */
-.wt-mut-align {
-  background:#ffffff; border:1px solid var(--line); border-radius:10px;
-  padding:14px 16px; margin:14px 0; overflow-x:auto;
+/* sequence_edit — wild-type vs mutant comparison. A summary row, colour-
+   coded mutation chips, then a two-row MSA-style alignment with a column
+   ruler and a single horizontal scrollbar; changed columns highlighted. */
+.widget-seqedit .seqedit-summary {
+  display:flex; flex-wrap:wrap; align-items:center;
+  gap:8px 9px; margin:11px 0 13px;
 }
-.wt-mut-row {
-  display:flex; align-items:center; gap:10px; padding:2px 0;
-  font-family:ui-monospace, monospace;
+.seqedit-op {
+  font-size:11px; font-weight:700; color:var(--accent);
+  background:var(--accent-soft); border-radius:999px; padding:3px 11px;
+  text-transform:uppercase; letter-spacing:0.04em;
 }
-.wt-mut-row code { background:transparent; padding:0; }
-.wt-mut-label {
-  width:50px; flex-shrink:0; font-size:11px; color:var(--muted); text-transform:uppercase;
-  letter-spacing:0.05em; font-weight:600;
+.seqedit-stats { display:flex; flex-wrap:wrap; gap:8px 9px; }
+.seqedit-stat {
+  font-size:11.5px; color:var(--muted);
+  background:#fbfafe; border:1px solid var(--line);
+  border-radius:999px; padding:3px 11px; white-space:nowrap;
 }
-.wt-mut-ruler { color:var(--muted); font-size:10px; }
-.wt-mut-row .aa { width:13px; text-align:center; font-size:12px; }
-.wt-mut-row .aa.diff { outline:2px solid var(--poor); outline-offset:-2px; }
+.seqedit-stat b {
+  color:var(--ink); font-weight:700; font-variant-numeric:tabular-nums;
+}
+.seqedit-align-head {
+  font-size:11.5px; color:var(--subtle); margin:13px 0 7px;
+  text-transform:uppercase; letter-spacing:0.04em; font-weight:600;
+}
+.seqedit-muts { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:3px; }
+.seqedit-mut-chip {
+  display:inline-flex; align-items:baseline; gap:1px;
+  font-family:ui-monospace, monospace; font-size:12.5px; font-weight:700;
+  background:#ffffff; border:1px solid var(--line); border-radius:7px;
+  padding:3px 10px;
+}
+.seqedit-mut-chip .sm-from { color:var(--muted); }
+.seqedit-mut-chip .sm-pos {
+  color:var(--subtle); font-weight:600; padding:0 2px;
+  font-variant-numeric:tabular-nums;
+}
+.seqedit-mut-chip .sm-to { color:var(--poor); }
+.seqedit-align-scroll {
+  overflow-x:auto; padding-bottom:8px;
+  background:#fbfafe; border:1px solid var(--line); border-radius:9px;
+}
+.seqedit-align-scroll::-webkit-scrollbar { height:12px; }
+.seqedit-align-scroll::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
+.seqedit-align-scroll::-webkit-scrollbar-thumb {
+  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
+}
+.seqedit-align-scroll::-webkit-scrollbar-thumb:hover { background:#8574c0; }
+.seqedit-row { display:flex; align-items:stretch; width:max-content; }
+.seqedit-row + .seqedit-row { border-top:1px solid #f0eef8; }
+.seqedit-row-label {
+  position:sticky; left:0; z-index:1; flex-shrink:0;
+  display:flex; align-items:center;
+  width:74px; padding:5px 10px;
+  font-size:10.5px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.05em; color:var(--muted);
+  background:#ffffff; border-right:1px solid var(--line);
+}
+.seqedit-row-mut .seqedit-row-label { color:var(--accent); }
+.seqedit-row-ruler .seqedit-row-label { background:#fbfafe; }
+.seqedit-row-seq {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; line-height:2; letter-spacing:1.6px;
+  white-space:pre; color:var(--ink); padding:0 10px;
+}
+.seqedit-row-ruler .seqedit-row-seq { color:var(--subtle); }
+.seqedit-diff-old {
+  background:#fde2ec; color:#a3076b; border-radius:2px;
+  box-shadow:0 0 0 1px #f6b9d3;
+}
+.seqedit-diff-new {
+  background:var(--poor); color:#ffffff; border-radius:2px; font-weight:700;
+  box-shadow:0 0 0 1px var(--poor);
+}
+.seqedit-legend {
+  display:flex; flex-wrap:wrap; gap:6px 16px; margin:8px 0 0;
+  font-size:11px; color:var(--muted);
+}
+.seqedit-legend-pip {
+  display:inline-block; width:11px; height:11px; border-radius:3px;
+  margin-right:5px; vertical-align:-1px;
+}
+.seqedit-warn {
+  margin-top:10px; padding:9px 13px; font-size:12px;
+  background:var(--ok-soft); border:1px solid var(--ok-line);
+  border-radius:8px; color:#92400e;
+}
 
-/* Amino-acid composition bars */
-.aa-bars { display:flex; flex-direction:column; gap:4px; margin:8px 0; }
-.aa-bar-row { display:grid; grid-template-columns:30px 1fr 50px; gap:8px; align-items:center; font-size:12px; }
-.aa-bar-label { text-align:center; padding:2px 0; }
-.aa-bar-track { background:var(--bg); border-radius:3px; height:10px; overflow:hidden; }
-.aa-bar-track i { display:block; height:100%; background:var(--accent); }
-.aa-bar-count { color:var(--muted); font-family:ui-monospace, monospace; font-size:11px; text-align:right; }
+/* AutoDock Vina docking widget — ranked binding poses, the Vina score-term
+   breakdown and a profile of the docked ligand parsed from the .pdbqt. */
+.vina-poses { margin:4px 0 2px; }
+.vina-pose {
+  display:grid; grid-template-columns:48px 1fr 118px 152px;
+  align-items:center; gap:13px; padding:8px 2px;
+}
+.vina-pose + .vina-pose { border-top:1px solid #f0eef8; }
+.vina-pose-head {
+  padding:4px 2px 6px; font-size:10px; text-transform:uppercase;
+  letter-spacing:0.05em; color:var(--subtle); font-weight:700;
+  border-bottom:1px solid var(--line);
+}
+.vina-pose-rank {
+  font-family:ui-monospace, monospace; font-weight:700; font-size:12.5px;
+  color:var(--accent);
+}
+.vina-pose-head .vina-pose-rank { color:var(--subtle); }
+.vina-pose-bar-track {
+  height:14px; background:#ede9fe; border-radius:999px; overflow:hidden;
+}
+.vina-pose-bar { display:block; height:100%; border-radius:999px; }
+.vina-pose-aff {
+  font-family:ui-monospace, monospace; font-weight:700; font-size:13px;
+  text-align:right; font-variant-numeric:tabular-nums;
+}
+.vina-pose-aff small { font-weight:500; color:var(--muted); font-size:9.5px; }
+.vina-pose-head .vina-pose-aff { color:var(--subtle); }
+.vina-pose-rmsd {
+  font-size:11px; color:var(--muted); text-align:right;
+  font-variant-numeric:tabular-nums;
+}
+.vina-pose-rmsd b { color:var(--ink); font-weight:600; }
+
+.vina-energy {
+  margin:4px 0 2px; padding:13px 15px;
+  background:#fbfafe; border:1px solid var(--line); border-radius:10px;
+}
+.vina-ed-row {
+  display:grid; grid-template-columns:142px 1fr 76px;
+  align-items:center; gap:12px; padding:5px 0;
+}
+.vina-ed-label { font-size:12px; color:var(--ink); cursor:help; }
+.vina-ed-track {
+  position:relative; height:16px; background:#ede9fe; border-radius:5px;
+}
+.vina-ed-axis {
+  position:absolute; left:50%; top:-2px; bottom:-2px; width:1.5px;
+  background:var(--subtle); transform:translateX(-50%);
+}
+.vina-ed-fill { position:absolute; top:0; bottom:0; border-radius:3px; }
+.vina-ed-neg { background:#4cc4e4; }
+.vina-ed-pos { background:#f39e3a; }
+.vina-ed-val {
+  font-family:ui-monospace, monospace; font-size:12px; font-weight:700;
+  text-align:right; color:var(--ink); font-variant-numeric:tabular-nums;
+}
+.vina-ed-result {
+  display:flex; justify-content:space-between; align-items:baseline;
+  margin-top:8px; padding-top:9px; border-top:1px solid var(--line);
+}
+.vina-ed-result-label {
+  font-size:11px; text-transform:uppercase; letter-spacing:0.05em;
+  font-weight:700; color:var(--subtle);
+}
+.vina-ed-result-val {
+  font-family:ui-monospace, monospace; font-size:16px; font-weight:700;
+  color:var(--accent);
+}
+.vina-ed-result-val small { font-size:10px; color:var(--muted); font-weight:500; }
+.vina-caption { font-size:11px; color:var(--muted); margin:7px 2px 0; line-height:1.5; }
+
+.vina-desc-grid {
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(122px, 1fr));
+  gap:9px; margin:4px 0 2px;
+}
+.vina-desc {
+  display:flex; flex-direction:column; gap:3px; padding:10px 12px;
+  background:#fbfafe; border:1px solid var(--line); border-radius:9px;
+}
+.vina-desc-val {
+  font-size:16px; font-weight:700; color:var(--ink);
+  font-variant-numeric:tabular-nums;
+}
+.vina-desc-val sub { font-size:11px; font-weight:600; }
+.vina-desc-label {
+  font-size:10.5px; color:var(--muted);
+  text-transform:uppercase; letter-spacing:0.03em;
+}
+.vina-el-head {
+  font-size:11.5px; color:var(--subtle); margin:13px 0 6px;
+  text-transform:uppercase; letter-spacing:0.04em; font-weight:600;
+}
+.vina-el-bar {
+  display:flex; height:16px; border-radius:5px; overflow:hidden;
+  border:1px solid var(--line);
+}
+.vina-el-seg { display:block; height:100%; }
+.vina-el-legend {
+  display:flex; flex-wrap:wrap; gap:5px 15px; margin-top:8px;
+  font-size:11.5px; color:var(--muted);
+}
+.vina-el-legend-item { display:inline-flex; align-items:center; }
+.vina-el-pip {
+  display:inline-block; width:10px; height:10px; border-radius:3px;
+  margin-right:6px;
+}
+.vina-el-legend-item b {
+  color:var(--ink); font-weight:700; margin-left:3px;
+  font-variant-numeric:tabular-nums;
+}
+
+/* template_select widget — ranked template cards (identity / coverage bars
+   + E-value chips) and an MSA-style template-sequence comparison strip. */
+.tmpl-list { display:flex; flex-direction:column; gap:11px; margin:4px 0 6px; }
+.tmpl-card {
+  background:#fbfafe; border:1px solid var(--line); border-radius:10px;
+  padding:13px 15px;
+}
+.tmpl-card-head {
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:8px;
+  margin-bottom:10px;
+}
+.tmpl-rank {
+  font-family:ui-monospace, monospace; font-weight:700; font-size:12px;
+  color:var(--accent);
+}
+.tmpl-id {
+  font-family:ui-monospace, monospace; font-weight:700; font-size:13.5px;
+  color:var(--ink);
+}
+.tmpl-desc { font-size:12px; color:var(--muted); }
+.tmpl-badges { margin-left:auto; display:flex; flex-wrap:wrap; gap:6px; }
+.tmpl-badge {
+  font-size:10.5px; color:var(--muted);
+  background:#ffffff; border:1px solid var(--line);
+  border-radius:999px; padding:2px 9px;
+}
+.tmpl-metrics { display:flex; flex-direction:column; gap:6px; }
+.tmpl-bar-row { display:flex; align-items:center; gap:11px; }
+.tmpl-bar-label {
+  flex-shrink:0; width:66px; font-size:11.5px; color:var(--ink); font-weight:500;
+}
+.tmpl-bar-track {
+  flex:1; height:9px; background:#ede9fe; border-radius:999px; overflow:hidden;
+}
+.tmpl-bar-track i { display:block; height:100%; border-radius:999px; }
+.tmpl-bar-val {
+  flex-shrink:0; width:52px; text-align:right; font-size:11.5px;
+  font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums;
+}
+.tmpl-chips { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
+.tmpl-chip {
+  font-size:11px; color:var(--muted);
+  background:#ffffff; border:1px solid var(--line);
+  border-radius:999px; padding:3px 10px;
+}
+.tmpl-chip b {
+  color:var(--ink); font-weight:700; font-variant-numeric:tabular-nums;
+  font-family:ui-monospace, monospace; margin-left:2px;
+}
+.tmpl-seq-scroll {
+  overflow-x:auto; padding-bottom:8px; margin-top:2px;
+  background:#fbfafe; border:1px solid var(--line); border-radius:9px;
+}
+.tmpl-seq-scroll::-webkit-scrollbar { height:12px; }
+.tmpl-seq-scroll::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
+.tmpl-seq-scroll::-webkit-scrollbar-thumb {
+  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
+}
+.tmpl-seq-scroll::-webkit-scrollbar-thumb:hover { background:#8574c0; }
+.tmpl-seq-row { display:flex; align-items:stretch; width:max-content; }
+.tmpl-seq-row + .tmpl-seq-row { border-top:1px solid #f0eef8; }
+.tmpl-seq-label {
+  position:sticky; left:0; z-index:1; flex-shrink:0;
+  display:flex; align-items:center; gap:8px;
+  width:200px; padding:6px 11px;
+  background:#ffffff; border-right:1px solid var(--line);
+}
+.tmpl-seq-name {
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap;
+  font-family:ui-monospace, monospace; font-size:11.5px; font-weight:700;
+  color:var(--ink);
+}
+.tmpl-seq-id {
+  flex-shrink:0; white-space:nowrap;
+  font-size:10px; font-weight:700;
+  color:var(--accent); background:var(--accent-soft);
+  border-radius:999px; padding:1px 7px;
+}
+.tmpl-seq-track {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; line-height:2; letter-spacing:1.6px;
+  white-space:pre; color:var(--ink); padding:0 11px;
+}
+.tmpl-seq-ruler .tmpl-seq-track { color:var(--subtle); }
+.tmpl-seq-ruler .tmpl-seq-label { background:#fbfafe; }
+
+/* Generative-design / LigandMPNN / ESM widgets — summary chips, per-design
+   results table cells and the ESM pooled-embedding fingerprint strip. */
+.dsn-chips { display:flex; flex-wrap:wrap; gap:7px; margin:4px 0 12px; }
+.dsn-chip {
+  font-size:11.5px; color:var(--muted);
+  background:#fbfafe; border:1px solid var(--line);
+  border-radius:999px; padding:3px 11px;
+}
+.dsn-chip b {
+  color:var(--ink); font-weight:700; margin-left:3px;
+  font-variant-numeric:tabular-nums;
+}
+.dsn-chip-warn {
+  color:var(--ok); background:var(--ok-soft); border-color:var(--ok-line);
+  font-weight:700;
+}
+.dsn-seq {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11.5px; color:var(--ink); background:transparent;
+  word-break:break-all;
+}
+.dsn-muted { color:var(--subtle); font-size:12px; font-style:italic; }
+.dsn-file {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11px; color:var(--muted); word-break:break-all;
+}
+.dsn-bar-cell { display:flex; align-items:center; gap:8px; }
+.dsn-bar {
+  flex:1; min-width:54px; max-width:130px; height:8px;
+  background:#ede9fe; border-radius:999px; overflow:hidden;
+}
+.dsn-bar i { display:block; height:100%; border-radius:999px; background:var(--accent); }
+.dsn-bar i.metric-good { background:var(--good); }
+.dsn-bar i.metric-ok { background:var(--ok); }
+.dsn-bar i.metric-poor { background:var(--poor); }
+.dsn-bar-cell span {
+  font-size:11.5px; font-weight:700; color:var(--ink);
+  font-variant-numeric:tabular-nums;
+}
+.esm-emb {
+  margin:2px 0 4px; padding:6px;
+  background:#ffffff; border:1px solid var(--line); border-radius:9px;
+}
+.esm-emb-svg { display:block; width:100%; height:34px; border-radius:4px; }
+.esm-emb-legend {
+  display:flex; flex-wrap:wrap; gap:5px 16px; margin:8px 2px 0;
+  font-size:11px; color:var(--muted);
+}
+.esm-emb-legend span { display:inline-flex; align-items:center; }
+.esm-emb-pip {
+  display:inline-block; width:11px; height:11px; border-radius:3px;
+  margin-right:6px; border:1px solid var(--line);
+}
+
+/* Amino-acid distribution — single-row sequence logo. Each residue type
+   is a column whose one-letter glyph is scaled vertically by its
+   composition frequency; glyph fills reuse the report's .aa-* palette so
+   the logo colouring stays aligned with the rest of the report. */
+.aa-logo {
+  margin:8px 0 6px; padding:14px 14px 8px;
+  background:#ffffff; border:1px solid var(--line); border-radius:10px;
+  box-shadow:var(--shadow-tile); overflow-x:auto;
+}
+.aa-logo-svg { display:block; width:100%; height:auto; margin:0 auto; }
+.aa-logo-grid { stroke:#efe9f7; stroke-width:1; }
+.aa-logo-baseline { stroke:var(--line); stroke-width:1.4; }
+.aa-logo-ytick {
+  font-size:10px; fill:var(--muted); font-variant-numeric:tabular-nums;
+}
+.aa-logo-xtick {
+  font-size:12px; font-weight:700; fill:var(--muted);
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.aa-logo-axis-title {
+  font-size:10px; fill:var(--subtle);
+  text-transform:uppercase; letter-spacing:0.07em;
+}
+.aa-logo-glyph {
+  font-family:"Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-weight:700;
+}
+.aa-logo-glyph.g-hydro   { fill:#0c4a63; }
+.aa-logo-glyph.g-pos     { fill:#0c4a63; }
+.aa-logo-glyph.g-neg     { fill:#831843; }
+.aa-logo-glyph.g-polar   { fill:#2d046e; }
+.aa-logo-glyph.g-special { fill:#7c2d12; }
+.aa-logo-glyph.g-other   { fill:#2a2440; }
+.aa-logo-legend {
+  display:flex; flex-wrap:wrap; gap:5px 16px; margin:9px 2px 2px;
+  font-size:11px; color:var(--muted);
+}
+.aa-logo-legend-item { display:inline-flex; align-items:center; }
+.aa-logo-legend-pip {
+  display:inline-block; width:11px; height:11px; border-radius:3px;
+  margin-right:6px;
+}
+.aa-logo-legend-pip.g-hydro   { background:#0c4a63; }
+.aa-logo-legend-pip.g-pos     { background:#0c4a63; }
+.aa-logo-legend-pip.g-neg     { background:#831843; }
+.aa-logo-legend-pip.g-polar   { background:#2d046e; }
+.aa-logo-legend-pip.g-special { background:#7c2d12; }
+/* sequence_analysis — residue-composition bars + caution-flag chips. */
+.seqana-comp { display:flex; flex-direction:column; gap:6px; margin:8px 0 4px; }
+.seqana-comp-row { display:flex; align-items:center; gap:11px; }
+.seqana-comp-label {
+  flex-shrink:0; width:96px; font-size:12px; color:var(--ink); font-weight:500;
+}
+.seqana-comp-track {
+  flex:1; height:9px; background:#ede9fe; border-radius:999px; overflow:hidden;
+}
+.seqana-comp-track i {
+  display:block; height:100%; background:var(--accent-bright); border-radius:999px;
+}
+.seqana-comp-pct {
+  flex-shrink:0; width:38px; text-align:right; font-size:11.5px;
+  color:var(--muted); font-variant-numeric:tabular-nums;
+}
+.seqana-flag {
+  display:inline-block; font-size:10px; font-weight:600;
+  color:var(--ok); background:var(--ok-soft); border:1px solid var(--ok-line);
+  border-radius:999px; padding:1px 7px; margin:0 3px 2px 0;
+}
+.seqana-muted { color:var(--subtle); }
 
 /* Raw output JSON (collapsed by default at bottom of node block) */
 .node-block-raw {

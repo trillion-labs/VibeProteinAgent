@@ -14,6 +14,9 @@ OUT_DIR="${VPA_SMOKE_OUT_DIR:-validation/sharded_gpu_smoke/out}"
 
 mkdir -p "$OUT_DIR"
 
+if [[ -n "${VPA_SHARED_HOME:-}" && -z "${VPA_HOME:-}" ]]; then
+  export VPA_HOME="$VPA_SHARED_HOME"
+fi
 if [[ -f "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh" ]]; then
   # shellcheck disable=SC1091
   source "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh"

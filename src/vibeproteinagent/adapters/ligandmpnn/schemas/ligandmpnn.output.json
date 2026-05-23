@@ -19,7 +19,9 @@
     },
     "designs_fasta": {"type": "string", "minLength": 1},
     "num_residues": {"type": "integer", "minimum": 1},
-    "runtime_ms": {"type": "integer", "minimum": 0}
+    "runtime_ms": {"type": "integer", "minimum": 0},
+    "position_mappings": {"type": "object", "additionalProperties": true, "default": {}},
+    "warnings": {"type": "array", "items": {"type": "string"}, "default": []}
   },
   "additionalProperties": false
 }

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.residue_mapping import (
+    PositionBasis,
+    parse_structure_residue_refs,
+    resolve_position_range,
+    resolve_positions,
+)
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
 _ADAPTER_DIR = Path(__file__).parent
@@ -56,6 +63,7 @@ RFdiffusionMode = Literal[
 _BASE_CKPT = "Base_ckpt.pt"
 _COMPLEX_CKPT = "Complex_base_ckpt.pt"
 _FOLD_CKPT = "Complex_Fold_base_ckpt.pt"
+_SIMPLE_RF_SELECTOR = re.compile(r"^(?P<chain>[A-Za-z_]?)(?P<start>\d+)(?:-(?P<end>\d+))?$")
 
 
 class RFdiffusionInput(BaseModel):
@@ -67,6 +75,10 @@ class RFdiffusionInput(BaseModel):
     target_chain: str = Field(default="A", min_length=1, max_length=1)
     target_residues: str | None = Field(default=None, pattern=r"^[0-9]+-[0-9]+$")
     target_hotspots: list[int | str] = Field(default_factory=list)
+    target_hotspot_residue_ids: list[str] = Field(default_factory=list)
+    target_sequence: str | None = None
+    target_fasta_path: str | None = Field(default=None, min_length=1)
+    position_basis: PositionBasis = "auto"
     contigs: list[str] | None = None
     length_min: int = Field(default=100, ge=20, le=5000)
     length_max: int | None = Field(default=None, ge=20, le=5000)
@@ -172,6 +184,8 @@ class RFdiffusionOutput(BaseModel):
     num_requested: int = 0
     num_generated: int = 0
     num_designs_returned: int
+    position_mappings: dict[str, object] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 @register_adapter("descriptor.yaml")
@@ -200,7 +214,9 @@ class RFdiffusionAdapter(ToolAdapter):
         staged_target_ss = _stage_file(params.target_ss, run_inputs)
         staged_target_adj = _stage_file(params.target_adj, run_inputs)
 
-        contigs = _build_contigs(params, staged_target)
+        contigs, position_mappings, mapping_warnings, resolved_hotspots, resolved_selectors = (
+            _build_contigs_with_mappings(params, staged_target)
+        )
         checkpoint = _required_weight(params)
         if not checkpoint.is_file():
             mode = _canonical_mode(params.mode)
@@ -220,6 +236,8 @@ class RFdiffusionAdapter(ToolAdapter):
             target_ss=staged_target_ss,
             target_adj=staged_target_adj,
             checkpoint=checkpoint,
+            resolved_hotspots=resolved_hotspots,
+            resolved_selectors=resolved_selectors,
         )
 
         try:
@@ -251,6 +269,8 @@ class RFdiffusionAdapter(ToolAdapter):
             num_requested=params.num_designs,
             num_generated=len(designs),
             num_designs_returned=len(designs),
+            position_mappings=position_mappings,
+            warnings=mapping_warnings,
         )
 
     def estimate_vram(self, params: RFdiffusionInput) -> int:
@@ -433,25 +453,89 @@ def _checkpoint_check(path: Path) -> dict[str, object]:
 
 
 def _build_contigs(params: RFdiffusionInput, target_pdb: Path | None) -> list[str]:
+    return _build_contigs_with_mappings(params, target_pdb)[0]
+
+
+def _build_contigs_with_mappings(
+    params: RFdiffusionInput,
+    target_pdb: Path | None,
+) -> tuple[list[str], dict[str, object], list[str], list[str] | None, dict[str, list[str]]]:
     mode = _canonical_mode(params.mode)
+    mappings: dict[str, object] = {}
+    warnings: list[str] = []
+    resolved_hotspots: list[str] | None = None
+    resolved_selectors: dict[str, list[str]] = {}
+    if target_pdb is not None and _has_target_hotspots(params):
+        hotspot_resolution = _resolve_target_hotspots(params, target_pdb)
+        resolved_hotspots = hotspot_resolution.residue_ids
+        warnings.extend(hotspot_resolution.warnings)
+        mappings["target_hotspots"] = hotspot_resolution.to_audit()
+    if target_pdb is not None:
+        for field_name in ("inpaint_seq", "inpaint_str", "provide_seq"):
+            values = getattr(params, field_name)
+            if not values:
+                continue
+            resolved_values, field_mapping, field_warnings = _resolve_rf_selector_list(
+                values=values,
+                params=params,
+                target_pdb=target_pdb,
+                label=field_name,
+            )
+            resolved_selectors[field_name] = resolved_values
+            if field_mapping:
+                mappings[field_name] = field_mapping
+            warnings.extend(field_warnings)
     if params.contigs:
-        return params.contigs
+        if params.target_sequence or params.target_fasta_path:
+            warnings.append(
+                "contigs were passed through as RFdiffusion-native structure syntax; "
+                "sequence/fasta mapping is applied only to target_residues, hotspots, "
+                "and simple inpaint/provide selectors"
+            )
+        return params.contigs, mappings, warnings, resolved_hotspots, resolved_selectors
     if mode == "unconditional":
-        return [_range(params.length_min, params.length_max)]
+        return (
+            [_range(params.length_min, params.length_max)],
+            mappings,
+            warnings,
+            resolved_hotspots,
+            resolved_selectors,
+        )
     if mode == "symmetric_oligomer":
         length = params.total_length or params.length_min
-        return [_range(length, params.length_max or length)]
+        return (
+            [_range(length, params.length_max or length)],
+            mappings,
+            warnings,
+            resolved_hotspots,
+            resolved_selectors,
+        )
     if mode == "partial_diffusion":
         assert target_pdb is not None
         span_len = _chain_length(target_pdb, params.target_chain)
-        return [f"{span_len}-{span_len}"]
+        return (
+            [f"{span_len}-{span_len}"],
+            mappings,
+            warnings,
+            resolved_hotspots,
+            resolved_selectors,
+        )
     if mode == "binder_design":
         assert target_pdb is not None
-        target_span = _target_span(params, target_pdb)
+        target_span, range_mapping, range_warnings = _target_span(params, target_pdb)
+        if range_mapping:
+            mappings["target_residues"] = range_mapping
+        warnings.extend(range_warnings)
         binder = _range(params.binder_length_min, params.binder_length_max)
-        return [f"{target_span}/0 {binder}"]
+        return (
+            [f"{target_span}/0 {binder}"],
+            mappings,
+            warnings,
+            resolved_hotspots,
+            resolved_selectors,
+        )
     if mode == "fold_conditioning":
-        return []
+        return [], mappings, warnings, resolved_hotspots, resolved_selectors
     raise ValueError(f"{mode} requires explicit contigs")
 
 
@@ -460,12 +544,82 @@ def _range(start: int, end: int | None) -> str:
     return f"{start}-{stop}"
 
 
-def _target_span(params: RFdiffusionInput, target_pdb: Path) -> str:
+def _target_span(params: RFdiffusionInput, target_pdb: Path) -> tuple[str, dict[str, object] | None, list[str]]:
     chain = params.target_chain.upper()
     if params.target_residues is not None:
-        return f"{chain}{params.target_residues}"
+        span, resolution = resolve_position_range(
+            residues=parse_structure_residue_refs(target_pdb, chain),
+            range_text=params.target_residues,
+            chain_id=chain,
+            sequence=params.target_sequence,
+            fasta_path=params.target_fasta_path,
+            position_basis=params.position_basis,
+            label="target_residues",
+        )
+        return span, resolution.to_audit(), resolution.warnings
     start, end = _longest_contiguous_span(target_pdb, chain)
-    return f"{chain}{start}-{end}"
+    return f"{chain}{start}-{end}", None, []
+
+
+def _resolve_rf_selector_list(
+    *,
+    values: list[str],
+    params: RFdiffusionInput,
+    target_pdb: Path,
+    label: str,
+) -> tuple[list[str], dict[str, object] | None, list[str]]:
+    resolved: list[str] = []
+    mappings: list[dict[str, object]] = []
+    warnings: list[str] = []
+    target_chain = params.target_chain.upper()
+    for value in values:
+        text = str(value).strip()
+        match = _SIMPLE_RF_SELECTOR.match(text)
+        if not match:
+            resolved.append(text)
+            if params.target_sequence or params.target_fasta_path:
+                warnings.append(
+                    f"{label} selector {text!r} is RFdiffusion-native syntax and was not sequence-mapped"
+                )
+            continue
+        chain = (match.group("chain") or target_chain).upper()
+        start = match.group("start")
+        end = match.group("end")
+        if chain != target_chain:
+            resolved.append(text)
+            warnings.append(
+                f"{label} selector {text!r} targets chain {chain}; only target_chain {target_chain} "
+                "can be sequence-mapped"
+            )
+            continue
+        refs = parse_structure_residue_refs(target_pdb, chain)
+        if end is None:
+            resolution = resolve_positions(
+                residues=refs,
+                positions=[int(start)],
+                chain_id=chain,
+                sequence=params.target_sequence,
+                fasta_path=params.target_fasta_path,
+                position_basis=params.position_basis,
+                label=label,
+            )
+            resolved.append(resolution.residue_ids[0] if resolution.residue_ids else text)
+        else:
+            span, resolution = resolve_position_range(
+                residues=refs,
+                range_text=f"{start}-{end}",
+                chain_id=chain,
+                sequence=params.target_sequence,
+                fasta_path=params.target_fasta_path,
+                position_basis=params.position_basis,
+                label=label,
+            )
+            resolved.append(span)
+        mappings.append({"requested_selector": text, "resolved_selector": resolved[-1], **resolution.to_audit()})
+        warnings.extend(resolution.warnings)
+    if not mappings:
+        return resolved, None, warnings
+    return resolved, {"resolved_selectors": resolved, "selectors": mappings}, warnings
 
 
 def _chain_length(pdb: Path, chain: str) -> int:
@@ -515,6 +669,8 @@ def _build_cmd(
     target_ss: Path | None,
     target_adj: Path | None,
     checkpoint: Path,
+    resolved_hotspots: list[str] | None = None,
+    resolved_selectors: dict[str, list[str]] | None = None,
 ) -> list[str]:
     run_inference = RFDIFFUSION_TREE / "scripts" / "run_inference.py"
     config_name = "symmetry" if _uses_symmetry_config(params) else "base"
@@ -543,11 +699,27 @@ def _build_cmd(
         argv.append(f"diffuser.partial_T={params.partial_T}")
     if params.symmetry:
         argv.append(f"inference.symmetry={params.symmetry}")
-    if params.target_hotspots:
-        argv.append(f"ppi.hotspot_res={_hotspot_list(params)}")
-    argv.extend(_optional_list_override("contigmap.inpaint_seq", params.inpaint_seq))
-    argv.extend(_optional_list_override("contigmap.inpaint_str", params.inpaint_str))
-    argv.extend(_optional_list_override("contigmap.provide_seq", params.provide_seq))
+    if _has_target_hotspots(params):
+        argv.append(f"ppi.hotspot_res={_hotspot_list(params, target_pdb, resolved_hotspots)}")
+    selector_values = resolved_selectors or {}
+    argv.extend(
+        _optional_list_override(
+            "contigmap.inpaint_seq",
+            selector_values.get("inpaint_seq", params.inpaint_seq),
+        )
+    )
+    argv.extend(
+        _optional_list_override(
+            "contigmap.inpaint_str",
+            selector_values.get("inpaint_str", params.inpaint_str),
+        )
+    )
+    argv.extend(
+        _optional_list_override(
+            "contigmap.provide_seq",
+            selector_values.get("provide_seq", params.provide_seq),
+        )
+    )
     if mode == "fold_conditioning":
         assert target_pdb is not None
         assert target_ss is not None
@@ -616,13 +788,50 @@ def _optional_list_override(key: str, values: list[str] | None) -> list[str]:
     return [f"{key}={_hydra_list(values)}"]
 
 
-def _hotspot_list(params: RFdiffusionInput) -> str:
+def _hotspot_list(
+    params: RFdiffusionInput,
+    target_pdb: Path | None = None,
+    resolved_hotspots: list[str] | None = None,
+) -> str:
     chain = params.target_chain.upper()
-    hotspots = []
-    for value in params.target_hotspots:
-        text = str(value).strip()
-        hotspots.append(text if text[:1].isalpha() else f"{chain}{text}")
+    hotspots = resolved_hotspots
+    if hotspots is None and target_pdb is not None:
+        hotspots = _resolve_target_hotspots(params, target_pdb).residue_ids
+    if hotspots is None:
+        hotspots = []
+        for value in params.target_hotspots:
+            text = str(value).strip()
+            hotspots.append(text if text[:1].isalpha() else f"{chain}{text}")
+        hotspots.extend(params.target_hotspot_residue_ids)
     return "[" + ",".join(hotspots) + "]"
+
+
+def _has_target_hotspots(params: RFdiffusionInput) -> bool:
+    return bool(params.target_hotspots or params.target_hotspot_residue_ids)
+
+
+def _resolve_target_hotspots(params: RFdiffusionInput, target_pdb: Path):
+    explicit = [
+        str(value)
+        for value in params.target_hotspots
+        if str(value).strip()[:1].isalpha()
+    ]
+    explicit.extend(params.target_hotspot_residue_ids)
+    numeric = [
+        int(value)
+        for value in params.target_hotspots
+        if not str(value).strip()[:1].isalpha()
+    ]
+    return resolve_positions(
+        residues=parse_structure_residue_refs(target_pdb, params.target_chain),
+        positions=numeric,
+        explicit_residue_ids=explicit,
+        chain_id=params.target_chain,
+        sequence=params.target_sequence,
+        fasta_path=params.target_fasta_path,
+        position_basis=params.position_basis,
+        label="target_hotspots",
+    )
 
 
 def _build_env(seed: int | None) -> dict[str, str]:

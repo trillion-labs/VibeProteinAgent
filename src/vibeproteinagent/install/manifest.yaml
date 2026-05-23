@@ -72,33 +72,71 @@ tools:
   boltz2_affinity:
     runtime: shared
     required: false
+    sources:
+      - name: boltz_source
+        path: "sidecars/boltz"
+        env_var: VPA_BOLTZ_TREE
+        repo: "https://github.com/jwohlwend/boltz.git"
+        ref: "cb04aeccdd480fd4db707f0bbafde538397fa2ac"
+        markers:
+          - "src/boltz/main.py"
+        required: true
     weights:
       - name: boltz2_conf
         path: "cache/boltz/boltz2_conf.ckpt"
         env_var: VPA_BOLTZ_CACHE
+        url: "https://huggingface.co/boltz-community/boltz-2/resolve/main/boltz2_conf.ckpt"
         source_path: "/opt/vpa-data/boltz_cache/boltz2_conf.ckpt"
         required: true
       - name: boltz2_aff
         path: "cache/boltz/boltz2_aff.ckpt"
         env_var: VPA_BOLTZ_CACHE
+        url: "https://huggingface.co/boltz-community/boltz-2/resolve/main/boltz2_aff.ckpt"
         source_path: "/opt/vpa-data/boltz_cache/boltz2_aff.ckpt"
         required: true
       - name: boltz_mols
         path: "cache/boltz/mols"
         env_var: VPA_BOLTZ_CACHE
+        url: "https://huggingface.co/boltz-community/boltz-2/resolve/main/mols.tar"
+        unpack: tar
         source_path: "/opt/vpa-data/boltz_cache/mols"
         required: true
     disk_bytes: 12000000000
   boltzgen:
     runtime: shared
     required: false
+    sources:
+      - name: boltzgen_source
+        path: "sidecars/boltzgen"
+        env_var: VPA_BOLTZGEN_TREE
+        repo: "https://github.com/HannesStark/boltzgen.git"
+        ref: "31d9d9b9c72245b4ed6fe8742d6fbf4e1a3552a0"
+        markers:
+          - "src/boltzgen/cli/boltzgen.py"
+        required: true
     weights:
+      - name: boltzgen_model_cache
+        path: "cache/boltzgen/models--boltzgen--boltzgen-1"
+        env_var: VPA_BOLTZGEN_CACHE
+        env_value: path
+        hf_repo_id: "boltzgen/boltzgen-1"
+        hf_repo_type: model
+        source_path: "/opt/vpa-data/boltzgen_cache/models--boltzgen--boltzgen-1"
+        required: true
+      - name: boltzgen_inference_data
+        path: "cache/boltzgen/datasets--boltzgen--inference-data"
+        env_var: VPA_BOLTZGEN_CACHE
+        env_value: path
+        hf_repo_id: "boltzgen/inference-data"
+        hf_repo_type: dataset
+        source_path: "/opt/vpa-data/boltzgen_cache/datasets--boltzgen--inference-data"
+        required: true
       - name: boltzgen_cache
         path: "cache/boltzgen"
         env_var: VPA_BOLTZGEN_CACHE
         env_value: path
         source_path: "/opt/vpa-data/boltzgen_cache"
-        required: true
+        required: false
     disk_bytes: 50000000000
   colabdesign_utils:
     runtime: shared

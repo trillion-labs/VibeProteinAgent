@@ -1,9 +1,9 @@
 """BoltzGen adapter.
 
 Pointer-style adapter — the BoltzGen Python source lives on disk at
-``$VPA_BOLTZGEN_TREE`` (default ``/opt/vpa-data/boltzgen``)
+``$VPA_BOLTZGEN_TREE`` (default ``$VPA_HOME/sidecars/boltzgen``)
 and the HuggingFace-style model + dataset cache at ``$VPA_BOLTZGEN_CACHE``
-(default ``/opt/vpa-data/boltzgen_cache``).
+(default ``$VPA_HOME/cache/boltzgen``).
 
 Why subprocess: BoltzGen orchestrates a multi-step pipeline (design,
 inverse_fold, folding, analyze, filter) with non-trivial state in
@@ -35,11 +35,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.core.config import vpa_home
 
 # --------------------------------------------------------------------------- paths
 
-BOLTZGEN_TREE_DEFAULT = "/opt/vpa-data/boltzgen"
-BOLTZGEN_CACHE_DEFAULT = "/opt/vpa-data/boltzgen_cache"
+BOLTZGEN_TREE_DEFAULT = str(vpa_home() / "sidecars" / "boltzgen")
+BOLTZGEN_CACHE_DEFAULT = str(vpa_home() / "cache" / "boltzgen")
 
 BOLTZGEN_TREE = Path(
     os.environ.get("VPA_BOLTZGEN_TREE", BOLTZGEN_TREE_DEFAULT)

@@ -1,22 +1,28 @@
 from __future__ import annotations
 
+import os
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
+from vibeproteinagent.core.config import load_vpa_env_file
 from vibeproteinagent.core.errors import InvalidParamsError, UnknownToolError
 from vibeproteinagent.install import installer as installer_module
 from vibeproteinagent.install.cuda import resolve_cuda_stack
 from vibeproteinagent.install.installer import (
     InstallOptions,
     InstallPaths,
+    InstallState,
     ManifestInstaller,
+    _ensure_weight,
+    _env_exports,
     _link_prebuilt_sidecar,
     _manifest_readiness,
     _torch_install_matches_stack,
 )
-from vibeproteinagent.install.manifest import load_manifest
+from vibeproteinagent.install.manifest import InstallTool, InstallWeight, load_manifest
 from vibeproteinagent.install.planner import resolve_selection
 
 
@@ -116,6 +122,145 @@ def test_install_dry_run_is_deterministic_and_non_mutating(
     assert first["env_exports"]["VPA_RFDIFFUSION_WEIGHTS"].endswith("/cache/rfdiffusion")
     assert first["env_exports"]["VPA_CUDA_PROFILE"] == first["cuda_profile"]
     assert not (isolated_vpa_home / "install" / "state.json").exists()
+
+
+def test_boltz_tools_dry_run_includes_sources_and_caches(
+    isolated_vpa_home: Path,
+) -> None:
+    installer = ManifestInstaller(load_manifest())
+    options = InstallOptions(
+        profile=None,
+        tools=("boltz2_affinity,boltzgen",),
+        install_root=isolated_vpa_home,
+        dry_run=True,
+    )
+    plan = installer.install(options)
+    units = {step["unit"] for step in plan["steps"]}
+
+    assert "source:boltz2_affinity:boltz_source" in units
+    assert "source:boltzgen:boltzgen_source" in units
+    assert "weight:boltz2_affinity:boltz2_conf" in units
+    assert "weight:boltzgen:boltzgen_model_cache" in units
+    assert plan["env_exports"]["VPA_BOLTZ_TREE"].endswith("/sidecars/boltz")
+    assert plan["env_exports"]["VPA_BOLTZ_CACHE"].endswith("/cache/boltz")
+    assert plan["env_exports"]["VPA_BOLTZGEN_TREE"].endswith("/sidecars/boltzgen")
+    assert plan["env_exports"]["VPA_BOLTZGEN_CACHE"].endswith("/cache/boltzgen")
+
+
+def test_manifest_readiness_reports_missing_required_source(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VPA_BOLTZGEN_TREE", raising=False)
+    monkeypatch.delenv("VPA_BOLTZGEN_CACHE", raising=False)
+    manifest = load_manifest()
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+
+    readiness = _manifest_readiness(
+        "boltzgen",
+        manifest.tools["boltzgen"],
+        paths,
+        required=True,
+    )
+
+    missing_units = {item["unit"] for item in readiness["missing"]}
+    assert readiness["ready"] is False
+    assert "source:boltzgen:boltzgen_source" in missing_units
+
+
+def test_env_exports_prefer_ready_source_override(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = load_manifest()
+    source = isolated_vpa_home / "external" / "boltzgen"
+    (source / "src" / "boltzgen" / "cli").mkdir(parents=True)
+    (source / "src" / "boltzgen" / "cli" / "boltzgen.py").write_text("")
+    monkeypatch.setenv("VPA_BOLTZGEN_TREE", str(source))
+    selection = resolve_selection(
+        manifest,
+        profile=None,
+        tools=("boltzgen",),
+        registry_tool_names=_registry_tool_names(),
+    )
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+
+    exports = _env_exports(selection, paths, InstallOptions(install_root=isolated_vpa_home))
+
+    assert exports["VPA_BOLTZGEN_TREE"] == str(source)
+
+
+def test_archive_weight_download_extracts_safely(tmp_path: Path) -> None:
+    payload = tmp_path / "payload"
+    (payload / "mols").mkdir(parents=True)
+    (payload / "mols" / "ligand.sdf").write_text("mock")
+    archive = tmp_path / "mols.tar"
+    with tarfile.open(archive, "w") as tf:
+        tf.add(payload / "mols", arcname="mols")
+    paths = InstallPaths(
+        root=tmp_path / "install",
+        shared_env=tmp_path / "install" / "envs" / "vpa",
+        sidecars_root=tmp_path / "install" / "sidecars",
+        cache_dir=tmp_path / "install" / "cache",
+        state_db=tmp_path / "install" / "state.json",
+    )
+    weight = InstallWeight(
+        name="mols",
+        path="cache/boltz/mols",
+        url=archive.as_uri(),
+        unpack="tar",
+    )
+    tool = InstallTool(name="boltz2_affinity", runtime="shared")
+    state = InstallState(paths.state_db)
+    results: list[dict[str, object]] = []
+
+    _ensure_weight(
+        tool,
+        weight,
+        paths,
+        InstallOptions(install_root=paths.root),
+        state,
+        results,
+        required=True,
+    )
+
+    assert (paths.cache_dir / "boltz" / "mols" / "ligand.sdf").is_file()
+    assert results[-1]["status"] == "downloaded"
+
+
+def test_vpa_env_file_loader_expands_installer_exports(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VPA_BOLTZ_TREE", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    (isolated_vpa_home / "env.sh").write_text(
+        "\n".join(
+            [
+                f"export VPA_HOME={isolated_vpa_home}",
+                'export VPA_BOLTZ_TREE="$VPA_HOME/sidecars/boltz"',
+                'export PATH="$VPA_HOME/envs/vpa/bin:$PATH"',
+                "",
+            ]
+        )
+    )
+
+    load_vpa_env_file()
+
+    assert Path(os.environ["VPA_BOLTZ_TREE"]) == isolated_vpa_home / "sidecars" / "boltz"
+    assert os.environ["PATH"].startswith(str(isolated_vpa_home / "envs" / "vpa" / "bin"))
 
 
 def test_manifest_can_export_exact_weight_file_path(isolated_vpa_home: Path) -> None:

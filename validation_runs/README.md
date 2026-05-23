@@ -47,13 +47,19 @@ export VPA_VALIDATION_CLAUDE_MODEL=sonnet
 export VPA_VALIDATION_OPENROUTER_MODEL=qwen/qwen3-8b
 ```
 
-By default every scenario creates an isolated `VPA_HOME` and `VPA_RUNTIME_DIR`
-under `output/validation_runs/...`, while reusing a persistent model cache:
+On a multi-node cluster, point VPA at one shared install root before running
+local or Slurm validation. This keeps envs, sidecars, workspaces, and model
+caches reusable across nodes:
 
 ```bash
-export VPA_MODEL_CACHE="${HOME}/.cache/vibeproteinagent/models"
-export HF_HOME="${HOME}/.cache/huggingface"
+export VPA_SHARED_HOME=/shared/projects/vpa/.vibeproteinagent
+export VPA_HOME="$VPA_SHARED_HOME"
+source "$VPA_HOME/env.sh"
 ```
+
+Scenarios use the active/shared `VPA_HOME` by default. Set
+`VPA_VALIDATION_ISOLATED=1` only when you intentionally want a scratch
+`VPA_HOME` under `output/validation_runs/...`.
 
 ## Local runs
 

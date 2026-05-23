@@ -19,7 +19,11 @@
       "enum": ["protein_mpnn", "ligand_mpnn", "soluble_mpnn", "ca_mpnn"],
       "default": "ligand_mpnn"
     },
-    "redesigned_residues": {"type": ["string", "null"], "default": null}
+    "redesigned_residues": {"type": ["string", "null"], "default": null, "description": "Explicit structure residue IDs such as A10 A11 B25."},
+    "redesigned_positions": {"type": "array", "items": {"type": "integer", "minimum": 1}, "default": [], "description": "FASTA/sequence 1-indexed positions to redesign when sequence/fasta_path is provided."},
+    "sequence": {"type": ["string", "null"], "default": null},
+    "fasta_path": {"type": ["string", "null"], "minLength": 1, "default": null, "vpa:digest": "sha256-if-path"},
+    "position_basis": {"type": "string", "enum": ["auto", "sequence", "structure"], "default": "auto"}
   },
   "additionalProperties": false
 }

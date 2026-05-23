@@ -1,21 +1,20 @@
 # BoltzGen — pointer-only vendor
 
-The BoltzGen Python tree is too large to copy under ``vendor/``. The adapter
-resolves the source tree from disk via the ``VPA_BOLTZGEN_TREE`` env var
-(default ``/opt/vpa-data/boltzgen``) and its HuggingFace-style
-model + dataset cache via ``VPA_BOLTZGEN_CACHE`` (default
-``/opt/vpa-data/boltzgen_cache``).
+The BoltzGen Python tree and model cache are too large to copy under
+``vendor/``. The installer fetches the source checkout into
+``$VPA_HOME/sidecars/boltzgen`` and its HuggingFace-style model + dataset cache
+under ``$VPA_HOME/cache/boltzgen``. The adapter resolves both via env vars.
 
 ## Upstream pin
 
 | field | value |
 | --- | --- |
-| Upstream URL | https://github.com/jwohlwend/boltzgen |
+| Upstream URL | https://github.com/HannesStark/boltzgen |
 | Pinned commit | `31d9d9b9c72245b4ed6fe8742d6fbf4e1a3552a0` ("Version bump to 0.3.2") |
 | Upstream version | `boltzgen` 0.3.2 (per `pyproject.toml`) |
 | License | MIT (`./LICENSE`) |
-| Source tree on disk | `/opt/vpa-data/boltzgen/` |
-| Model + dataset cache | `/opt/vpa-data/boltzgen_cache/` |
+| Default installed source tree | `$VPA_HOME/sidecars/boltzgen/` |
+| Default installed model + dataset cache | `$VPA_HOME/cache/boltzgen/` |
 
 ## Required cache contents
 
@@ -48,8 +47,9 @@ plan to use the small-molecule protocol, also place it under
 
 - The on-disk source tree is ~50 MB of Python.
 - The cache directory is ~6 GB of model checkpoints.
-- Both already exist on the target machine. Copying them under `vendor/`
-  would bloat the repo and the cache layout depends on the HF rev hash.
+- Both are installed into `$VPA_HOME` by `vpa install`. Copying them under
+  `vendor/` would bloat the repo and the cache layout depends on the HF rev
+  hash.
 
 ## Deliberate-skip notes
 

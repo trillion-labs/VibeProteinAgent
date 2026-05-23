@@ -35,7 +35,9 @@
     "seeds_used": {
       "type": "array",
       "items": {"type": "integer"}
-    }
+    },
+    "position_mappings": {"type": "object", "additionalProperties": true, "default": {}},
+    "warnings": {"type": "array", "items": {"type": "string"}, "default": []}
   },
   "additionalProperties": false
 }

@@ -15,6 +15,12 @@ from pydantic import BaseModel, Field
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.adapters.dssp.adapter import _parse_dssp_ss
+from vibeproteinagent.adapters.residue_mapping import (
+    PositionBasis,
+    clean_sequence,
+    residue_refs_from_objects,
+    resolve_positions,
+)
 from vibeproteinagent.core.binary import find_binary
 
 AA3 = {
@@ -313,6 +319,8 @@ def _patches(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 class StructureAnalysisInput(BaseModel):
     structure_path: str = Field(min_length=1, json_schema_extra={"vpa:digest": "sha256-if-path"})
     sequence: str | None = None
+    fasta_path: str | None = Field(None, min_length=1)
+    position_basis: PositionBasis = "auto"
     chain_id: str | None = None
     interface_chain_ids: list[str] = Field(default_factory=list)
     ligand_resnames: list[str] = Field(default_factory=list)
@@ -423,21 +431,55 @@ class StructureAnalysisAdapter(ToolAdapter):
                 "neighbor_count": neighbors,
             }
             all_rows.append(row)
+        rows_by_key = {
+            (row["chain_id"], row["resseq"], row["icode"]): row
+            for row in all_rows
+        }
         wanted = set(params.positions) if params.positions else None
-        rows = [
-            row for row in all_rows
-            if wanted is None or int(row["resseq"]) in wanted
-        ]
-        if wanted and len(rows) != len(wanted):
-            observed = {int(row["resseq"]) for row in rows}
-            missing_positions = sorted(wanted - observed)
-            warnings.append(
-                "requested positions missing from parsed structure: "
-                + ",".join(str(pos) for pos in missing_positions)
+        position_index_basis = "all_residues_after_chain_filter"
+        mapped_positions: list[dict[str, Any]] = []
+        missing_positions: list[int] = []
+        if wanted is None:
+            rows = all_rows
+        else:
+            chain_ids = {residue.chain_id for residue in residues}
+            mapping_from_sequence = bool(params.sequence or params.fasta_path)
+            if mapping_from_sequence and params.chain_id is None and len(chain_ids) > 1:
+                raise ValueError(
+                    "structure_analysis sequence/fasta position mapping requires chain_id "
+                    f"when the parsed structure has multiple chains: {sorted(chain_ids)}"
+                )
+            resolution = resolve_positions(
+                residues=residue_refs_from_objects(residues),
+                positions=sorted(wanted),
+                chain_id=params.chain_id or residues[0].chain_id,
+                sequence=params.sequence,
+                fasta_path=params.fasta_path,
+                position_basis=params.position_basis,
+                label="requested positions",
             )
-        if params.sequence:
+            warnings.extend(resolution.warnings)
+            position_index_basis = resolution.position_index_basis
+            mapped_positions = resolution.mapped_positions
+            missing_positions = resolution.missing_positions
+            rows = []
+            seen_keys: set[tuple[str, int, str]] = set()
+            for mapping in mapped_positions:
+                key = (
+                    str(mapping["chain_id"]),
+                    int(mapping["resseq"]),
+                    str(mapping.get("icode") or ""),
+                )
+                row = rows_by_key.get(key)
+                if row is None:
+                    continue
+                if key not in seen_keys:
+                    rows.append(row)
+                    seen_keys.add(key)
+        sequence_for_check = clean_sequence(params.sequence) if params.sequence else None
+        if sequence_for_check:
             parsed_sequence = "".join(r.aa for r in residues if r.aa != "X")
-            provided = "".join(params.sequence.split()).upper()
+            provided = sequence_for_check
             if len(provided) != len(parsed_sequence):
                 warnings.append(
                     "provided sequence length does not match parsed structure residues: "
@@ -520,6 +562,9 @@ class StructureAnalysisAdapter(ToolAdapter):
                 "requested_positions" if wanted else "all_residues_after_chain_filter"
             ),
             "requested_positions": sorted(wanted) if wanted else [],
+            "position_index_basis": position_index_basis,
+            "mapped_positions": mapped_positions,
+            "missing_positions": sorted(missing_positions),
             "annotated_residue_count": len(rows),
             "summary_residue_count": len(all_rows),
         }

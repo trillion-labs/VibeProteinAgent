@@ -21,6 +21,7 @@ class ESM2Input(BaseModel):
     model_name: str = Field(_DEFAULT_MODEL)
     return_attention: bool = Field(False)
     mask_positions: list[int] = Field(default_factory=list)
+    mask_indices_zero_based: list[int] = Field(default_factory=list)
 
     @field_validator("sequence")
     @classmethod
@@ -38,11 +39,18 @@ class ESM2Input(BaseModel):
         L = len(self.sequence)
         seen: set[int] = set()
         for pos in self.mask_positions:
-            if pos < 0 or pos >= L:
+            if pos < 1 or pos > L:
                 raise ValueError(f"mask position {pos} is outside sequence length {L}")
             if pos in seen:
                 raise ValueError(f"duplicate mask position {pos}")
             seen.add(pos)
+        seen_zero: set[int] = set()
+        for idx in self.mask_indices_zero_based:
+            if idx < 0 or idx >= L:
+                raise ValueError(f"zero-based mask index {idx} is outside sequence length {L}")
+            if idx in seen_zero:
+                raise ValueError(f"duplicate zero-based mask index {idx}")
+            seen_zero.add(idx)
         return self
 
 
@@ -163,8 +171,13 @@ class ESM2Adapter(ToolAdapter):
     def _run_sequence_generation(
         self, params: ESM2Input, ctx: AdapterRunContext, t0: float
     ) -> ESM2Output:
-        positions = _masked_positions(params.sequence, params.mask_positions)
-        if not positions:
+        user_positions = _masked_positions(
+            params.sequence,
+            params.mask_positions,
+            params.mask_indices_zero_based,
+        )
+        indices = [pos - 1 for pos in user_positions]
+        if not indices:
             ctx.emit_progress(1.0)
             return ESM2Output(
                 generated_sequences=[params.sequence],
@@ -178,7 +191,7 @@ class ESM2Adapter(ToolAdapter):
 
         self._load(params.model_name)
         ctx.emit_progress(0.30)
-        tokens = _tokens_for_generation(params.sequence, positions, self.tokenizer.mask_token)
+        tokens = _tokens_for_generation(params.sequence, indices, self.tokenizer.mask_token)
         special_tokens = [self.tokenizer.cls_token, *tokens, self.tokenizer.eos_token]
         ids = self.tokenizer.convert_tokens_to_ids(special_tokens)
         input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
@@ -193,7 +206,7 @@ class ESM2Adapter(ToolAdapter):
         )
         logits = outputs.logits[0]
         generated = list(params.sequence)
-        for pos in positions:
+        for pos in indices:
             token_pos = pos + 1  # account for CLS
             scores = logits[token_pos, aa_ids]
             generated[pos] = _AMINO_ACIDS[int(torch.argmax(scores).item())]
@@ -202,7 +215,7 @@ class ESM2Adapter(ToolAdapter):
         filled = "".join(generated)
         return ESM2Output(
             generated_sequences=[filled],
-            filled_positions=positions,
+            filled_positions=user_positions,
             generation_strategy="esm2_mlm_argmax",
             num_residues=len(filled),
             model_name=params.model_name,
@@ -229,9 +242,14 @@ class ESM2Adapter(ToolAdapter):
 __all__ = ["ESM2Adapter", "ESM2Input", "ESM2Output"]
 
 
-def _masked_positions(sequence: str, explicit_positions: list[int]) -> list[int]:
-    positions = {idx for idx, aa in enumerate(sequence) if aa in _MASK_CHARS}
+def _masked_positions(
+    sequence: str,
+    explicit_positions: list[int],
+    zero_based_indices: list[int] | None = None,
+) -> list[int]:
+    positions = {idx + 1 for idx, aa in enumerate(sequence) if aa in _MASK_CHARS}
     positions.update(explicit_positions)
+    positions.update(idx + 1 for idx in zero_based_indices or [])
     return sorted(positions)
 
 

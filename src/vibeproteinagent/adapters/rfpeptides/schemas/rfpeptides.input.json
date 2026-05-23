@@ -18,14 +18,34 @@
     },
     "target_residues": {
       "type": ["string", "null"],
-      "description": "Optional residue range on the target chain (e.g. ``3-117``). Defaults to the full chain.",
+      "description": "Optional FASTA/sequence 1-indexed target range when target_sequence/target_fasta_path is provided; otherwise legacy structure residue range.",
       "pattern": "^[0-9]+-[0-9]+$"
     },
     "target_hotspots": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "default": [],
-      "description": "Optional target residue indices the binder should contact. Empty means no hotspot guidance."
+      "description": "Optional FASTA/sequence 1-indexed target positions when target_sequence/target_fasta_path is provided; otherwise legacy structure residue numbers."
+    },
+    "target_hotspot_residue_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "default": []
+    },
+    "target_sequence": {
+      "type": ["string", "null"],
+      "default": null
+    },
+    "target_fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "position_basis": {
+      "type": "string",
+      "enum": ["auto", "sequence", "structure"],
+      "default": "auto"
     },
     "peptide_length": {
       "type": "integer",

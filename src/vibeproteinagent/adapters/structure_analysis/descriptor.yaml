@@ -1,7 +1,7 @@
 name: structure_analysis
 version: "1.0.0"
 category: analysis
-description: "Per-residue structural-environment analysis from a single PDB/mmCIF: solvent exposure (RSA), contacts, interface residues against specified partner chains, ligand-contact residues, and mutation-liability flags. For comparing two structures use `tmalign` or `pxmeter`."
+description: "Per-residue structure analysis: exposure, contacts, interfaces, ligand contacts, and liabilities. Integer positions are FASTA/sequence 1-indexed with sequence/fasta_path; otherwise legacy structure numbers."
 runtime: python
 backend: numpy
 gpu_required: false
