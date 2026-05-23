@@ -120,6 +120,122 @@ class ReproducibilityBlock:
 
 
 @dataclass(frozen=True)
+class AgentMessage:
+    """One row of the agent's chat transcript.
+
+    ``role`` is the standard chat role (``"user"`` / ``"assistant"`` /
+    ``"system"`` / ``"tool"``). ``content`` is the raw message text — the
+    renderer is responsible for prettifying / collapsing tool blobs.
+    ``timestamp_ms`` is wall-clock epoch-milliseconds when the message was
+    recorded; ``model`` carries the model id for assistant rows when known.
+    """
+
+    role: str
+    content: str
+    timestamp_ms: int | None = None
+    model: str | None = None
+    token_count: int | None = None
+
+
+@dataclass(frozen=True)
+class AgentToolCall:
+    """One tool invocation the agent made during the run.
+
+    Rendered as a compact chip interleaved with the chat bubbles in the
+    full-transcript view, in chronological order with messages. ``args``
+    and ``result`` are arbitrary JSON-compatible dicts — the renderer
+    pretty-prints them on demand.
+    """
+
+    tool_name: str
+    args: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+    ok: bool = True
+    timestamp_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class AgentDecision:
+    """One ``agent_decisions`` row — the agent's reasoning between rounds.
+
+    Populated by the planner / DecisionEngine after each workflow round
+    in a multi-round run. ``decision_label`` is the short verdict string
+    (``"completed_review_metrics"``, ``"workflow_not_completed"``, ...);
+    ``next_round_recommended`` + ``reason`` carry the "should we go
+    again?" call; ``notes`` captures any warnings the engine attached
+    (e.g. LLM-fallback notices).
+    """
+
+    round_index: int
+    decision_label: str
+    next_round_recommended: bool = False
+    reason: str = ""
+    notes: list[Any] = field(default_factory=list)
+    metrics_used: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+    timestamp_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class AgentStepSummary:
+    """One ``agent_summaries`` row — what the agent saw after a step ran.
+
+    Each step is either a workflow or a single job. ``kind`` says which.
+    ``state`` (``"completed"`` / ``"failed"`` / ...) drives the
+    timeline-card colour; ``tool`` is the adapter name for job-kind
+    summaries; ``name`` is the workflow name when kind=="workflow".
+    """
+
+    kind: str  # "job" | "workflow"
+    workflow_id: str | None = None
+    job_id: str | None = None
+    tool: str | None = None
+    state: str | None = None
+    name: str | None = None
+    error_message: str | None = None
+    metrics_used: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+    timestamp_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class AgentTranscript:
+    """Textual artifacts of an LLM-agent-orchestrated run.
+
+    Surfaces the conversation that produced the workflow: the user's
+    original natural-language request, the agent's plan response, the
+    final answer / summary, plus three audit layers (tool calls,
+    per-round decisions, per-step summaries). ``None`` on
+    ``ReportModel`` means the run was *not* LLM-planned and the section
+    should not render at all.
+    """
+
+    run_id: str
+    user_query: str
+    plan_text: str | None = None
+    # Structured plan from agent_plans (last validated entry, if any).
+    # Kept separately from plan_text so the renderer can format it as a
+    # structured outline rather than a raw JSON blob.
+    plan_structured: dict[str, Any] | None = None
+    final_response: str | None = None
+    messages: list[AgentMessage] = field(default_factory=list)
+    # Interleaved with messages in chronological order for the
+    # full-transcript view; also surfaced as a count chip in the header.
+    tool_calls: list[AgentToolCall] = field(default_factory=list)
+    # Multi-round agent reasoning (one entry per round). Only rendered
+    # when there's at least one decision row.
+    decisions: list[AgentDecision] = field(default_factory=list)
+    # Per-step summaries the agent recorded after each workflow/job —
+    # drives the execution-timeline section.
+    step_summaries: list[AgentStepSummary] = field(default_factory=list)
+    # Optional metadata for the panel header.
+    model: str | None = None
+    provider: str | None = None
+    started_at_ms: int | None = None
+    finished_at_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class ReportModel:
     summary: RunSummary
     graph: WorkflowGraph
@@ -129,10 +245,16 @@ class ReportModel:
     plots: list[PlotSpec] = field(default_factory=list)
     warnings: list[ReportWarning] = field(default_factory=list)
     reproducibility: ReproducibilityBlock | None = None
+    agent_transcript: AgentTranscript | None = None
     raw_summary: dict[str, Any] = field(default_factory=dict)
 
 
 __all__ = [
+    "AgentDecision",
+    "AgentMessage",
+    "AgentStepSummary",
+    "AgentToolCall",
+    "AgentTranscript",
     "MSABlock",
     "PlotSpec",
     "ReportArtifact",

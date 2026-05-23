@@ -21,7 +21,24 @@ from vibeproteinagent._version import __version__
 from vibeproteinagent.core.errors import InvalidParamsError
 
 from ._brand import vpa_logo
+from .metrics import (
+    DUAL_SCALE_METRICS as _DUAL_SCALE_METRICS,
+)
+from .metrics import (
+    METRIC_REGISTRY as _METRIC_REGISTRY,
+)
+from .metrics import (
+    metric_explainer as _metric_explainer,
+)
+from .metrics import (
+    pretty_metric_name as _pretty_metric_name,
+)
 from .models import (
+    AgentDecision,
+    AgentMessage,
+    AgentStepSummary,
+    AgentToolCall,
+    AgentTranscript,
     MSABlock,
     PlotSpec,
     ReportArtifact,
@@ -291,8 +308,11 @@ def render_report_html(
     show_plots = bool(plots)
     show_msa = bool(model.msa_blocks)
     show_candidates = bool(model.candidates)
+    show_conversation = model.agent_transcript is not None
 
     nav_items: list[tuple[str, str, str]] = [("summary", "Summary", "◎")]
+    if show_conversation:
+        nav_items.append(("conversation", "Conversation", "❝"))
     if show_candidates:
         nav_items.append(("candidates", "Top candidates", "★"))
     if show_workflow:
@@ -354,6 +374,13 @@ def render_report_html(
   {_hero_sequence_block(model)}
   {_warning_list(model)}
 </section>"""
+
+    # ----- Conversation section (LLM-agent runs only) -----
+    conversation_section = (
+        _agent_transcript_section(model.agent_transcript)
+        if show_conversation
+        else ""
+    )
 
     # ----- Candidates section -----
     candidates_section = (
@@ -433,6 +460,7 @@ def render_report_html(
   </header>
   <main class="content">
     {summary_card}
+    {conversation_section}
     {candidates_section}
     {workflow_section}
     {plots_section}
@@ -2354,159 +2382,10 @@ _QC_FLAG_EXPLAINERS: dict[str, str] = {
 
 # --------------------------------------------------------------- generic metric registry
 #
-# Centralised metric metadata: any tool — known or unknown — that emits a
-# scalar with one of these canonical names automatically gets a gauge-centred
-# card via :func:`_generic_metric_widget` and :func:`_auto_score_card`. This
-# keeps the per-tool widget surface systematic: introducing a new adapter
-# does *not* require teaching the report renderer about it as long as the
-# adapter emits metrics with the names already understood by the rest of the
-# stack.
-#
-# Each entry: ``key -> (display_name, explainer, gauge_lo, gauge_hi)``
-_METRIC_REGISTRY: dict[str, tuple[str, str, float, float]] = {
-    "plddt": (
-        "Mean pLDDT",
-        "Per-residue confidence averaged across the chain (0-100). >=70 = confident, >=90 = very high.",
-        0.0, 100.0,
-    ),
-    "mean_plddt": (
-        "Mean pLDDT",
-        "Per-residue confidence averaged across the chain (0-100). >=70 = confident, >=90 = very high.",
-        0.0, 100.0,
-    ),
-    "ptm": (
-        "pTM",
-        "Predicted TM-score (0-1). >0.5 implies a likely-correct overall fold.",
-        0.0, 1.0,
-    ),
-    "iptm": (
-        "ipTM",
-        "Interface pTM (0-1). >0.6 generally trustworthy for complex / binder interfaces.",
-        0.0, 1.0,
-    ),
-    "pae": (
-        "PAE",
-        "Predicted aligned error in angstroms. Lower is better; <5 indicates well-resolved geometry.",
-        0.0, 30.0,
-    ),
-    "mean_pae": (
-        "PAE",
-        "Predicted aligned error in angstroms. Lower is better; <5 indicates well-resolved geometry.",
-        0.0, 30.0,
-    ),
-    "dockq": (
-        "DockQ",
-        "Interface accuracy score (0-1). >0.23 acceptable, >0.49 medium, >0.80 high.",
-        0.0, 1.0,
-    ),
-    "ipsae": (
-        "ipSAE",
-        "Interface predicted symmetry-aware error. Lower is better.",
-        0.0, 30.0,
-    ),
-    "ranking_confidence": (
-        "Ranking confidence",
-        "Composite head used to rank candidate structures. Scale matches the predictor.",
-        0.0, 1.0,
-    ),
-    "ranking_score": (
-        "Ranking score",
-        "Pipeline-specific aggregate score used to order candidates.",
-        0.0, 1.0,
-    ),
-    "score": (
-        "Score",
-        "Generic composite score reported by the tool.",
-        0.0, 1.0,
-    ),
-    "delta_g": (
-        "ΔG (kcal/mol)",
-        "Predicted binding free energy. More negative = stronger binding.",
-        -16.0, 0.0,
-    ),
-    "dg": (
-        "ΔG (kcal/mol)",
-        "Predicted binding free energy. More negative = stronger binding.",
-        -16.0, 0.0,
-    ),
-    "affinity": (
-        "Affinity",
-        "Predicted binding strength on the tool's native scale.",
-        0.0, 12.0,
-    ),
-    "affinity_pred_value": (
-        "Affinity (pred)",
-        "Boltz-2 predicted affinity value (-log10 IC50). Higher = tighter.",
-        0.0, 12.0,
-    ),
-    "affinity_probability": (
-        "Binder probability",
-        "Calibrated probability that the candidate binds (0-1).",
-        0.0, 1.0,
-    ),
-    "affinity_probability_binary": (
-        "Binder probability",
-        "Boltz-2 binary binder probability (0-1).",
-        0.0, 1.0,
-    ),
-    "confidence_score": (
-        "Model confidence",
-        "Boltz-2 composite confidence head (0-1).",
-        0.0, 1.0,
-    ),
-    "iplddt": (
-        "ipLDDT",
-        "Interface pLDDT — per-residue confidence at the binding interface.",
-        0.0, 100.0,
-    ),
-    "recovery": (
-        "Recovery",
-        "Fraction of native residues recovered by the design (0-1).",
-        0.0, 1.0,
-    ),
-    "seq_recovery": (
-        "Seq recovery",
-        "Fraction of native residues recovered by the designed sequence (0-1).",
-        0.0, 1.0,
-    ),
-    "instability_index": (
-        "Instability index",
-        "Guruprasad heuristic. <40 = predicted stable in vitro.",
-        0.0, 80.0,
-    ),
-    "gravy": (
-        "GRAVY",
-        "Grand average of hydropathy (Kyte-Doolittle). Negative = hydrophilic / likely soluble.",
-        -2.0, 2.0,
-    ),
-    "pi": (
-        "Isoelectric point",
-        "pH at net-zero charge. Typical soluble proteins span 4-9.",
-        0.0, 14.0,
-    ),
-    "polybasic_hits": (
-        "Polybasic motifs",
-        "Count of K/R-rich runs that drive non-specific membrane / RNA binding.",
-        0.0, 10.0,
-    ),
-    "aromatic_fraction": (
-        "Aromatic fraction",
-        "Fraction of F/Y/W residues. Relevant for UV absorbance / aggregation propensity.",
-        0.0, 0.25,
-    ),
-    "rmsd": (
-        "RMSD (Å)",
-        "Root-mean-square deviation over aligned atoms. Lower = closer structural match; <2 A is a tight fit.",
-        0.0, 10.0,
-    ),
-}
-
-
-# Metrics that conventionally arrive on a 0-1 scale but may also appear as
-# 0-100 (pLDDT is the canonical example). Used by :func:`_auto_score_card`
-# to autoscale the gauge so the donut fills correctly either way.
-_DUAL_SCALE_METRICS = {"plddt", "mean_plddt", "iptm", "ptm", "recovery", "seq_recovery"}
-
+# Metric metadata (registry, dual-scale set, per-tool explainers, helpers)
+# lives in :mod:`.metrics` so render.py and plots.py share one source of
+# truth. The renderer keeps short local aliases below so the rest of this
+# file's call sites read the same as before.
 
 # Keys that look like nested metric dicts inside an adapter's output. The
 # generic widget recurses one level into these so a tool emitting
@@ -5206,10 +5085,35 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
 
     # Designed sequences, MSA-style scroll. With no recovery table the
     # per-design score rides along in the sequence label so it isn't lost.
+    #
+    # When two or more designs are present we compute per-column
+    # conservation across them and highlight positions where every design
+    # agrees on the same residue. This surfaces "the model never wanted to
+    # change this position" hot-spots at a glance — typically the
+    # functional / structural core residues.
     present = [(i, d) for i, d in enumerate(designs, 1) if d.get("sequence")]
     seq_html = ""
     if present:
         max_len = max(len(d["sequence"]) for _, d in present)
+        conservation: list[float] = []
+        conservation_caption = ""
+        if len(present) >= 2:
+            conservation = _conservation(
+                [(f"design_{i}", d["sequence"]) for i, d in present],
+                max_len,
+            )
+            fully_conserved = sum(1 for v in conservation if v >= 0.9999)
+            if max_len:
+                pct = 100.0 * fully_conserved / max_len
+                conservation_caption = (
+                    '<p class="widget-subexplain">'
+                    f'Highlighted cells are positions where all {len(present)} '
+                    'designs agree on the same residue '
+                    f'(<strong>{fully_conserved}/{max_len}</strong> &middot; '
+                    f'{pct:.0f}% fully conserved). Dimmed cells are positions '
+                    'where the model picked different residues across designs.'
+                    '</p>'
+                )
         seq_rows: list[str] = []
         for i, d in present:
             badge = ""
@@ -5217,11 +5121,15 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
                 score = _num(d.get("score"))
                 if score is not None:
                     badge = f'<span class="tmpl-seq-id">score {_h(_fmt(score))}</span>'
+            if conservation:
+                track_html = _mpnn_seq_cells(d["sequence"], max_len, conservation)
+            else:
+                track_html = _h(d["sequence"])
             seq_rows.append(
                 '<div class="tmpl-seq-row">'
                 '<span class="tmpl-seq-label">'
                 f'<span class="tmpl-seq-name">Design {i}</span>{badge}</span>'
-                f'<code class="tmpl-seq-track">{_h(d["sequence"])}</code></div>'
+                f'<code class="tmpl-seq-track">{track_html}</code></div>'
             )
         seq_rows.append(
             '<div class="tmpl-seq-row tmpl-seq-ruler">'
@@ -5230,6 +5138,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
         )
         seq_html = (
             '<h5 class="widget-subhead">Designed sequences</h5>'
+            f'{conservation_caption}'
             f'<div class="tmpl-seq-scroll">{"".join(seq_rows)}</div>'
         )
     return (
@@ -5237,6 +5146,45 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
         f'<h4 class="widget-title">{_h(title)}</h4>'
         f"{explainer}{chips_html}{table_html}{seq_html}</div>"
     )
+
+
+def _mpnn_seq_cells(
+    sequence: str, max_len: int, conservation: list[float]
+) -> str:
+    """Render an MPNN design sequence as per-residue spans with conservation highlight.
+
+    Each residue becomes a ``<span>`` carrying either ``mpnn-cell-conserved``
+    (bold + a single soft brand-purple background, regardless of which
+    amino acid) for positions where every design agrees, or
+    ``mpnn-cell-variable`` for positions where at least one design differs.
+    A single calm highlight colour is intentional — letting the per-AA
+    chemistry palette through here makes the strip read as a noisy mosaic
+    when most positions are conserved. Layout-affecting properties (width,
+    padding, inline-block) are intentionally NOT set on these classes — the
+    parent ``.tmpl-seq-track`` is ``white-space:pre`` monospace with a
+    fixed ``letter-spacing``, so each character still occupies exactly one
+    monospace slot and stays column-aligned with the ruler below.
+    """
+    cells: list[str] = []
+    for idx in range(max_len):
+        if idx < len(sequence):
+            aa = sequence[idx]
+            if conservation[idx] >= 0.9999:
+                cells.append(
+                    f'<span class="mpnn-cell-conserved" '
+                    f'title="Position {idx + 1}: conserved across all designs">'
+                    f'{_h(aa)}</span>'
+                )
+            else:
+                cells.append(
+                    f'<span class="mpnn-cell-variable" '
+                    f'title="Position {idx + 1}: varies across designs">'
+                    f'{_h(aa)}</span>'
+                )
+        else:
+            # Shorter design — pad with a space to keep ruler alignment.
+            cells.append(" ")
+    return "".join(cells)
 
 
 def _lerp_hex(a: str, b: str, t: float) -> str:
@@ -6589,12 +6537,20 @@ def _score_bars(candidate: ReportCandidate) -> str:
             base_idx = len(_SCORE_BAR_PRIORITY)
         return (base_idx, key)
 
+    # Tool that produced this candidate — used by ``_score_bar_row`` to
+    # pick the right per-tool explainer for ambiguous metric names like
+    # ``score``. Falls back to "" when source is missing so the bare-metric
+    # registry explainer wins.
+    candidate_tool = ""
+    if isinstance(candidate.source, dict):
+        candidate_tool = str(candidate.source.get("tool") or "")
+
     rows: list[str] = []
     for key in sorted(deduped.keys(), key=_priority):
         base_key = key.split(":", 1)[-1].lower()
         if base_key in _SCORE_BAR_SKIP:
             continue
-        row = _score_bar_row(key, deduped[key])
+        row = _score_bar_row(key, deduped[key], candidate_tool=candidate_tool)
         if row:
             rows.append(row)
     rows = rows[:14]
@@ -6603,7 +6559,7 @@ def _score_bars(candidate: ReportCandidate) -> str:
     return "<div class='score-bars'>" + "".join(rows) + "</div>"
 
 
-def _score_bar_row(key: str, value: Any) -> str:
+def _score_bar_row(key: str, value: Any, *, candidate_tool: str = "") -> str:
     """Render a single metric row with a percentage-filled bar.
 
     Bar width is computed from the metric's registered range in
@@ -6618,6 +6574,13 @@ def _score_bar_row(key: str, value: Any) -> str:
     metric. The prefix renders as a small source tag next to the label so
     the reader sees ``pLDDT  ·  boltz2`` instead of an ambiguous bare
     ``pLDDT``.
+
+    Each row carries a definition tooltip — pulled from the per-tool
+    override table or the bare-metric registry — and an inline ``ⓘ`` chip
+    next to the label so users discover the hover. Ambiguous metrics
+    (notably ``score`` for the MPNN family of inverse-folding tools) get a
+    tool-specific explanation instead of the generic "composite score"
+    placeholder.
     """
     num = _num(value)
     if num is None:
@@ -6646,15 +6609,33 @@ def _score_bar_row(key: str, value: Any) -> str:
     span = (hi - lo) if hi > lo else 1.0
     width = max(3.0, min(100.0, ((num - lo) / span) * 100.0))
     quality = _quality_class(canonical, num)
-    # Render a clean label — no inline chip, no ``· tool`` suffix. The
-    # tool of origin (when known) lives only in the row's ``title`` so
-    # hovering reveals it without cluttering the bar.
-    row_title = ""
-    if tool_prefix:
-        row_title = f' title="Source: {_attr(tool_prefix)}"'
+
+    # Compose the row tooltip: definition first, then source provenance.
+    # Tool-prefixed metric keys (``boltz2:plddt``) win over candidate_tool
+    # when picking the per-tool explainer override — the explicit prefix
+    # is more authoritative.
+    explainer_tool = tool_prefix or candidate_tool
+    explainer = _metric_explainer(canonical, explainer_tool)
+    source_tool = tool_prefix or candidate_tool
+    title_parts: list[str] = []
+    if explainer:
+        title_parts.append(explainer)
+    if source_tool:
+        title_parts.append(f"Source: {source_tool}")
+    title_text = "\n\n".join(title_parts)
+    row_title = f' title="{_attr(title_text)}"' if title_text else ""
+    # ``ⓘ`` chip beside the label so users notice the tooltip exists
+    # without having to guess that the row is hoverable. Skipped when
+    # there's no explainer to surface — empty info circle would mislead.
+    info_chip = (
+        f' <span class="score-info" title="{_attr(title_text)}" aria-label="metric definition">ⓘ</span>'
+        if explainer
+        else ""
+    )
+
     return (
         f"<div class='score-row quality-{quality}'{row_title}>"
-        f"<span>{_h(label)}</span>"
+        f"<span>{_h(label)}{info_chip}</span>"
         f"<div class='bar-track'><i style='width:{width:.1f}%'></i></div>"
         f"<b>{_h(_fmt(num))}</b></div>"
     )
@@ -6733,6 +6714,563 @@ def _warning_list(model: ReportModel) -> str:
         )
         + "</div>"
     )
+
+
+# --------------------------------------------------------------------------- agent transcript
+#
+# Three-tier panel for LLM-agent runs: original user query (You),
+# plan / planning response (Agent plan), final answer (Final response),
+# plus a collapsible full transcript at the bottom for users who want
+# every assistant / tool turn. Renders nothing when the run wasn't
+# LLM-planned (``model.agent_transcript is None``).
+
+# Role icons for the chat-bubble transcript. Kept small and monochrome
+# so the panel reads as a polished product, not a chat-app pastiche.
+_AGENT_ROLE_BADGES: dict[str, tuple[str, str]] = {
+    "user":      ("You",    "❝"),
+    "assistant": ("Agent",  "✦"),
+    "system":    ("System", "⚙"),
+    "tool":      ("Tool",   "⌬"),
+}
+
+
+def _agent_transcript_section(transcript: AgentTranscript) -> str:
+    """Top-level "Conversation" card for an LLM-agent run.
+
+    Layout (top to bottom):
+      1. Card header with eyebrow + title + meta chips
+         (model, message count, tool-call count, round count).
+      2. **You** — the user's original natural-language query.
+      3. **Agent plan** — the plan response (structured + prose).
+      4. **Final response** — the agent's wrap-up answer.
+      5. **Execution timeline** — agent_summaries, one card per
+         completed job/workflow, in chronological order. Only rendered
+         when there's at least one step summary.
+      6. **Decision audit** — agent_decisions, one row per round, only
+         rendered for multi-round runs (≥1 decision recorded).
+      7. **Full transcript** — collapsed ``<details>`` with every
+         message AND tool call interleaved chronologically.
+    """
+    user_html = _agent_user_block(transcript.user_query)
+    plan_html = _agent_plan_block(transcript)
+    final_html = _agent_final_block(transcript.final_response)
+    timeline_html = _agent_step_timeline_block(transcript.step_summaries)
+    decisions_html = _agent_decisions_block(transcript.decisions)
+    transcript_html = _agent_full_transcript_block(
+        transcript.messages, transcript.tool_calls,
+    )
+
+    meta_chips: list[str] = []
+    if transcript.model:
+        meta_chips.append(
+            f'<span class="conv-meta-chip">model · <b>{_h(transcript.model)}</b></span>'
+        )
+    if transcript.provider:
+        meta_chips.append(
+            f'<span class="conv-meta-chip">{_h(transcript.provider)}</span>'
+        )
+    msg_count = len(transcript.messages)
+    if msg_count:
+        meta_chips.append(
+            f'<span class="conv-meta-chip">{msg_count} message{"s" if msg_count != 1 else ""}</span>'
+        )
+    tc_count = len(transcript.tool_calls)
+    if tc_count:
+        meta_chips.append(
+            f'<span class="conv-meta-chip">{tc_count} tool call{"s" if tc_count != 1 else ""}</span>'
+        )
+    round_count = len(transcript.decisions)
+    if round_count > 1:
+        meta_chips.append(
+            f'<span class="conv-meta-chip">{round_count} rounds</span>'
+        )
+    meta_html = (
+        f'<div class="conv-meta">{"".join(meta_chips)}</div>'
+        if meta_chips
+        else ""
+    )
+
+    return f"""<section id="conversation" class="card card-conversation">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Conversation</p>
+      <h2 class="card-title">Agent transcript</h2>
+    </div>
+    {meta_html}
+  </header>
+  <p class="widget-explainer">This run was orchestrated by an LLM agent — the prompt below was translated into the workflow you see in the rest of the report. The plan and final response are the agent's own narrative; the timeline, decision audit, and full transcript expose every step the agent took along the way.</p>
+  {user_html}
+  {plan_html}
+  {final_html}
+  {timeline_html}
+  {decisions_html}
+  {transcript_html}
+</section>"""
+
+
+def _agent_user_block(query: str) -> str:
+    if not query:
+        return ""
+    return f"""<div class="conv-block conv-block-user">
+  <div class="conv-block-head">
+    <span class="conv-role-badge conv-role-badge-user">❝ You</span>
+  </div>
+  <blockquote class="conv-user-quote">{_render_agent_prose(query)}</blockquote>
+</div>"""
+
+
+def _agent_plan_block(transcript: AgentTranscript) -> str:
+    """Render the agent's plan, preferring structured outline over prose."""
+    structured_html = ""
+    if isinstance(transcript.plan_structured, dict):
+        structured_html = _render_plan_structured(transcript.plan_structured)
+    prose_html = ""
+    if transcript.plan_text:
+        prose_html = (
+            '<div class="conv-plan-prose">'
+            f'{_render_agent_prose(transcript.plan_text)}'
+            '</div>'
+        )
+    if not structured_html and not prose_html:
+        return ""
+    return f"""<div class="conv-block conv-block-plan">
+  <div class="conv-block-head">
+    <span class="conv-role-badge conv-role-badge-agent">✦ Agent plan</span>
+  </div>
+  {structured_html}
+  {prose_html}
+</div>"""
+
+
+def _render_plan_structured(plan: dict[str, Any]) -> str:
+    """Render the ``agent_plans.plan_json`` dict as a polished outline.
+
+    Picks out the well-known fields the planner emits (goal, assumptions,
+    required_tools, workflow_plan, success_criteria) and lays them out as
+    a definition list. Unknown fields fall through into a final "raw"
+    section so nothing is silently dropped.
+    """
+    blocks: list[str] = []
+    goal = plan.get("goal")
+    if isinstance(goal, str) and goal.strip():
+        blocks.append(
+            '<dl class="conv-plan-dl">'
+            '<dt>Goal</dt>'
+            f'<dd>{_render_agent_prose(goal.strip())}</dd>'
+            '</dl>'
+        )
+    for key, label in (
+        ("assumptions", "Assumptions"),
+        ("missing_inputs", "Missing inputs"),
+        ("required_tools", "Tools the plan needs"),
+        ("warm_tools", "Tools to warm"),
+        ("success_criteria", "Success criteria"),
+    ):
+        items = plan.get(key)
+        if isinstance(items, list) and items:
+            lis = "".join(
+                f"<li>{_render_agent_prose(str(item))}</li>"
+                for item in items
+                if item
+            )
+            if lis:
+                blocks.append(
+                    '<div class="conv-plan-list">'
+                    f'<h5 class="conv-plan-list-head">{_h(label)}</h5>'
+                    f'<ul>{lis}</ul>'
+                    '</div>'
+                )
+    workflow_plan = plan.get("workflow_plan")
+    if isinstance(workflow_plan, list) and workflow_plan:
+        steps = []
+        for step in workflow_plan:
+            if not isinstance(step, dict):
+                continue
+            tool = str(step.get("tool") or step.get("name") or "step")
+            reason = step.get("reason") or step.get("why") or step.get("purpose")
+            steps.append(
+                '<li>'
+                f'<code class="conv-plan-tool">{_h(tool)}</code>'
+                + (f'<span class="conv-plan-reason">{_render_agent_prose(str(reason))}</span>' if reason else "")
+                + '</li>'
+            )
+        if steps:
+            blocks.append(
+                '<div class="conv-plan-list conv-plan-list-steps">'
+                f'<h5 class="conv-plan-list-head">Planned steps</h5>'
+                f'<ol>{"".join(steps)}</ol>'
+                '</div>'
+            )
+    return "".join(blocks)
+
+
+def _agent_final_block(final: str | None) -> str:
+    if not final:
+        return ""
+    return f"""<div class="conv-block conv-block-final">
+  <div class="conv-block-head">
+    <span class="conv-role-badge conv-role-badge-final">✓ Final response</span>
+  </div>
+  <div class="conv-final-body">{_render_agent_prose(final)}</div>
+</div>"""
+
+
+def _agent_full_transcript_block(
+    messages: list[AgentMessage],
+    tool_calls: list[AgentToolCall] | None = None,
+) -> str:
+    """Collapsible transcript at the bottom: chat bubbles interleaved with tool-call chips.
+
+    Messages and tool calls are merged into one chronological stream
+    using ``timestamp_ms``; missing timestamps sort first (so they stay
+    at the top in append order). Each tool call renders as a compact
+    pill chip with the tool name, ok/fail badge, and a click-to-expand
+    ``<details>`` showing pretty-printed args / result.
+    """
+    tool_calls = tool_calls or []
+    if not messages and not tool_calls:
+        return ""
+
+    # Chronological merge. Use enumeration index as a tiebreaker so two
+    # events sharing a timestamp keep their original order.
+    events: list[tuple[int, int, str, Any]] = []
+    for idx, msg in enumerate(messages):
+        events.append((msg.timestamp_ms or 0, idx, "msg", msg))
+    for idx, tc in enumerate(tool_calls):
+        events.append((tc.timestamp_ms or 0, 10_000_000 + idx, "tool", tc))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    pieces: list[str] = []
+    for _ts, _ord, kind, payload in events:
+        if kind == "msg":
+            pieces.append(_agent_message_bubble(payload))
+        else:
+            pieces.append(_agent_tool_call_chip(payload))
+
+    return f"""<details class="conv-transcript-details">
+  <summary class="conv-transcript-summary">
+    <span class="conv-transcript-summary-label">Full transcript</span>
+    <span class="conv-transcript-summary-meta">{len(messages)} message{"s" if len(messages) != 1 else ""}{f", {len(tool_calls)} tool call{'s' if len(tool_calls) != 1 else ''}" if tool_calls else ""}</span>
+  </summary>
+  <div class="conv-transcript-body">
+    {"".join(pieces)}
+  </div>
+</details>"""
+
+
+def _agent_message_bubble(msg: AgentMessage) -> str:
+    """Single chat bubble for one message in the full transcript."""
+    label, glyph = _AGENT_ROLE_BADGES.get(
+        msg.role.lower(),
+        (msg.role.title(), "•"),
+    )
+    role_cls = msg.role.lower().replace(" ", "-")
+    model_chip = (
+        f'<span class="conv-bubble-model">{_h(msg.model)}</span>'
+        if msg.model and msg.role.lower() == "assistant"
+        else ""
+    )
+    return (
+        f'<article class="conv-bubble conv-bubble-{_h(role_cls)}">'
+        f'<header class="conv-bubble-head">'
+        f'<span class="conv-role-badge conv-role-badge-{_h(role_cls)}">'
+        f'{_h(glyph)} {_h(label)}</span>'
+        f'{model_chip}'
+        '</header>'
+        f'<div class="conv-bubble-body">{_render_agent_prose(msg.content)}</div>'
+        '</article>'
+    )
+
+
+def _agent_tool_call_chip(tc: AgentToolCall) -> str:
+    """Compact inline chip for a single tool invocation in the transcript.
+
+    Shows the tool name + ok/fail badge by default; click-to-expand
+    reveals pretty-printed args (JSON) and a compact result preview.
+    Lives in the same chronological stream as message bubbles but reads
+    as a single-line audit row rather than a chat bubble — that visual
+    distinction is the cue "this is the agent doing, not saying."
+    """
+    status_cls = "ok" if tc.ok else "fail"
+    status_glyph = "✓" if tc.ok else "✕"
+    args_html = ""
+    if tc.args:
+        args_html = (
+            '<div class="conv-tool-section">'
+            '<div class="conv-tool-section-head">args</div>'
+            f'<code class="conv-tool-payload">{_h(_pretty_json(tc.args))}</code>'
+            '</div>'
+        )
+    result_html = ""
+    if tc.result is not None and tc.result != "":
+        result_html = (
+            '<div class="conv-tool-section">'
+            '<div class="conv-tool-section-head">result</div>'
+            f'<code class="conv-tool-payload">{_h(_pretty_json(tc.result))}</code>'
+            '</div>'
+        )
+    body_html = args_html + result_html
+    summary_html = (
+        f'<summary class="conv-tool-summary">'
+        f'<span class="conv-tool-glyph conv-tool-glyph-{status_cls}">{status_glyph}</span>'
+        f'<span class="conv-tool-label">Tool</span>'
+        f'<code class="conv-tool-name">{_h(tc.tool_name)}</code>'
+        + (
+            '<span class="conv-tool-state conv-tool-state-fail">failed</span>'
+            if not tc.ok else ""
+        )
+        + '</summary>'
+    )
+    if not body_html:
+        # No payload to show — render as a plain (non-collapsible) chip.
+        return (
+            f'<div class="conv-tool-chip conv-tool-chip-{status_cls} conv-tool-chip-plain">'
+            f'<span class="conv-tool-glyph conv-tool-glyph-{status_cls}">{status_glyph}</span>'
+            f'<span class="conv-tool-label">Tool</span>'
+            f'<code class="conv-tool-name">{_h(tc.tool_name)}</code>'
+            + (
+                '<span class="conv-tool-state conv-tool-state-fail">failed</span>'
+                if not tc.ok else ""
+            )
+            + '</div>'
+        )
+    return (
+        f'<details class="conv-tool-chip conv-tool-chip-{status_cls}">'
+        f'{summary_html}'
+        f'<div class="conv-tool-body">{body_html}</div>'
+        '</details>'
+    )
+
+
+def _agent_step_timeline_block(steps: list[AgentStepSummary]) -> str:
+    """Vertical execution timeline — one card per step the agent ran.
+
+    Built from ``agent_summaries``; rendered as a left-rail timeline
+    with an icon per step state (completed / failed / running) and a
+    compact body showing the tool/workflow name + state pill + key
+    metrics. The whole section is omitted when the agent didn't
+    record any per-step summary (e.g. a single-shot tool call).
+    """
+    if not steps:
+        return ""
+    cards: list[str] = []
+    for idx, step in enumerate(steps, 1):
+        state = (step.state or "unknown").lower()
+        state_class = _state_class(state)
+        title_parts: list[str] = []
+        if step.kind == "workflow":
+            title_parts.append("Workflow")
+            if step.name:
+                title_parts.append(_h(step.name))
+            elif step.workflow_id:
+                title_parts.append(f'<code>{_h(_short(step.workflow_id, 14))}</code>')
+        else:
+            title_parts.append("Job")
+            if step.tool:
+                title_parts.append(_h(step.tool))
+            elif step.job_id:
+                title_parts.append(f'<code>{_h(_short(step.job_id, 14))}</code>')
+        title_html = " · ".join(title_parts)
+        meta_bits: list[str] = []
+        if step.state:
+            meta_bits.append(
+                f'<span class="conv-timeline-state state-{state_class}">{_h(step.state)}</span>'
+            )
+        if step.metrics_used:
+            shown = ", ".join(step.metrics_used[:6])
+            extra = ""
+            if len(step.metrics_used) > 6:
+                extra = f' <span class="conv-timeline-meta-extra">(+{len(step.metrics_used) - 6})</span>'
+            meta_bits.append(
+                f'<span class="conv-timeline-metrics">metrics: {_h(shown)}{extra}</span>'
+            )
+        if step.workflow_id and step.kind != "workflow":
+            meta_bits.append(
+                f'<span class="conv-timeline-meta-id">in <code>{_h(_short(step.workflow_id, 14))}</code></span>'
+            )
+        meta_html = (
+            f'<div class="conv-timeline-meta">{"  ·  ".join(meta_bits)}</div>'
+            if meta_bits else ""
+        )
+        error_html = ""
+        if step.error_message:
+            error_html = (
+                f'<div class="conv-timeline-error">'
+                f'<strong>Error</strong> {_h(step.error_message)}'
+                f'</div>'
+            )
+        cards.append(
+            f'<li class="conv-timeline-row conv-timeline-row-{state_class}">'
+            f'<div class="conv-timeline-marker"><span class="conv-timeline-bullet"></span>'
+            f'<span class="conv-timeline-index">{idx}</span></div>'
+            f'<div class="conv-timeline-card">'
+            f'<div class="conv-timeline-title">{title_html}</div>'
+            f'{meta_html}{error_html}'
+            '</div>'
+            '</li>'
+        )
+    return f"""<div class="conv-block conv-block-timeline">
+  <div class="conv-block-head">
+    <span class="conv-role-badge conv-role-badge-timeline">⏳ Execution timeline</span>
+    <span class="conv-meta-chip">{len(steps)} step{"s" if len(steps) != 1 else ""}</span>
+  </div>
+  <ol class="conv-timeline">
+    {"".join(cards)}
+  </ol>
+</div>"""
+
+
+def _agent_decisions_block(decisions: list[AgentDecision]) -> str:
+    """Per-round decision audit for multi-round agent runs.
+
+    Each decision becomes a compact row showing the round index, the
+    verdict label, whether another round was recommended, and the
+    reason text. Notes attached by the decision engine (e.g. LLM-fallback
+    warnings) collapse into a "notes" sublist when present. The block
+    is omitted entirely for single-round runs (no recorded decisions).
+    """
+    if not decisions:
+        return ""
+    rows: list[str] = []
+    for d in decisions:
+        verdict_cls = "go" if d.next_round_recommended else "stop"
+        verdict_label = "Continue → next round" if d.next_round_recommended else "Stop"
+        notes_html = ""
+        if d.notes:
+            note_items: list[str] = []
+            for entry in d.notes:
+                if isinstance(entry, dict):
+                    level = str(entry.get("level") or "note")
+                    msg = str(entry.get("message") or "")
+                    code = entry.get("code")
+                    code_html = f' <code class="conv-decision-note-code">{_h(str(code))}</code>' if code else ""
+                    note_items.append(
+                        f'<li class="conv-decision-note conv-decision-note-{_h(level)}">'
+                        f'<strong>{_h(level)}</strong> {_h(msg)}{code_html}</li>'
+                    )
+                else:
+                    note_items.append(f'<li class="conv-decision-note">{_h(str(entry))}</li>')
+            notes_html = (
+                f'<ul class="conv-decision-notes">{"".join(note_items)}</ul>'
+            )
+        metrics_html = ""
+        if d.metrics_used:
+            metrics_html = (
+                f'<div class="conv-decision-metrics">'
+                f'<span class="conv-decision-metrics-head">metrics weighed:</span> '
+                f'{_h(", ".join(d.metrics_used[:8]))}'
+                + (f' (+{len(d.metrics_used) - 8} more)' if len(d.metrics_used) > 8 else '')
+                + '</div>'
+            )
+        rows.append(
+            f'<li class="conv-decision-row">'
+            f'<div class="conv-decision-head">'
+            f'<span class="conv-decision-round">Round {d.round_index + 1}</span>'
+            f'<code class="conv-decision-label">{_h(d.decision_label)}</code>'
+            f'<span class="conv-decision-verdict conv-decision-verdict-{verdict_cls}">{verdict_label}</span>'
+            '</div>'
+            + (
+                f'<p class="conv-decision-reason">{_render_agent_prose(d.reason)}</p>'
+                if d.reason else ""
+            )
+            + metrics_html
+            + notes_html
+            + '</li>'
+        )
+    return f"""<div class="conv-block conv-block-decisions">
+  <div class="conv-block-head">
+    <span class="conv-role-badge conv-role-badge-decisions">⚖ Decision audit</span>
+    <span class="conv-meta-chip">{len(decisions)} round{"s" if len(decisions) != 1 else ""}</span>
+  </div>
+  <ol class="conv-decisions">
+    {"".join(rows)}
+  </ol>
+</div>"""
+
+
+def _pretty_json(value: Any, *, max_len: int = 2_000) -> str:
+    """Pretty-print arbitrary JSON-compatible data with a length cap.
+
+    Lists/dicts get 2-space indent. Strings render verbatim. The cap
+    keeps massive tool results (e.g. base64 blobs) from blowing up the
+    transcript size — the trailing slice is dropped with an ellipsis.
+    """
+    if isinstance(value, str):
+        s = value
+    else:
+        try:
+            import json as _json
+            s = _json.dumps(value, indent=2, ensure_ascii=False, sort_keys=False, default=str)
+        except Exception:
+            s = repr(value)
+    if len(s) > max_len:
+        s = s[:max_len].rstrip() + f"\n… [{len(s) - max_len} more chars truncated]"
+    return s
+
+
+def _render_agent_prose(text: str) -> str:
+    """Escape + lightly format an agent's text content for HTML.
+
+    Preserves paragraph breaks (double newline) and inline newlines
+    (single newline → ``<br>``). Code fences ``` ``` ``` are rendered as
+    monospace blocks. Nothing fancy — the goal is faithful prose
+    rendering, not a markdown parser.
+    """
+    if not text:
+        return ""
+    s = str(text).strip()
+    # Split out triple-backtick fenced blocks first.
+    parts: list[str] = []
+    buf: list[str] = []
+    in_code = False
+    code_buf: list[str] = []
+    for line in s.split("\n"):
+        if line.strip().startswith("```"):
+            if in_code:
+                parts.append("<para>" + "\n".join(buf) + "</para>" if buf else "")
+                buf = []
+                parts.append(
+                    "<code class='conv-codeblock'>"
+                    + _h("\n".join(code_buf))
+                    + "</code>"
+                )
+                code_buf = []
+                in_code = False
+            else:
+                if buf:
+                    parts.append("<para>" + "\n".join(buf) + "</para>")
+                    buf = []
+                in_code = True
+            continue
+        if in_code:
+            code_buf.append(line)
+        else:
+            buf.append(line)
+    if in_code and code_buf:
+        # Unterminated fence — render what we have as a code block.
+        parts.append(
+            "<code class='conv-codeblock'>" + _h("\n".join(code_buf)) + "</code>"
+        )
+    elif buf:
+        parts.append("<para>" + "\n".join(buf) + "</para>")
+
+    html_parts: list[str] = []
+    for chunk in parts:
+        if not chunk:
+            continue
+        if chunk.startswith("<code"):
+            html_parts.append(chunk)
+            continue
+        # Strip our <para> sentinel and split on blank lines for paragraphs.
+        inner = chunk[len("<para>"):-len("</para>")]
+        for paragraph in inner.split("\n\n"):
+            paragraph = paragraph.strip("\n")
+            if not paragraph:
+                continue
+            # Within a paragraph, single newlines become <br>.
+            escaped = _h(paragraph).replace("\n", "<br>")
+            html_parts.append(f"<p>{escaped}</p>")
+    return "".join(html_parts)
 
 
 def _why_candidate(candidate: ReportCandidate) -> str:
@@ -6826,65 +7364,10 @@ def _quality_class(key: str, value: Any) -> str:
     return "neutral"
 
 
-# Science tokens that should keep a fixed casing when a snake_case metric
-# key is expanded into a human label (so ``tm_score`` -> "TM score", not
-# "Tm score"). Anything not listed is sentence-cased normally.
-_METRIC_ABBR: dict[str, str] = {
-    "tm": "TM", "rmsd": "RMSD", "plddt": "pLDDT", "iplddt": "ipLDDT",
-    "ptm": "pTM", "iptm": "ipTM", "pae": "PAE", "lddt": "lDDT",
-    "ipsae": "ipSAE", "dockq": "DockQ", "kd": "Kd", "nm": "nM",
-    "pi": "pI", "ic50": "IC50", "qc": "QC", "ss": "SS", "id": "ID",
-    "uniprot": "UniProt", "dna": "DNA", "rna": "RNA", "cif": "CIF",
-    "pdb": "PDB", "msa": "MSA", "a": "A", "b": "B", "ab": "AB", "ba": "BA",
-}
-
-# Trailing unit suffixes pulled out of a metric key and rendered as a
-# parenthesised unit ("best_affinity_kcal_mol" -> "Best affinity (kcal/mol)").
-# Longest suffix first so "_kcal_mol" wins over a bare "_mol".
-_METRIC_UNIT_SUFFIXES: tuple[tuple[str, str], ...] = (
-    ("_kcal_mol", "kcal/mol"),
-    ("_nm", "nM"),
-    ("_um", "µM"),
-)
-
-
-def _pretty_metric_name(key: str) -> str:
-    known = {
-        "plddt": "pLDDT",
-        "mean_plddt": "pLDDT",
-        "iptm": "ipTM",
-        "ptm": "pTM",
-        "pae": "PAE",
-        "mean_pae": "PAE",
-        "ipsae": "ipSAE",
-        "dockq": "DockQ",
-        "delta_g": "ΔG",
-        "seq_recovery": "Seq recov.",
-        "recovery": "Recovery",
-        "score": "Score",
-        "ranking_score": "Rank score",
-    }
-    if key in known:
-        return known[key]
-    # Peel a trailing unit suffix and render it parenthesised on the base name.
-    for suffix, unit in _METRIC_UNIT_SUFFIXES:
-        if key.endswith(suffix) and len(key) > len(suffix):
-            return f"{_pretty_metric_name(key[: -len(suffix)])} ({unit})"
-    # snake_case / kebab-case -> "Sentence case", upper-casing known science
-    # abbreviations so auto-generated metric labels read cleanly.
-    tokens = [t for t in key.replace("-", "_").split("_") if t]
-    if not tokens:
-        return key
-    words: list[str] = []
-    for idx, tok in enumerate(tokens):
-        low = tok.lower()
-        if low in _METRIC_ABBR:
-            words.append(_METRIC_ABBR[low])
-        elif idx == 0:
-            words.append(tok[:1].upper() + tok[1:].lower())
-        else:
-            words.append(low)
-    return " ".join(words)
+# ``_pretty_metric_name`` lives in :mod:`.metrics` (as ``pretty_metric_name``)
+# alongside the science-token + unit-suffix tables it consumes. Imported at
+# module top so the rest of this file's call sites can keep using the same
+# local name.
 
 
 def _as_unit(value: Any) -> float | None:
@@ -7260,6 +7743,363 @@ body {
 }
 /* Drop the historical accent-tinted card-candidates variant — every card is now identical. */
 .card-candidates { background:var(--panel); border:1px solid var(--line); box-shadow:var(--shadow-card); }
+
+/* ==========================================================================
+   Conversation panel — three-tier transcript for LLM-agent runs.
+   Mirrors the visual weight of the executive-summary card while staying
+   visually distinct: the user/agent/final tiers each have a coloured left
+   border + soft tint so a reader can scan the conversation at a glance.
+   ========================================================================== */
+.card-conversation .card-header-pills,
+.conv-meta { display:flex; gap:7px; flex-wrap:wrap; }
+.conv-meta-chip {
+  font-size:11.5px; color:var(--muted);
+  background:var(--panel); border:1px solid var(--line);
+  border-radius:var(--radius-pill); padding:3px 11px;
+}
+.conv-meta-chip b {
+  color:var(--ink); font-weight:600;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.conv-block {
+  margin:14px 0; padding:16px 18px 14px;
+  border-radius:12px; border:1px solid var(--line);
+  background:#ffffff; box-shadow:var(--shadow-tile);
+  position:relative; overflow:hidden;
+}
+.conv-block::before {
+  content:""; position:absolute; left:0; top:0; bottom:0; width:4px;
+}
+.conv-block-user::before  { background:var(--accent); }
+.conv-block-plan::before  { background:#5b8def; }   /* sky-indigo for "thinking" */
+.conv-block-final::before { background:var(--good); }
+.conv-block-head {
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  margin-bottom:10px;
+}
+.conv-role-badge {
+  display:inline-flex; align-items:center; gap:6px;
+  font-size:11px; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.07em;
+  padding:4px 11px; border-radius:var(--radius-pill);
+  border:1px solid var(--line); background:#fbfafe; color:var(--ink);
+}
+.conv-role-badge-user,
+.conv-role-badge-user.conv-role-badge {
+  color:var(--accent); background:var(--accent-soft); border-color:#d9cef3;
+}
+.conv-role-badge-agent,
+.conv-role-badge-assistant,
+.conv-role-badge-assistant.conv-role-badge {
+  color:#1e40af; background:#e7efff; border-color:#bfd4ff;
+}
+.conv-role-badge-final,
+.conv-role-badge-final.conv-role-badge {
+  color:var(--good); background:var(--good-soft); border-color:var(--good-line);
+}
+.conv-role-badge-system { color:var(--muted); background:#f7f5fb; }
+.conv-role-badge-tool   { color:#7c2d12; background:#fcebdd; border-color:#f3d3b8; }
+
+/* The user quote leans on the brand serif accent so it reads as
+   prose — a customer-quote treatment rather than a code block. */
+.conv-user-quote {
+  margin:0; padding:0 0 0 14px;
+  border-left:3px solid var(--accent-soft);
+  color:var(--ink); font-size:16px; line-height:1.65;
+}
+.conv-user-quote p { margin:0 0 8px; }
+.conv-user-quote p:last-child { margin-bottom:0; }
+
+/* Plan tier: structured outline + optional prose. */
+.conv-plan-dl { margin:0 0 12px; }
+.conv-plan-dl dt {
+  font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em;
+  color:var(--subtle); margin-bottom:4px;
+}
+.conv-plan-dl dd {
+  margin:0; padding:0; font-size:14px; color:var(--ink); line-height:1.55;
+}
+.conv-plan-list { margin:10px 0; }
+.conv-plan-list-head {
+  margin:0 0 6px; font-size:11px; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.08em; color:var(--subtle);
+}
+.conv-plan-list ul, .conv-plan-list ol {
+  margin:0; padding-left:20px; font-size:13.5px; color:var(--ink); line-height:1.6;
+}
+.conv-plan-list li { margin:3px 0; }
+.conv-plan-list-steps ol { padding-left:22px; }
+.conv-plan-list-steps li {
+  display:flex; align-items:baseline; gap:10px;
+  padding:5px 0;
+}
+.conv-plan-tool {
+  flex-shrink:0;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; font-weight:700; color:var(--accent);
+  background:var(--accent-soft); border-radius:5px; padding:1px 8px;
+}
+.conv-plan-reason { color:var(--muted); font-size:13.5px; }
+.conv-plan-prose { margin-top:10px; color:var(--ink); font-size:14px; line-height:1.65; }
+.conv-plan-prose p { margin:0 0 8px; }
+.conv-plan-prose p:last-child { margin-bottom:0; }
+
+/* Final tier: prose, slightly heavier weight to read as the "answer". */
+.conv-final-body { font-size:14.5px; line-height:1.65; color:var(--ink); }
+.conv-final-body p { margin:0 0 10px; }
+.conv-final-body p:last-child { margin-bottom:0; }
+
+/* Inline code block inside any agent prose. */
+.conv-codeblock {
+  display:block; white-space:pre; overflow-x:auto;
+  margin:10px 0; padding:10px 12px;
+  background:#0f0a1f; color:#ede9fe;
+  border-radius:8px; font-size:12.5px; line-height:1.55;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Full-transcript: collapsible chat-bubble list. */
+.conv-transcript-details {
+  margin-top:16px; border-top:1px solid var(--line); padding-top:14px;
+}
+.conv-transcript-summary {
+  cursor:pointer; user-select:none; padding:6px 10px;
+  display:inline-flex; align-items:center; gap:10px;
+  border-radius:8px; color:var(--muted); font-size:13px;
+  list-style:none;
+}
+.conv-transcript-summary::-webkit-details-marker { display:none; }
+.conv-transcript-summary::before {
+  content:"▸"; color:var(--subtle); transition:transform 0.15s;
+}
+.conv-transcript-details[open] > .conv-transcript-summary::before {
+  transform:rotate(90deg); display:inline-block;
+}
+.conv-transcript-summary:hover { background:#f7f5fb; color:var(--accent); }
+.conv-transcript-summary-label { font-weight:600; color:var(--ink); }
+.conv-transcript-summary-meta { color:var(--subtle); font-size:12px; }
+.conv-transcript-body {
+  margin-top:12px;
+  display:flex; flex-direction:column; gap:10px;
+}
+.conv-bubble {
+  padding:12px 14px;
+  border-radius:10px; border:1px solid var(--line);
+  background:#ffffff;
+}
+.conv-bubble-user { background:var(--accent-soft); border-color:#d9cef3; }
+.conv-bubble-assistant { background:#f4f7ff; border-color:#bfd4ff; }
+.conv-bubble-system { background:#fafafa; }
+.conv-bubble-tool { background:#fcebdd; border-color:#f3d3b8; }
+.conv-bubble-head {
+  display:flex; align-items:center; justify-content:space-between;
+  gap:10px; margin-bottom:6px;
+}
+.conv-bubble-model {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:10.5px; color:var(--subtle);
+}
+.conv-bubble-body {
+  font-size:13.5px; line-height:1.6; color:var(--ink);
+}
+.conv-bubble-body p { margin:0 0 6px; }
+.conv-bubble-body p:last-child { margin-bottom:0; }
+
+/* -------- Execution timeline -------- */
+/* Distinguishes the timeline block from the user/plan/final tiers via
+   a calmer slate-tinted left rail so the eye groups "what the agent
+   DID" separately from "what the agent SAID". */
+.conv-block-timeline::before { background:#94a3b8; }
+.conv-role-badge-timeline {
+  color:#475569; background:#eef2f7; border-color:#dbe3ec;
+}
+.conv-timeline { list-style:none; margin:8px 0 0; padding:0; }
+.conv-timeline-row {
+  display:grid; grid-template-columns:38px 1fr; gap:10px;
+  padding:7px 0; position:relative;
+}
+.conv-timeline-row + .conv-timeline-row { border-top:1px dashed #f0eef8; }
+.conv-timeline-marker {
+  display:flex; flex-direction:column; align-items:center; gap:3px;
+  padding-top:4px; color:var(--subtle);
+}
+.conv-timeline-bullet {
+  width:9px; height:9px; border-radius:50%;
+  background:var(--accent-3); box-shadow:0 0 0 3px #fbfafe;
+}
+.conv-timeline-row-completed .conv-timeline-bullet,
+.conv-timeline-row-cached    .conv-timeline-bullet { background:var(--good); }
+.conv-timeline-row-failed    .conv-timeline-bullet { background:var(--poor); }
+.conv-timeline-row-running   .conv-timeline-bullet { background:var(--accent-bright); }
+.conv-timeline-index {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:10.5px; color:var(--subtle); font-variant-numeric:tabular-nums;
+}
+.conv-timeline-card { min-width:0; }
+.conv-timeline-title {
+  font-size:14px; font-weight:600; color:var(--ink); line-height:1.4;
+}
+.conv-timeline-title code {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; color:var(--accent);
+  background:var(--accent-soft); border-radius:5px; padding:1px 7px;
+}
+.conv-timeline-meta {
+  font-size:12px; color:var(--muted); margin-top:3px;
+  display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center;
+}
+.conv-timeline-state {
+  display:inline-block; font-size:10.5px; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.05em;
+  padding:1px 8px; border-radius:var(--radius-pill);
+  background:#fbfafe; border:1px solid var(--line); color:var(--muted);
+}
+.conv-timeline-state.state-completed,
+.conv-timeline-state.state-cached {
+  background:var(--good-soft); color:var(--good); border-color:var(--good-line);
+}
+.conv-timeline-state.state-failed {
+  background:var(--poor-soft); color:var(--poor); border-color:var(--poor-line);
+}
+.conv-timeline-metrics {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11.5px;
+}
+.conv-timeline-meta-extra { color:var(--subtle); }
+.conv-timeline-meta-id code {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11px; color:var(--subtle); background:transparent;
+  border:none; padding:0;
+}
+.conv-timeline-error {
+  margin-top:5px; padding:6px 10px; border-radius:6px;
+  background:var(--poor-soft); border:1px solid var(--poor-line);
+  color:var(--poor); font-size:12.5px;
+}
+
+/* -------- Decision audit -------- */
+.conv-block-decisions::before { background:#d97706; }   /* amber for "the agent decided" */
+.conv-role-badge-decisions {
+  color:#92400e; background:#fef3c7; border-color:#fde68a;
+}
+.conv-decisions { list-style:none; margin:8px 0 0; padding:0; }
+.conv-decision-row {
+  padding:9px 0;
+}
+.conv-decision-row + .conv-decision-row { border-top:1px dashed #f0eef8; }
+.conv-decision-head {
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+}
+.conv-decision-round {
+  font-size:11px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.07em; color:var(--subtle);
+  font-variant-numeric:tabular-nums;
+}
+.conv-decision-label {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; color:var(--ink);
+  background:#fbfafe; border:1px solid var(--line);
+  border-radius:5px; padding:1px 8px;
+}
+.conv-decision-verdict {
+  font-size:11px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.05em; padding:2px 9px; border-radius:var(--radius-pill);
+}
+.conv-decision-verdict-go {
+  color:#1e40af; background:#e7efff; border:1px solid #bfd4ff;
+}
+.conv-decision-verdict-stop {
+  color:#475569; background:#eef2f7; border:1px solid #dbe3ec;
+}
+.conv-decision-reason {
+  margin:6px 0 0; color:var(--ink); font-size:13.5px; line-height:1.55;
+}
+.conv-decision-reason p { margin:0 0 5px; }
+.conv-decision-reason p:last-child { margin-bottom:0; }
+.conv-decision-metrics {
+  margin-top:5px; font-size:12px; color:var(--muted);
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.conv-decision-metrics-head {
+  font-family:Inter, system-ui, sans-serif;
+  text-transform:uppercase; font-size:10.5px; letter-spacing:0.07em;
+  color:var(--subtle); margin-right:4px;
+}
+.conv-decision-notes {
+  margin:6px 0 0; padding-left:18px; font-size:12.5px; color:var(--muted);
+}
+.conv-decision-note { margin:2px 0; }
+.conv-decision-note strong { text-transform:uppercase; font-size:10.5px; letter-spacing:0.05em; }
+.conv-decision-note-warning strong { color:var(--warn); }
+.conv-decision-note-error   strong { color:var(--poor); }
+.conv-decision-note-code {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:11px; color:var(--subtle);
+}
+
+/* -------- Tool-call chip (interleaved in full transcript) -------- */
+.conv-tool-chip {
+  display:block; margin:4px 0;
+  border:1px solid var(--line); border-radius:8px;
+  background:#fbfafe;
+  font-size:12.5px;
+}
+.conv-tool-chip[open] { box-shadow:var(--shadow-tile); }
+.conv-tool-chip-plain {
+  padding:6px 11px;
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+}
+.conv-tool-summary {
+  cursor:pointer; user-select:none;
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:6px 11px; border-radius:8px;
+  list-style:none;
+}
+.conv-tool-summary::-webkit-details-marker { display:none; }
+.conv-tool-summary::after {
+  content:"▸"; color:var(--subtle); margin-left:auto;
+  transition:transform 0.15s; font-size:10px;
+}
+.conv-tool-chip[open] > .conv-tool-summary::after { transform:rotate(90deg); }
+.conv-tool-summary:hover { background:#f7f5fb; }
+.conv-tool-chip-ok    { border-left:3px solid var(--good); }
+.conv-tool-chip-fail  { border-left:3px solid var(--poor); background:var(--poor-soft); }
+.conv-tool-glyph {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:18px; height:18px; border-radius:50%; font-size:11px; font-weight:700;
+}
+.conv-tool-glyph-ok   { background:var(--good-soft); color:var(--good); }
+.conv-tool-glyph-fail { background:#fee2e2;          color:var(--poor); }
+.conv-tool-label {
+  font-size:10.5px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.07em; color:var(--subtle);
+}
+.conv-tool-name {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12.5px; font-weight:700; color:var(--ink);
+  background:transparent;
+}
+.conv-tool-state {
+  font-size:10.5px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.05em; padding:1px 7px; border-radius:var(--radius-pill);
+}
+.conv-tool-state-fail { background:#fee2e2; color:var(--poor); }
+.conv-tool-body {
+  padding:0 11px 10px;
+  border-top:1px solid var(--line);
+}
+.conv-tool-section { margin-top:9px; }
+.conv-tool-section-head {
+  font-size:10px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.07em; color:var(--subtle); margin-bottom:4px;
+}
+.conv-tool-payload {
+  display:block; white-space:pre-wrap; word-break:break-word;
+  padding:8px 10px; max-height:300px; overflow:auto;
+  background:#0f0a1f; color:#ede9fe;
+  border-radius:6px; font-size:11.5px; line-height:1.5;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 .pill {
   border:1px solid var(--line); border-radius:var(--radius-pill); padding:4px 11px;
@@ -8033,6 +8873,17 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   white-space:nowrap;
 }
 .score-row > b { font-family: ui-monospace, monospace; font-weight:600; text-align:right; }
+/* ⓘ chip beside metric labels: surfaces the per-metric definition
+   tooltip (especially useful for tool-ambiguous names like ``score`` on
+   MPNN inverse-folding outputs). Visually muted by default, slightly
+   coloured on hover so users notice it's interactive. ``cursor:help``
+   is the standard affordance for tooltip targets. */
+.score-info {
+  display:inline-block; margin-left:5px;
+  font-size:11px; color:var(--subtle); cursor:help;
+  vertical-align:1px; user-select:none;
+}
+.score-info:hover { color:var(--accent); }
 .bar-track { height:9px; background:#ede9fe; border-radius:999px; overflow:hidden; }
 /* Bar quality colour rule:
      good   → sky    (cool calm "this is fine")
@@ -8151,6 +9002,9 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 .sd-plot .sd-axis { font-size:10.5px; fill:var(--muted); }
 .sd-plot .sd-axis-title { font-size:11px; fill:var(--subtle); letter-spacing:0.04em; }
 .sd-plot .sd-subtitle { font-size:11.5px; fill:var(--muted); font-weight:500; }
+/* Second-line subtitle (numeric summary under the tool/metric caption);
+   slightly smaller and lower-contrast so the eye lands on line 1 first. */
+.sd-plot .sd-subtitle-meta { font-size:11px; fill:var(--subtle); font-weight:400; }
 .sd-mean { stroke:var(--accent-2); stroke-width:1; stroke-dasharray:4 4; }
 .sd-plot .sd-mean-label { font-size:9.5px; fill:var(--accent-2); letter-spacing:0.02em; }
 
@@ -9008,6 +9862,30 @@ a.lit-title:hover { color:var(--accent); text-decoration:underline; }
 }
 .tmpl-seq-ruler .tmpl-seq-track { color:var(--subtle); }
 .tmpl-seq-ruler .tmpl-seq-label { background:#fbfafe; }
+/* MPNN-widget conservation highlight: positions where every design
+   agrees on the same residue. A single calm brand-purple tint is used
+   for ALL conserved cells regardless of amino acid — a multi-colour
+   per-AA palette reads as a noisy mosaic when most positions are
+   conserved (which is typical for MPNN designs against a fixed
+   backbone). Only the visual weight + a soft background + rounded
+   corners are added — no width / padding / margin / border, so each
+   cell stays exactly one monospace slot wide and keeps column
+   alignment with the ruler below. */
+.mpnn-cell-conserved {
+  font-weight:700;
+  color:var(--accent);
+  background:var(--accent-soft);
+  border-radius:2px;
+}
+.mpnn-cell-variable {
+  color:var(--subtle); opacity:0.75;
+}
+/* Sub-explainer below the "Designed sequences" subhead — same muted
+   tone as widget-explainer but a touch tighter so it doesn't compete
+   with the section heading. */
+.widget-subexplain {
+  margin:2px 0 8px; color:var(--muted); font-size:12px; line-height:1.5;
+}
 
 /* Generative-design / LigandMPNN / ESM widgets — summary chips, per-design
    results table cells and the ESM pooled-embedding fingerprint strip. */

@@ -4,6 +4,14 @@ import html
 import math
 from pathlib import Path
 
+from .metrics import (
+    RECOVERY_DEFINITIONS,
+    RECOVERY_PLOT_TITLE_SUFFIX,
+    SCORE_DEFINITIONS,
+    TOOL_OUTPUT_KIND,
+    TOOLS_PREFER_RECOVERY,
+    pretty_tool_name,
+)
 from .models import PlotSpec, ReportModel
 
 
@@ -35,13 +43,86 @@ def build_plots(model: ReportModel) -> list[PlotSpec]:
         if len(model.candidates) == 1:
             break
 
-    scores = [c.score for c in model.candidates if c.score is not None]
-    if len(scores) >= 3:
+    # Score distribution — bucketed by source tool. Each tool's score has
+    # its own meaning and scale (ProteinMPNN's NLL is not comparable to
+    # Boltz-2's ranking confidence), so plotting them in one chart would
+    # mix incompatible units. One plot per tool keeps the y-axis honest
+    # and lets each plot carry its own "what does score mean here?" caption.
+    #
+    # For inverse-folding tools (proteinmpnn / ligandmpnn) the canonical
+    # ``candidate.score`` is per-residue NLL — wrong-direction and on an
+    # unfamiliar scale. We swap to ``seq_recovery`` (fraction of native
+    # residues recovered, 0-1, higher = better) which is the metric
+    # sequence-design reviewers actually look at. If recovery isn't
+    # available we fall back to the raw score for those tools too.
+    # ``axis_kind`` records what we actually plotted: "recovery" only
+    # when the swap fired for every contributing candidate, otherwise
+    # "score". Per-tool homogeneity is enforced by separating the
+    # buckets — if any candidate of an MPNN tool lacks recovery, we
+    # use the score path for that entire tool's bucket so all bars
+    # share one axis and the caption stays honest.
+    by_tool: dict[str, list[float]] = {}
+    axis_kind: dict[str, str] = {}
+    for c in model.candidates:
+        tool = ""
+        if isinstance(c.source, dict):
+            tool = str(c.source.get("tool") or "").lower()
+        recovery = None
+        if tool in TOOLS_PREFER_RECOVERY:
+            recovery = _num(c.scores.get("seq_recovery"))
+            if recovery is None:
+                recovery = _num(c.scores.get("recovery"))
+        # First candidate of a tool decides the axis: prefer recovery
+        # when available, otherwise raw score. Subsequent candidates of
+        # the same tool must match — drop any that can't supply a value
+        # on the chosen axis (rare in practice, but keeps the bars
+        # comparable).
+        chosen_axis = axis_kind.get(tool)
+        if chosen_axis is None:
+            if tool in TOOLS_PREFER_RECOVERY and recovery is not None:
+                chosen_axis = "recovery"
+            elif c.score is not None:
+                chosen_axis = "score"
+            else:
+                continue
+            axis_kind[tool] = chosen_axis
+        if chosen_axis == "recovery":
+            if recovery is None:
+                continue
+            by_tool.setdefault(tool, []).append(recovery)
+        else:  # "score"
+            if c.score is None:
+                continue
+            by_tool.setdefault(tool, []).append(c.score)
+    for tool_lc, scores in by_tool.items():
+        if len(scores) < 3:
+            continue
+        tool_label = pretty_tool_name(tool_lc) if tool_lc else "Candidate"
+        output_kind = TOOL_OUTPUT_KIND.get(tool_lc, "")
+        if axis_kind[tool_lc] == "recovery":
+            score_def = RECOVERY_DEFINITIONS.get(tool_lc, "")
+            title = (
+                f"{tool_label} {RECOVERY_PLOT_TITLE_SUFFIX}"
+                if tool_lc
+                else "Sequence recovery distribution"
+            )
+        else:
+            score_def = SCORE_DEFINITIONS.get(tool_lc, "")
+            title = (
+                f"{tool_label} score distribution"
+                if tool_lc
+                else "Candidate score distribution"
+            )
         plots.append(
             PlotSpec(
-                "Candidate score distribution",
+                title,
                 "score_bars",
-                score_distribution_svg(scores),
+                score_distribution_svg(
+                    scores,
+                    tool_label=tool_label,
+                    output_kind=output_kind,
+                    score_definition=score_def,
+                ),
             )
         )
 
@@ -246,7 +327,13 @@ def _nice_ceiling(v: float) -> float:
 
 
 def score_distribution_svg(
-    values: list[float], *, width: int = 860, height: int = 232
+    values: list[float],
+    *,
+    width: int = 860,
+    height: int = 248,
+    tool_label: str = "",
+    output_kind: str = "",
+    score_definition: str = "",
 ) -> str:
     """Per-candidate score bar chart — product-analytics styling.
 
@@ -256,6 +343,13 @@ def score_distribution_svg(
     bar, and a dashed mean reference. Bar width is capped so a handful of
     candidates never balloon into solid blocks, while the bars still span
     the full plot width so the panel never looks empty.
+
+    ``tool_label`` / ``output_kind`` / ``score_definition`` populate the
+    plot subtitle so the chart is self-describing — a reader sees which
+    tool produced these scores, what kind of artifact each candidate is
+    (sequence design, structure prediction, ...), and what "score" means
+    in context (with direction). All three are optional; when omitted the
+    subtitle collapses back to the generic ``n = N · range MIN-MAX`` line.
     """
     if not values:
         return ""
@@ -265,7 +359,10 @@ def score_distribution_svg(
     mean_v = sum(vals) / n
     y_top = 1.0 if vmax <= 1.0 else _nice_ceiling(vmax)
 
-    pad_l, pad_r, pad_t, pad_b = 46, 18, 42, 34
+    # Reserve extra vertical padding when we have a 2-line subtitle to keep
+    # the gridlines from collapsing onto the caption text.
+    has_context_line = bool(tool_label or output_kind or score_definition)
+    pad_l, pad_r, pad_t, pad_b = 46, 18, (58 if has_context_line else 42), 34
     plot_w = width - pad_l - pad_r
     plot_h = height - pad_t - pad_b
     base_y = pad_t + plot_h
@@ -326,10 +423,30 @@ def score_distribution_svg(
         f'y="{ymean - 5:.1f}" text-anchor="end">mean {fmt(mean_v)}</text>'
     )
 
-    subtitle = (
-        f'<text class="sd-subtitle" x="{pad_l}" y="20">'
-        f'n = {n} candidates · score {fmt(vmin)}-{fmt(vmax)}</text>'
-    )
+    # Subtitle: when caller provided context, line 1 carries the
+    # tool + output kind + score definition; line 2 carries the
+    # numeric summary. Without context we keep the one-line generic.
+    if has_context_line:
+        # Line 1: "<Tool> <output kind> · score = <definition>". Each
+        # part is optional; only include separators when neighbouring
+        # parts are present so we don't emit dangling "  · "s.
+        line1_parts: list[str] = []
+        head = " ".join(p for p in (tool_label, output_kind) if p).strip()
+        if head:
+            line1_parts.append(head)
+        if score_definition:
+            line1_parts.append(f"score = {score_definition}")
+        line1 = " · ".join(line1_parts)
+        subtitle = (
+            f'<text class="sd-subtitle" x="{pad_l}" y="20">{html.escape(line1)}</text>'
+            f'<text class="sd-subtitle sd-subtitle-meta" x="{pad_l}" y="36">'
+            f'n = {n} candidates · range {fmt(vmin)}-{fmt(vmax)}</text>'
+        )
+    else:
+        subtitle = (
+            f'<text class="sd-subtitle" x="{pad_l}" y="20">'
+            f'n = {n} candidates · score {fmt(vmin)}-{fmt(vmax)}</text>'
+        )
     xtitle = (
         f'<text class="sd-axis-title" x="{pad_l + plot_w / 2:.1f}" y="{height - 5}" '
         f'text-anchor="middle">candidate · sorted by score</text>'

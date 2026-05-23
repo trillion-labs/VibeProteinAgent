@@ -18,6 +18,11 @@ from vibeproteinagent.workspace.types import (
 )
 
 from .models import (
+    AgentDecision,
+    AgentMessage,
+    AgentStepSummary,
+    AgentToolCall,
+    AgentTranscript,
     MSABlock,
     ReportArtifact,
     ReportCandidate,
@@ -160,6 +165,9 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
             artifacts=artifacts,
             workspace=workspace.name,
         ),
+        agent_transcript=_collect_agent_transcript(
+            workspace, workflow_id=job.workflow_id, job_id=job.job_id,
+        ),
         raw_summary=_raw_job_summary(job, artifacts),
     )
 
@@ -253,6 +261,9 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
             nodes=report_nodes,
             artifacts=all_artifacts,
             workspace=workspace.name,
+        ),
+        agent_transcript=_collect_agent_transcript(
+            workspace, workflow_id=wf.workflow_id,
         ),
         raw_summary=_raw_workflow_summary(
             workflow_id=wf.workflow_id,
@@ -1248,6 +1259,234 @@ def _compact(value: Any, *, depth: int = 0) -> Any:
             for key, item in list(value.items())[:50]
         }
     return str(value)
+
+
+# --------------------------------------------------------------------------- agent transcript
+
+
+def _collect_agent_transcript(
+    workspace: Workspace,
+    *,
+    workflow_id: str | None = None,
+    job_id: str | None = None,
+) -> AgentTranscript | None:
+    """Pull the LLM-agent conversation that produced this workflow / job.
+
+    Looks up the ``agent_runs`` row whose ``workflow_ids_json`` /
+    ``job_ids_json`` contains the given id, then loads the message log,
+    last validated plan, and final report. Returns ``None`` when:
+
+    * no agent run is associated with this workflow / job (e.g. it was
+      submitted as a direct-tool call), OR
+    * the associated run carries no user message and no assistant
+      message (purely-prevalidated submission with nothing to show).
+
+    Failures (DB errors, malformed rows) are swallowed and return
+    ``None`` — the rest of the report still renders.
+    """
+    if not workflow_id and not job_id:
+        return None
+    try:
+        # Local import to avoid a circular dependency at module-load time
+        # (the agents.session module pulls in heavier deps that the
+        # reporting layer should not require for non-agent runs).
+        from vibeproteinagent.agents.session.store import AgentSessionStore
+
+        store = AgentSessionStore(workspace)
+        run = _find_agent_run_for(store, workflow_id=workflow_id, job_id=job_id)
+        if run is None:
+            return None
+        details = store.get_run_details(run.run_id)
+    except Exception:
+        return None
+
+    messages_raw = details.get("messages") or []
+    tool_calls_raw = details.get("tool_calls") or []
+    plans_raw = details.get("plans") or []
+    decisions_raw = details.get("decisions") or []
+    summaries_raw = details.get("summaries") or []
+    run_record = details.get("run") or {}
+
+    messages: list[AgentMessage] = []
+    for row in messages_raw:
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        messages.append(
+            AgentMessage(
+                role=str(row.get("role") or "assistant"),
+                content=content,
+                timestamp_ms=_as_int(row.get("created_at")),
+                model=row.get("model"),
+                token_count=_as_int(row.get("token_count")),
+            )
+        )
+
+    tool_calls: list[AgentToolCall] = []
+    for row in tool_calls_raw:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("tool_name") or "").strip()
+        if not name:
+            continue
+        args = row.get("args")
+        tool_calls.append(
+            AgentToolCall(
+                tool_name=name,
+                args=args if isinstance(args, dict) else {},
+                result=row.get("result"),
+                ok=bool(row.get("ok", True)),
+                timestamp_ms=_as_int(row.get("created_at")),
+            )
+        )
+
+    decisions: list[AgentDecision] = []
+    for row in decisions_raw:
+        if not isinstance(row, dict):
+            continue
+        decision_obj = row.get("decision") if isinstance(row.get("decision"), dict) else {}
+        next_round_raw = decision_obj.get("next_round")
+        next_round = next_round_raw if isinstance(next_round_raw, dict) else {}
+        notes_raw = decision_obj.get("notes")
+        decisions.append(
+            AgentDecision(
+                round_index=int(row.get("round_index") or 0),
+                decision_label=str(decision_obj.get("decision") or "decision"),
+                next_round_recommended=bool(next_round.get("recommended", False)),
+                reason=str(next_round.get("reason") or ""),
+                notes=notes_raw if isinstance(notes_raw, list) else [],
+                metrics_used=[
+                    str(m) for m in (decision_obj.get("metrics_used") or [])
+                    if isinstance(m, (str, int, float))
+                ],
+                raw=decision_obj,
+                timestamp_ms=_as_int(row.get("created_at")),
+            )
+        )
+
+    step_summaries: list[AgentStepSummary] = []
+    for row in summaries_raw:
+        if not isinstance(row, dict):
+            continue
+        body = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+        is_workflow = bool(body.get("workflow_id")) and "nodes" in body
+        error = body.get("error") if isinstance(body.get("error"), dict) else None
+        step_summaries.append(
+            AgentStepSummary(
+                kind="workflow" if is_workflow else "job",
+                workflow_id=row.get("workflow_id") or body.get("workflow_id"),
+                job_id=row.get("job_id") or body.get("job_id"),
+                tool=body.get("tool"),
+                state=body.get("state"),
+                name=body.get("name"),
+                error_message=(error or {}).get("message") or body.get("error_message"),
+                metrics_used=[
+                    str(m) for m in (body.get("metrics_used") or [])
+                    if isinstance(m, (str, int, float))
+                ],
+                raw=body,
+                timestamp_ms=_as_int(row.get("created_at")),
+            )
+        )
+
+    # User query: prefer the first explicit user message; fall back to
+    # ``agent_runs.user_request`` so we still have something when the
+    # message log was pruned.
+    user_query = ""
+    for m in messages:
+        if m.role == "user":
+            user_query = m.content
+            break
+    if not user_query:
+        user_query = str(run_record.get("user_request") or "").strip()
+    if not user_query and not any(m.role == "assistant" for m in messages):
+        # Nothing useful to surface.
+        return None
+
+    # Plan: pick the most-recently-validated plan; fall back to the last
+    # plan of any status so we still show *something* even mid-run.
+    plan_structured: dict[str, Any] | None = None
+    validated_statuses = {"validated", "validated_next_round", "submitted"}
+    for entry in reversed(plans_raw):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") in validated_statuses:
+            plan_structured = entry.get("plan") if isinstance(entry.get("plan"), dict) else None
+            break
+    if plan_structured is None:
+        for entry in reversed(plans_raw):
+            if isinstance(entry, dict) and isinstance(entry.get("plan"), dict):
+                plan_structured = entry["plan"]
+                break
+
+    # Plan text: take the *last assistant message before the final*
+    # — that's typically where the agent explains the plan it generated.
+    plan_text: str | None = None
+    assistant_msgs = [m for m in messages if m.role == "assistant"]
+    if len(assistant_msgs) >= 2:
+        plan_text = assistant_msgs[0].content
+    elif assistant_msgs and not plan_structured:
+        # Only one assistant message exists; treat it as the plan
+        # unless it clearly reads as a final wrap-up.
+        plan_text = assistant_msgs[0].content
+
+    # Final response: prefer agent_runs.final_report_json text; fall
+    # back to the last assistant message.
+    final_response: str | None = None
+    final_report = run_record.get("final_report")
+    if isinstance(final_report, dict):
+        for key in ("summary", "final_response", "narrative", "answer", "text"):
+            value = final_report.get(key)
+            if isinstance(value, str) and value.strip():
+                final_response = value.strip()
+                break
+    if not final_response and len(assistant_msgs) >= 2:
+        final_response = assistant_msgs[-1].content
+
+    return AgentTranscript(
+        run_id=str(run_record.get("run_id") or run.run_id),
+        user_query=user_query,
+        plan_text=plan_text,
+        plan_structured=plan_structured,
+        final_response=final_response,
+        messages=messages,
+        tool_calls=tool_calls,
+        decisions=decisions,
+        step_summaries=step_summaries,
+        model=run_record.get("model"),
+        provider=run_record.get("provider"),
+        started_at_ms=_as_int(run_record.get("created_at")),
+        finished_at_ms=_as_int(run_record.get("updated_at")),
+    )
+
+
+def _find_agent_run_for(
+    store: Any,
+    *,
+    workflow_id: str | None,
+    job_id: str | None,
+) -> Any | None:
+    """Scan recent agent runs for one whose workflow/job lists contain our id.
+
+    ``agent_runs`` doesn't have a reverse index from workflow → run, so we
+    list the most-recent N runs and match in Python. This is O(N) but N is
+    bounded (typical workspace has a small handful of agent runs); the
+    sample data uses ≤3 runs per session.
+    """
+    try:
+        runs = store.list_runs(limit=200)
+    except Exception:
+        return None
+    for run in runs:
+        wf_ids = getattr(run, "workflow_ids", None) or []
+        job_ids = getattr(run, "job_ids", None) or []
+        if workflow_id and workflow_id in wf_ids:
+            return run
+        if job_id and job_id in job_ids:
+            return run
+    return None
 
 
 __all__ = ["collect_report_model"]
