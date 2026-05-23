@@ -24,6 +24,7 @@ because they bind the InferenceRunner to a specific input/output dir.
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib
 import json
 import os
@@ -245,6 +246,7 @@ class PXDesignInput(BaseModel):
 
 
 class PXDesignDesign(BaseModel):
+    candidate_id: str | None = None
     pdb_path: str | None = None
     cif_path: str
     score: float | None = None
@@ -258,6 +260,12 @@ class PXDesignOutput(BaseModel):
     num_samples: int
     task_name: str | None = None
     seed: int | None = None
+
+
+def _design_candidate_id(task_name: str, index: int, sequence: str, cif_path: Path) -> str:
+    seed = f"{task_name}:{index}:{sequence}:{cif_path.name}"
+    token = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:10]
+    return f"pxdesign:{task_name}:design_{index}:{token}"
 
 
 @dataclass(frozen=True)
@@ -917,7 +925,7 @@ class PXDesignAdapter(ToolAdapter):
             return []
 
         rows = rows[:top_k]
-        for row in rows:
+        for idx, row in enumerate(rows, start=1):
             seq = (row.get("sequence") or "").strip()
             chosen_rel = (row.get("chosen_struct_path") or "").strip()
             cif_path = task_dir / chosen_rel if chosen_rel else None
@@ -926,6 +934,7 @@ class PXDesignAdapter(ToolAdapter):
             score = _summary_score_from_row(row)
             designs.append(
                 PXDesignDesign(
+                    candidate_id=_design_candidate_id(task_name, idx, seq, cif_path),
                     pdb_path=None,
                     cif_path=str(cif_path),
                     score=score,
@@ -951,7 +960,7 @@ class PXDesignAdapter(ToolAdapter):
             return []
         results: list[PXDesignDesign] = []
         cifs = sorted(predictions_dir.glob(f"{task_name}_sample_*.cif"))
-        for cif in cifs:
+        for idx, cif in enumerate(cifs, start=1):
             try:
                 rank_str = cif.stem.rsplit("_", 1)[-1]
                 rank = int(rank_str)
@@ -971,6 +980,7 @@ class PXDesignAdapter(ToolAdapter):
             seq = _extract_binder_sequence(cif)
             results.append(
                 PXDesignDesign(
+                    candidate_id=_design_candidate_id(task_name, idx, seq, cif),
                     pdb_path=None,
                     cif_path=str(cif),
                     score=score,
@@ -1319,6 +1329,9 @@ def _collect_preview_pipeline_outputs(
                 continue
             designs.append(
                 PXDesignDesign(
+                    candidate_id=_design_candidate_id(
+                        task_name, len(designs) + 1, seq, cif
+                    ),
                     pdb_path=None,
                     cif_path=str(cif),
                     score=None,

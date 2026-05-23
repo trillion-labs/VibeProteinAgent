@@ -41,7 +41,7 @@ class WorkflowPlanner:
         upstream: set[str] = set()
         for expr in refs:
             head, _, rest = expr.partition(".")
-            if head != "outputs":
+            if head not in {"outputs", "jobs"}:
                 continue
             name = rest.split(".", 1)[0]
             if "[" in name:

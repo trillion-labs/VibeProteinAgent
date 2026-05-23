@@ -165,7 +165,7 @@ class Workflow(BaseModel):
                 refs.extend(iter_refs(node.when))
             for expr in refs:
                 head, _, rest = expr.partition(".")
-                if head != "outputs":
+                if head not in {"outputs", "jobs"}:
                     continue
                 upstream = rest.split(".", 1)[0]
                 # Strip any bracket index on the head segment ("foo[0]" -> "foo").

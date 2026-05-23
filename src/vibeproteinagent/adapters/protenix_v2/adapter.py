@@ -173,6 +173,7 @@ class ProtenixV2Input(BaseModel):
 
 
 class ProtenixV2PredictionRecord(BaseModel):
+    candidate_id: str | None = None
     seed: int
     rank: int
     cif_path: str
@@ -529,6 +530,9 @@ class ProtenixV2Adapter(ToolAdapter):
             )
             pae_path = _write_ipsae_pae_json(full_confidence, summary_path)
             rec = ProtenixV2PredictionRecord(
+                candidate_id=(
+                    f"protenix_v2:{prediction_sample_name}:seed_{seed_val}:rank_{rank}"
+                ),
                 seed=seed_val,
                 rank=rank,
                 cif_path=str(cif_path),

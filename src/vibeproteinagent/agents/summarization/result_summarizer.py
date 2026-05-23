@@ -70,6 +70,8 @@ class ResultSummarizer:
                 for n in nodes
             ],
             "top_designs": _extract_top_designs(nodes),
+            "submissions": _extract_submissions(nodes),
+            "final_submission": _latest_final_submission(nodes),
             "metrics_used": _extract_metric_names(nodes),
             "artifacts": artifacts_by_job,
             "notes": [],
@@ -119,11 +121,43 @@ def _extract_top_designs(nodes: list[Any]) -> list[dict[str, Any]]:
             or output.get("designs")
             or output.get("ranked")
             or output.get("ranked_candidates")
+            or output.get("representative_sequences")
         )
         if isinstance(candidates, list):
             for idx, item in enumerate(candidates[:10]):
                 designs.append({"node_id": node.node_id, "rank": idx + 1, "design": _compact(item)})
     return designs[:10]
+
+
+def _extract_submissions(nodes: list[Any]) -> list[dict[str, Any]]:
+    submissions: list[dict[str, Any]] = []
+    for node in nodes:
+        if node.tool_name != "submit_candidate" or node.state != "completed":
+            continue
+        output = node.output
+        if not isinstance(output, dict) or output.get("terminal") is not True:
+            continue
+        submission = _compact(output)
+        if isinstance(submission, dict):
+            submission["node_id"] = node.node_id
+            submission["job_id"] = node.job_id
+            submissions.append(submission)
+    return submissions
+
+
+def _latest_final_submission(nodes: list[Any]) -> dict[str, Any] | None:
+    submissions = _extract_submissions(nodes)
+    if not submissions:
+        return None
+    superseded = {
+        str(submission.get("supersedes"))
+        for submission in submissions
+        if submission.get("supersedes")
+    }
+    for submission in reversed(submissions):
+        if str(submission.get("submission_id")) not in superseded:
+            return submission
+    return submissions[-1]
 
 
 def _artifact_refs(records: dict[str, Any]) -> dict[str, dict[str, Any]]:

@@ -47,10 +47,50 @@ def _metric(row: dict[str, Any], key: str) -> float | None:
 
 
 def _path(row: dict[str, Any]) -> str | None:
-    for key in ("predicted_cif", "predicted_pdb", "structure_path", "pdb_path"):
+    for key in ("predicted_cif", "predicted_pdb", "structure_path", "pdb_path", "cif_path"):
         value = row.get(key)
         if value:
             return str(value)
+    return None
+
+
+def _first_value(*rows: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for row in rows:
+        for key in keys:
+            value = row.get(key)
+            if value is not None:
+                return value
+    return None
+
+
+def _candidate_id(
+    idx: int,
+    prediction: dict[str, Any],
+    candidate: dict[str, Any],
+) -> str:
+    value = _first_value(
+        candidate,
+        prediction,
+        keys=("candidate_id", "name", "id", "seed", "header"),
+    )
+    if value:
+        return str(value)
+    return str(idx + 1)
+
+
+def _sequence(candidate: dict[str, Any], prediction: dict[str, Any]) -> str | None:
+    value = _first_value(
+        candidate,
+        prediction,
+        keys=("sequence", "protein_sequence", "designed_sequence"),
+    )
+    return str(value) if value else None
+
+
+def _first_metric(*values: float | None) -> float | None:
+    for value in values:
+        if value is not None:
+            return value
     return None
 
 
@@ -60,7 +100,12 @@ def _score(
     qc: dict[str, Any],
     candidate: dict[str, Any],
 ) -> tuple[float, dict[str, Any]]:
-    ranking_score = _metric(prediction, "ranking_score")
+    candidate_score = _metric(candidate, "score")
+    ranking_score = _first_metric(
+        _metric(prediction, "ranking_score"),
+        _metric(candidate, "ranking_score"),
+        candidate_score,
+    )
     plddt = _metric(prediction, "plddt")
     iptm = _metric(prediction, "iptm")
     ptm = _metric(prediction, "ptm")
@@ -89,6 +134,7 @@ def _score(
 
     reported_plddt = plddt if plddt is not None else qc_plddt
     details = {
+        "candidate_score": candidate_score,
         "ranking_score": ranking_score,
         "plddt": reported_plddt,
         "iptm": iptm,
@@ -97,6 +143,7 @@ def _score(
         "qc_flag_count": len(qc_flags),
         "qc_flags": qc_flags,
         "structure_path": _path(prediction) or _path(candidate),
+        "sequence": _sequence(candidate, prediction),
     }
     return score, details
 
@@ -129,12 +176,7 @@ class RankDesignsAdapter(ToolAdapter):
             ranked.append(
                 {
                     "rank": 0,
-                    "candidate_id": str(
-                        candidate.get("candidate_id")
-                        or prediction.get("name")
-                        or prediction.get("seed")
-                        or idx + 1
-                    ),
+                    "candidate_id": _candidate_id(idx, prediction, candidate),
                     "score": round(score, 6),
                     **details,
                 }

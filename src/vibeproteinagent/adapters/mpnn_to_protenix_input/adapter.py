@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -10,6 +11,7 @@ from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
 
 _SCORE_RE = re.compile(r"score=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
+_CANDIDATE_ID_RE = re.compile(r"(?:^|[,| ]+)candidate_id=([^, ]+)")
 
 
 class Mpnn2ProtenixInput(BaseModel):
@@ -21,18 +23,24 @@ class Mpnn2ProtenixInput(BaseModel):
 class Mpnn2ProtenixOutput(BaseModel):
     input_jsons: list[str]
     names: list[str]
+    candidates: list[dict]
     count: int
 
 
-def _parse_mpnn_fasta(fasta_path: Path) -> list[tuple[str, float | None]]:
-    """Return (sequence, score) for every non-input record in a ProteinMPNN FASTA.
+def _stable_candidate_id(index: int, sequence: str) -> str:
+    token = hashlib.sha256(sequence.encode("utf-8")).hexdigest()[:10]
+    return f"proteinmpnn:design_{index}:{token}"
+
+
+def _parse_mpnn_fasta(fasta_path: Path) -> list[dict]:
+    """Return candidate records for every non-input record in a ProteinMPNN FASTA.
 
     The proteinmpnn adapter writes the source sequence first with header
     ``>name|input, num_residues=N`` (no score), then one record per design with
-    header ``>name|design=K, T=…, score=S, seq_recovery=R``. We skip ``input``
-    rows and parse ``score=...`` out of the remainder.
+    candidate metadata. We skip ``input`` rows and parse the ranking fields out
+    of the remaining headers.
     """
-    records: list[tuple[str, float | None]] = []
+    records: list[dict] = []
     header: str | None = None
     seq_chunks: list[str] = []
 
@@ -43,9 +51,22 @@ def _parse_mpnn_fasta(fasta_path: Path) -> list[tuple[str, float | None]]:
             return
         seq = "".join(seq_chunks).strip()
         if seq and "|input" not in header:
-            m = _SCORE_RE.search(header)
-            score = float(m.group(1)) if m else None
-            records.append((seq, score))
+            score_match = _SCORE_RE.search(header)
+            candidate_match = _CANDIDATE_ID_RE.search(header)
+            index = len(records) + 1
+            records.append(
+                {
+                    "candidate_id": (
+                        candidate_match.group(1)
+                        if candidate_match
+                        else _stable_candidate_id(index, seq)
+                    ),
+                    "index": index - 1,
+                    "sequence": seq,
+                    "score": float(score_match.group(1)) if score_match else None,
+                    "header": header,
+                }
+            )
         header = None
         seq_chunks = []
 
@@ -88,7 +109,10 @@ class Mpnn2ProtenixAdapter(ToolAdapter):
         # always preferred over a header-malformed one.
         ranked = sorted(
             records,
-            key=lambda r: (float("inf") if r[1] is None else r[1]),
+            key=lambda r: (
+                float("inf") if r.get("score") is None else float(r["score"]),
+                str(r.get("candidate_id") or ""),
+            ),
         )
         top = ranked[: params.top_k]
 
@@ -97,8 +121,10 @@ class Mpnn2ProtenixAdapter(ToolAdapter):
 
         input_jsons: list[str] = []
         names: list[str] = []
-        for i, (seq, _score) in enumerate(top, start=1):
+        candidates: list[dict] = []
+        for i, record in enumerate(top, start=1):
             name = f"{params.name_prefix}_{i}"
+            seq = str(record["sequence"])
             # Protenix v1 input JSON is a list of entries (each describing one
             # molecular system). For single-chain refold we emit a 1-element list.
             payload = [
@@ -114,10 +140,23 @@ class Mpnn2ProtenixAdapter(ToolAdapter):
             target.write_text(json.dumps(payload, indent=2))
             input_jsons.append(str(target))
             names.append(name)
+            candidates.append(
+                {
+                    "candidate_id": record["candidate_id"],
+                    "sequence": seq,
+                    "score": record.get("score"),
+                    "source_header": record.get("header"),
+                    "protenix_input_json": str(target),
+                    "protenix_name": name,
+                }
+            )
 
         ctx.emit_progress(1.0)
         return Mpnn2ProtenixOutput(
-            input_jsons=input_jsons, names=names, count=len(input_jsons)
+            input_jsons=input_jsons,
+            names=names,
+            candidates=candidates,
+            count=len(input_jsons),
         )
 
     def estimate_vram(self, params: Mpnn2ProtenixInput) -> int:

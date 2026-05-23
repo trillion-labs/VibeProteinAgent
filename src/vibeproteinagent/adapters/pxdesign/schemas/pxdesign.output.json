@@ -8,8 +8,15 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["pdb_path", "cif_path", "score", "sequence", "binder_length"],
+        "required": [
+          "pdb_path",
+          "cif_path",
+          "score",
+          "sequence",
+          "binder_length"
+        ],
         "properties": {
+          "candidate_id": {"type": ["string", "null"], "minLength": 1},
           "pdb_path": {"type": ["string", "null"]},
           "cif_path": {"type": "string"},
           "score": {"type": ["number", "null"]},

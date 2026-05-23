@@ -288,6 +288,8 @@ tools:
     required: false
   rank_designs:
     runtime: shared
+  submit_candidate:
+    runtime: shared
   rfdiffusion:
     runtime: shared
     weights:

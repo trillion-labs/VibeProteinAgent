@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import time
 from pathlib import Path
@@ -47,6 +48,7 @@ class ProteinMPNNInput(BaseModel):
 
 
 class ProteinMPNNDesign(BaseModel):
+    candidate_id: str | None = None
     sequence: str
     score: float
     seq_recovery: float | None = None
@@ -71,6 +73,12 @@ def _resolve_checkpoint(weights_dir: Path) -> Path:
         f"ProteinMPNN checkpoint v_48_020.pt not found in {weights_dir!s} "
         f"or vendored fallback {_VENDOR_WEIGHTS_DEFAULT!s}"
     )
+
+
+def _candidate_id(pdb_path: str, sample_idx: int, sequence: str) -> str:
+    stem = Path(pdb_path).stem.replace(" ", "_") or "input"
+    token = hashlib.sha256(sequence.encode("utf-8")).hexdigest()[:10]
+    return f"proteinmpnn:{stem}:design_{sample_idx}:{token}"
 
 
 @register_adapter("descriptor.yaml")
@@ -220,14 +228,19 @@ class ProteinMPNNAdapter(ToolAdapter):
                     ).item()
                     seq = _S_to_seq(S_sample[b_ix], chain_M[b_ix] * chain_M_pos[b_ix])
                     score = float(scores[b_ix])
+                    sample_idx = n_done + b_ix + 1
+                    candidate_id = _candidate_id(pdb_path, sample_idx, seq)
                     designs.append(
                         ProteinMPNNDesign(
-                            sequence=seq, score=score, seq_recovery=float(recovery)
+                            candidate_id=candidate_id,
+                            sequence=seq,
+                            score=score,
+                            seq_recovery=float(recovery),
                         )
                     )
-                    sample_idx = n_done + b_ix + 1
                     fh.write(
                         f">{protein['name']}|design={sample_idx}, "
+                        f"candidate_id={candidate_id}, "
                         f"T={params.temperature}, score={score:.4f}, "
                         f"seq_recovery={recovery:.4f}\n{seq}\n"
                     )

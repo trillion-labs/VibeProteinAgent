@@ -240,6 +240,9 @@ class ReportModel:
     summary: RunSummary
     graph: WorkflowGraph
     candidates: list[ReportCandidate] = field(default_factory=list)
+    final_candidates: list[ReportCandidate] = field(default_factory=list)
+    final_submission: dict[str, Any] | None = None
+    submissions: list[dict[str, Any]] = field(default_factory=list)
     artifacts: list[ReportArtifact] = field(default_factory=list)
     msa_blocks: list[MSABlock] = field(default_factory=list)
     plots: list[PlotSpec] = field(default_factory=list)

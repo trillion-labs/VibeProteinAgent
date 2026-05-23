@@ -298,7 +298,9 @@ def render_report_html(
     del share, report_format  # share/bundle behaviour handled upstream in write_report
     plots = build_plots(model)
     title = f"VPA report · {model.summary.id}"
-    top = model.candidates[:top_k]
+    final_top = model.final_candidates[:top_k]
+    explored_top = model.candidates[:top_k]
+    top = final_top or explored_top
 
     headline = _executive_headline(model)
     dashboard_html = _executive_dashboard(model)
@@ -307,14 +309,14 @@ def render_report_html(
     show_workflow = len(model.graph.nodes) >= 2
     show_plots = bool(plots)
     show_msa = bool(model.msa_blocks)
-    show_candidates = bool(model.candidates)
+    show_candidates = bool(model.final_candidates or model.candidates)
     show_conversation = model.agent_transcript is not None
 
     nav_items: list[tuple[str, str, str]] = [("summary", "Summary", "◎")]
     if show_conversation:
         nav_items.append(("conversation", "Conversation", "❝"))
     if show_candidates:
-        nav_items.append(("candidates", "Top candidates", "★"))
+        nav_items.append(("candidates", "Candidates", "★"))
     if show_workflow:
         nav_items.append(("workflow", "Workflow", "⌥"))
     if show_plots:
@@ -383,6 +385,30 @@ def render_report_html(
     )
 
     # ----- Candidates section -----
+    final_block = ""
+    if model.final_candidates:
+        final_label = "Auto-selected" if (
+            model.final_submission or {}
+        ).get("auto_selected") else "Submitted"
+        final_block = f"""
+  <div class="candidate-group candidate-group-final">
+    <div class="candidate-group-head">
+      <p class="card-eyebrow">Final picks</p>
+      <span class="card-meta">{_h(final_label)}</span>
+    </div>
+    {_candidate_cards(final_top, total_candidates=len(model.final_candidates))}
+  </div>"""
+    explored_block = ""
+    if model.candidates:
+        explored_block = f"""
+  <div class="candidate-group candidate-group-explored">
+    <div class="candidate-group-head">
+      <p class="card-eyebrow">Explored candidates</p>
+      <span class="card-meta">{len(model.candidates)} total</span>
+    </div>
+    {_candidate_cards(explored_top, total_candidates=len(model.candidates))}
+    {_all_designs_table(model.candidates)}
+  </div>"""
     candidates_section = (
         f"""<section id="candidates" class="card card-candidates">
   <header class="card-header">
@@ -390,10 +416,10 @@ def render_report_html(
       <p class="card-eyebrow">Designs</p>
       <h2 class="card-title">Top Candidates</h2>
     </div>
-    <span class="card-meta">{len(model.candidates)} total</span>
+    <span class="card-meta">{len(model.final_candidates)} final · {len(model.candidates)} explored</span>
   </header>
-  {_candidate_cards(top, total_candidates=len(model.candidates))}
-  {_all_designs_table(model.candidates)}
+  {final_block}
+  {explored_block}
 </section>"""
         if show_candidates else ""
     )
@@ -7839,6 +7865,9 @@ def _render_agent_prose(text: str) -> str:
 
 
 def _why_candidate(candidate: ReportCandidate) -> str:
+    justification = candidate.source.get("justification")
+    if isinstance(justification, str) and justification.strip():
+        return justification.strip()
     bits = []
     # ipTM / ipSAE are interface metrics — meaningless for a single-chain
     # candidate. Drop them from the per-card "why" prose when monomer.

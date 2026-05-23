@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.agents import AgentConfig, AgentController, AgentSessionStore, ModeRouter
+from vibeproteinagent.agents.evaluation import DecisionEngine
 from vibeproteinagent.agents.execution import ExecutionPolicy
 from vibeproteinagent.agents.planning import WorkflowPlanner
 from vibeproteinagent.agents.planning.workflow_planner import _fallback_plan_from_prompt
@@ -21,6 +22,42 @@ from vibeproteinagent.core.errors import InvalidParamsError, TimeoutError_
 from vibeproteinagent.mcp.tools import SessionCtx, list_workflows
 from vibeproteinagent.workflows import WorkflowStore
 from vibeproteinagent.workspace import ArtifactStore, JobState, JobStore, Workspace
+
+
+def test_decision_engine_does_not_terminal_on_representative_sequence() -> None:
+    decision = DecisionEngine(None).local_decision(
+        {
+            "state": "completed",
+            "nodes": [
+                {
+                    "node_id": "sequence_summary",
+                    "output": {
+                        "representative_sequences": [
+                            {"sequence": "ACDEFGHIK", "length": 9}
+                        ]
+                    },
+                }
+            ],
+            "metrics_used": ["metrics.family_summary.sequence_count"],
+        },
+        success_criteria={"final_response_includes_one_output_protein_sequence": True},
+    )
+
+    assert decision["decision"] == "completed_review_metrics"
+    assert decision["next_round"]["recommended"] is False
+
+
+def test_decision_engine_does_not_terminal_on_ranked_design() -> None:
+    decision = DecisionEngine(None).local_decision(
+        {
+            "state": "completed",
+            "top_designs": [{"rank": 1, "design": {"sequence": "ACDEFGHIK"}}],
+        },
+        success_criteria={"return_top_ranked_sequence": True},
+    )
+
+    assert decision["decision"] == "completed_review_metrics"
+    assert decision["next_round"]["recommended"] is False
 
 
 def _run_pending_jobs(store: JobStore, registry: ToolRegistry, stop: threading.Event) -> None:
@@ -1110,6 +1147,31 @@ def test_workflow_summary_extracts_ranked_candidates() -> None:
 
     assert designs[0]["node_id"] == "rank"
     assert designs[0]["design"]["candidate_id"] == "a"
+
+
+def test_workflow_summary_exposes_representative_sequences_as_candidates() -> None:
+    from types import SimpleNamespace
+
+    from vibeproteinagent.agents.summarization.result_summarizer import _extract_top_designs
+
+    nodes = [
+        SimpleNamespace(
+            node_id="sequence_summary",
+            output={
+                "representative_sequences": [
+                    {
+                        "candidate_id": "representative:1:abc",
+                        "sequence": "ACDEFGHIK",
+                    }
+                ]
+            },
+        )
+    ]
+
+    designs = _extract_top_designs(nodes)
+
+    assert designs[0]["node_id"] == "sequence_summary"
+    assert designs[0]["design"]["candidate_id"] == "representative:1:abc"
 
 
 def test_compact_tool_schema_keeps_only_planner_facing_fields() -> None:

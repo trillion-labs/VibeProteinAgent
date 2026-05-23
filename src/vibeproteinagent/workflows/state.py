@@ -50,12 +50,15 @@ class WorkflowStateMachine:
         current: NodeRuntime | None = None,
     ) -> dict[str, Any]:
         outputs: dict[str, Any] = {}
+        jobs: dict[str, Any] = {}
         parent_outputs: set[str] = set()
         foreach_children: list[NodeRuntime] = []
         for rt in runtime.values():
             if rt.state not in SUCCESS_NODE_STATES or rt.output is None:
                 continue
             outputs[rt.runtime_id] = rt.output
+            if rt.job_id:
+                jobs[rt.runtime_id] = rt.job_id
             if rt.foreach_parent is not None:
                 foreach_children.append(rt)
             elif rt.desc.foreach:
@@ -69,7 +72,9 @@ class WorkflowStateMachine:
             # children as a best-effort ordered list.
             if rt.foreach_parent not in parent_outputs:
                 outputs.setdefault(rt.foreach_parent, []).append(rt.output)
-        scope: dict[str, Any] = {"params": params, "outputs": outputs}
+            if rt.job_id:
+                jobs.setdefault(rt.foreach_parent, []).append(rt.job_id)
+        scope: dict[str, Any] = {"params": params, "outputs": outputs, "jobs": jobs}
         if current is not None and current.foreach_parent is not None:
             scope["item"] = current.item
             scope["index"] = current.foreach_index

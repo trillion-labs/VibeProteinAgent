@@ -47,17 +47,22 @@ workflow can execute at all.
 Preferred executable fallbacks:
 - Pure semantic/function text without sequence or structure: retrieve
   literature/family sequences, summarize the family, and return a representative
-  candidate sequence from the retrieved set.
+  candidate sequence from the retrieved set with submit_candidate.
 - Target sequence plus target-site residues: fold the target sequence, run a
   hotspot-directed binder design workflow, analyze/QC/rank, and return the top
-  binder sequence.
+  binder sequence with submit_candidate.
 - De novo design without scaffold: run backbone generation, inverse folding,
-  refolding, structure analysis, protein QC, and ranking.
+  refolding, structure analysis, protein QC, ranking, and submit_candidate.
 
 Respect requested output formats by carrying the requested final fields in
 success_criteria and assumptions. For example, if the user asks for
 `Reason:` and `Answer:`, make the workflow produce enough ranked sequence data
 for the final response to fill those fields.
+
+When a satisfactory final answer is ready, use submit_candidate as the explicit
+termination signal. Use rank_designs before submit_candidate when ranked design
+metrics are needed. If more refinement is needed, plan another workflow round
+instead of submitting.
 
 When selected tool metadata includes `sharding`, prefer workflow-level fan-out:
 use `foreach` over seed/candidate lists, keep expensive generator shards at the
@@ -75,6 +80,9 @@ put only runtime values in top-level `params`, for example
 `{"workflow_ref": "rfdiffusion_backbone_design_round", "params": {"length": 100}}`.
 Do not copy template YAML or write parameter schema objects; VPA expands and
 validates the selected template locally.
+Template parameters named `submit_final` default to false so candidate-producing
+rounds can be reviewed. Set `submit_final: true` only when this planned round is
+intended to make an explicit final submission.
 
 The first output character must be `{` and the final output character must be
 `}`. Do not output comments, XML tags, Markdown fences, prose, thinking text, or
@@ -86,6 +94,9 @@ DECISION_SYSTEM_PROMPT = """You are the VPA result critic and next-round advisor
 Inspect only compact local summaries with artifact references. Decide whether the
 current run satisfies the stated success criteria, and whether another local VPA
 workflow round is justified. Do not request remote GPU or cloud scientific inference.
+Do not treat the mere presence of candidates as terminal; explicit final
+selection is represented by a successful submit_candidate output. If no
+submit_candidate exists and metrics are insufficient, recommend another round.
 
 Return only JSON with keys: decision, next_round, metrics_used, notes.
 """
@@ -97,6 +108,11 @@ decision recommending another round, draft the next local VPA workflow plan.
 Use only available VPA tools. Preserve local execution and validation. Prefer
 `workflow_ref` plus top-level runtime `params` for template-based next rounds,
 and explain parameter changes in assumptions or notes.
+When the next round should produce a final answer, include submit_candidate after
+the relevant candidate-producing or rank_designs node and reference candidates
+explicitly by job_id plus candidate_id or index.
+For template next rounds, express that by setting the template's
+`submit_final` runtime parameter to true.
 For expensive sharded tools, continue using `foreach` and `max_parallel`; vary
 seeds/candidates between rounds instead of making one large single-GPU node.
 

@@ -522,6 +522,22 @@ class AgentController:
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
+            final_submission = outcome.summary.get("final_submission")
+            if isinstance(final_submission, dict):
+                decision = {
+                    "decision": "submitted_final_candidate",
+                    "next_round": {
+                        "recommended": False,
+                        "changes": [],
+                        "reason": "workflow completed with an explicit submit_candidate result",
+                    },
+                    "metrics_used": outcome.summary.get("metrics_used") or [],
+                    "notes": [],
+                    "submission": final_submission,
+                }
+                self.session_store.add_decision(run_id, decision, round_index=round_index)
+                decisions.append(decision)
+                break
             try:
                 decision = await self._run_llm_entry(
                     phase=f"decision_round_{round_index}",
@@ -555,11 +571,27 @@ class AgentController:
                             "details": exc.details,
                         }
                     )
+            next_round = decision.get("next_round") or {}
+            if next_round.get("recommended") and round_index + 1 >= self.config.max_rounds:
+                decision["fallback_final_selection"] = {
+                    "auto_select": True,
+                    "reason": (
+                        "max_rounds reached without an explicit submit_candidate result"
+                    ),
+                }
+                decision["next_round"] = {
+                    "recommended": False,
+                    "changes": next_round.get("changes") or [],
+                    "reason": (
+                        "max_rounds reached without an explicit submit_candidate result"
+                    ),
+                }
+                self.session_store.add_decision(run_id, decision, round_index=round_index)
+                decisions.append(decision)
+                break
             self.session_store.add_decision(run_id, decision, round_index=round_index)
             decisions.append(decision)
-
-            next_round = decision.get("next_round") or {}
-            if not next_round.get("recommended") or round_index + 1 >= self.config.max_rounds:
+            if not next_round.get("recommended"):
                 break
             next_plan = next_round.get("plan") or next_round.get("workflow_plan")
             try:

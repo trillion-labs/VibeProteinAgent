@@ -10,6 +10,7 @@
         "type": "object",
         "required": ["sequence", "score"],
         "properties": {
+          "candidate_id": {"type": ["string", "null"], "minLength": 1},
           "sequence": {"type": "string", "minLength": 1},
           "score": {"type": "number"},
           "seq_recovery": {"type": ["number", "null"]}

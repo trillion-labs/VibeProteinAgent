@@ -464,8 +464,10 @@ def _representative_sequences(
     for idx, (header, sequence) in enumerate(records[:limit], start=1):
         metrics = _metrics(sequence, ph)
         liabilities = _liabilities(sequence, metrics)
+        source = header or f"sequence_{idx}"
         representatives.append(
             {
+                "candidate_id": f"representative:{idx}:{_stable_token(source, sequence)}",
                 "index": idx,
                 "header": header,
                 "sequence": sequence,
@@ -478,6 +480,13 @@ def _representative_sequences(
             }
         )
     return representatives
+
+
+def _stable_token(label: str, sequence: str) -> str:
+    import hashlib
+
+    seed = f"{label}\n{sequence}".encode()
+    return hashlib.sha256(seed).hexdigest()[:12]
 
 
 def _family_summary(records: list[tuple[str | None, str]]) -> dict[str, Any]:

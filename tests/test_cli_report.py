@@ -172,6 +172,137 @@ def test_report_workflow_uses_ranked_candidates_qc_and_msa(
     assert "Reproducibility" in html
 
 
+def test_report_does_not_auto_select_without_agent_budget_marker(
+    tmp_workspace: Workspace,
+) -> None:
+    job_store = JobStore(tmp_workspace)
+    rank_job = job_store.submit("rank_designs", "1.0.0", {"top_k": 1})
+    job_store.transition(rank_job.job_id, JobState.QUEUED)
+    job_store.transition(rank_job.job_id, JobState.RUNNING)
+    ranked_output = {
+        "candidate_count": 1,
+        "ranked_candidates": [
+            {"rank": 1, "candidate_id": "design_1", "score": 1.0}
+        ],
+    }
+    job_store.transition(rank_job.job_id, JobState.COMPLETED, output=ranked_output)
+
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="no_submission_demo",
+        version="1.0",
+        descriptor_yaml="name: no_submission_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    wf_store.add_node(
+        workflow_id=wf_id,
+        node_id="rank",
+        tool_name="rank_designs",
+        tool_version="1.0.0",
+        upstream=[],
+        params_hash="abc",
+        input_hash="def",
+        cache_key="ghi",
+    )
+    wf_store.update_node_state(
+        wf_id,
+        "rank",
+        "completed",
+        job_id=rank_job.job_id,
+        output=ranked_output,
+    )
+    wf_store.update_state(wf_id, "completed", finished=True)
+
+    model = collect_report_model(tmp_workspace, wf_id)
+
+    assert model.final_submission is None
+    assert model.final_candidates == []
+    assert [candidate.candidate_id for candidate in model.candidates] == ["design_1"]
+
+
+def test_report_separates_explicit_final_submission(
+    tmp_workspace: Workspace,
+) -> None:
+    job_store = JobStore(tmp_workspace)
+    rank_job = job_store.submit("rank_designs", "1.0.0", {"top_k": 2})
+    job_store.transition(rank_job.job_id, JobState.QUEUED)
+    job_store.transition(rank_job.job_id, JobState.RUNNING)
+    ranked_output = {
+        "candidate_count": 2,
+        "ranked_candidates": [
+            {"rank": 1, "candidate_id": "design_1", "score": 1.0},
+            {"rank": 2, "candidate_id": "design_2", "score": 0.5},
+        ],
+    }
+    job_store.transition(rank_job.job_id, JobState.COMPLETED, output=ranked_output)
+
+    submit_job = job_store.submit(
+        "submit_candidate",
+        "1.0.0",
+        {"outcome": "accepted", "candidates": [], "reasoning": "x"},
+    )
+    job_store.transition(submit_job.job_id, JobState.QUEUED)
+    job_store.transition(submit_job.job_id, JobState.RUNNING)
+    submission = {
+        "submission_id": "sub_final",
+        "outcome": "accepted",
+        "terminal": True,
+        "candidates_resolved": [
+            {
+                "source_job_id": rank_job.job_id,
+                "source_tool": "rank_designs",
+                "candidate_id": "design_2",
+                "rank": 2,
+                "score": 0.5,
+                "justification": "diverse backup",
+                "scores": {"score": 0.5},
+                "artifacts": [],
+            }
+        ],
+        "reasoning": "selected diverse backup",
+        "supersedes": None,
+        "auto_selected": False,
+        "runtime_ms": 1,
+    }
+    job_store.transition(submit_job.job_id, JobState.COMPLETED, output=submission)
+
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="submission_demo",
+        version="1.0",
+        descriptor_yaml="name: submission_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    for node_id, tool, job, output in (
+        ("rank", "rank_designs", rank_job, ranked_output),
+        ("submit", "submit_candidate", submit_job, submission),
+    ):
+        wf_store.add_node(
+            workflow_id=wf_id,
+            node_id=node_id,
+            tool_name=tool,
+            tool_version="1.0.0",
+            upstream=[],
+            params_hash="abc",
+            input_hash="def",
+            cache_key="ghi",
+        )
+        wf_store.update_node_state(
+            wf_id,
+            node_id,
+            "completed",
+            job_id=job.job_id,
+            output=output,
+        )
+    wf_store.update_state(wf_id, "completed", finished=True)
+
+    model = collect_report_model(tmp_workspace, wf_id)
+
+    assert model.final_submission["submission_id"] == "sub_final"
+    assert [candidate.candidate_id for candidate in model.final_candidates] == ["design_2"]
+    assert [candidate.candidate_id for candidate in model.candidates] == ["design_1", "design_2"]
+
+
 def test_output_derived_flat_candidates_keep_source_metrics_separate() -> None:
     nodes = [
         WorkflowNodeSummary(

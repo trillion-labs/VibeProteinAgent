@@ -21,6 +21,7 @@ produces identical results, slightly slower.
 from __future__ import annotations
 
 import csv
+import hashlib
 import os
 import shutil
 import subprocess
@@ -93,6 +94,7 @@ class BoltzGenInput(BaseModel):
 
 
 class BoltzGenDesign(BaseModel):
+    candidate_id: str | None = None
     cif_path: str
     pdb_path: str | None = None
     sequence: str | None = None
@@ -111,6 +113,12 @@ class BoltzGenOutput(BaseModel):
 
 
 # --------------------------------------------------------------------------- adapter
+
+
+def _design_candidate_id(index: int, cif_path: Path, sequence: str | None = None) -> str:
+    seed = f"{index}:{cif_path.name}:{sequence or ''}"
+    token = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:10]
+    return f"boltzgen:design_{index}:{token}"
 
 
 @register_adapter("descriptor.yaml")
@@ -401,9 +409,10 @@ def _collect_designs(
             raise RuntimeError(
                 f"BoltzGen produced no design CIFs under {search_dir}"
             )
-        for cif in cifs:
+        for idx, cif in enumerate(cifs, start=1):
             designs.append(
                 BoltzGenDesign(
+                    candidate_id=_design_candidate_id(idx, cif),
                     cif_path=str(cif),
                     pdb_path=None,
                     sequence=None,
@@ -424,9 +433,10 @@ def _collect_designs(
         # No designs survived filtering — fall back to refold_cif.
         fallback = output_dir / "intermediate_designs_inverse_folded" / "refold_cif"
         if fallback.is_dir():
-            for cif in sorted(fallback.glob("*.cif")):
+            for idx, cif in enumerate(sorted(fallback.glob("*.cif")), start=1):
                 designs.append(
                     BoltzGenDesign(
+                        candidate_id=_design_candidate_id(idx, cif),
                         cif_path=str(cif),
                         length=params.binder_length,
                     )
@@ -446,14 +456,16 @@ def _collect_designs(
                 if key:
                     metrics_by_id[key] = row
 
-    for cif in sorted(final_set_dir.glob("*.cif")):
+    for idx, cif in enumerate(sorted(final_set_dir.glob("*.cif")), start=1):
         stem = cif.stem
         row = metrics_by_id.get(stem, {})
+        sequence = row.get("sequence") or None
         designs.append(
             BoltzGenDesign(
+                candidate_id=_design_candidate_id(idx, cif, sequence),
                 cif_path=str(cif),
                 pdb_path=None,
-                sequence=row.get("sequence") or None,
+                sequence=sequence,
                 length=_safe_int(row.get("design_length")) or params.binder_length,
                 score=_safe_float(row.get("score")),
                 affinity_pred_value=_safe_float(row.get("affinity_pred_value")),

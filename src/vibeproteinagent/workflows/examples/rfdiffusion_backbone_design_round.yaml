@@ -5,6 +5,7 @@ params:
   length: {type: int, required: true}
   mpnn_num_designs: {type: int, default: 4}
   top_k: {type: int, default: 1}
+  submit_final: {type: bool, default: false}
 nodes:
   - id: backbone
     tool: rfdiffusion
@@ -67,7 +68,21 @@ nodes:
     version: ">=1.0.0,<2"
     inputs:
       predictions: ${outputs.refold}
+      candidates: ${outputs.protenix_input.candidates}
       analyses: ${outputs.analyze_refold}
       qc_results: ${outputs.qc}
       top_k: ${params.top_k}
     cache: true
+  - id: submit
+    tool: submit_candidate
+    version: ">=1.0.0,<2"
+    when: "params['submit_final']"
+    inputs:
+      outcome: accepted
+      candidates:
+        - job_id: ${jobs.rank}
+          candidate_id: ${outputs.rank.ranked_candidates[0].candidate_id}
+          justification: "Top ranked de novo design candidate from rank_designs."
+          scores_to_highlight: ["score", "ranking_score", "plddt", "iptm", "ptm"]
+      reasoning: "Selected the top ranked de novo design after backbone generation, sequence design, refolding, structure analysis, QC, and ranking."
+    cache: false

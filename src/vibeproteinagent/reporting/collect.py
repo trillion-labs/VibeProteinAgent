@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -132,6 +133,9 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
         [node], artifacts,
         node_params={node.node_id: job.params if isinstance(job.params, dict) else {}},
     )
+    submissions = _submission_outputs([node])
+    final_submission = _latest_final_submission(submissions)
+    final_candidates = _candidates_from_submission(final_submission)
     if not candidates:
         candidates = _structure_candidates(
             artifacts,
@@ -156,6 +160,9 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
         ),
         graph=WorkflowGraph(workflow_id=job.workflow_id, nodes=[node]),
         candidates=candidates,
+        final_candidates=final_candidates,
+        final_submission=final_submission,
+        submissions=submissions,
         artifacts=artifacts,
         msa_blocks=msa_blocks,
         warnings=warnings,
@@ -231,9 +238,28 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
     candidates = _normalize_candidates(
         report_nodes, all_artifacts, node_params=params_by_node,
     )
+    submissions = _submission_outputs(report_nodes)
+    final_submission = _latest_final_submission(submissions)
+    final_candidates = _candidates_from_submission(final_submission)
     if not candidates:
         candidates = _structure_candidates(
             all_artifacts, source={"kind": "workflow", "workflow_id": wf.workflow_id}
+        )
+    if (
+        final_submission is None
+        and candidates
+        and _agent_allows_auto_selection(workspace, wf.workflow_id)
+    ):
+        final_submission, final_candidates = _auto_submission_from_candidates(candidates)
+        warnings.append(
+            ReportWarning(
+                level="warning",
+                message=(
+                    "No explicit submit_candidate output was found; the report "
+                    "auto-selected the highest ranked available candidate."
+                ),
+                source="submit_candidate",
+            )
         )
     workflow_tools = {(n.tool or "").lower() for n in report_nodes}
     tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
@@ -251,6 +277,9 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
         ),
         graph=WorkflowGraph(workflow_id=wf.workflow_id, nodes=report_nodes),
         candidates=candidates,
+        final_candidates=final_candidates,
+        final_submission=final_submission,
+        submissions=submissions,
         artifacts=all_artifacts,
         msa_blocks=_collect_msa_blocks(
             all_artifacts, workflow_tools=workflow_tools, tool_by_job=tool_by_job,
@@ -503,6 +532,120 @@ def _normalize_candidates(
         )
     _attach_qc_and_analysis(candidates, nodes, merge_global_metrics=False)
     return _dedupe_candidates(candidates)
+
+
+def _submission_outputs(nodes: list[WorkflowNodeSummary]) -> list[dict[str, Any]]:
+    submissions: list[dict[str, Any]] = []
+    for node in nodes:
+        if node.tool != "submit_candidate" or node.state != "completed":
+            continue
+        output = node.output if isinstance(node.output, dict) else {}
+        if output.get("terminal") is not True:
+            continue
+        submission = dict(output)
+        submission["node_id"] = node.node_id
+        submission["job_id"] = node.job_id
+        submissions.append(submission)
+    return submissions
+
+
+def _latest_final_submission(submissions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not submissions:
+        return None
+    superseded = {
+        str(submission.get("supersedes"))
+        for submission in submissions
+        if submission.get("supersedes")
+    }
+    for submission in reversed(submissions):
+        if str(submission.get("submission_id")) not in superseded:
+            return submission
+    return submissions[-1]
+
+
+def _candidates_from_submission(
+    submission: dict[str, Any] | None,
+) -> list[ReportCandidate]:
+    if not submission:
+        return []
+    resolved = submission.get("candidates_resolved")
+    if not isinstance(resolved, list):
+        return []
+    out: list[ReportCandidate] = []
+    for idx, row in enumerate(resolved):
+        if not isinstance(row, dict):
+            continue
+        artifacts = [
+            ReportArtifact(
+                field=str(artifact.get("field") or ""),
+                artifact_id=artifact.get("artifact_id"),
+                kind=str(artifact.get("kind") or "artifact"),
+                mime=artifact.get("mime"),
+                size_bytes=_as_int(artifact.get("size_bytes")),
+                sha256=artifact.get("sha256"),
+                path=str(artifact.get("path") or ""),
+                job_id=row.get("source_job_id"),
+            )
+            for artifact in row.get("artifacts") or []
+            if isinstance(artifact, dict) and artifact.get("path")
+        ]
+        out.append(
+            ReportCandidate(
+                candidate_id=str(row.get("candidate_id") or idx + 1),
+                rank=_as_int(row.get("rank")) or idx + 1,
+                score=_as_float(row.get("score")),
+                sequence=row.get("sequence") if isinstance(row.get("sequence"), str) else None,
+                structure_path=(
+                    row.get("structure_path")
+                    if isinstance(row.get("structure_path"), str)
+                    else None
+                ),
+                scores=_score_map(
+                    row.get("scores") if isinstance(row.get("scores"), dict) else row
+                ),
+                source={
+                    "kind": "final_submission",
+                    "submission_id": submission.get("submission_id"),
+                    "outcome": submission.get("outcome"),
+                    "reasoning": submission.get("reasoning"),
+                    "justification": row.get("justification"),
+                    "job_id": row.get("source_job_id"),
+                    "tool": row.get("source_tool"),
+                    "node_id": row.get("source_workflow_node_id"),
+                    "auto_selected": bool(submission.get("auto_selected", False)),
+                },
+                artifacts=artifacts,
+            )
+        )
+    return out
+
+
+def _auto_submission_from_candidates(
+    candidates: list[ReportCandidate],
+) -> tuple[dict[str, Any], list[ReportCandidate]]:
+    candidate = candidates[0]
+    submission = {
+        "submission_id": "auto_selected",
+        "outcome": "accepted",
+        "terminal": True,
+        "reasoning": (
+            "Auto-selected highest ranked available candidate because no explicit "
+            "submit_candidate output was produced."
+        ),
+        "supersedes": None,
+        "auto_selected": True,
+    }
+    final = replace(
+        candidate,
+        source={
+            **candidate.source,
+            "kind": "final_submission",
+            "submission_id": "auto_selected",
+            "reasoning": submission["reasoning"],
+            "auto_selected": True,
+        },
+    )
+    return submission, [final]
 
 
 # Field names adapters use to surface a structure artifact path on a
@@ -1487,6 +1630,35 @@ def _find_agent_run_for(
         if job_id and job_id in job_ids:
             return run
     return None
+
+
+def _agent_allows_auto_selection(workspace: Workspace, workflow_id: str) -> bool:
+    """Return true only for agent runs that explicitly exhausted round budget.
+
+    Report collection is also used for direct workflows and one-off jobs. Those
+    should show explored candidates, but not invent a final answer. The agent
+    controller sets this marker only when max_rounds is reached without a
+    submit_candidate result.
+    """
+    try:
+        from vibeproteinagent.agents.session.store import AgentSessionStore
+
+        store = AgentSessionStore(workspace)
+        run = _find_agent_run_for(store, workflow_id=workflow_id, job_id=None)
+        if run is None:
+            return False
+        details = store.get_run_details(run.run_id)
+    except Exception:
+        return False
+
+    for row in reversed(details.get("decisions") or []):
+        if not isinstance(row, dict):
+            continue
+        decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
+        fallback = decision.get("fallback_final_selection")
+        if isinstance(fallback, dict):
+            return fallback.get("auto_select") is True
+    return False
 
 
 __all__ = ["collect_report_model"]

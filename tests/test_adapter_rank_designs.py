@@ -37,6 +37,24 @@ def test_rank_designs_combines_prediction_analysis_and_qc(tmp_path):
     assert Path(out.ranked_tsv).exists()
 
 
+def test_rank_designs_preserves_candidate_sequence_and_uses_candidate_score(tmp_path):
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        RankDesignsInput(
+            candidates=[
+                {"candidate_id": "weak", "sequence": "AAAA", "score": 0.1},
+                {"candidate_id": "strong", "sequence": "CCCC", "score": 0.9},
+            ],
+            top_k=1,
+        ),
+        null_context(tmp_path),
+    )
+
+    assert out.ranked_candidates[0]["candidate_id"] == "strong"
+    assert out.ranked_candidates[0]["sequence"] == "CCCC"
+    assert out.ranked_candidates[0]["candidate_score"] == 0.9
+
+
 def test_rank_designs_requires_input(tmp_path):
     adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
     with pytest.raises(ValueError, match="requires at least one"):

@@ -997,7 +997,7 @@ class WorkflowPlanner:
         scope = {"params": merged, "outputs": {}}
         for node in workflow.nodes:
             refs = iter_refs(node.inputs)
-            if any(ref.startswith(("outputs.", "item")) for ref in refs):
+            if any(ref.startswith(("outputs.", "jobs.", "item")) for ref in refs):
                 continue
             try:
                 resolved = resolve(node.inputs, scope)
