@@ -233,6 +233,7 @@ add requested tools as time allows.
 | `esm2` | protein design | Protein language model that supports unconditional and masked partial-sequence generation and representation extraction. |
 | `ligandmpnn` | inverse folding | Ligand-aware sequence design over fixed backbones while considering nearby small molecules. |
 | `rank_designs` | analysis | Deterministic ranking of candidates from prediction metrics, structure analysis, and QC flags. |
+| `submit_candidate` | analysis | Explicit final-submission tool for agent workflows to select final candidates or report that no acceptable candidate was found. |
 | `sequence_analysis` | analysis | CPU sequence metrics, residue annotations, composition, charge, and simple liabilities. |
 | `structure_analysis` | analysis | Local structure checks for contacts, exposure, residue environment, and mutation liabilities. |
 | `protein_qc` | scoring/QC | pLDDT, GRAVY, instability, pI, and sequence/structure quality control (QC) flags. |

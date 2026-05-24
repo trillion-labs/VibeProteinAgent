@@ -2130,6 +2130,24 @@ def _wf_node_inputs_from_output(node: WorkflowNodeSummary) -> list[tuple[str, st
     elif tool == "rank_designs":
         if out.get("candidate_count") is not None:
             add("candidates", out.get("candidate_count"))
+    elif tool == "submit_candidate":
+        # Surface the terminal-submission shape so the workflow composition
+        # row reads as "step N: submit_candidate (outcome=accepted, 2
+        # candidates, 'top ranked binder')" instead of an unannotated
+        # marker. The full resolved snapshot lives on the candidates
+        # section; here we only show the at-a-glance signals.
+        outcome = out.get("outcome")
+        add("outcome", outcome)
+        if out.get("auto_selected") is True:
+            add("auto-selected", "yes")
+        resolved = out.get("candidates_resolved")
+        if isinstance(resolved, list) and outcome == "accepted":
+            add("candidates", len(resolved))
+        reasoning = out.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            add("reasoning", _short(reasoning.strip(), 80))
+        if out.get("supersedes"):
+            add("supersedes", _short(str(out["supersedes"]), 24))
 
     # Generic fallback: surface any unambiguous run-config keys the tool
     # echoes (model name, mode, seed, sample count, …) when no tool-specific
@@ -2358,6 +2376,12 @@ _TOOLS_WITHOUT_DELIVERABLE = frozenset({
     "mpnn_to_protenix_input",
     "sequence_to_protenix_input",
     "noop",
+    # The explicit termination tool — its deliverable is already shown as
+    # the prominent "Final picks" / "Final outcome" panel at the top of
+    # the candidates section, so a second copy of the resolved-candidates
+    # JSON inside Per-tool widgets would be pure noise. Failures still
+    # surface because ``_node_details`` keeps failed passthrough nodes.
+    "submit_candidate",
 })
 
 

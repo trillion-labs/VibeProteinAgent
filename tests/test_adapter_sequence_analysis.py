@@ -40,6 +40,7 @@ def test_sequence_metrics_liabilities_and_artifacts(tmp_path):
     assert out.sequence_length == len(sequence)
     assert out.metrics["length"] == len(sequence)
     assert out.representative_sequences[0]["sequence"] == sequence
+    assert out.representative_sequences[0]["candidate_id"].startswith("representative:1:")
     assert out.metrics["amino_acid_counts"]["K"] == 4
     assert "gravy" in out.metrics
     assert "pI" in out.metrics
@@ -91,6 +92,7 @@ def test_multi_record_fasta_reports_family_summary(tmp_path):
     assert out.metrics["family_summary"]["sequence_count"] == 2
     assert out.representative_sequences[0]["header"] == "a"
     assert out.representative_sequences[0]["sequence"] == "MGPCK"
+    assert out.representative_sequences[0]["candidate_id"].startswith("representative:1:")
     per_sequence = out.artifacts["per_sequence_metrics_jsonl"]
     assert per_sequence is not None
     assert Path(per_sequence).read_text().count("\n") == 2

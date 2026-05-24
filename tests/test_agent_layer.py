@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socketserver
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from vibeproteinagent.agents.planning import WorkflowPlanner
 from vibeproteinagent.agents.planning.workflow_planner import _fallback_plan_from_prompt
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse, provider_from_config
 from vibeproteinagent.agents.provider.cli_agent import CliAgentProvider
+from vibeproteinagent.agents.provider.openrouter import _post_json_with_total_timeout
 from vibeproteinagent.agents.tools.schemas import compact_tool_outline, compact_tool_schema
 from vibeproteinagent.cli.main import app
 from vibeproteinagent.core.errors import InvalidParamsError, TimeoutError_
@@ -198,6 +200,31 @@ def test_template_recovery_handles_semantic_function_requests(
     assert plan["params"]["query"].startswith("Design a protein")
 
 
+def test_template_recovery_sets_submit_final_for_explicit_final_request(
+    tmp_workspace: Workspace,
+) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+
+    plan = _fallback_plan_from_prompt(
+        {
+            "request": (
+                "Find representative protein sequences for GO:0052855 activity "
+                "and explicitly submit the final candidate. Return Reason: and Answer:."
+            ),
+            "workflow_templates": workflows,
+            "tool_selection": {},
+        },
+        "",
+    )
+
+    assert plan is not None
+    assert plan["workflow_ref"] == "semantic_constraint_to_family_sequences"
+    assert plan["params"]["submit_final"] is True
+    assert plan["workflow_plan"]["nodes"][-1]["tool"] == "submit_candidate"
+
+
 def test_template_recovery_handles_target_sequence_binder_requests(
     tmp_workspace: Workspace,
 ) -> None:
@@ -225,6 +252,32 @@ def test_template_recovery_handles_target_sequence_binder_requests(
     params = plan["params"]
     assert params["target_sequence"] == target_sequence
     assert params["target_hotspots"] == [73, 76, 128, 36, 132, 72, 40, 35, 25, 39]
+
+
+def test_template_recovery_handles_binder_residue_list_without_site_label(
+    tmp_workspace: Workspace,
+) -> None:
+    registry = ToolRegistry()
+    registry.discover()
+    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+    target_sequence = (
+        "MKAVEVANNILFSVMMFNGAQTVIQKISWLRTAIAFLKGYMETTGATKKELEQVEK"
+        "LKERVDEIATAVNWDVYAQYARGDFNLLSDDEYKEIQKALLVLEDIKEQIIVEM"
+        "LRVGLAQGQMGTLKISDYLDSLIKERK"
+    )
+    request = (
+        f"Design a protein binder for this target sequence: {target_sequence}. "
+        "Direct the binder interface toward residues Y73, Y76, Y128, F36, L132."
+    )
+
+    plan = _fallback_plan_from_prompt(
+        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
+        "",
+    )
+
+    assert plan is not None
+    assert plan["workflow_ref"] == "target_sequence_binder_design_round"
+    assert plan["params"]["target_hotspots"] == [73, 76, 128, 36, 132]
 
 
 def test_template_recovery_defaults_de_novo_design_length(
@@ -610,9 +663,11 @@ def test_agent_config_defaults_to_local_cli_provider(monkeypatch) -> None:
     monkeypatch.delenv("VPA_AGENT_MODEL", raising=False)
     monkeypatch.delenv("VPA_AGENT_MAX_ROUNDS", raising=False)
     monkeypatch.delenv("VPA_AGENT_MAX_ENTRIES", raising=False)
+    monkeypatch.delenv("VPA_AGENT_TIMEOUT_S", raising=False)
     config = AgentConfig.from_env()
 
     assert config.provider == "codex"
+    assert config.timeout_s == 300
     assert config.max_rounds == 8
     assert config.max_entries == 3
     assert isinstance(provider_from_config(config), CliAgentProvider)
@@ -626,6 +681,31 @@ def test_agent_config_reads_max_entries_env(monkeypatch) -> None:
 
     assert config.max_entries == 4
     assert config.max_rounds == 6
+
+
+def test_openrouter_post_enforces_total_timeout() -> None:
+    class SlowHandler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            _ = self.request.recv(4096)
+            time.sleep(2.0)
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), SlowHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/chat/completions"
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError_):
+            _post_json_with_total_timeout(
+                url,
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                timeout_s=0.2,
+            )
+        assert time.monotonic() - t0 < 1.5
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_agent_config_parses_provider_model_refs() -> None:

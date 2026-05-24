@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import multiprocessing as mp
+import queue
 import time
 import urllib.error
 import urllib.request
@@ -77,18 +79,17 @@ class OpenRouterProvider:
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
 
-        req = urllib.request.Request(
-            f"{self.config.base_url.rstrip('/')}/chat/completions",
-            data=data,
-            headers=headers,
-            method="POST",
-        )
+        url = f"{self.config.base_url.rstrip('/')}/chat/completions"
 
         last_error: BaseException | None = None
         for attempt in range(3):
             try:
-                with urllib.request.urlopen(req, timeout=self.config.timeout_s) as resp:
-                    raw = json.loads(resp.read().decode("utf-8"))
+                raw = _post_json_with_total_timeout(
+                    url,
+                    data=data,
+                    headers=headers,
+                    timeout_s=self.config.timeout_s,
+                )
                 choice = (raw.get("choices") or [{}])[0]
                 message = choice.get("message") or {}
                 usage = raw.get("usage") or {}
@@ -105,16 +106,14 @@ class OpenRouterProvider:
                     ),
                     raw=raw,
                 )
-            except TimeoutError as exc:
-                last_error = exc
-                if attempt == 2:
-                    raise TimeoutError_(
-                        "OpenRouter request timed out",
-                        details={
-                            "provider": self.provider_name,
-                            "timeout_s": self.config.timeout_s,
-                        },
-                    ) from exc
+            except TimeoutError_ as exc:
+                raise TimeoutError_(
+                    "OpenRouter request timed out",
+                    details={
+                        "provider": self.provider_name,
+                        "timeout_s": self.config.timeout_s,
+                    },
+                ) from exc
             except urllib.error.HTTPError as exc:
                 last_error = exc
                 if exc.code < 500 or attempt == 2:
@@ -137,6 +136,129 @@ class OpenRouterProvider:
             "OpenRouter request failed",
             details={"provider": self.provider_name, "error": str(last_error)},
         )
+
+
+def _post_json_with_total_timeout(
+    url: str,
+    *,
+    data: bytes,
+    headers: dict[str, str],
+    timeout_s: float,
+) -> dict[str, Any]:
+    ctx = _mp_context()
+    result_queue = ctx.Queue(maxsize=1)
+    proc = ctx.Process(
+        target=_post_json_worker,
+        args=(url, data, headers, timeout_s, result_queue),
+    )
+    proc.daemon = True
+    proc.start()
+    proc.join(timeout_s)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=2.0)
+        raise TimeoutError_(
+            "OpenRouter request timed out",
+            details={"provider": OpenRouterProvider.provider_name, "timeout_s": timeout_s},
+        )
+
+    try:
+        result = result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise DependencyError(
+            "OpenRouter request failed",
+            details={
+                "provider": OpenRouterProvider.provider_name,
+                "error": f"worker exited without a response (exitcode={proc.exitcode})",
+            },
+        ) from exc
+
+    kind = result.get("kind")
+    if kind == "ok":
+        raw = result.get("raw")
+        if isinstance(raw, dict):
+            return raw
+        raise DependencyError(
+            "OpenRouter request failed",
+            details={"provider": OpenRouterProvider.provider_name, "error": "invalid JSON"},
+        )
+    if kind == "timeout":
+        raise TimeoutError_(
+            "OpenRouter request timed out",
+            details={"provider": OpenRouterProvider.provider_name, "timeout_s": timeout_s},
+        )
+    if kind == "http_error":
+        raise urllib.error.HTTPError(
+            url,
+            int(result.get("status") or 0),
+            str(result.get("reason") or "OpenRouter request failed"),
+            hdrs=None,
+            fp=_ErrorBody(result.get("body") or ""),
+        )
+    if kind == "url_error":
+        raise urllib.error.URLError(str(result.get("error") or "OpenRouter request failed"))
+    raise DependencyError(
+        "OpenRouter request failed",
+        details={
+            "provider": OpenRouterProvider.provider_name,
+            "error": str(result.get("error") or "unknown worker error"),
+            "error_type": result.get("error_type"),
+        },
+    )
+
+
+def _post_json_worker(
+    url: str,
+    data: bytes,
+    headers: dict[str, str],
+    timeout_s: float,
+    result_queue: mp.Queue,
+) -> None:
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+        result_queue.put({"kind": "ok", "raw": raw})
+    except TimeoutError as exc:
+        result_queue.put({"kind": "timeout", "error": str(exc)})
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8")[:2000]
+        except Exception:
+            body = ""
+        result_queue.put(
+            {
+                "kind": "http_error",
+                "status": exc.code,
+                "reason": exc.reason,
+                "body": body,
+            }
+        )
+    except urllib.error.URLError as exc:
+        result_queue.put({"kind": "url_error", "error": str(exc)})
+    except Exception as exc:
+        result_queue.put(
+            {
+                "kind": "error",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+
+
+class _ErrorBody:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode("utf-8")
+
+    def read(self, *_args: object, **_kwargs: object) -> bytes:
+        return self._body
+
+
+def _mp_context() -> mp.context.BaseContext:
+    methods = mp.get_all_start_methods()
+    if "spawn" in methods:
+        return mp.get_context("spawn")
+    return mp.get_context()
 
 
 def _messages_for_model(

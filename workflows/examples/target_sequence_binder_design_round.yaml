@@ -9,6 +9,7 @@ params:
   num_samples: {type: int, default: 1}
   num_steps: {type: int, default: 20}
   top_k: {type: int, default: 1}
+  submit_final: {type: bool, default: false}
 nodes:
   - id: target_input
     tool: sequence_to_protenix_input
@@ -65,8 +66,21 @@ nodes:
     tool: rank_designs
     version: ">=1.0.0,<2"
     inputs:
-      predictions: ${outputs.binder_design}
+      candidates: ${outputs.binder_design.designs}
       analyses: ${outputs.analyze_binder}
       qc_results: ${outputs.qc}
       top_k: ${params.top_k}
     cache: true
+  - id: submit
+    tool: submit_candidate
+    version: ">=1.0.0,<2"
+    when: "params['submit_final']"
+    inputs:
+      outcome: accepted
+      candidates:
+        - job_id: ${jobs.rank}
+          candidate_id: ${outputs.rank.ranked_candidates[0].candidate_id}
+          justification: "Top ranked binder candidate from rank_designs."
+          scores_to_highlight: ["score", "ranking_score", "plddt", "iptm", "ptm"]
+      reasoning: "Selected the top ranked binder after target folding, hotspot-directed binder design, structure analysis, QC, and ranking."
+    cache: false

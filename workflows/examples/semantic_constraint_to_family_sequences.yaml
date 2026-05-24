@@ -5,6 +5,7 @@ params:
   query: {type: str, required: true}
   temporal_cutoff: {type: str, default: null}
   max_sequences: {type: int, default: 100}
+  submit_final: {type: bool, default: false}
 nodes:
   - id: literature
     tool: literature_search
@@ -29,3 +30,16 @@ nodes:
       fasta_path: ${outputs.family_sequences.fasta_path}
       max_annotations: 50
     cache: true
+  - id: submit
+    tool: submit_candidate
+    version: ">=1.0.0,<2"
+    when: "params['submit_final']"
+    inputs:
+      outcome: accepted
+      candidates:
+        - job_id: ${jobs.sequence_summary}
+          candidate_id: ${outputs.sequence_summary.representative_sequences[0].candidate_id}
+          justification: "Representative family sequence selected by sequence_analysis."
+          scores_to_highlight: ["length", "gravy", "pI", "net_charge"]
+      reasoning: "Selected the first representative sequence from the retrieved functional family as the final semantic candidate."
+    cache: false

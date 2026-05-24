@@ -341,6 +341,8 @@ def _is_target_sequence_binder_request(request: str) -> bool:
             "target binding site" in request
             or "target residues" in request
             or "hotspot" in request
+            or "interface toward residues" in request
+            or re.search(r"\bresidues?\s+[a-z]\d+", request) is not None
         )
     )
 
@@ -348,6 +350,7 @@ def _is_target_sequence_binder_request(request: str) -> bool:
 def _template_runtime_params_for_request(template: dict[str, Any], request: str) -> dict[str, Any]:
     params: dict[str, Any] = {}
     name = str(template.get("name") or "")
+    template_params = template.get("params") if isinstance(template.get("params"), dict) else {}
     if name == "semantic_constraint_to_family_sequences":
         params["query"] = request
     elif name == "rfdiffusion_backbone_design_round":
@@ -359,7 +362,24 @@ def _template_runtime_params_for_request(template: dict[str, Any], request: str)
             params["target_sequence"] = sequence
         if hotspots:
             params["target_hotspots"] = hotspots
+    if "submit_final" in template_params and _request_implies_final_submission(request):
+        params["submit_final"] = True
     return params
+
+
+def _request_implies_final_submission(request: str) -> bool:
+    text = request.lower()
+    return any(
+        marker in text
+        for marker in (
+            "submit the final",
+            "explicitly submit",
+            "final candidate",
+            "final top",
+            "return reason:",
+            "answer:",
+        )
+    )
 
 
 def _extract_design_length(request: str) -> int | None:

@@ -123,6 +123,7 @@ def test_iterative_protein_examples_are_loadable_and_registered() -> None:
         "rfdiffusion_backbone_design_round.yaml",
         "mutation_repair_round.yaml",
         "semantic_constraint_to_family_sequences.yaml",
+        "target_sequence_binder_design_round.yaml",
         "template_guided_design_prep.yaml",
     ):
         wf = load_workflow(root / name)
@@ -138,9 +139,18 @@ def test_iterative_protein_examples_are_loadable_and_registered() -> None:
         "structure_analysis",
         "protein_qc",
         "rank_designs",
+        "submit_candidate",
     ]
+    assert rfdiffusion.params["submit_final"].default is False
+    assert rfdiffusion.nodes[-1].when == "params['submit_final']"
     assert "rfdiffusion_num_designs" not in rfdiffusion.params
     assert rfdiffusion.nodes[1].inputs["pdb_path"] == "${outputs.backbone.designs[0].pdb_path}"
+    semantic = load_workflow(root / "semantic_constraint_to_family_sequences.yaml")
+    assert semantic.params["submit_final"].default is False
+    assert semantic.nodes[-1].tool == "submit_candidate"
+    binder = load_workflow(root / "target_sequence_binder_design_round.yaml")
+    assert binder.params["submit_final"].default is False
+    assert binder.nodes[-1].tool == "submit_candidate"
     repair = load_workflow(root / "mutation_repair_round.yaml")
     assert [node.tool for node in repair.nodes] == [
         "structure_analysis",
