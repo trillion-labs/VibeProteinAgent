@@ -12,6 +12,7 @@ from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.agents import AgentConfig, AgentController, AgentSessionStore, ModeRouter
 from vibeproteinagent.agents.evaluation import DecisionEngine
 from vibeproteinagent.agents.execution import ExecutionPolicy
+from vibeproteinagent.agents.execution.controller import WorkflowExecutionOutcome
 from vibeproteinagent.agents.planning import WorkflowPlanner
 from vibeproteinagent.agents.planning.workflow_planner import _fallback_plan_from_prompt
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse, provider_from_config
@@ -990,6 +991,108 @@ def test_agent_plan_controller_executes_and_logs_provider_messages(
     run = AgentSessionStore(tmp_workspace).get_run(data["run_id"])
     assert run.provider_snapshot is not None
     assert run.final_report["decision"]["decision"] == "done"
+
+
+def test_agent_plan_stops_after_explicit_submit_candidate(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = {
+        "mode": "agent_plan",
+        "goal": "select a final candidate",
+        "assumptions": [],
+        "missing_inputs": [],
+        "required_tools": ["rank_designs", "submit_candidate"],
+        "workflow_plan": {
+            "name": "submit_contract",
+            "version": "0.1.0",
+            "nodes": [
+                {
+                    "id": "rank",
+                    "tool": "rank_designs",
+                    "inputs": {
+                        "candidates": [
+                            {"candidate_id": "design_1", "sequence": "ACDE", "score": 1.0}
+                        ],
+                        "top_k": 1,
+                    },
+                },
+                {
+                    "id": "submit",
+                    "tool": "submit_candidate",
+                    "inputs": {
+                        "outcome": "accepted",
+                        "candidates": [
+                            {
+                                "job_id": "${jobs.rank}",
+                                "candidate_id": "${outputs.rank.ranked_candidates[0].candidate_id}",
+                                "justification": "top ranked",
+                            }
+                        ],
+                        "reasoning": "ready to submit",
+                    },
+                },
+            ],
+        },
+        "success_criteria": {"return_final_candidate": True},
+        "warm_tools": [],
+        "estimated_llm_calls": 1,
+    }
+
+    async def _draft_plan(self, *args, **kwargs):
+        del self, args, kwargs
+        return plan
+
+    class NoDecisionProvider:
+        provider_name = "fake"
+
+        async def chat(self, messages, **kwargs):
+            del messages, kwargs
+            raise AssertionError("decision critic should not run after submit_candidate")
+
+    calls = {"execute": 0}
+
+    def _execute(self, run_id, broker, current_plan, params, policy):
+        del self, run_id, broker, current_plan, params, policy
+        calls["execute"] += 1
+        return WorkflowExecutionOutcome(
+            workflow_id="wf_submit_contract",
+            state="completed",
+            executed=True,
+            summary={
+                "state": "completed",
+                "workflow_id": "wf_submit_contract",
+                "job_ids": ["job_rank", "job_submit"],
+                "metrics_used": [],
+                "final_submission": {
+                    "submission_id": "sub_final",
+                    "outcome": "accepted",
+                    "terminal": True,
+                    "candidates_resolved": [{"candidate_id": "design_1"}],
+                    "reasoning": "ready to submit",
+                    "supersedes": None,
+                    "auto_selected": False,
+                },
+            },
+        )
+
+    monkeypatch.setattr(WorkflowPlanner, "draft_plan", _draft_plan)
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.execution.controller.provider_from_config",
+        lambda config: NoDecisionProvider(),
+    )
+    monkeypatch.setattr(AgentController, "_execute_validated_plan", _execute)
+
+    controller = AgentController(
+        tmp_workspace,
+        config=AgentConfig.from_env(provider="codex", model="fake"),
+    )
+    data = controller.run_sync("design a final protein candidate")
+
+    assert calls["execute"] == 1
+    assert data["state"] == "completed"
+    assert data["decision"]["decision"] == "submitted_final_candidate"
+    assert data["decision"]["submission"]["submission_id"] == "sub_final"
 
 
 def test_agent_plan_retries_bad_llm_entries_within_budget(

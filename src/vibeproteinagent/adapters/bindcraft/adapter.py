@@ -33,6 +33,7 @@ canonical ~5.3 GiB tarball from
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -242,6 +243,7 @@ class BindCraftInput(BaseModel):
 
 
 class BindCraftDesign(BaseModel):
+    candidate_id: str | None = None
     pdb_path: str
     sequence: str
     binder_length: int
@@ -636,7 +638,7 @@ def _collect_designs(
     stats = _load_final_stats(design_path / "final_design_stats.csv")
     designs: list[BindCraftDesign] = []
     warnings: list[str] = []
-    for pdb in pdbs:
+    for idx, pdb in enumerate(pdbs, start=1):
         # The CSV keys by the design name without BindCraft's AF2 model suffix
         # (the trailing ``_model{N}`` it appends when saving the accepted PDB).
         # Strip it so the lookup hits.
@@ -663,6 +665,7 @@ def _collect_designs(
 
         designs.append(
             BindCraftDesign(
+                candidate_id=_bindcraft_candidate_id(pdb, idx, sequence),
                 pdb_path=str(pdb),
                 sequence=sequence,
                 binder_length=binder_length,
@@ -682,6 +685,12 @@ def _collect_designs(
             )
         )
     return designs, warnings
+
+
+def _bindcraft_candidate_id(pdb_path: Path, index: int, sequence: str) -> str:
+    stem = re.sub(r"_model\d+$", "", pdb_path.stem)
+    token = hashlib.sha256(f"{stem}:{sequence}".encode()).hexdigest()[:10]
+    return f"bindcraft:{stem or f'design_{index}'}:{token}"
 
 
 # Three-letter → one-letter map for the 20 canonical amino acids. Anything

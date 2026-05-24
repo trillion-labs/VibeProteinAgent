@@ -15,6 +15,11 @@
         "type": "object",
         "required": ["pdb_path", "sequence", "binder_length"],
         "properties": {
+          "candidate_id": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Stable identifier for this accepted BindCraft design, emitted by the adapter when available."
+          },
           "pdb_path": {
             "type": "string",
             "minLength": 1,

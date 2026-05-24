@@ -309,7 +309,7 @@ def render_report_html(
     show_workflow = len(model.graph.nodes) >= 2
     show_plots = bool(plots)
     show_msa = bool(model.msa_blocks)
-    show_candidates = bool(model.final_candidates or model.candidates)
+    show_candidates = bool(model.final_submission or model.final_candidates or model.candidates)
     show_conversation = model.agent_transcript is not None
 
     nav_items: list[tuple[str, str, str]] = [("summary", "Summary", "◎")]
@@ -386,9 +386,22 @@ def render_report_html(
 
     # ----- Candidates section -----
     final_block = ""
-    if model.final_candidates:
+    final_submission = model.final_submission or {}
+    if final_submission.get("outcome") == "no_acceptable_candidate":
+        final_block = f"""
+  <div class="candidate-group candidate-group-final">
+    <div class="candidate-group-head">
+      <p class="card-eyebrow">Final outcome</p>
+      <span class="card-meta">No acceptable candidate</span>
+    </div>
+    <div class="empty-state">
+      <strong>No acceptable final candidate was submitted.</strong>
+      <p>{_h(str(final_submission.get("reasoning") or "The agent completed the search without selecting a candidate."))}</p>
+    </div>
+  </div>"""
+    elif model.final_candidates:
         final_label = "Auto-selected" if (
-            model.final_submission or {}
+            final_submission
         ).get("auto_selected") else "Submitted"
         final_block = f"""
   <div class="candidate-group candidate-group-final">

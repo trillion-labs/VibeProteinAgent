@@ -215,6 +215,7 @@ def test_collect_designs_reads_accepted_pdbs(tmp_path):
     assert len(designs) == 2
     assert warnings == []
     by_path = {Path(d.pdb_path).name: d for d in designs}
+    assert by_path["binder_0.pdb"].candidate_id.startswith("bindcraft:binder_0:")
     assert by_path["binder_0.pdb"].sequence == "MKKLPLLFAA"
     assert by_path["binder_0.pdb"].iptm == pytest.approx(0.71)
     assert by_path["binder_0.pdb"].plddt == pytest.approx(0.88)
@@ -238,6 +239,7 @@ def test_collect_designs_matches_bindcraft_model_suffix_to_stats(tmp_path):
     assert warnings == []
     assert len(designs) == 1
     design = designs[0]
+    assert design.candidate_id.startswith("bindcraft:prodigy_3BZD_l30_s680367_mpnn1:")
     assert design.sequence == "MKKLPLLFAAGGSSYYTTQQ"
     assert design.iptm == pytest.approx(0.73)
     assert design.plddt == pytest.approx(0.91)

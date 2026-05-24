@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from vibeproteinagent.agents import AgentSessionStore
 from vibeproteinagent.cli.main import app
 from vibeproteinagent.mcp.tools import __all__ as mcp_tool_exports
-from vibeproteinagent.reporting import collect_report_model
+from vibeproteinagent.reporting import collect_report_model, render_report_html
 from vibeproteinagent.reporting.collect import _normalize_candidates
 from vibeproteinagent.reporting.models import WorkflowNodeSummary
 from vibeproteinagent.workflows import WorkflowStore
@@ -301,6 +302,220 @@ def test_report_separates_explicit_final_submission(
     assert model.final_submission["submission_id"] == "sub_final"
     assert [candidate.candidate_id for candidate in model.final_candidates] == ["design_2"]
     assert [candidate.candidate_id for candidate in model.candidates] == ["design_1", "design_2"]
+
+
+def test_report_uses_latest_non_superseded_submission(
+    tmp_workspace: Workspace,
+) -> None:
+    job_store = JobStore(tmp_workspace)
+    rank_job = job_store.submit("rank_designs", "1.0.0", {"top_k": 2})
+    job_store.transition(rank_job.job_id, JobState.QUEUED)
+    job_store.transition(rank_job.job_id, JobState.RUNNING)
+    ranked_output = {
+        "candidate_count": 2,
+        "ranked_candidates": [
+            {"rank": 1, "candidate_id": "design_1", "score": 1.0},
+            {"rank": 2, "candidate_id": "design_2", "score": 0.5},
+        ],
+    }
+    job_store.transition(rank_job.job_id, JobState.COMPLETED, output=ranked_output)
+
+    first = {
+        "submission_id": "sub_first",
+        "outcome": "accepted",
+        "terminal": True,
+        "candidates_resolved": [
+            {
+                "source_job_id": rank_job.job_id,
+                "source_tool": "rank_designs",
+                "candidate_id": "design_1",
+                "rank": 1,
+                "score": 1.0,
+                "justification": "initial pick",
+                "scores": {"score": 1.0},
+                "artifacts": [],
+            }
+        ],
+        "reasoning": "initial pick",
+        "supersedes": None,
+        "auto_selected": False,
+        "runtime_ms": 1,
+    }
+    second = {
+        **first,
+        "submission_id": "sub_second",
+        "candidates_resolved": [
+            {
+                **first["candidates_resolved"][0],
+                "candidate_id": "design_2",
+                "rank": 2,
+                "score": 0.5,
+                "justification": "superseding pick",
+                "scores": {"score": 0.5},
+            }
+        ],
+        "reasoning": "superseding pick",
+        "supersedes": "sub_first",
+    }
+    submit_jobs = []
+    for submission in (first, second):
+        rec = job_store.submit(
+            "submit_candidate",
+            "1.0.0",
+            {"outcome": "accepted", "candidates": [], "reasoning": "x"},
+            salt=str(submission["submission_id"]),
+        )
+        job_store.transition(rec.job_id, JobState.QUEUED)
+        job_store.transition(rec.job_id, JobState.RUNNING)
+        job_store.transition(rec.job_id, JobState.COMPLETED, output=submission)
+        submit_jobs.append((rec, submission))
+
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="supersession_demo",
+        version="1.0",
+        descriptor_yaml="name: supersession_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    rows = [("rank", "rank_designs", rank_job, ranked_output)] + [
+        (f"submit_{idx}", "submit_candidate", rec, submission)
+        for idx, (rec, submission) in enumerate(submit_jobs, start=1)
+    ]
+    for node_id, tool, job, output in rows:
+        wf_store.add_node(
+            workflow_id=wf_id,
+            node_id=node_id,
+            tool_name=tool,
+            tool_version="1.0.0",
+            upstream=[],
+            params_hash="abc",
+            input_hash="def",
+            cache_key="ghi",
+        )
+        wf_store.update_node_state(
+            wf_id, node_id, "completed", job_id=job.job_id, output=output
+        )
+    wf_store.update_state(wf_id, "completed", finished=True)
+
+    model = collect_report_model(tmp_workspace, wf_id)
+
+    assert [submission["submission_id"] for submission in model.submissions] == [
+        "sub_first",
+        "sub_second",
+    ]
+    assert model.final_submission["submission_id"] == "sub_second"
+    assert [candidate.candidate_id for candidate in model.final_candidates] == ["design_2"]
+
+
+def test_report_auto_selects_only_after_agent_budget_marker(
+    tmp_workspace: Workspace,
+) -> None:
+    job_store = JobStore(tmp_workspace)
+    rank_job = job_store.submit("rank_designs", "1.0.0", {"top_k": 1})
+    job_store.transition(rank_job.job_id, JobState.QUEUED)
+    job_store.transition(rank_job.job_id, JobState.RUNNING)
+    ranked_output = {
+        "candidate_count": 1,
+        "ranked_candidates": [
+            {"rank": 1, "candidate_id": "design_1", "score": 1.0}
+        ],
+    }
+    job_store.transition(rank_job.job_id, JobState.COMPLETED, output=ranked_output)
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="auto_submission_demo",
+        version="1.0",
+        descriptor_yaml="name: auto_submission_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    wf_store.add_node(
+        workflow_id=wf_id,
+        node_id="rank",
+        tool_name="rank_designs",
+        tool_version="1.0.0",
+        upstream=[],
+        params_hash="abc",
+        input_hash="def",
+        cache_key="ghi",
+    )
+    wf_store.update_node_state(
+        wf_id, "rank", "completed", job_id=rank_job.job_id, output=ranked_output
+    )
+    wf_store.update_state(wf_id, "completed", finished=True)
+    session = AgentSessionStore(tmp_workspace)
+    run = session.create_run("agent max rounds reached")
+    session.update_run(run.run_id, workflow_ids=[wf_id])
+    session.add_decision(
+        run.run_id,
+        {
+            "decision": "completed_review_metrics",
+            "next_round": {"recommended": False, "reason": "max rounds reached"},
+            "fallback_final_selection": {"auto_select": True},
+        },
+    )
+
+    model = collect_report_model(tmp_workspace, wf_id)
+
+    assert model.final_submission["auto_selected"] is True
+    assert [candidate.candidate_id for candidate in model.final_candidates] == ["design_1"]
+    assert any(w.source == "submit_candidate" for w in model.warnings)
+
+
+def test_report_renders_no_acceptable_candidate_submission(
+    tmp_workspace: Workspace,
+) -> None:
+    job_store = JobStore(tmp_workspace)
+    submit_job = job_store.submit(
+        "submit_candidate",
+        "1.0.0",
+        {
+            "outcome": "no_acceptable_candidate",
+            "candidates": [],
+            "reasoning": "All explored candidates failed the acceptance criteria.",
+        },
+    )
+    job_store.transition(submit_job.job_id, JobState.QUEUED)
+    job_store.transition(submit_job.job_id, JobState.RUNNING)
+    submission = {
+        "submission_id": "sub_empty",
+        "outcome": "no_acceptable_candidate",
+        "terminal": True,
+        "candidates_resolved": [],
+        "reasoning": "All explored candidates failed the acceptance criteria.",
+        "supersedes": None,
+        "auto_selected": False,
+        "runtime_ms": 1,
+    }
+    job_store.transition(submit_job.job_id, JobState.COMPLETED, output=submission)
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="empty_submission_demo",
+        version="1.0",
+        descriptor_yaml="name: empty_submission_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    wf_store.add_node(
+        workflow_id=wf_id,
+        node_id="submit",
+        tool_name="submit_candidate",
+        tool_version="1.0.0",
+        upstream=[],
+        params_hash="abc",
+        input_hash="def",
+        cache_key="ghi",
+    )
+    wf_store.update_node_state(
+        wf_id, "submit", "completed", job_id=submit_job.job_id, output=submission
+    )
+    wf_store.update_state(wf_id, "completed", finished=True)
+
+    model = collect_report_model(tmp_workspace, wf_id)
+    html = render_report_html(model)
+
+    assert model.final_submission["outcome"] == "no_acceptable_candidate"
+    assert model.final_candidates == []
+    assert "No acceptable final candidate was submitted." in html
+    assert "All explored candidates failed the acceptance criteria." in html
 
 
 def test_output_derived_flat_candidates_keep_source_metrics_separate() -> None:
