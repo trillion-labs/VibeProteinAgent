@@ -451,7 +451,6 @@ class AgentController:
             run_id,
         )
         available_tools = broker.list_tools()
-        workflows = broker.list_workflows()
         planner = WorkflowPlanner(self.registry, provider)
         entry_failures: list[dict[str, Any]] = []
         plan = await self._run_llm_entry(
@@ -460,22 +459,11 @@ class AgentController:
             factory=lambda attempt: planner.draft_plan(
                 request,
                 available_tools=available_tools,
-                workflows=workflows,
                 model=self.config.model_for_role("planner"),
                 idempotency_key=f"{run_id}:initial-plan:{attempt}",
             ),
         )
-        try:
-            planner.validate_invocation(plan, classification.params)
-        except VPAError:
-            plan = planner.template_plan(request, workflows=workflows)
-            planner.validate_invocation(plan, classification.params)
-            assumptions = plan.setdefault("assumptions", [])
-            if isinstance(assumptions, list):
-                assumptions.append(
-                    "Provider plan did not match the available invocation inputs; "
-                    "used a validated local workflow template."
-                )
+        planner.validate_invocation(plan, classification.params)
         self.session_store.add_plan(run_id, plan, status="validated")
         if not policy.submit:
             return _final_report(
@@ -571,6 +559,59 @@ class AgentController:
                             "details": exc.details,
                         }
                     )
+            if decision.get("decision") in {"submit_candidate", "no_acceptable_candidate"}:
+                try:
+                    submission, submit_job_id = self._execute_submit_candidate_decision(
+                        run_id,
+                        broker,
+                        decision,
+                        round_index=round_index,
+                        policy=policy,
+                    )
+                except VPAError as exc:
+                    notes = decision.setdefault("notes", [])
+                    if isinstance(notes, list):
+                        notes.append(
+                            {
+                                "level": "error",
+                                "message": "submit_candidate decision failed during execution",
+                                "code": exc.code,
+                                "details": exc.details,
+                            }
+                        )
+                    final_state = "failed"
+                    self.session_store.add_decision(run_id, decision, round_index=round_index)
+                    decisions.append(decision)
+                    break
+                outcome.summary["final_submission"] = submission
+                job_ids = outcome.summary.setdefault("job_ids", [])
+                if isinstance(job_ids, list) and submit_job_id not in job_ids:
+                    job_ids.append(submit_job_id)
+                decision["submission"] = submission
+                decision["submit_job_id"] = submit_job_id
+                self.session_store.add_summary(
+                    run_id,
+                    {
+                        "state": "completed",
+                        "job_id": submit_job_id,
+                        "tool": "submit_candidate",
+                        "final_submission": submission,
+                        "metrics_used": decision.get("metrics_used") or [],
+                    },
+                    job_id=submit_job_id,
+                )
+                self.session_store.add_decision(run_id, decision, round_index=round_index)
+                decisions.append(decision)
+                self.session_store.update_run(
+                    run_id,
+                    state=final_state,
+                    workflow_ids=workflow_ids,
+                    job_ids=[jid for item in summaries for jid in item.get("job_ids", [])],
+                    final_report=_partial_report(
+                        classification, workflow_ids, summaries, final_state
+                    ),
+                )
+                break
             next_round = decision.get("next_round") or {}
             if next_round.get("recommended") and round_index + 1 >= self.config.max_rounds:
                 decision["fallback_final_selection"] = {
@@ -596,22 +637,13 @@ class AgentController:
             next_plan = next_round.get("plan") or next_round.get("workflow_plan")
             try:
                 if isinstance(next_plan, dict):
-                    if "workflow_plan" not in next_plan and "workflow_ref" not in next_plan:
+                    if "workflow_plan" not in next_plan:
                         next_plan = {
                             "mode": "agent_plan",
                             "workflow_plan": next_plan,
                             "success_criteria": current_plan.get("success_criteria") or {},
                         }
-                    if "workflow_ref" in next_plan:
-                        next_plan = planner._canonicalize_template_plan(
-                            {
-                                "request": next_plan.get("goal") or request,
-                                "workflow_templates": workflows,
-                                "tool_selection": {},
-                            },
-                            next_plan,
-                        )
-                    current_plan = planner.validate_plan(next_plan)
+                    current_plan = planner.validate_round_plan(next_plan)
                     planner.validate_invocation(current_plan, classification.params)
                 else:
                     current_plan = await self._run_llm_entry(
@@ -626,7 +658,6 @@ class AgentController:
                             summary=outcome.summary,
                             decision=decision,
                             available_tools=available_tools,
-                            workflows=workflows,
                             model=self.config.model_for_role("planner"),
                             idempotency_key=f"{run_id}:next-round:{round_index}:{attempt}",
                         ),
@@ -668,6 +699,48 @@ class AgentController:
             decisions=decisions,
             plan=plan,
         )
+
+    def _execute_submit_candidate_decision(
+        self,
+        run_id: str,
+        broker: AgentToolBroker,
+        decision: dict[str, Any],
+        *,
+        round_index: int,
+        policy: ExecutionPolicy,
+    ) -> tuple[dict[str, Any], str]:
+        params = _submit_candidate_params_from_decision(decision)
+        result = broker.submit_job(
+            "submit_candidate",
+            params,
+            call_id=f"{run_id}:submit-candidate:{round_index}",
+            priority=policy.priority,
+            max_retries=policy.max_retries,
+        )
+        if result.get("ok") is False:
+            raise InvalidParamsError(
+                "submit_candidate decision could not be submitted",
+                details={"submit_result": result},
+            )
+        job_id = str(result.get("job_id") or "")
+        if not job_id:
+            raise InvalidParamsError(
+                "submit_candidate submission did not return a job_id",
+                details={"submit_result": result},
+            )
+        final = broker.wait_job(job_id, timeout_ms=policy.wait_job_timeout_ms)
+        if final.get("state") != "completed":
+            raise InvalidParamsError(
+                "submit_candidate decision did not complete",
+                details={"job_id": job_id, "job": final},
+            )
+        output = final.get("output")
+        if not isinstance(output, dict) or output.get("terminal") is not True:
+            raise InvalidParamsError(
+                "submit_candidate completed without a terminal output",
+                details={"job_id": job_id, "output": output},
+            )
+        return output, job_id
 
     async def _run_llm_entry(
         self,
@@ -910,6 +983,45 @@ def _final_report(
         "next_round": (decision or {}).get("next_round") if decision else None,
         "plan": plan,
     }
+
+
+def _submit_candidate_params_from_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    label = decision.get("decision")
+    if label == "submit_candidate":
+        params = decision.get("submit_candidate")
+        if not isinstance(params, dict):
+            raise InvalidParamsError(
+                "submit_candidate decision missing submit_candidate payload",
+                details={"decision": decision},
+            )
+        out = dict(params)
+        out.setdefault("outcome", "accepted")
+        out.setdefault("candidates", [])
+        return out
+    if label == "no_acceptable_candidate":
+        return {
+            "outcome": "no_acceptable_candidate",
+            "candidates": [],
+            "reasoning": _negative_submission_reason(decision),
+        }
+    raise InvalidParamsError(
+        "decision is not a submit_candidate action",
+        details={"decision": decision},
+    )
+
+
+def _negative_submission_reason(decision: dict[str, Any]) -> str:
+    next_round = decision.get("next_round")
+    if isinstance(next_round, dict):
+        reason = next_round.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    notes = decision.get("notes")
+    if isinstance(notes, list):
+        text = "; ".join(str(item) for item in notes if str(item).strip())
+        if text:
+            return text
+    return "No acceptable candidate met the stated success criteria."
 
 
 def _agent_run_state(report: dict[str, Any]) -> str:

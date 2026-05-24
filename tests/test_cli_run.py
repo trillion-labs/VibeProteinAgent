@@ -111,16 +111,19 @@ def test_workflow_resume_without_daemon_returns_immediately(
     assert payload["error"]["details"]["workflow_id"] == workflow_id
 
 
-def test_workflow_list_includes_iterative_examples(
+def test_workflow_list_omits_task_specific_bundled_recipes(
     runner: CliRunner, isolated_vpa_home: Path
 ) -> None:
     result = runner.invoke(app, ["workflow", "list", "--json"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     names = {row["name"] for row in payload["data"]["workflows"]}
-    assert {
+    assert "noop_chain" in names
+    assert not {
         "semantic_constraint_to_family_sequences",
         "template_guided_design_prep",
         "rfdiffusion_backbone_design_round",
         "mutation_repair_round",
-    }.issubset(names)
+        "target_sequence_binder_design_round",
+        "mpnn_then_refold",
+    } & names

@@ -165,9 +165,26 @@ PyRosetta-style dependencies.
 
 Before installation, run `vpa install preflight --profile full --cuda-profile
 auto`. After installation, run `vpa install doctor` and a small smoke job for
-the tools you plan to use. If host dependency resolution is fragile, the repo
-also provides Docker and Apptainer CUDA 12.8 fallback definitions under
-[`containers/`](containers/).
+the tools you plan to use.
+
+If host dependency resolution is fragile (common on shared clusters), the repo
+ships CUDA 12.8 container definitions you can build instead. The image bundles
+the CUDA 12.8 userspace + VPA conda env; mount your repo or `$VPA_HOME` to
+install large sidecars or weights.
+
+```bash
+# Docker — definition at containers/Dockerfile.cu128
+docker build -f containers/Dockerfile.cu128 -t vibeproteinagent:cu128 .
+docker run --rm --gpus all -e VPA_HOME=/workspace/.vpa -v "$PWD:/workspace" \
+  vibeproteinagent:cu128 vpa install preflight --profile full --cuda-profile cu128
+
+# Apptainer — definition at containers/apptainer-cu128.def
+apptainer build vpa-cu128.sif containers/apptainer-cu128.def
+apptainer exec --nv vpa-cu128.sif vpa install preflight --profile full --cuda-profile cu128
+```
+
+For sidecar installs from a mounted checkout, pass `--source-root /workspace`.
+See [`containers/README.md`](containers/README.md) for the full notes.
 
 ## Start
 
@@ -310,7 +327,7 @@ For expensive generators, prefer `foreach` fan-out over one large node and set
 `max_parallel` to the number of GPU slots you want that fan-out to occupy.
 Tools such as RFdiffusion/RFpeptides/RFdiffusion3, PXDesign, BindCraft,
 Protenix-v2, Boltz2 affinity, BoltzGen, Proteina-Complexa, ProteinMPNN, and
-LigandMPNN advertise sharding guidance for planner/templates; user-authored
+LigandMPNN advertise sharding guidance for planner-generated workflows; user-authored
 workflow YAML is never silently rewritten.
 
 Guide: [docs/use_workflows.md](docs/use_workflows.md)
@@ -319,7 +336,8 @@ Notebook: [demo/use_workflows_demo.ipynb](demo/use_workflows_demo.ipynb)
 ### 3. Use The LLM Agent
 
 Use this when you want to describe the scientific goal in natural language and
-let an LLM planner choose tools/workflows from the public VPA tool list. VPA is
+let an LLM planner choose tools and write an explicit workflow plan from the
+public VPA tool list. VPA is
 provider-flexible: you can use Codex, Claude Code, or OpenRouter-backed models
 without changing the underlying tool/workflow runtime.
 

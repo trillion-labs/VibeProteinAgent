@@ -112,7 +112,7 @@ workers.
 
 ```bash
 vpa workflow list
-vpa workflow inspect workflows/examples/mutation_repair_round.yaml
+vpa workflow inspect my_sequence_workflow.yaml
 ```
 
 ## 5. Run A Workflow
@@ -120,13 +120,9 @@ vpa workflow inspect workflows/examples/mutation_repair_round.yaml
 Run with inline parameters:
 
 ```bash
-# This workflow mutates the 1-indexed sequence position 3 to alanine (A).
-# For dictionary params, pass JSON like '{"3":"A"}'.
-vpa workflow run workflows/examples/mutation_repair_round.yaml \
+vpa workflow run my_sequence_workflow.yaml \
   --workspace design_round \
-  --param structure_path=target.pdb \
-  --param wild_type_sequence=ACDEFGHIKLMNPQRSTVWY \
-  --param mapping='{"3":"A"}' \
+  --param sequence=ACDEFGHIKLMNPQRSTVWY \
   --follow
 ```
 
@@ -134,7 +130,7 @@ Run with a YAML params file:
 
 ```bash
 # Wait up to 7200 seconds (2 hours) for the workflow to finish before the CLI gives up waiting.
-vpa workflow run workflows/examples/rfdiffusion_backbone_design_round.yaml \
+vpa workflow run my_sequence_workflow.yaml \
   --workspace design_round \
   --params-file workflow_params.yaml \
   --max-wait-s 7200 
@@ -150,7 +146,7 @@ vpa report <workflow_id> --workspace design_round --out report.html --open
 If a run is interrupted, resume it:
 
 ```bash
-vpa workflow run workflows/examples/mutation_repair_round.yaml \
+vpa workflow run my_sequence_workflow.yaml \
   --workspace design_round \
   --resume <workflow_id>
 ```

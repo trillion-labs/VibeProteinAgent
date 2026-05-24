@@ -304,6 +304,85 @@ def test_report_separates_explicit_final_submission(
     assert [candidate.candidate_id for candidate in model.candidates] == ["design_1", "design_2"]
 
 
+def test_report_uses_agent_standalone_submit_candidate_decision(
+    tmp_workspace: Workspace,
+) -> None:
+    job_store = JobStore(tmp_workspace)
+    rank_job = job_store.submit("rank_designs", "1.0.0", {"top_k": 1})
+    job_store.transition(rank_job.job_id, JobState.QUEUED)
+    job_store.transition(rank_job.job_id, JobState.RUNNING)
+    ranked_output = {
+        "ranked_candidates": [
+            {"rank": 1, "candidate_id": "design_1", "sequence": "ACDE", "score": 1.0}
+        ]
+    }
+    job_store.transition(rank_job.job_id, JobState.COMPLETED, output=ranked_output)
+
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="post_round_submission_demo",
+        version="1.0",
+        descriptor_yaml="name: post_round_submission_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    wf_store.add_node(
+        workflow_id=wf_id,
+        node_id="rank",
+        tool_name="rank_designs",
+        tool_version="1.0.0",
+        upstream=[],
+        params_hash="abc",
+        input_hash="def",
+        cache_key="ghi",
+    )
+    wf_store.update_node_state(
+        wf_id, "rank", "completed", job_id=rank_job.job_id, output=ranked_output
+    )
+    wf_store.update_state(wf_id, "completed", finished=True)
+
+    submission = {
+        "submission_id": "sub_post_round",
+        "outcome": "accepted",
+        "terminal": True,
+        "candidates_resolved": [
+            {
+                "source_job_id": rank_job.job_id,
+                "source_tool": "rank_designs",
+                "candidate_id": "design_1",
+                "rank": 1,
+                "sequence": "ACDE",
+                "score": 1.0,
+                "justification": "best ranked",
+                "scores": {"score": 1.0},
+                "artifacts": [],
+            }
+        ],
+        "reasoning": "post-round decision selected the top candidate",
+        "supersedes": None,
+        "auto_selected": False,
+    }
+    session = AgentSessionStore(tmp_workspace)
+    run = session.create_run("agent post-round submission")
+    session.update_run(run.run_id, workflow_ids=[wf_id], job_ids=[rank_job.job_id, "job_submit"])
+    session.add_decision(
+        run.run_id,
+        {
+            "decision": "submit_candidate",
+            "submit_job_id": "job_submit",
+            "submission": submission,
+            "next_round": {"recommended": False, "reason": "ready"},
+            "metrics_used": ["score"],
+            "notes": [],
+        },
+    )
+
+    model = collect_report_model(tmp_workspace, wf_id)
+
+    assert model.final_submission["submission_id"] == "sub_post_round"
+    assert [candidate.candidate_id for candidate in model.final_candidates] == ["design_1"]
+    assert [candidate.candidate_id for candidate in model.candidates] == ["design_1"]
+
+
 def test_report_uses_latest_non_superseded_submission(
     tmp_workspace: Workspace,
 ) -> None:

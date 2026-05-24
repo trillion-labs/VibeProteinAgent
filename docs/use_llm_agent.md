@@ -104,10 +104,11 @@ curl https://openrouter.ai/api/v1/models | python -m json.tool
 
 ## 3. Ask For A Plan First
 
-`--plan-only` uses the same VPA-level planning flow for every provider. VPA sends the planner system
-prompt below, plus your request, available VPA tools, workflow templates, and a
-strict JSON output contract. VPA validates the returned plan locally, but does
-not submit jobs, start tool execution, or warm models.
+`--plan-only` uses the same VPA-level planning flow for every provider. VPA sends
+the planner system prompt, your request, the available VPA tools, and a strict
+JSON output contract. The planner must return an explicit `workflow_plan.nodes[]`
+tool chain. VPA validates the returned plan locally, but does not submit jobs,
+start tool execution, or warm models.
 
 For tools that advertise sharding metadata, the planner should prefer `foreach`
 fan-out with small seed/candidate shards and `max_parallel` set to the available

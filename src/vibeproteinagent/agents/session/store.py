@@ -10,7 +10,7 @@ from vibeproteinagent.workspace.store import canonical_json, now_us
 
 from .types import AgentRunRecord, ModeClassification
 
-SYSTEM_PROMPT_VERSION = "vpa-agent-2026-05-19"
+SYSTEM_PROMPT_VERSION = "vpa-agent-2026-05-24"
 TOOL_SCHEMA_VERSION = "vpa-agent-tools-v1"
 
 

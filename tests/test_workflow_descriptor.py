@@ -114,49 +114,39 @@ def test_node_id_cannot_contain_brackets() -> None:
         WorkflowNode(id="x[0]", tool="noop")
 
 
-def test_iterative_protein_examples_are_loadable_and_registered() -> None:
+def test_task_specific_bundled_examples_are_not_public_surface() -> None:
     root = Path(__file__).resolve().parents[1] / "workflows" / "examples"
-    registry = ToolRegistry()
-    registry.discover()
-    tools = {descriptor.name for descriptor in registry.list()}
     for name in (
         "rfdiffusion_backbone_design_round.yaml",
         "mutation_repair_round.yaml",
         "semantic_constraint_to_family_sequences.yaml",
         "target_sequence_binder_design_round.yaml",
         "template_guided_design_prep.yaml",
+        "mpnn_then_refold.yaml",
     ):
-        wf = load_workflow(root / name)
-        wf.validate_dag()
-        assert {node.tool for node in wf.nodes} <= tools
+        assert not (root / name).exists()
 
-    rfdiffusion = load_workflow(root / "rfdiffusion_backbone_design_round.yaml")
-    assert [node.tool for node in rfdiffusion.nodes] == [
-        "rfdiffusion",
-        "proteinmpnn",
-        "mpnn_to_protenix_input",
-        "protenix_v2",
-        "structure_analysis",
-        "protein_qc",
-        "rank_designs",
-        "submit_candidate",
-    ]
-    assert rfdiffusion.params["submit_final"].default is False
-    assert rfdiffusion.nodes[-1].when == "params['submit_final']"
-    assert "rfdiffusion_num_designs" not in rfdiffusion.params
-    assert rfdiffusion.nodes[1].inputs["pdb_path"] == "${outputs.backbone.designs[0].pdb_path}"
-    semantic = load_workflow(root / "semantic_constraint_to_family_sequences.yaml")
-    assert semantic.params["submit_final"].default is False
-    assert semantic.nodes[-1].tool == "submit_candidate"
-    binder = load_workflow(root / "target_sequence_binder_design_round.yaml")
-    assert binder.params["submit_final"].default is False
-    assert binder.nodes[-1].tool == "submit_candidate"
-    repair = load_workflow(root / "mutation_repair_round.yaml")
-    assert [node.tool for node in repair.nodes] == [
-        "structure_analysis",
-        "sequence_edit",
-        "sequence_to_protenix_input",
-        "protenix_v2",
-        "structure_analysis",
-        "rank_designs",
-    ]
+
+def test_user_provided_workflow_yaml_still_loads_and_validates(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path,
+        """
+name: user_qc
+version: "1.0.0"
+params:
+  sequence: {type: str, required: true}
+nodes:
+  - id: qc
+    tool: protein_qc
+    inputs:
+      sequence: ${params.sequence}
+""",
+    )
+    registry = ToolRegistry()
+    registry.discover()
+    tools = {descriptor.name for descriptor in registry.list()}
+
+    wf = load_workflow(p)
+    wf.validate_dag()
+    assert {node.tool for node in wf.nodes} <= tools
+    assert wf.nodes[0].tool == "protein_qc"

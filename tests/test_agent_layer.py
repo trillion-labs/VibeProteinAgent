@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socketserver
+import sys
 import threading
 import time
 from pathlib import Path
@@ -15,14 +16,13 @@ from vibeproteinagent.agents.evaluation import DecisionEngine
 from vibeproteinagent.agents.execution import ExecutionPolicy
 from vibeproteinagent.agents.execution.controller import WorkflowExecutionOutcome
 from vibeproteinagent.agents.planning import WorkflowPlanner
-from vibeproteinagent.agents.planning.workflow_planner import _fallback_plan_from_prompt
+from vibeproteinagent.agents.planning.prompts import PLANNER_SYSTEM_PROMPT
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse, provider_from_config
 from vibeproteinagent.agents.provider.cli_agent import CliAgentProvider
 from vibeproteinagent.agents.provider.openrouter import _post_json_with_total_timeout
 from vibeproteinagent.agents.tools.schemas import compact_tool_outline, compact_tool_schema
 from vibeproteinagent.cli.main import app
 from vibeproteinagent.core.errors import InvalidParamsError, TimeoutError_
-from vibeproteinagent.mcp.tools import SessionCtx, list_workflows
 from vibeproteinagent.workflows import WorkflowStore
 from vibeproteinagent.workspace import ArtifactStore, JobState, JobStore, Workspace
 
@@ -66,11 +66,14 @@ def test_decision_engine_does_not_terminal_on_ranked_design() -> None:
 def _run_pending_jobs(store: JobStore, registry: ToolRegistry, stop: threading.Event) -> None:
     import typing
 
-    import torch
-
     from vibeproteinagent.adapters.context import null_context
 
-    device = torch.device("cpu")
+    try:
+        import torch
+
+        device = torch.device("cpu")
+    except Exception:
+        device = None
     weights_dir = Path("/tmp/vpa_test_weights")
     weights_dir.mkdir(exist_ok=True)
     while not stop.is_set():
@@ -178,150 +181,15 @@ def test_mode_router_fresh_analysis_request_uses_planning(tmp_workspace: Workspa
     assert route.requires_llm_planning is True
 
 
-def test_template_recovery_handles_semantic_function_requests(
-    tmp_workspace: Workspace,
-) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-
-    plan = _fallback_plan_from_prompt(
-        {
-            "request": "Design a protein with NADPHX epimerase activity and Mg2+ binding.",
-            "workflow_templates": workflows,
-            "tool_selection": {},
-        },
-        "",
-    )
-
-    assert plan is not None
-    assert plan["workflow_plan"]["name"] == "semantic_constraint_to_family_sequences"
-    assert plan["workflow_ref"] == "semantic_constraint_to_family_sequences"
-    assert plan["params"]["query"].startswith("Design a protein")
+def test_planner_prompt_is_format_only_not_template_routing() -> None:
+    assert "submit_final" not in PLANNER_SYSTEM_PROMPT
+    assert "workflow_templates" not in PLANNER_SYSTEM_PROMPT
+    assert "semantic_constraint_to_family_sequences" not in PLANNER_SYSTEM_PROMPT
+    assert "target_sequence_binder_design_round" not in PLANNER_SYSTEM_PROMPT
+    assert "rfdiffusion_backbone_design_round" not in PLANNER_SYSTEM_PROMPT
 
 
-def test_template_recovery_sets_submit_final_for_explicit_final_request(
-    tmp_workspace: Workspace,
-) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-
-    plan = _fallback_plan_from_prompt(
-        {
-            "request": (
-                "Find representative protein sequences for GO:0052855 activity "
-                "and explicitly submit the final candidate. Return Reason: and Answer:."
-            ),
-            "workflow_templates": workflows,
-            "tool_selection": {},
-        },
-        "",
-    )
-
-    assert plan is not None
-    assert plan["workflow_ref"] == "semantic_constraint_to_family_sequences"
-    assert plan["params"]["submit_final"] is True
-    assert plan["workflow_plan"]["nodes"][-1]["tool"] == "submit_candidate"
-
-
-def test_template_recovery_handles_target_sequence_binder_requests(
-    tmp_workspace: Workspace,
-) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-    target_sequence = (
-        "MKAVEVANNILFSVMMFNGAQTVIQKISWLRTAIAFLKGYMETTGATKKELEQVEK"
-        "LKERVDEIATAVNWDVYAQYARGDFNLLSDDEYKEIQKALLVLEDIKEQIIVEM"
-        "LRVGLAQGQMGTLKISDYLDSLIKERK"
-    )
-    request = (
-        "Design a protein binder that targets a specific site.\n"
-        f"Sequence: {target_sequence}\n"
-        "Target binding site: Y73, Y76, Y128, F36, L132, V72, Y40, A35, Q25, G39"
-    )
-
-    plan = _fallback_plan_from_prompt(
-        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
-        "",
-    )
-
-    assert plan is not None
-    assert plan["workflow_plan"]["name"] == "target_sequence_binder_design_round"
-    params = plan["params"]
-    assert params["target_sequence"] == target_sequence
-    assert params["target_hotspots"] == [73, 76, 128, 36, 132, 72, 40, 35, 25, 39]
-
-
-def test_template_recovery_handles_binder_residue_list_without_site_label(
-    tmp_workspace: Workspace,
-) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-    target_sequence = (
-        "MKAVEVANNILFSVMMFNGAQTVIQKISWLRTAIAFLKGYMETTGATKKELEQVEK"
-        "LKERVDEIATAVNWDVYAQYARGDFNLLSDDEYKEIQKALLVLEDIKEQIIVEM"
-        "LRVGLAQGQMGTLKISDYLDSLIKERK"
-    )
-    request = (
-        f"Design a protein binder for this target sequence: {target_sequence}. "
-        "Direct the binder interface toward residues Y73, Y76, Y128, F36, L132."
-    )
-
-    plan = _fallback_plan_from_prompt(
-        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
-        "",
-    )
-
-    assert plan is not None
-    assert plan["workflow_ref"] == "target_sequence_binder_design_round"
-    assert plan["params"]["target_hotspots"] == [73, 76, 128, 36, 132]
-
-
-def test_template_recovery_defaults_de_novo_design_length(
-    tmp_workspace: Workspace,
-) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-    request = (
-        "Use rfdiffusion, proteinmpnn, protenix_v2, structure_analysis, "
-        "protein_qc, and rank_designs to design a de novo soluble protein candidate."
-    )
-
-    plan = _fallback_plan_from_prompt(
-        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
-        "",
-    )
-
-    assert plan is not None
-    assert plan["workflow_plan"]["name"] == "rfdiffusion_backbone_design_round"
-    assert plan["params"]["length"] == 100
-
-
-def test_template_recovery_extracts_requested_de_novo_length(
-    tmp_workspace: Workspace,
-) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-
-    plan = _fallback_plan_from_prompt(
-        {
-            "request": "Design a de novo 85 aa soluble protein with RFdiffusion.",
-            "workflow_templates": workflows,
-            "tool_selection": {},
-        },
-        "",
-    )
-
-    assert plan is not None
-    assert plan["params"]["length"] == 85
-
-
-def test_template_recovery_canonicalizes_runtime_param_values(
+def test_planner_rejects_workflow_ref_contract(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -335,97 +203,19 @@ def test_template_recovery_canonicalizes_runtime_param_values(
     )
     registry = ToolRegistry()
     registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-    request = "Design a protein with NADPHX epimerase activity and Mg2+ binding."
-    raw_plan = {
-        "mode": "agent_plan",
-        "goal": request,
-        "assumptions": [],
-        "missing_inputs": [],
-        "required_tools": ["literature_search", "go_sequences", "sequence_analysis"],
-        "workflow_plan": {
-            "name": "semantic_constraint_to_family_sequences",
-            "version": "1.0.0",
-            "params": {"query": request, "max_sequences": 200},
-            "nodes": [],
-        },
-        "success_criteria": {},
-        "warm_tools": [],
-    }
-
     planner = WorkflowPlanner(registry)
-    plan = planner._canonicalize_template_plan(
-        {"request": request, "workflow_templates": workflows, "tool_selection": {}},
-        raw_plan,
-    )
-    validated = planner.validate_plan(plan)
 
-    params = validated["workflow_plan"]["params"]
-    assert validated["params"]["query"] == request
-    assert validated["params"]["max_sequences"] == 200
-    assert params["query"]["type"] == "str"
-    assert validated["workflow_plan"]["nodes"]
-
-
-def test_template_recovery_overrides_bad_provider_selection(
-    tmp_workspace: Workspace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import asyncio
-
-    monkeypatch.setattr(
-        "vibeproteinagent.agents.planning.workflow_planner.descriptor_availability",
-        lambda *args, **kwargs: {"available": True},
-    )
-    monkeypatch.setattr(
-        "vibeproteinagent.agents.planning.workflow_planner._install_readiness",
-        lambda tool_name: {"install_ready": True},
-    )
-
-    class FakeProvider:
-        async def chat(self, messages, **kwargs):
-            prompt = json.loads(messages[-1].content)
-            if prompt["output_contract"]["mode"] == "tool_selection":
-                return ProviderResponse(
-                    provider="fake",
-                    model="fake",
-                    content=json.dumps(
-                        {
-                            "mode": "tool_selection",
-                            "candidate_tools": ["mpnn_to_protenix_input"],
-                            "reason": "bad internal glue selection",
-                            "missing_inputs": [],
-                        }
-                    ),
-                )
-            return ProviderResponse(
-                provider="fake",
-                model="fake",
-                content=json.dumps({"mode": "agent_plan", "goal": "incomplete"}),
-            )
-
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-    request = "Design a protein with NADPHX epimerase activity and Mg2+ binding."
-
-    plan = asyncio.run(
-        WorkflowPlanner(registry, FakeProvider()).draft_plan(
-            request,
-            available_tools=[
-                {"name": "literature_search", "input_schema": {}},
-                {"name": "go_sequences", "input_schema": {}},
-                {"name": "sequence_analysis", "input_schema": {}},
-            ],
-            workflows=workflows,
+    with pytest.raises(InvalidParamsError, match="workflow_plan, not workflow_ref"):
+        planner.validate_plan(
+            {
+                "mode": "agent_plan",
+                "workflow_ref": "some_recipe",
+                "params": {"x": 1},
+            }
         )
-    )
-
-    assert plan["workflow_plan"]["name"] == "semantic_constraint_to_family_sequences"
-    assert plan["params"]["query"] == request
 
 
-def test_workflow_ref_contract_accepts_runtime_params(
+def test_generic_planner_drafts_explicit_workflow_plan(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,12 +240,8 @@ def test_workflow_ref_contract_accepts_runtime_params(
                     content=json.dumps(
                         {
                             "mode": "tool_selection",
-                            "candidate_tools": [
-                                "rfdiffusion",
-                                "proteinmpnn",
-                                "protenix_v2",
-                            ],
-                            "reason": "de novo backbone workflow",
+                            "candidate_tools": ["protein_qc"],
+                            "reason": "sequence quality check",
                             "missing_inputs": [],
                         }
                     ),
@@ -466,76 +252,45 @@ def test_workflow_ref_contract_accepts_runtime_params(
                 content=json.dumps(
                     {
                         "mode": "agent_plan",
-                        "goal": "Design an 85 aa protein.",
+                        "goal": "check sequence quality",
                         "assumptions": [],
                         "missing_inputs": [],
-                        "required_tools": ["rfdiffusion", "proteinmpnn", "protenix_v2"],
-                        "workflow_ref": "rfdiffusion_backbone_design_round",
-                        "params": {"length": 85},
+                        "required_tools": ["protein_qc"],
+                        "params": {},
+                        "workflow_plan": {
+                            "name": "qc_plan",
+                            "version": "0.1.0",
+                            "params": {"sequence": {"type": "str", "required": True}},
+                            "nodes": [
+                                {
+                                    "id": "qc",
+                                    "tool": "protein_qc",
+                                    "inputs": {"sequence": "${params.sequence}"},
+                                }
+                            ],
+                        },
                         "success_criteria": {"workflow_completes": True},
-                        "warm_tools": ["rfdiffusion", "proteinmpnn", "protenix_v2"],
-                        "estimated_llm_calls": 1,
+                        "warm_tools": ["protein_qc"],
+                        "estimated_llm_calls": 2,
                     }
                 ),
             )
 
     registry = ToolRegistry()
     registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
+    request = "Check this protein sequence for quality."
 
     plan = asyncio.run(
         WorkflowPlanner(registry, FakeProvider()).draft_plan(
-            "Design an 85 aa protein with RFdiffusion.",
-            available_tools=[
-                {"name": "rfdiffusion", "input_schema": {}},
-                {"name": "proteinmpnn", "input_schema": {}},
-                {"name": "protenix_v2", "input_schema": {}},
-                {"name": "structure_analysis", "input_schema": {}},
-                {"name": "protein_qc", "input_schema": {}},
-                {"name": "rank_designs", "input_schema": {}},
-            ],
-            workflows=workflows,
+            request,
+            available_tools=[{"name": "protein_qc", "input_schema": {}}],
+            workflows=[],
         )
     )
 
-    assert plan["workflow_ref"] == "rfdiffusion_backbone_design_round"
-    assert plan["params"] == {"length": 85}
-    assert plan["workflow_plan"]["params"]["length"]["type"] == "int"
-    WorkflowPlanner(registry).validate_invocation(plan, {})
-
-
-def test_workflow_ref_contract_rejects_wrong_runtime_param_type(
-    tmp_workspace: Workspace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "vibeproteinagent.agents.planning.workflow_planner.descriptor_availability",
-        lambda *args, **kwargs: {"available": True},
-    )
-    monkeypatch.setattr(
-        "vibeproteinagent.agents.planning.workflow_planner._install_readiness",
-        lambda tool_name: {"install_ready": True},
-    )
-    registry = ToolRegistry()
-    registry.discover()
-    workflows = list_workflows(SessionCtx(tmp_workspace, registry))
-    planner = WorkflowPlanner(registry)
-
-    plan = planner._canonicalize_template_plan(
-        {
-            "request": "Design a de novo protein.",
-            "workflow_templates": workflows,
-            "tool_selection": {},
-        },
-        {
-            "mode": "agent_plan",
-            "workflow_ref": "rfdiffusion_backbone_design_round",
-            "params": {"length": "eighty-five"},
-        },
-    )
-
-    with pytest.raises(InvalidParamsError, match="runtime param has the wrong type"):
-        planner.validate_invocation(plan, {})
+    assert "workflow_ref" not in plan
+    assert plan["workflow_plan"]["name"] == "qc_plan"
+    assert plan["workflow_plan"]["nodes"][0]["tool"] == "protein_qc"
 
 
 def test_agent_direct_tool_set_accepts_explicit_jobs(tmp_workspace: Workspace) -> None:
@@ -740,7 +495,7 @@ def test_cli_agent_provider_reads_json_from_subprocess(
         "_ = sys.stdin.read()\n"
         "print('{\"mode\":\"agent_plan\",\"workflow_plan\":{\"name\":\"x\",\"nodes\":[]}}')\n"
     )
-    monkeypatch.setenv("VPA_CODEX_COMMAND", "python")
+    monkeypatch.setenv("VPA_CODEX_COMMAND", sys.executable)
     monkeypatch.setenv("VPA_CODEX_ARGS", str(script))
     provider = provider_from_config(AgentConfig.from_env(provider="codex", model="fake"))
 
@@ -1040,7 +795,7 @@ def test_agent_plan_controller_executes_and_logs_provider_messages(
         "import sys\n"
         "prompt = sys.stdin.read()\n"
         "if 'result critic' in prompt.lower():\n"
-        "    print('{\"decision\":\"done\",\"next_round\":{\"recommended\":false,"
+        "    print('{\"decision\":\"stop\",\"next_round\":{\"recommended\":false,"
         "\"changes\":[],\"reason\":\"ok\"},\"metrics_used\":[],\"notes\":[]}')\n"
         "else:\n"
         "    print('''{\"mode\":\"agent_plan\",\"goal\":\"x\",\"assumptions\":[],"
@@ -1070,7 +825,7 @@ def test_agent_plan_controller_executes_and_logs_provider_messages(
     assert data["workflow_ids"]
     run = AgentSessionStore(tmp_workspace).get_run(data["run_id"])
     assert run.provider_snapshot is not None
-    assert run.final_report["decision"]["decision"] == "done"
+    assert run.final_report["decision"]["decision"] == "stop"
 
 
 def test_agent_plan_stops_after_explicit_submit_candidate(
@@ -1173,6 +928,256 @@ def test_agent_plan_stops_after_explicit_submit_candidate(
     assert data["state"] == "completed"
     assert data["decision"]["decision"] == "submitted_final_candidate"
     assert data["decision"]["submission"]["submission_id"] == "sub_final"
+
+
+def test_agent_plan_executes_post_round_submit_candidate_decision(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = {
+        "mode": "agent_plan",
+        "goal": "rank candidates before deciding",
+        "assumptions": [],
+        "missing_inputs": [],
+        "required_tools": ["rank_designs"],
+        "workflow_plan": {
+            "name": "rank_only",
+            "version": "0.1.0",
+            "nodes": [
+                {
+                    "id": "rank",
+                    "tool": "rank_designs",
+                    "inputs": {
+                        "candidates": [
+                            {"candidate_id": "design_1", "sequence": "ACDE", "score": 1.0}
+                        ],
+                        "top_k": 1,
+                    },
+                }
+            ],
+        },
+        "success_criteria": {"return_final_candidate": True},
+        "warm_tools": [],
+        "estimated_llm_calls": 1,
+    }
+
+    async def _draft_plan(self, *args, **kwargs):
+        del self, args, kwargs
+        return plan
+
+    class SubmitDecisionProvider:
+        provider_name = "fake"
+
+        async def chat(self, messages, **kwargs):
+            del kwargs
+            if "result critic" in messages[0].content:
+                return ProviderResponse(
+                    provider="fake",
+                    model="fake",
+                    content=json.dumps(
+                        {
+                            "decision": "submit_candidate",
+                            "submit_candidate": {
+                                "outcome": "accepted",
+                                "candidates": [
+                                    {
+                                        "job_id": "job_rank",
+                                        "candidate_id": "design_1",
+                                        "index": None,
+                                        "justification": "top ranked candidate",
+                                        "scores_to_highlight": ["score"],
+                                    }
+                                ],
+                                "reasoning": "ranking is sufficient",
+                                "supersedes": None,
+                            },
+                            "next_round": {"recommended": False, "reason": "ready"},
+                            "metrics_used": ["score"],
+                            "notes": [],
+                        }
+                    ),
+                )
+            raise AssertionError("planner should be monkeypatched")
+
+    def _execute(self, run_id, broker, current_plan, params, policy):
+        del self, run_id, broker, current_plan, params, policy
+        return WorkflowExecutionOutcome(
+            workflow_id="wf_rank_only",
+            state="completed",
+            executed=True,
+            summary={
+                "state": "completed",
+                "workflow_id": "wf_rank_only",
+                "job_ids": ["job_rank"],
+                "metrics_used": ["score"],
+                "nodes": [
+                    {
+                        "node_id": "rank",
+                        "tool": "rank_designs",
+                        "state": "completed",
+                        "job_id": "job_rank",
+                        "output": {
+                            "ranked_candidates": [
+                                {
+                                    "candidate_id": "design_1",
+                                    "sequence": "ACDE",
+                                    "score": 1.0,
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+
+    def _submit(self, run_id, broker, decision, *, round_index, policy):
+        del self, run_id, broker, round_index, policy
+        assert decision["decision"] == "submit_candidate"
+        assert decision["submit_candidate"]["candidates"][0]["job_id"] == "job_rank"
+        return (
+            {
+                "submission_id": "sub_post_round",
+                "outcome": "accepted",
+                "terminal": True,
+                "candidates_resolved": [{"candidate_id": "design_1", "sequence": "ACDE"}],
+                "reasoning": "ranking is sufficient",
+                "supersedes": None,
+                "auto_selected": False,
+            },
+            "job_submit",
+        )
+
+    monkeypatch.setattr(WorkflowPlanner, "draft_plan", _draft_plan)
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.execution.controller.provider_from_config",
+        lambda config: SubmitDecisionProvider(),
+    )
+    monkeypatch.setattr(AgentController, "_execute_validated_plan", _execute)
+    monkeypatch.setattr(AgentController, "_execute_submit_candidate_decision", _submit)
+
+    controller = AgentController(
+        tmp_workspace,
+        config=AgentConfig.from_env(provider="codex", model="fake"),
+    )
+    data = controller.run_sync("rank and decide")
+
+    assert data["state"] == "completed"
+    assert data["decision"]["decision"] == "submit_candidate"
+    assert data["decision"]["submit_job_id"] == "job_submit"
+    assert data["summary"]["latest"]["final_submission"]["submission_id"] == "sub_post_round"
+    assert "job_submit" in data["job_ids"]
+
+
+def test_agent_plan_executes_no_acceptable_candidate_decision(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = {
+        "mode": "agent_plan",
+        "goal": "inspect candidates",
+        "assumptions": [],
+        "missing_inputs": [],
+        "required_tools": ["rank_designs"],
+        "workflow_plan": {
+            "name": "rank_none",
+            "version": "0.1.0",
+            "nodes": [
+                {
+                    "id": "rank",
+                    "tool": "rank_designs",
+                    "inputs": {
+                        "candidates": [{"candidate_id": "weak", "sequence": "ACDE", "score": 0.1}],
+                        "top_k": 1,
+                    },
+                }
+            ],
+        },
+        "success_criteria": {"minimum_score": 0.8},
+        "warm_tools": [],
+        "estimated_llm_calls": 1,
+    }
+
+    async def _draft_plan(self, *args, **kwargs):
+        del self, args, kwargs
+        return plan
+
+    class RejectDecisionProvider:
+        provider_name = "fake"
+
+        async def chat(self, messages, **kwargs):
+            del kwargs
+            if "result critic" in messages[0].content:
+                return ProviderResponse(
+                    provider="fake",
+                    model="fake",
+                    content=json.dumps(
+                        {
+                            "decision": "no_acceptable_candidate",
+                            "submit_candidate": None,
+                            "next_round": {
+                                "recommended": False,
+                                "reason": "candidate score is below threshold",
+                            },
+                            "metrics_used": ["score"],
+                            "notes": [],
+                        }
+                    ),
+                )
+            raise AssertionError("planner should be monkeypatched")
+
+    def _execute(self, run_id, broker, current_plan, params, policy):
+        del self, run_id, broker, current_plan, params, policy
+        return WorkflowExecutionOutcome(
+            workflow_id="wf_rank_none",
+            state="completed",
+            executed=True,
+            summary={
+                "state": "completed",
+                "workflow_id": "wf_rank_none",
+                "job_ids": ["job_rank"],
+                "metrics_used": ["score"],
+            },
+        )
+
+    def _submit(self, run_id, broker, decision, *, round_index, policy):
+        del self, run_id, broker, round_index, policy
+        params = _submit_candidate_params_from_decision(decision)
+        assert params == {
+            "outcome": "no_acceptable_candidate",
+            "candidates": [],
+            "reasoning": "candidate score is below threshold",
+        }
+        return (
+            {
+                "submission_id": "sub_none",
+                "outcome": "no_acceptable_candidate",
+                "terminal": True,
+                "candidates_resolved": [],
+                "reasoning": params["reasoning"],
+                "supersedes": None,
+                "auto_selected": False,
+            },
+            "job_submit_none",
+        )
+
+    from vibeproteinagent.agents.execution.controller import _submit_candidate_params_from_decision
+
+    monkeypatch.setattr(WorkflowPlanner, "draft_plan", _draft_plan)
+    monkeypatch.setattr(
+        "vibeproteinagent.agents.execution.controller.provider_from_config",
+        lambda config: RejectDecisionProvider(),
+    )
+    monkeypatch.setattr(AgentController, "_execute_validated_plan", _execute)
+    monkeypatch.setattr(AgentController, "_execute_submit_candidate_decision", _submit)
+
+    controller = AgentController(
+        tmp_workspace,
+        config=AgentConfig.from_env(provider="codex", model="fake"),
+    )
+    data = controller.run_sync("rank and reject")
+
+    assert data["decision"]["decision"] == "no_acceptable_candidate"
+    assert data["summary"]["latest"]["final_submission"]["outcome"] == "no_acceptable_candidate"
 
 
 def test_agent_plan_retries_bad_llm_entries_within_budget(

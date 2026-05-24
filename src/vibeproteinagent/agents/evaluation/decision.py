@@ -47,11 +47,12 @@ class DecisionEngine:
                 "decision model returned non-JSON content",
                 details={"error": str(exc), "content": response.content[:1000]},
             ) from exc
-        decision.setdefault("decision", local["decision"])
-        decision.setdefault("next_round", local["next_round"])
-        decision.setdefault("metrics_used", local.get("metrics_used", []))
-        decision.setdefault("notes", [])
-        return cast(dict[str, Any], decision)
+        if not isinstance(decision, dict):
+            raise InvalidParamsError(
+                "decision model must return a JSON object",
+                details={"got_type": type(decision).__name__},
+            )
+        return self._normalize_decision(decision, local)
 
     def local_decision(
         self,
@@ -80,3 +81,46 @@ class DecisionEngine:
             "metrics_used": metrics_used,
             "notes": [],
         }
+
+    def _normalize_decision(
+        self,
+        decision: dict[str, Any],
+        local: dict[str, Any],
+    ) -> dict[str, Any]:
+        label = decision.get("decision")
+        allowed = {"submit_candidate", "next_round", "no_acceptable_candidate", "stop"}
+        if label not in allowed:
+            label = "next_round" if _next_round_recommended(decision) else "stop"
+        next_round = decision.get("next_round")
+        if not isinstance(next_round, dict):
+            next_round = {}
+        if label == "next_round":
+            next_round.setdefault("recommended", True)
+        else:
+            next_round.setdefault("recommended", False)
+        next_round.setdefault("changes", [])
+        next_round.setdefault(
+            "reason",
+            local.get("next_round", {}).get("reason", ""),
+        )
+        submit = decision.get("submit_candidate")
+        if not isinstance(submit, dict):
+            submit = None
+        normalized = {
+            "decision": label,
+            "submit_candidate": submit,
+            "next_round": next_round,
+            "metrics_used": decision.get("metrics_used") or local.get("metrics_used", []),
+            "notes": decision.get("notes") if isinstance(decision.get("notes"), list) else [],
+        }
+        if label == "submit_candidate" and submit is None:
+            raise InvalidParamsError(
+                "submit_candidate decision missing submit_candidate payload",
+                details={"decision": decision},
+            )
+        return cast(dict[str, Any], normalized)
+
+
+def _next_round_recommended(decision: dict[str, Any]) -> bool:
+    next_round = decision.get("next_round")
+    return isinstance(next_round, dict) and next_round.get("recommended") is True

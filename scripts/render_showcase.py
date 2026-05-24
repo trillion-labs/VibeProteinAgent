@@ -1,3 +1,4 @@
+# ruff: noqa: E402, I001
 """Generate a self-contained HTML showcase of the Phase 6 pretty-mode renderers.
 
 Runs each ``render_*`` function in :mod:`vibeproteinagent.cli.render` against a
@@ -23,7 +24,6 @@ the descriptor surface changes.
 from __future__ import annotations
 
 import html
-import os
 import sys
 from io import StringIO
 from pathlib import Path
@@ -113,10 +113,16 @@ TOOLS = {"tools": [
      "description": "Sequence design over a fixed backbone (Dauparas et al., 2022).",
      "gpu_required": True, "vram_min_gib": 2},
     {"name": "mpnn_to_protenix_input", "version": "1.0.1", "category": "misc",
-     "description": "Glue adapter: convert top-K ProteinMPNN designs (FASTA) into Protenix-v2 input JSON files.",
+     "description": (
+         "Glue adapter: convert top-K ProteinMPNN designs (FASTA) into "
+         "Protenix-v2 input JSON files."
+     ),
      "gpu_required": False, "vram_min_gib": None},
     {"name": "protenix_v2", "version": "1.0.0", "category": "structure_prediction",
-     "description": "Protein/complex 3D structure prediction (Protenix v1, AlphaFold3-class). ByteDance, B200-patched.",
+     "description": (
+         "Protein/complex 3D structure prediction (Protenix v1, "
+         "AlphaFold3-class). ByteDance, B200-patched."
+     ),
      "gpu_required": True, "vram_min_gib": 16},
     {"name": "pxdesign", "version": "1.0.0", "category": "protein_design",
      "description": "PXDesign target-conditioned binder generation (ByteDance DiT, B200-patched).",
@@ -188,7 +194,7 @@ JOB = {"job": {
 def _workflow(state_map: dict) -> dict:
     return {
         "workflow_id": "a8cb8f1e6e3ca062",
-        "name": "mpnn_then_refold", "version": "1.0.0",
+        "name": "user_design_workflow", "version": "1.0.0",
         "state": "completed",
         "nodes": [
             {"node_id": "design", "tool": "proteinmpnn",
@@ -210,8 +216,12 @@ def _workflow(state_map: dict) -> dict:
     }
 
 
-WORKFLOW_FIRST  = _workflow({"design": "completed", "convert": "completed", "refold[0]": "completed"})
-WORKFLOW_CACHED = _workflow({"design": "cached",    "convert": "cached",    "refold[0]": "cached"})
+WORKFLOW_FIRST = _workflow(
+    {"design": "completed", "convert": "completed", "refold[0]": "completed"}
+)
+WORKFLOW_CACHED = _workflow(
+    {"design": "cached", "convert": "cached", "refold[0]": "cached"}
+)
 
 ERROR = {"ok": False, "error": {
     "code": "E_CONFLICT",
@@ -228,7 +238,8 @@ ERROR = {"ok": False, "error": {
 TILES = [
     ("vpa version",               "Three-line version block.",
      render.render_version,         VERSION, 100),
-    ("vpa tools",                  "Registered tools table — category column colored, GPU/VRAM badges.",
+    ("vpa tools",
+     "Registered tools table — category column colored, GPU/VRAM badges.",
      render.render_tool_list,       TOOLS, 110),
     ("vpa doctor",                 "Environment summary + per-GPU table.",
      render.render_doctor,          DOCTOR, 92),
@@ -240,10 +251,10 @@ TILES = [
      render.render_warm_result,     WARM, 100),
     ("vpa status <job_id>",        "Single job record.",
      render.render_job,             JOB, 110),
-    ("vpa workflow run mpnn_then_refold (first run)",
+    ("vpa workflow run user_design_workflow.yaml (first run)",
      "DAG node states — 3 ran, 1 skipped (foreach parent).",
      render.render_workflow_status, WORKFLOW_FIRST, 110),
-    ("vpa workflow run mpnn_then_refold (re-run)",
+    ("vpa workflow run user_design_workflow.yaml (re-run)",
      "Same workflow, all 3 nodes hit the cache.",
      render.render_workflow_status, WORKFLOW_CACHED, 110),
     ("vpa run --call-id collision (E_CONFLICT)",
@@ -272,7 +283,8 @@ def main() -> None:
         '<!doctype html><html><head><meta charset="utf-8">',
         '<title>vibeproteinagent — pretty-mode showcase</title>',
         '<style>',
-        'body{font-family:system-ui,sans-serif;max-width:1300px;margin:2em auto;padding:0 2em;color:#222}',
+        'body{font-family:system-ui,sans-serif;max-width:1300px;margin:2em auto;'
+        'padding:0 2em;color:#222}',
         'h1{border-bottom:2px solid #333;padding-bottom:.4em}',
         'h2{margin-top:2.5em;color:#0a3d62}',
         '.desc{color:#555;margin:.5em 0 1em}',
@@ -290,7 +302,9 @@ def main() -> None:
         parts.append(f'<h2>{html.escape(cmd)}</h2>')
         parts.append(f'<p class="desc">{html.escape(desc)}</p>')
         parts.append(svg)
-        parts.append(f'<details><summary>plain mode</summary><pre>{html.escape(text)}</pre></details>')
+        parts.append(
+            f'<details><summary>plain mode</summary><pre>{html.escape(text)}</pre></details>'
+        )
     parts.append('</body></html>')
 
     OUT_HTML.write_text('\n'.join(parts))

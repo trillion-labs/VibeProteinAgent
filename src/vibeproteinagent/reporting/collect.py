@@ -238,7 +238,10 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
     candidates = _normalize_candidates(
         report_nodes, all_artifacts, node_params=params_by_node,
     )
-    submissions = _submission_outputs(report_nodes)
+    submissions = [
+        *_submission_outputs(report_nodes),
+        *_agent_submission_outputs(workspace, workflow_id=wf.workflow_id, job_id=None),
+    ]
     final_submission = _latest_final_submission(submissions)
     final_candidates = _candidates_from_submission(final_submission)
     if not candidates:
@@ -1659,6 +1662,45 @@ def _agent_allows_auto_selection(workspace: Workspace, workflow_id: str) -> bool
         if isinstance(fallback, dict):
             return fallback.get("auto_select") is True
     return False
+
+
+def _agent_submission_outputs(
+    workspace: Workspace,
+    *,
+    workflow_id: str | None,
+    job_id: str | None,
+) -> list[dict[str, Any]]:
+    try:
+        from vibeproteinagent.agents.session.store import AgentSessionStore
+
+        store = AgentSessionStore(workspace)
+        run = _find_agent_run_for(store, workflow_id=workflow_id, job_id=job_id)
+        if run is None:
+            return []
+        details = store.get_run_details(run.run_id)
+    except Exception:
+        return []
+
+    submissions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in details.get("decisions") or []:
+        if not isinstance(row, dict):
+            continue
+        decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
+        submission = decision.get("submission")
+        if not isinstance(submission, dict) or submission.get("terminal") is not True:
+            continue
+        submission_id = str(submission.get("submission_id") or "")
+        key = submission_id or json.dumps(submission, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        row_submission = dict(submission)
+        if decision.get("submit_job_id"):
+            row_submission.setdefault("job_id", decision.get("submit_job_id"))
+        row_submission.setdefault("node_id", "post_round_decision")
+        submissions.append(row_submission)
+    return submissions
 
 
 __all__ = ["collect_report_model"]

@@ -165,30 +165,19 @@ def test_list_workspaces_includes_session(ctx: SessionCtx) -> None:
     assert ctx.workspace.name in out
 
 
-def test_list_workflows_returns_bundled_examples(ctx: SessionCtx) -> None:
+def test_list_workflows_returns_only_generic_bundled_examples(ctx: SessionCtx) -> None:
     items = list_workflows(ctx)
     assert isinstance(items, list)
     names = {it.get("name") for it in items}
-    # Built-ins shipped in src/vibeproteinagent/workflows/examples/.
     assert "noop_chain" in names
-    assert "mpnn_then_refold" in names
-    assert "semantic_constraint_to_family_sequences" in names
-    assert "template_guided_design_prep" in names
-    assert "rfdiffusion_backbone_design_round" in names
-    assert "mutation_repair_round" in names
-    semantic = next(
-        item for item in items
-        if item.get("name") == "semantic_constraint_to_family_sequences"
-    )
-    assert semantic["params"]["query"]["required"] is True
-    assert semantic["tool_sequence"] == [
-        "literature_search",
-        "go_sequences",
-        "sequence_analysis",
-    ]
-    assert semantic["node_specs"][1]["inputs"]["go_id"] == (
-        "${outputs.literature.constraint_evidence.go_terms[0]}"
-    )
+    assert not {
+        "mpnn_then_refold",
+        "semantic_constraint_to_family_sequences",
+        "template_guided_design_prep",
+        "rfdiffusion_backbone_design_round",
+        "mutation_repair_round",
+        "target_sequence_binder_design_round",
+    } & names
 
 
 def test_run_workflow_unknown_returns_not_found(ctx: SessionCtx) -> None:
