@@ -53,3 +53,6 @@ vendor/proteina-complexa/rf3_outputs/
 
 # Auto-generated showcase artifacts (regenerate with scripts/render_showcase.py)
 docs/render-showcase*
+
+# Local provider credentials — do not commit.
+.env
