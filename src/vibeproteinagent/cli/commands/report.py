@@ -34,7 +34,7 @@ def report(
         ws = Workspace.resolve(workspace)
         model = collect_report_model(ws, id)
         default_name = f"{id}_report_bundle" if format_ == "bundle" else f"{id}_report.html"
-        default_out = Path.cwd() / default_name
+        default_out = ws.root / "reports" / default_name
         html_path = write_report(
             model,
             Path(out) if out else default_out,
