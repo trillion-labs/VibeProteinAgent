@@ -20,6 +20,7 @@ class AgentConfig:
     agent_profile: str = "planner"
     api_key: str | None = None
     base_url: str = "https://openrouter.ai/api/v1"
+    faithfulness_check_enabled: bool = True
 
     @classmethod
     def from_env(
@@ -58,6 +59,9 @@ class AgentConfig:
                 or os.environ.get("VPA_OPENROUTER_CREDENTIAL")
             ),
             base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            faithfulness_check_enabled=_parse_bool_env(
+                "VPA_AGENT_FAITHFULNESS_CHECK", default=True
+            ),
         )
 
     def model_for_role(self, role: str) -> str:
@@ -79,6 +83,13 @@ def normalize_provider_id(provider: str) -> str:
         "codex-cli": "codex",
     }
     return aliases.get(key, key)
+
+
+def _parse_bool_env(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parse_model_ref(model_ref: str) -> tuple[str, str] | None:

@@ -184,3 +184,14 @@ CREATE TABLE IF NOT EXISTS agent_decisions (
   created_at    INTEGER NOT NULL,
   FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS agent_faithfulness_checks (
+  check_id      TEXT PRIMARY KEY,
+  run_id        TEXT NOT NULL,
+  round_index   INTEGER NOT NULL,
+  decision_id   TEXT,
+  result_json   TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_agent_faithfulness_run ON agent_faithfulness_checks(run_id);

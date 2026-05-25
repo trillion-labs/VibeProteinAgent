@@ -8,7 +8,7 @@ from typing import Any, TypeVar
 
 from vibeproteinagent.adapters import ToolRegistry, validate_params
 from vibeproteinagent.agents.config import AgentConfig
-from vibeproteinagent.agents.evaluation import DecisionEngine
+from vibeproteinagent.agents.evaluation import DecisionEngine, FaithfulnessChecker
 from vibeproteinagent.agents.planning import WorkflowPlanner
 from vibeproteinagent.agents.provider import SessionLoggingProvider, provider_from_config
 from vibeproteinagent.agents.routing import ModeRouter
@@ -559,6 +559,43 @@ class AgentController:
                             "details": exc.details,
                         }
                     )
+            if self.config.faithfulness_check_enabled:
+                try:
+                    check_result = await FaithfulnessChecker(provider).check(
+                        user_request=request,
+                        success_criteria=current_plan.get("success_criteria") or {},
+                        workflow_outputs=outcome.summary,
+                        decision=decision,
+                        model=self.config.model_for_role("analyst"),
+                        idempotency_key=f"{run_id}:faithfulness:{round_index}",
+                    )
+                    self.session_store.add_faithfulness_check(
+                        run_id, check_result, round_index=round_index
+                    )
+                    if check_result.get("verdict") == "ungrounded":
+                        notes = decision.setdefault("notes", [])
+                        if isinstance(notes, list):
+                            notes.append(
+                                {
+                                    "level": "warning",
+                                    "message": (
+                                        "Faithfulness checker flagged "
+                                        f"{check_result.get('unsupported_count')} unsupported "
+                                        "claim(s) in this decision."
+                                    ),
+                                    "code": "E_FAITHFULNESS_UNGROUNDED",
+                                    "details": {
+                                        "unsupported_count": check_result.get("unsupported_count"),
+                                        "claims": [
+                                            c for c in check_result.get("claims", [])
+                                            if c.get("source") == "unsupported"
+                                        ],
+                                    },
+                                }
+                            )
+                except Exception:
+                    # Verifier must never break the main agent loop.
+                    pass
             if decision.get("decision") in {"submit_candidate", "no_acceptable_candidate"}:
                 try:
                     submission, submit_job_id = self._execute_submit_candidate_decision(

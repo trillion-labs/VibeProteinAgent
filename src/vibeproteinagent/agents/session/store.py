@@ -266,6 +266,36 @@ class AgentSessionStore:
             conn.close()
         return decision_id
 
+    def add_faithfulness_check(
+        self,
+        run_id: str,
+        result: dict[str, Any],
+        *,
+        round_index: int = 0,
+        decision_id: str | None = None,
+    ) -> str:
+        check_id = f"adfc_{uuid.uuid4().hex}"
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO agent_faithfulness_checks (
+                  check_id, run_id, round_index, decision_id, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    check_id,
+                    run_id,
+                    int(round_index),
+                    decision_id,
+                    canonical_json(result),
+                    now_us(),
+                ),
+            )
+        finally:
+            conn.close()
+        return check_id
+
     def list_runs(self, *, limit: int = 50) -> list[AgentRunRecord]:
         conn = self.workspace.connect()
         try:
