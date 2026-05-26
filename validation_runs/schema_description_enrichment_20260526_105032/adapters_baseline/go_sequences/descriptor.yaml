@@ -1,0 +1,17 @@
+name: go_sequences
+version: "1.0.0"
+category: retrieval
+description: "Retrieves UniProt FASTA sequences annotated with a Gene Ontology term (e.g., GO:0003674). Filters by GO aspect (MF/BP/CC), organism, evidence codes, length, review status, and date cutoff. Use to gather function-driven sequence sets for training, MSAs, or templates."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 60
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [go_sequences]
+input_schema: schemas/go_sequences.input.json
+output_schema: schemas/go_sequences.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.go_sequences.adapter:GOSequencesAdapter"

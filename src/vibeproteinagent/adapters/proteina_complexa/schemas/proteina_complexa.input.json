@@ -7,127 +7,166 @@
     "mode": {
       "type": "string",
       "enum": ["protein_binder", "ligand_binder", "motif"],
-      "description": "Proteina-Complexa task: protein_binder designs binders to a protein target; ligand_binder designs binders around a ligand pocket; motif scaffolds a functional motif."
+      "description": "Task mode for Proteina-Complexa: `protein_binder` designs binders to a protein target; `ligand_binder` designs binders around a small-molecule pocket; `motif` scaffolds a functional motif into a larger protein.",
+      "examples": ["protein_binder", "ligand_binder", "motif"]
     },
     "target_pdb": {
       "type": ["string", "null"],
       "minLength": 1,
-      "description": "Protein target PDB for protein_binder, or ligand-only PDB for ligand_binder.",
+      "description": "Target structure PDB. Required for `protein_binder` (the receptor) and `ligand_binder` (a structure containing the ligand pocket).",
+      "examples": ["/abs/path/target.pdb", null],
       "vpa:digest": "sha256-if-path"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path into `target_pdb` (or `motif_pdb` in motif mode) when those direct inputs are omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/target.pdb"}]]
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
       "maxLength": 1,
-      "default": "A"
+      "default": "A",
+      "description": "Single-letter chain id on `target_pdb` to design against.",
+      "examples": ["A", "B"]
     },
     "target_pocket_residues": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "default": [],
-      "description": "ligand_binder only: FASTA/sequence 1-indexed target positions when target_sequence/target_fasta_path is provided; otherwise legacy structure residue numbers."
+      "description": "ligand_binder only: target pocket residue positions. Interpreted as FASTA/sequence 1-indexed positions when `target_sequence`/`target_fasta_path` is provided; otherwise legacy PDB residue numbers.",
+      "examples": [[42, 44, 46]]
     },
     "target_pocket_residue_ids": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
       "default": [],
-      "description": "ligand_binder only: explicit structure residue IDs such as A10 or B82A."
+      "description": "ligand_binder only: explicit pocket residue identifiers `<chain><resnum>[icode]`.",
+      "examples": [["A10", "A12", "B82A"]]
     },
     "target_sequence": {
       "type": ["string", "null"],
-      "default": null
+      "default": null,
+      "description": "Reference target sequence for mapping integer pocket residues onto PDB residue IDs.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
     },
     "target_fasta_path": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
+      "description": "FASTA file containing the target sequence. Alternative to inline `target_sequence`.",
+      "examples": ["/abs/path/target.fasta", null],
       "vpa:digest": "sha256-if-path"
     },
     "ligand_smiles": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
-      "description": "ligand_binder only: ligand SMILES."
+      "description": "ligand_binder only: SMILES string of the ligand whose pocket the binder is designed around.",
+      "examples": ["CCO", "C1=CC=CC=C1", null]
     },
     "motif_pdb": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
-      "description": "motif only: PDB containing the motif residues to preserve.",
+      "description": "motif only: PDB containing the functional motif residues that must be preserved in the designed protein.",
+      "examples": ["/abs/path/motif.pdb", null],
       "vpa:digest": "sha256-if-path"
     },
     "motif_chain": {
       "type": "string",
       "minLength": 1,
       "maxLength": 1,
-      "default": "A"
+      "default": "A",
+      "description": "Single-letter chain id on `motif_pdb` holding the motif residues.",
+      "examples": ["A", "B"]
     },
     "motif_residues": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "default": [],
-      "description": "motif only: FASTA/sequence 1-indexed positions to preserve when motif_sequence/motif_fasta_path is provided; otherwise legacy structure residue numbers."
+      "description": "motif only: positions to preserve. Interpreted as FASTA/sequence 1-indexed positions when `motif_sequence`/`motif_fasta_path` is provided; otherwise legacy PDB residue numbers.",
+      "examples": [[10, 11, 12], [42]]
     },
     "motif_residue_ids": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
       "default": [],
-      "description": "motif only: explicit structure residue IDs such as A10 or B82A."
+      "description": "motif only: explicit motif residue identifiers `<chain><resnum>[icode]`.",
+      "examples": [["A10", "A11", "B82A"]]
     },
     "motif_sequence": {
       "type": ["string", "null"],
-      "default": null
+      "default": null,
+      "description": "Reference sequence for the motif chain, used for mapping integer `motif_residues` onto PDB residue IDs.",
+      "examples": ["MKTAYIAKQRQ", null]
     },
     "motif_fasta_path": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
+      "description": "FASTA file for the motif sequence; alternative to inline `motif_sequence`.",
+      "examples": ["/abs/path/motif.fasta", null],
       "vpa:digest": "sha256-if-path"
     },
     "position_basis": {
       "type": "string",
       "enum": ["auto", "sequence", "structure"],
-      "default": "auto"
+      "default": "auto",
+      "description": "How to interpret integer position inputs. `auto` picks sequence when a target/motif sequence is provided, else structure; `sequence` forces 1-indexed FASTA positions; `structure` forces legacy PDB residue numbering.",
+      "examples": ["auto", "sequence", "structure"]
     },
     "total_length": {
       "type": ["integer", "null"],
       "minimum": 30,
       "maximum": 400,
       "default": null,
-      "description": "motif only: total designed monomer length."
+      "description": "motif only: total length of the designed monomer (motif + scaffold).",
+      "examples": [120, 200, null]
     },
     "binder_length": {
       "type": "integer",
       "minimum": 30,
       "maximum": 200,
-      "default": 80
+      "default": 80,
+      "description": "Length of the designed binder chain in residues (protein_binder, ligand_binder).",
+      "examples": [60, 80, 120]
     },
     "num_designs": {
       "type": ["integer", "null"],
       "minimum": 1,
       "maximum": 128,
       "default": null,
-      "description": "Candidate count. Null preserves the mode-specific default: protein_binder=4, ligand_binder=2, motif=10."
+      "description": "Candidate count. Null preserves the mode-specific default: protein_binder=4, ligand_binder=2, motif=10.",
+      "examples": [4, 10, null]
     },
     "seed": {
       "type": ["integer", "null"],
-      "default": null
+      "default": null,
+      "description": "Optional integer RNG seed for reproducibility.",
+      "examples": [42, null]
     },
     "run_name": {
       "type": ["string", "null"],
-      "default": null
+      "default": null,
+      "description": "Optional human-friendly run name written into the artifact directory. Null lets the adapter generate one.",
+      "examples": ["pdl1_binder_v1", null]
     },
     "search_algorithm": {
       "type": "string",
       "enum": ["default", "single-pass", "best-of-n", "beam-search", "fk-steering", "mcts"],
       "default": "default",
-      "description": "Generation search strategy. default preserves the upstream mode config; single-pass is useful for small smoke runs."
+      "description": "Generation search strategy. `default` preserves the upstream mode config; `single-pass` is useful for small smoke runs; richer strategies (`best-of-n`, `beam-search`, `mcts`) increase quality at higher cost.",
+      "examples": ["default", "single-pass", "best-of-n"]
     },
     "reward_model": {
       "type": "string",
       "enum": ["default", "none"],
       "default": "default",
-      "description": "Reward model policy. default preserves the upstream config; none disables reward scoring/guidance for fast compatibility smoke runs."
+      "description": "Reward model policy. `default` preserves the upstream config; `none` disables reward scoring/guidance for fast compatibility smoke runs.",
+      "examples": ["default", "none"]
     },
     "steps": {
       "type": ["array", "null"],
@@ -137,7 +176,8 @@
       },
       "minItems": 1,
       "default": null,
-      "description": "Optional Proteina-Complexa pipeline steps to run. Null preserves the adapter default for the selected mode; ['generate', 'filter'] is useful for fast design-only smoke runs."
+      "description": "Optional Proteina-Complexa pipeline steps to run. Null preserves the adapter default for the selected mode; `[generate, filter]` is useful for fast design-only smoke runs.",
+      "examples": [["generate", "filter"], ["generate", "filter", "evaluate", "analyze"], null]
     }
   },
   "allOf": [

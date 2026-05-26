@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/vina.input.json",
+  "type": "object",
+  "required": ["center", "box_size"],
+  "properties": {
+    "receptor_pdbqt": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "ligand_pdbqt": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "candidates": {"type": "array", "items": {"type": "object", "additionalProperties": true}, "default": []},
+    "center": {
+      "type": "array",
+      "items": {"type": "number"},
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "box_size": {
+      "type": "array",
+      "items": {"type": "number", "exclusiveMinimum": 0.0},
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "exhaustiveness": {"type": "integer", "minimum": 1, "default": 8},
+    "num_modes": {"type": "integer", "minimum": 1, "default": 9},
+    "seed": {"type": ["integer", "null"], "default": null}
+  },
+  "additionalProperties": false
+}

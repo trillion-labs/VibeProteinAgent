@@ -1,0 +1,1 @@
+{"ok": false, "error": {"code": "E_INVALID_PARAMS", "message": "agent workflow runtime param has the wrong type", "details": {"workflow": "compact_binder_design", "param": "target_hotspot_residue_ids", "expected_type": "list", "actual_type": "str", "value": "runtime value \u2014 list of PDB residue IDs e.g. [\"A45\",\"A82\"]"}}}

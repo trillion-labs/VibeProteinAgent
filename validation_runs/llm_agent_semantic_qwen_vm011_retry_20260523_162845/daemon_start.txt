@@ -1,0 +1,4 @@
+ supervisor running    pid=623148  socket=/run/user/1002/vpa/supervisor.sock
+  workspace=llm_agent_semantic_qwen_vm011_retry_20260523_162845  workers=2
+ worker -1  pid=623221  cpu  vram=cpu
+ worker -2  pid=623222  cpu  vram=cpu

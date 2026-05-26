@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/interpro_sequences.input.json",
+  "type": "object",
+  "required": ["interpro_id"],
+  "properties": {
+    "interpro_id": {"type": "string", "pattern": "^IPR[0-9]{6}$"},
+    "max_sequences": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1000},
+    "reviewed": {"type": ["boolean", "null"], "default": null},
+    "taxon_id": {"type": ["integer", "null"], "default": null},
+    "min_length": {"type": ["integer", "null"], "minimum": 1, "default": null},
+    "max_length": {"type": ["integer", "null"], "minimum": 1, "default": null},
+    "temporal_cutoff": {"type": ["string", "null"], "default": null},
+    "include_fragments": {"type": "boolean", "default": false},
+    "include_undated": {"type": "boolean", "default": false},
+    "deduplicate_sequences": {"type": "boolean", "default": true},
+    "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+    "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 120, "default": 20},
+    "max_scan_accessions": {"type": ["integer", "null"], "minimum": 1, "maximum": 50000, "default": null}
+  },
+  "additionalProperties": false
+}

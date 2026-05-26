@@ -7,20 +7,25 @@
     "designs_fasta": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to a ProteinMPNN-format FASTA emitted by the proteinmpnn adapter.",
+      "description": "Absolute path to a ProteinMPNN-format FASTA emitted by the proteinmpnn/ligandmpnn adapters. Each FASTA record's score header is parsed to rank designs before formatting as Protenix input JSONs.",
+      "examples": ["/abs/path/mpnn_designs.fasta", "outputs/proteinmpnn/designs.fa"],
       "vpa:digest": "sha256"
     },
     "top_k": {
       "type": "integer",
       "minimum": 1,
       "maximum": 1024,
-      "default": 1
+      "default": 1,
+      "description": "Number of top-scoring MPNN designs to emit as Protenix input JSON files.",
+      "examples": [1, 5, 32]
     },
     "name_prefix": {
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "default": "design"
+      "default": "design",
+      "description": "Filename/identifier prefix for the generated Protenix input JSONs. Output files are named `<name_prefix>_<rank>.json`.",
+      "examples": ["design", "binder_v1", "exp42"]
     }
   },
   "additionalProperties": false

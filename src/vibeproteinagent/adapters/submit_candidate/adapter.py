@@ -197,6 +197,9 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
 
 
 def _candidate_rows(output: dict[str, Any]) -> list[dict[str, Any]]:
+    canonical = _canonical_candidate_rows(output)
+    if canonical:
+        return canonical
     rows: list[dict[str, Any]] = []
     for key in _CANDIDATE_LIST_KEYS:
         value = output.get(key)
@@ -208,6 +211,42 @@ def _candidate_rows(output: dict[str, Any]) -> list[dict[str, Any]]:
     ):
         rows.append(output)
     return rows
+
+
+def _canonical_candidate_rows(output: dict[str, Any]) -> list[dict[str, Any]]:
+    value = output.get("candidates")
+    if not isinstance(value, list) or not value:
+        return []
+    rows = [item for item in value if isinstance(item, dict)]
+    if len(rows) != len(value) or not all(_is_canonical_candidate(row) for row in rows):
+        return []
+    return [_row_from_canonical_candidate(row) for row in rows]
+
+
+def _is_canonical_candidate(row: dict[str, Any]) -> bool:
+    return row.get("schema_version") == "candidate_v1"
+
+
+def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    producer_tool = str(source.get("tool") or "")
+    scores = candidate.get("scores") if isinstance(candidate.get("scores"), dict) else {}
+    producer_scores = (
+        scores.get(producer_tool)
+        if producer_tool and isinstance(scores.get(producer_tool), dict)
+        else {}
+    )
+    row: dict[str, Any] = {
+        "candidate_id": candidate.get("candidate_id"),
+        "index": source.get("index"),
+        "sequence": candidate.get("sequence"),
+        "structure_path": candidate.get("structure_path"),
+        "source": source,
+    }
+    if isinstance(producer_scores, dict):
+        row.update(producer_scores)
+        row["scores"] = dict(producer_scores)
+    return {key: value for key, value in row.items() if value is not None}
 
 
 def _select_row(

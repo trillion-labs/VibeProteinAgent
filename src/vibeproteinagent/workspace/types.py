@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    from enum import StrEnum
+except ImportError:  # pragma: no cover - exercised by Python 3.10 sidecars
+    from enum import Enum
+
+    class StrEnum(str, Enum):  # noqa: UP042
+        pass
 
 
 class JobState(StrEnum):

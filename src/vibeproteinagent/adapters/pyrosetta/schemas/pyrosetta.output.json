@@ -31,6 +31,12 @@
       "type": ["string", "null"],
       "description": "Path to the relaxed/packed PDB written under <job_dir>/outputs/, or null."
     },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "runtime_ms": {
       "type": "integer",
       "minimum": 0

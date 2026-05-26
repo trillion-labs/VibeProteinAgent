@@ -20,6 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from vibeproteinagent.core.errors import InvalidParamsError
 
+from ._error_guides import enrich_errors
+
 _SCHEMA_PATH = Path(__file__).parent / "_schema" / "tool-descriptor.schema.json"
 
 
@@ -190,6 +192,8 @@ class ToolDescriptor(BaseModel):
     supported_precisions: list[Precision] = Field(min_length=1)
     weight_uris: list[WeightURI] | None = None
     supports_batching: bool = False
+    planner_visible: bool = True
+    audit_visible: bool = True
     incompatible_with: list[str] = Field(
         default_factory=list,
         description="Tool names that must not be co-resident in the same worker process.",
@@ -282,6 +286,10 @@ def serialize_descriptor(d: ToolDescriptor) -> dict[str, Any]:
     out = d.model_dump(mode="json", exclude_none=True)
     if d.vram_min_gib is None:
         out["vram_min_gib"] = None
+    if d.planner_visible is True:
+        out.pop("planner_visible", None)
+    if d.audit_visible is True:
+        out.pop("audit_visible", None)
     return out
 
 
@@ -299,10 +307,26 @@ def resolve_input_schema_dict(descriptor: ToolDescriptor) -> dict[str, Any]:
     schema = descriptor.input_schema
     if isinstance(schema, dict):
         return schema
-    return _load_input_schema_file(descriptor, schema)
+    return _load_schema_file(descriptor, schema, kind="input_schema")
 
 
-def _load_input_schema_file(descriptor: ToolDescriptor, schema_ref: str) -> dict[str, Any]:
+def resolve_output_schema_dict(descriptor: ToolDescriptor) -> dict[str, Any]:
+    """Return the descriptor's ``output_schema`` as a fully-loaded dict.
+
+    Wildcard/free-form output schemas return an empty dict, which callers
+    should treat as "not statically checkable".
+    """
+    schema = getattr(descriptor, "output_schema", None)
+    if not schema or schema == "*":
+        return {}
+    if isinstance(schema, dict):
+        return schema
+    return _load_schema_file(descriptor, schema, kind="output_schema")
+
+
+def _load_schema_file(
+    descriptor: ToolDescriptor, schema_ref: str, *, kind: str
+) -> dict[str, Any]:
     """Locate ``schema_ref`` relative to the descriptor's adapter module."""
     import importlib
 
@@ -322,7 +346,7 @@ def _load_input_schema_file(descriptor: ToolDescriptor, schema_ref: str) -> dict
         if c.is_file():
             return json.loads(c.read_text())
     raise InvalidParamsError(
-        f"input_schema {schema_ref!r} not found for tool {descriptor.name!r}",
+        f"{kind} {schema_ref!r} not found for tool {descriptor.name!r}",
         details={"schema_ref": schema_ref, "tried": [str(c) for c in candidates]},
     )
 
@@ -361,7 +385,7 @@ def input_validator(descriptor: ToolDescriptor) -> Draft202012Validator:
             return cached
     schema = descriptor.input_schema
     if isinstance(schema, str):
-        schema = _load_input_schema_file(descriptor, schema)
+        schema = _load_schema_file(descriptor, schema, kind="input_schema")
     Draft202012Validator.check_schema(schema)
     v = Draft202012Validator(schema)
     if cache_key is not None:
@@ -392,7 +416,7 @@ def output_validator(descriptor: ToolDescriptor) -> Draft202012Validator | None:
             if cache_key is not None:
                 _VALIDATOR_CACHE[cache_key] = None
             return None
-        schema = _load_input_schema_file(descriptor, schema)
+        schema = _load_schema_file(descriptor, schema, kind="output_schema")
     if not isinstance(schema, dict) or not schema:
         if cache_key is not None:
             _VALIDATOR_CACHE[cache_key] = None
@@ -424,27 +448,77 @@ def validate_params(
     field. Single call site for tool-input validation; the CLI's ``run``
     command and the workflow executor's pre-submit step both go through
     here so the two surfaces can't drift.
+
+    Error messages are enriched with retry-recovery hints (constraint info,
+    schema description / examples, and per-tool alternative-tool suggestions)
+    via :mod:`._error_guides` so the planner LLM has actionable context on
+    retry. Enrichment fires only on validation failure (no impact on the
+    happy path).
     """
     validator = input_validator(descriptor)
     errors = sorted(validator.iter_errors(params), key=lambda e: list(e.absolute_path))
     if not errors:
         return
-    first = errors[0]
-    field = ".".join(str(p) for p in first.absolute_path) or "<root>"
+    raw_errors = [
+        {
+            "field": ".".join(str(p) for p in e.absolute_path) or "<root>",
+            "message": e.message,
+        }
+        for e in errors
+    ]
+    schema = resolve_input_schema_dict(descriptor)
+    enriched_errors = enrich_errors(
+        tool_name=descriptor.name,
+        schema=schema,
+        raw_errors=raw_errors,
+    )
+    first_field = raw_errors[0]["field"]
+    first_message = enriched_errors[0]["message"]
     raise InvalidParamsError(
-        f"params for {descriptor.name} failed validation: {first.message} at '{field}'",
+        f"params for {descriptor.name} failed validation: {first_message} at '{first_field}'",
         details={
             "tool": descriptor.name,
-            "field": field,
-            "errors": [
-                {
-                    "field": ".".join(str(p) for p in e.absolute_path) or "<root>",
-                    "message": e.message,
-                }
-                for e in errors
-            ],
+            "field": first_field,
+            "errors": enriched_errors,
         },
     )
+
+
+def drop_optional_none_params(
+    descriptor: ToolDescriptor,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Return params with optional ``None`` values omitted.
+
+    LLM planners often use JSON ``null`` to mean "use the tool default". VPA
+    tool schemas express defaults by making a field optional, not by accepting
+    null unless the schema explicitly says so. This helper keeps that boundary
+    behavior consistent across planner validation and workflow execution.
+    """
+
+    schema = resolve_input_schema_dict(descriptor)
+    required = set(schema.get("required") or [])
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    if not properties:
+        return params
+    out = dict(params)
+    for name, value in list(params.items()):
+        if value is not None or name in required:
+            continue
+        prop = properties.get(name)
+        if not isinstance(prop, dict) or _schema_allows_null(prop):
+            continue
+        out.pop(name, None)
+    return out
+
+
+def _schema_allows_null(schema: dict[str, Any]) -> bool:
+    typ = schema.get("type")
+    if typ == "null":
+        return True
+    if isinstance(typ, list) and "null" in typ:
+        return True
+    return False
 
 
 def validate_output(

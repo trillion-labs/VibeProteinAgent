@@ -98,6 +98,26 @@ def test_multi_record_fasta_reports_family_summary(tmp_path):
     assert Path(per_sequence).read_text().count("\n") == 2
 
 
+def test_empty_fasta_reports_no_sequence_without_failing(tmp_path):
+    fasta = tmp_path / "empty.fasta"
+    fasta.write_text("")
+    adapter = SequenceAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        SequenceAnalysisInput(fasta_path=str(fasta), max_annotations=3),
+        null_context(tmp_path),
+    )
+
+    assert out.sequence_length == 0
+    assert out.metrics["analysis_mode"] == "empty_fasta"
+    assert out.metrics["family_summary"]["sequence_count"] == 0
+    assert out.metrics["warnings"] == ["no_sequences_found"]
+    assert out.representative_sequences == []
+    assert out.liabilities == []
+    assert out.top_annotations == []
+    assert Path(out.artifacts["metrics_json"]).exists()
+    assert Path(out.artifacts["summary_json"]).exists()
+
+
 def test_noncanonical_characters_are_reported_not_rejected(tmp_path):
     adapter = SequenceAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
     out = adapter.run(

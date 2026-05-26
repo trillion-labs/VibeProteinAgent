@@ -51,6 +51,12 @@
         "additionalProperties": false
       }
     },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "runtime_ms": {"type": "integer", "minimum": 0},
     "num_designs_returned": {"type": "integer", "minimum": 0},
     "seeds_used": {

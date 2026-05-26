@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
@@ -19,6 +19,22 @@ class RankDesignsInput(BaseModel):
     top_k: int = Field(10, ge=1, le=1000)
     output_prefix: str = Field("rank_designs", pattern=r"^[A-Za-z0-9_.-]+$")
 
+    @field_validator("predictions", "analyses", "qc_results", "candidates", mode="before")
+    @classmethod
+    def _flatten_nested_rows(cls, value: Any, info: ValidationInfo) -> list[dict[str, Any]]:
+        rows = _as_list(value)
+        if info.field_name != "candidates" or not rows:
+            return rows
+        canonical = [_is_canonical_candidate(row) for row in rows]
+        if all(canonical):
+            return [_row_from_canonical_candidate(row) for row in rows]
+        if any(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy row objects."
+            )
+        return rows
+
 
 class RankDesignsOutput(BaseModel):
     candidate_count: int
@@ -28,12 +44,42 @@ class RankDesignsOutput(BaseModel):
     runtime_ms: int
 
 
-def _as_list(value: list[dict[str, Any]] | dict[str, Any] | None) -> list[dict[str, Any]]:
+def _as_list(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if isinstance(value, dict):
         return [value]
-    return [row for row in value if isinstance(row, dict)]
+    if isinstance(value, list):
+        rows: list[dict[str, Any]] = []
+        for item in value:
+            rows.extend(_as_list(item))
+        return rows
+    return []
+
+
+def _is_canonical_candidate(row: dict[str, Any]) -> bool:
+    return row.get("schema_version") == "candidate_v1"
+
+
+def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    producer_tool = str(source.get("tool") or "")
+    scores = candidate.get("scores") if isinstance(candidate.get("scores"), dict) else {}
+    producer_scores = (
+        scores.get(producer_tool)
+        if producer_tool and isinstance(scores.get(producer_tool), dict)
+        else {}
+    )
+    row: dict[str, Any] = {
+        "candidate_id": candidate.get("candidate_id"),
+        "sequence": candidate.get("sequence"),
+        "structure_path": candidate.get("structure_path"),
+        "source": source,
+    }
+    if isinstance(producer_scores, dict):
+        row.update(producer_scores)
+        row["scores"] = dict(producer_scores)
+    return {key: value for key, value in row.items() if value is not None}
 
 
 def _metric(row: dict[str, Any], key: str) -> float | None:

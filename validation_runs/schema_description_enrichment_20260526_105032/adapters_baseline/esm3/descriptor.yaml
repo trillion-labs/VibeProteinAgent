@@ -1,0 +1,26 @@
+name: esm3
+version: "1.0.0"
+category: embedding
+description: "Multimodal protein language model that jointly generates and embeds across sequence, structure, and embedding tracks from a starting sequence. Use when a co-generated backbone+sequence is needed in one call; for sequence-only embeddings or completion use `esm2`."
+runtime: python
+backend: pytorch
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 8
+startup_cost: high
+estimated_runtime_s: 600
+warm_load_capable: true
+pin_warm: false
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.esm3:availability_skip_reason"
+supported_tasks: [sequence_generation, partial_sequence_design, backbone_generation, embedding, per_residue_embedding]
+input_schema: schemas/esm3.input.json
+output_schema: schemas/esm3.output.json
+supported_precisions: [bf16]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.esm3.adapter:ESM3Adapter"

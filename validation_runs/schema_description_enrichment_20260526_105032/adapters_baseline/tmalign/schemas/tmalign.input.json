@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/tmalign.input.json",
+  "type": "object",
+  "anyOf": [
+    {"required": ["pdb_a", "pdb_b"]},
+    {"required": ["candidates"]}
+  ],
+  "properties": {
+    "pdb_a": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "pdb_b": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "normalize_by": {
+      "type": "string",
+      "enum": ["a", "b", "average", "shorter", "longer"],
+      "default": "shorter"
+    }
+  },
+  "additionalProperties": false
+}

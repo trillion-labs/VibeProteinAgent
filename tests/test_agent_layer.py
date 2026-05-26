@@ -16,6 +16,7 @@ from vibeproteinagent.agents.evaluation import DecisionEngine
 from vibeproteinagent.agents.execution import ExecutionPolicy
 from vibeproteinagent.agents.execution.controller import WorkflowExecutionOutcome
 from vibeproteinagent.agents.planning import WorkflowPlanner
+from vibeproteinagent.agents.planning.canonical_tools import EXPLICIT_MODE_TOOLS
 from vibeproteinagent.agents.planning.prompts import PLANNER_SYSTEM_PROMPT
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse, provider_from_config
 from vibeproteinagent.agents.provider.cli_agent import CliAgentProvider
@@ -112,6 +113,12 @@ def inline_supervisor(tmp_workspace: Workspace):
     finally:
         stop.set()
         thread.join(timeout=2)
+
+
+@pytest.fixture(autouse=True)
+def legacy_executor_ir_planner_for_agent_layer(monkeypatch: pytest.MonkeyPatch):
+    # Added during BLOCKER #1 fix to verify legacy path remains functional after default flip.
+    monkeypatch.setenv("VPA_PLANNER_IR", "off")
 
 
 def test_mode_router_preserves_direct_tool_without_llm(tmp_workspace: Workspace) -> None:
@@ -795,8 +802,8 @@ def test_agent_plan_controller_executes_and_logs_provider_messages(
         "import sys\n"
         "prompt = sys.stdin.read()\n"
         "if 'result critic' in prompt.lower():\n"
-        "    print('{\"decision\":\"stop\",\"next_round\":{\"recommended\":false,"
-        "\"changes\":[],\"reason\":\"ok\"},\"metrics_used\":[],\"notes\":[]}')\n"
+        "    print('{\"decision\":\"stop\",\"reasoning\":\"workflow completed\","
+        "\"metrics_used\":[],\"notes\":\"ok\"}')\n"
         "else:\n"
         "    print('''{\"mode\":\"agent_plan\",\"goal\":\"x\",\"assumptions\":[],"
         "\"missing_inputs\":[],\"required_tools\":[\"protein_qc\"],"
@@ -977,23 +984,20 @@ def test_agent_plan_executes_post_round_submit_candidate_decision(
                     content=json.dumps(
                         {
                             "decision": "submit_candidate",
+                            "reasoning": "ranking is sufficient",
                             "submit_candidate": {
-                                "outcome": "accepted",
                                 "candidates": [
                                     {
                                         "job_id": "job_rank",
                                         "candidate_id": "design_1",
-                                        "index": None,
                                         "justification": "top ranked candidate",
                                         "scores_to_highlight": ["score"],
                                     }
                                 ],
-                                "reasoning": "ranking is sufficient",
                                 "supersedes": None,
                             },
-                            "next_round": {"recommended": False, "reason": "ready"},
                             "metrics_used": ["score"],
-                            "notes": [],
+                            "notes": "ready",
                         }
                     ),
                 )
@@ -1113,13 +1117,12 @@ def test_agent_plan_executes_no_acceptable_candidate_decision(
                     content=json.dumps(
                         {
                             "decision": "no_acceptable_candidate",
-                            "submit_candidate": None,
-                            "next_round": {
-                                "recommended": False,
+                            "reasoning": "candidate score is below threshold",
+                            "no_acceptable_candidate": {
                                 "reason": "candidate score is below threshold",
                             },
                             "metrics_used": ["score"],
-                            "notes": [],
+                            "notes": "no acceptable candidate",
                         }
                     ),
                 )
@@ -1398,6 +1401,7 @@ def test_compact_tool_schema_keeps_only_planner_facing_fields() -> None:
     assert compact == {
         "name": "rfdiffusion",
         "description": "Backbone generation.",
+        "allowed_modes": EXPLICIT_MODE_TOOLS["rfdiffusion"],
         "sharding": {
             "strategy": "design_seed_shards",
             "shardable_fields": ["num_designs", "seed"],

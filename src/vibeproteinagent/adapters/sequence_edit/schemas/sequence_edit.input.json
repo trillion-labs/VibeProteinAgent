@@ -4,25 +4,72 @@
   "type": "object",
   "required": ["operation"],
   "properties": {
-    "operation": {"type": "string", "enum": ["mutate_residues", "check_wt_consistency"]},
-    "sequence": {"type": ["string", "null"], "default": null},
-    "wild_type_sequence": {"type": ["string", "null"], "default": null},
-    "mutant_sequence": {"type": ["string", "null"], "default": null},
+    "operation": {
+      "type": "string",
+      "enum": ["mutate_residues", "check_wt_consistency"],
+      "description": "Operation to perform. `mutate_residues` applies point mutations to `sequence`; `check_wt_consistency` validates that mutation notations match a wild-type reference and produce the given mutant.",
+      "examples": ["mutate_residues", "check_wt_consistency"]
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` into the `sequence` input when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
+    },
+    "sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Reference protein sequence to mutate (used by `mutate_residues`).",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
+    },
+    "wild_type_sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Wild-type reference sequence for `check_wt_consistency`. Each mutation notation's wild-type letter is checked against this sequence.",
+      "examples": ["MKTAYIAKQRQ", null]
+    },
+    "mutant_sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Candidate mutant sequence for `check_wt_consistency`. Compared against the wild-type after applying the notation.",
+      "examples": ["MKQAYIAKQRQ", null]
+    },
     "mapping": {
       "type": "object",
       "propertyNames": {"pattern": "^[1-9][0-9]*$"},
       "additionalProperties": {"type": "string", "pattern": "^[A-Za-z]$"},
-      "default": {}
+      "default": {},
+      "description": "Position-to-residue mutation map (1-indexed positions as string keys → single-letter target residue). Example: `{\"73\": \"Q\"}` mutates residue 73 to Q.",
+      "examples": [{"73": "Q"}, {"10": "A", "12": "V"}]
     },
     "mutation_notation": {
       "type": "array",
       "items": {"type": "string", "pattern": "^[A-Za-z][1-9][0-9]*[A-Za-z]$"},
       "uniqueItems": true,
-      "default": []
+      "default": [],
+      "description": "Mutation notation strings of form `<WT-AA><1-indexed-position><MUT-AA>` (e.g. `V73Q`, `K10A`). Combined with `mapping` to form the full mutation set.",
+      "examples": [["V73Q"], ["K10A", "E15D"]]
     },
-    "allow_noop": {"type": "boolean", "default": false},
-    "strict_wild_type": {"type": "boolean", "default": true},
-    "output_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "default": "mutant"}
+    "allow_noop": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, allow no-op mutations where the target residue equals the wild-type (silently ignored).",
+      "examples": [false, true]
+    },
+    "strict_wild_type": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, enforce that mutation-notation wild-type letters match the reference sequence; mismatches raise. Disable for sloppy LLM-emitted notation.",
+      "examples": [true, false]
+    },
+    "output_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "default": "mutant",
+      "description": "Stem name for the output FASTA artifact.",
+      "examples": ["mutant", "binder_v1_mut"]
+    }
   },
   "additionalProperties": false
 }

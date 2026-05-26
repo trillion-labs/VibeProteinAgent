@@ -55,6 +55,38 @@ def test_rank_designs_preserves_candidate_sequence_and_uses_candidate_score(tmp_
     assert out.ranked_candidates[0]["candidate_score"] == 0.9
 
 
+def test_rank_designs_flattens_nested_candidate_lists(tmp_path):
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        RankDesignsInput(
+            candidates=[
+                [{"candidate_id": "a", "sequence": "AAAA", "score": 0.2}],
+                [{"candidate_id": "b", "sequence": "BBBB", "score": 0.7}],
+            ],
+            top_k=2,
+        ),
+        null_context(tmp_path),
+    )
+
+    assert out.candidate_count == 2
+    assert [row["candidate_id"] for row in out.ranked_candidates] == ["b", "a"]
+
+
+def test_rank_designs_accepts_single_prediction_object(tmp_path):
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        RankDesignsInput(
+            predictions={"name": "single", "ranking_score": 0.5, "plddt": 80},
+            top_k=1,
+        ),
+        null_context(tmp_path),
+    )
+
+    assert out.candidate_count == 1
+    assert out.ranked_candidates[0]["candidate_id"] == "single"
+    assert out.ranked_candidates[0]["ranking_score"] == 0.5
+
+
 def test_rank_designs_requires_input(tmp_path):
     adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
     with pytest.raises(ValueError, match="requires at least one"):

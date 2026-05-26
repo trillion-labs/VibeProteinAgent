@@ -18,130 +18,279 @@
         "symmetric_oligomer",
         "symmetric_oligomer_design"
       ],
-      "default": "unconditional"
+      "default": "unconditional",
+      "description": "RFdiffusion workflow mode. `unconditional` (default) generates de novo backbones; `binder_design` builds binders against `target_pdb`; `motif_scaffolding` builds scaffolds around fixed motif residues; `partial_diffusion` re-noises an existing structure; `fold_conditioning` requires a `scaffold_dir`; `symmetric_*` modes enforce point-group symmetry via `symmetry`.",
+      "examples": ["unconditional", "binder_design", "motif_scaffolding", "partial_diffusion"]
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. When provided, auto-promotes mode to `partial_diffusion` and uses the first item's structure_path as the seed structure.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "boltzgen", "local_id": "0"}, "structure_path": "/abs/seed.pdb"}]]
     },
     "target_pdb": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
+      "description": "Target structure (.pdb) for binder/motif modes. Null is valid for `unconditional`.",
+      "examples": ["/abs/path/target.pdb", null],
       "vpa:digest": "sha256-if-path"
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
       "maxLength": 1,
-      "default": "A"
+      "default": "A",
+      "description": "Single-letter chain id on `target_pdb` to bind against / scaffold from.",
+      "examples": ["A", "B"]
     },
     "target_residues": {
       "type": ["string", "null"],
       "pattern": "^[0-9]+-[0-9]+$",
       "default": null,
-      "description": "Inclusive FASTA/sequence 1-indexed range when target_sequence/target_fasta_path is provided; otherwise legacy structure residue range."
+      "description": "Inclusive integer range `<start>-<end>` of target residues. FASTA/sequence 1-indexed when `target_sequence`/`target_fasta_path` is provided; otherwise legacy structure residue range.",
+      "examples": ["10-80", "120-180", null]
     },
     "target_hotspots": {
       "type": "array",
       "items": {"type": ["integer", "string"]},
       "default": [],
-      "description": "Integer values are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; string values such as A10 are explicit structure residue IDs."
+      "description": "Hotspot residues. Integer values are FASTA/sequence 1-indexed when a target sequence is provided; string values such as `A10` are explicit structure residue IDs.",
+      "examples": [[42, 44], ["A10", "B82A"], [12, "A30"]]
     },
     "target_hotspot_residue_ids": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
-      "default": []
+      "default": [],
+      "description": "Explicit hotspot residue identifiers `<chain><resnum>[icode]`. Useful when target residue numbering is non-standard.",
+      "examples": [["A10", "A11"], ["B82A"]]
     },
     "target_sequence": {
       "type": ["string", "null"],
       "default": null,
-      "description": "Full FASTA/sequence for target_residues and integer target_hotspots sequence-to-structure mapping."
+      "description": "Full FASTA/sequence for target_residues and integer target_hotspots sequence-to-structure mapping.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
     },
     "target_fasta_path": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
-      "description": "FASTA file for target_residues and integer target_hotspots sequence-to-structure mapping.",
+      "description": "FASTA file for target_residues and integer target_hotspots sequence-to-structure mapping. Alternative to inline `target_sequence`.",
+      "examples": ["/abs/path/target.fasta", null],
       "vpa:digest": "sha256-if-path"
     },
     "position_basis": {
       "type": "string",
       "enum": ["auto", "sequence", "structure"],
-      "default": "auto"
+      "default": "auto",
+      "description": "How to interpret integer position inputs. `auto` picks sequence when a target sequence is provided, else structure; `sequence` forces 1-indexed FASTA positions; `structure` forces legacy PDB residue numbering.",
+      "examples": ["auto", "sequence", "structure"]
     },
     "contigs": {
       "type": ["array", "null"],
       "items": {"type": "string", "minLength": 1},
       "default": null,
-      "description": "Raw RFdiffusion-native contig syntax. Prefer target_residues for sequence-indexed target ranges."
+      "description": "Raw RFdiffusion-native contig syntax. Prefer `target_residues` for sequence-indexed target ranges; use this only for advanced multi-chain contig wiring.",
+      "examples": [["A1-60/0 50-50"], ["A1-60/0", "B1-30"]]
     },
-    "length_min": {"type": "integer", "minimum": 20, "maximum": 5000, "default": 100},
-    "length_max": {"type": ["integer", "null"], "minimum": 20, "maximum": 5000, "default": null},
-    "total_length": {"type": ["integer", "null"], "minimum": 20, "maximum": 5000, "default": null},
-    "binder_length_min": {"type": "integer", "minimum": 20, "maximum": 1000, "default": 70},
-    "binder_length_max": {"type": ["integer", "null"], "minimum": 20, "maximum": 1000, "default": null},
-    "symmetry": {"type": ["string", "null"], "minLength": 1, "default": null},
-    "num_designs": {"type": "integer", "minimum": 1, "maximum": 256, "default": 10},
-    "num_diffusion_steps": {"type": "integer", "minimum": 15, "maximum": 200, "default": 50},
-    "partial_T": {"type": ["integer", "null"], "minimum": 1, "maximum": 200, "default": null},
-    "noise_scale_ca": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
-    "noise_scale_frame": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
+    "length_min": {
+      "type": "integer",
+      "minimum": 20,
+      "maximum": 5000,
+      "default": 100,
+      "description": "Minimum total scaffold length (residues) for unconditional/motif modes.",
+      "examples": [80, 100]
+    },
+    "length_max": {
+      "type": ["integer", "null"],
+      "minimum": 20,
+      "maximum": 5000,
+      "default": null,
+      "description": "Maximum total scaffold length. Null pins to `length_min` for a fixed-size sampling.",
+      "examples": [120, null]
+    },
+    "total_length": {
+      "type": ["integer", "null"],
+      "minimum": 20,
+      "maximum": 5000,
+      "default": null,
+      "description": "Fixed total oligomer/scaffold length. Overrides `length_min`/`length_max` when set (used by symmetric and motif modes).",
+      "examples": [120, null]
+    },
+    "binder_length_min": {
+      "type": "integer",
+      "minimum": 20,
+      "maximum": 1000,
+      "default": 70,
+      "description": "Minimum binder length (residues) for binder modes.",
+      "examples": [60, 70]
+    },
+    "binder_length_max": {
+      "type": ["integer", "null"],
+      "minimum": 20,
+      "maximum": 1000,
+      "default": null,
+      "description": "Maximum binder length. Null pins to `binder_length_min`.",
+      "examples": [90, null]
+    },
+    "symmetry": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "Point-group symmetry tag (e.g. `C3`, `D4`, `T`, `O`, `I`). Required for `symmetric_*` modes.",
+      "examples": ["C3", "D4", null]
+    },
+    "num_designs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 256,
+      "default": 10,
+      "description": "Number of backbones to sample.",
+      "examples": [10, 50]
+    },
+    "num_diffusion_steps": {
+      "type": "integer",
+      "minimum": 15,
+      "maximum": 200,
+      "default": 50,
+      "description": "Diffusion timesteps. 50 is the recommended default; lower for speed, higher for quality.",
+      "examples": [50, 100]
+    },
+    "partial_T": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 200,
+      "default": null,
+      "description": "Partial-diffusion timestep count. Required for `partial_diffusion` mode (number of forward-noise steps to apply before re-denoising).",
+      "examples": [10, 20, null]
+    },
+    "noise_scale_ca": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 1.0,
+      "description": "CA-translational noise scale during sampling. Lower yields tighter, less-diverse backbones.",
+      "examples": [1.0, 0.5]
+    },
+    "noise_scale_frame": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 1.0,
+      "description": "Backbone-frame rotational noise scale during sampling.",
+      "examples": [1.0, 0.5]
+    },
     "inpaint_seq": {
       "type": ["array", "null"],
       "items": {"type": "string"},
       "default": null,
-      "description": "RFdiffusion inpaint_seq selectors. Simple integer/range selectors are sequence-mapped when target_sequence/target_fasta_path is provided; complex selectors remain native syntax."
+      "description": "RFdiffusion `inpaint_seq` selectors (fixed sequence regions). Simple integer/range selectors are sequence-mapped when `target_sequence`/`target_fasta_path` is provided; complex selectors remain native syntax.",
+      "examples": [["10-20"], ["A10-A20"], null]
     },
     "inpaint_str": {
       "type": ["array", "null"],
       "items": {"type": "string"},
       "default": null,
-      "description": "RFdiffusion inpaint_str selectors. Simple integer/range selectors are sequence-mapped when target_sequence/target_fasta_path is provided; complex selectors remain native syntax."
+      "description": "RFdiffusion `inpaint_str` selectors (fixed structure regions). Same mapping behavior as `inpaint_seq`.",
+      "examples": [["10-20"], null]
     },
     "provide_seq": {
       "type": ["array", "null"],
       "items": {"type": "string"},
       "default": null,
-      "description": "RFdiffusion provide_seq selectors. Simple integer/range selectors are sequence-mapped when target_sequence/target_fasta_path is provided; complex selectors remain native syntax."
+      "description": "RFdiffusion `provide_seq` selectors (sequence-known regions). Same mapping behavior as `inpaint_seq`.",
+      "examples": [["10-20"], null]
     },
-    "contig_length": {"type": ["string", "null"], "pattern": "^[0-9]+-[0-9]+$", "default": null},
+    "contig_length": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]+-[0-9]+$",
+      "default": null,
+      "description": "Contig length range `<min>-<max>` used by some advanced motif modes.",
+      "examples": ["50-100", null]
+    },
     "checkpoint_path": {
       "type": ["string", "null"],
       "default": null,
+      "description": "Optional override path to a specific RFdiffusion checkpoint (.pt). Null uses the env-configured default.",
+      "examples": ["/abs/path/Base_ckpt.pt", null],
       "vpa:digest": "sha256-if-path"
     },
     "model_directory_path": {
       "type": ["string", "null"],
       "default": null,
+      "description": "Optional override directory containing RFdiffusion weights. Null uses the env-configured default.",
+      "examples": ["/abs/path/rfdiff_weights/", null],
       "vpa:digest": "sha256-if-path"
     },
     "scaffold_dir": {
       "type": ["string", "null"],
       "default": null,
+      "description": "Directory of secondary-structure/adjacency scaffolds for `fold_conditioning` mode.",
+      "examples": ["/abs/path/scaffolds/", null],
       "vpa:digest": "sha256-if-path"
     },
     "target_ss": {
       "type": ["string", "null"],
       "default": null,
+      "description": "Path to a target secondary-structure file used by fold conditioning.",
+      "examples": ["/abs/path/target_ss.pt", null],
       "vpa:digest": "sha256-if-path"
     },
     "target_adj": {
       "type": ["string", "null"],
       "default": null,
+      "description": "Path to a target adjacency-matrix file used by fold conditioning.",
+      "examples": ["/abs/path/target_adj.pt", null],
       "vpa:digest": "sha256-if-path"
     },
-    "guiding_potentials": {"type": ["array", "null"], "items": {"type": "string"}, "default": null},
-    "guide_scale": {"type": ["number", "null"], "minimum": 0.0, "default": null},
+    "guiding_potentials": {
+      "type": ["array", "null"],
+      "items": {"type": "string"},
+      "default": null,
+      "description": "Names of RFdiffusion guiding-potential terms (e.g. `monomer_ROG`, `binder_ROG`). Null disables guidance.",
+      "examples": [["monomer_ROG"], ["binder_ROG"], null]
+    },
+    "guide_scale": {
+      "type": ["number", "null"],
+      "minimum": 0.0,
+      "default": null,
+      "description": "Strength of the guiding-potential applied during sampling. Null disables.",
+      "examples": [1.0, 2.0, null]
+    },
     "guide_decay": {
       "type": ["string", "null"],
       "enum": ["constant", "linear", "quadratic", "cubic", null],
-      "default": null
+      "default": null,
+      "description": "Decay schedule of the guiding potential across diffusion steps.",
+      "examples": ["constant", "linear", "quadratic", null]
     },
-    "olig_intra_all": {"type": ["boolean", "null"], "default": null},
-    "olig_inter_all": {"type": ["boolean", "null"], "default": null},
+    "olig_intra_all": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "Symmetric-oligomer flag: enforce intra-chain symmetry across all chains. Null preserves upstream default.",
+      "examples": [true, false, null]
+    },
+    "olig_inter_all": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "Symmetric-oligomer flag: enforce inter-chain symmetry across all chains. Null preserves upstream default.",
+      "examples": [true, false, null]
+    },
     "hydra_overrides": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
-      "default": []
+      "default": [],
+      "description": "Raw Hydra config overrides forwarded to RFdiffusion (`key=value` strings). Reserved for power users; most workflows do not need this.",
+      "examples": [["inference.input_pdb=foo.pdb"], ["potentials.guide_scale=2.0"]]
     },
-    "seed": {"type": ["integer", "null"], "default": null}
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "Optional integer RNG seed for reproducibility.",
+      "examples": [42, null]
+    }
   },
   "additionalProperties": false
 }

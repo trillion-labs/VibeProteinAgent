@@ -1,0 +1,25 @@
+name: tmalign
+version: "1.0.0"
+category: scoring
+description: "Pairwise structural alignment between two PDB structures, returning a length-normalizable TM-score (normalize by shorter/longer/A/B/average). Use to quantify global similarity; for predicted-vs-reference accuracy metrics (lDDT/DockQ) use `pxmeter`."
+runtime: python
+backend: binary
+gpu_required: false
+gpus_required: 1
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.tmalign:availability_skip_reason"
+supported_tasks: [structure_alignment]
+input_schema: schemas/tmalign.input.json
+output_schema: schemas/tmalign.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.tmalign.adapter:TMalignAdapter"

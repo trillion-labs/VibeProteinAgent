@@ -2,15 +2,40 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/pxmeter.input.json",
   "type": "object",
-  "required": ["predicted_cif", "reference_cif"],
+  "anyOf": [
+    {"required": ["predicted_cif", "reference_cif"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
-    "predicted_cif": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "reference_cif": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "predicted_cif": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the model-predicted structure (mmCIF format).",
+      "examples": ["/abs/path/predicted.cif"],
+      "vpa:digest": "sha256"
+    },
+    "reference_cif": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the reference/ground-truth structure (mmCIF format).",
+      "examples": ["/abs/path/reference.cif"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from upstream tools. Requires at least two items: the first's structure_path is treated as `predicted_cif`, the second's as `reference_cif`.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "p", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/pred.cif"}, {"schema_version": "candidate_v1", "candidate_id": "r", "source": {"tool": "literature_search", "local_id": "0"}, "structure_path": "/abs/ref.cif"}]]
+    },
     "metrics": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
       "uniqueItems": true,
-      "default": ["lddt", "dockq"]
+      "default": ["lddt", "dockq"],
+      "description": "Requested evaluation metrics. `lddt` is per-residue LDDT (intrinsic quality); `dockq` is the DockQ score for protein-protein interfaces.",
+      "examples": [["lddt", "dockq"], ["lddt"]]
     },
     "chain_pairs": {
       "type": ["array", "null"],
@@ -18,12 +43,24 @@
         "type": "object",
         "required": ["a", "b"],
         "properties": {
-          "a": {"type": "string", "minLength": 1},
-          "b": {"type": "string", "minLength": 1}
+          "a": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Chain id of side A of the interface pair.",
+            "examples": ["A", "T"]
+          },
+          "b": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Chain id of side B of the interface pair.",
+            "examples": ["B", "L"]
+          }
         },
         "additionalProperties": false
       },
-      "default": null
+      "default": null,
+      "description": "Optional list of chain-pair selections to restrict DockQ scoring. Null evaluates every cross-chain interface.",
+      "examples": [[{"a": "A", "b": "B"}], null]
     }
   },
   "additionalProperties": false

@@ -3,13 +3,15 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_residue_id,
@@ -48,7 +50,8 @@ from ligandmpnn_vendor import (  # noqa: E402
 
 
 class LigandMPNNInput(BaseModel):
-    pdb_path: str = Field(..., description="Absolute path to the input PDB.")
+    pdb_path: str | None = Field(None, description="Absolute path to the input PDB.")
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     chains: list[str] | None = Field(
         None, description="Chain identifiers to load; None loads every chain."
     )
@@ -73,6 +76,37 @@ class LigandMPNNInput(BaseModel):
     fasta_path: str | None = Field(default=None, min_length=1)
     position_basis: PositionBasis = "auto"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_pdb_path(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError("ligandmpnn canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("pdb_path", structure_path)
+            if candidates[0].get("sequence"):
+                out.setdefault("sequence", candidates[0].get("sequence"))
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_pdb_path(self) -> LigandMPNNInput:
+        if not self.pdb_path:
+            raise ValueError("ligandmpnn requires pdb_path")
+        return self
+
 
 class LigandMPNNDesign(BaseModel):
     sequence: str
@@ -82,6 +116,7 @@ class LigandMPNNDesign(BaseModel):
 
 class LigandMPNNOutput(BaseModel):
     designs: list[LigandMPNNDesign]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     designs_fasta: str
     num_residues: int
     runtime_ms: int
@@ -168,6 +203,7 @@ class LigandMPNNAdapter(ToolAdapter):
             if self.device.type == "cuda":
                 torch.cuda.manual_seed_all(int(params.seed))
 
+        assert params.pdb_path is not None
         pdb_path = str(Path(params.pdb_path).expanduser())
         parsed_list = _parse_PDB(
             pdb_path,
@@ -310,6 +346,7 @@ class LigandMPNNAdapter(ToolAdapter):
         runtime_ms = int((time.time() - t0) * 1000)
         return LigandMPNNOutput(
             designs=designs,
+            candidates=_ligandmpnn_candidates(params, designs, pdb_path),
             designs_fasta=str(fasta_path),
             num_residues=int(L),
             runtime_ms=runtime_ms,
@@ -339,6 +376,53 @@ __all__ = [
     "LigandMPNNInput",
     "LigandMPNNOutput",
 ]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _ligandmpnn_candidates(
+    params: LigandMPNNInput,
+    designs: list[LigandMPNNDesign],
+    structure_path: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, design in enumerate(designs):
+        local_id = f"seq_{index:04d}"
+        candidate = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "ligandmpnn",
+                local_id,
+                sequence=design.sequence,
+                structure_path=structure_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "ligandmpnn",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": None,
+                "index": index,
+            },
+            "sequence": design.sequence,
+            "structure_path": structure_path,
+            "scores": {
+                "ligandmpnn": {
+                    "score": design.score,
+                    "seq_recovery": design.seq_recovery,
+                }
+            },
+            "artifacts": {},
+        }
+        if params.candidates and _is_canonical_candidate(params.candidates[0]):
+            upstream_scores = params.candidates[0].get("scores")
+            if isinstance(upstream_scores, dict):
+                candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        candidates.append(candidate)
+    return candidates
 
 
 def _resolve_redesigned_positions(params: LigandMPNNInput, pdb_path: Path):

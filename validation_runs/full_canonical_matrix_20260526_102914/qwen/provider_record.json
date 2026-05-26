@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "validation_runs/full_canonical_matrix_20260526_102914/qwen",
+  "duration_seconds": 596.0,
+  "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent LLM entry budget exhausted\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 3, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"params for pxdesign failed validation: 'target_pdb' is a required property Constraint: type `object`. at '<root>'\", \"details\": {\"tool\": \"pxdesign\", \"field\": \"<root>\", \"errors\": [{\"field\": \"<root>\", \"message\": \"'target_pdb' is a",
+  "provider": "qwen",
+  "reason": "workflow_failed",
+  "status": "FAIL"
+}

@@ -1,0 +1,17 @@
+name: mpnn_to_protenix_input
+version: "1.0.1"
+category: misc
+description: "Format converter that reads a ProteinMPNN designs FASTA and emits one Protenix-v2 input JSON per top-K design. Use as the glue step between sequence design and structure refolding in a workflow."
+runtime: python
+backend: biopython
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [format_conversion]
+input_schema: schemas/mpnn_to_protenix_input.input.json
+output_schema: schemas/mpnn_to_protenix_input.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.mpnn_to_protenix_input.adapter:Mpnn2ProtenixAdapter"

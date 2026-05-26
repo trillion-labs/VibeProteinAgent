@@ -64,9 +64,11 @@ def test_descriptor_loads_and_matches_spec() -> None:
 def test_descriptor_input_schema_is_valid_json() -> None:
     raw = json.loads(_INPUT_SCHEMA.read_text())
     assert raw["$id"].endswith("protenix_v2.input.json")
-    assert "input_json" in raw["required"]
+    assert {"required": ["input_json"]} in raw["anyOf"]
+    assert {"required": ["candidates"]} in raw["anyOf"]
     props = raw["properties"]
     assert "seeds" in props and props["seeds"]["default"] == [101]
+    assert "candidates" in props
     assert props["use_msa"]["default"] is False
     assert props["msa_backend"]["default"] == "auto"
     assert sorted(props["msa_backend"]["enum"]) == ["auto", "none", "remote"]

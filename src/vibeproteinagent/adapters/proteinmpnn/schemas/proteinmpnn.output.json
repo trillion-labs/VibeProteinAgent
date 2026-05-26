@@ -18,6 +18,12 @@
         "additionalProperties": false
       }
     },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "designs_fasta": {"type": "string", "minLength": 1},
     "log_prob_npz": {"type": "string", "minLength": 1},
     "num_residues": {"type": "integer", "minimum": 1},

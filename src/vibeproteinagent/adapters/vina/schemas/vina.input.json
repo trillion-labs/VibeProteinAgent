@@ -2,25 +2,65 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/vina.input.json",
   "type": "object",
-  "required": ["receptor_pdbqt", "ligand_pdbqt", "center", "box_size"],
+  "required": ["center", "box_size"],
   "properties": {
-    "receptor_pdbqt": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "ligand_pdbqt": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "receptor_pdbqt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the receptor in AutoDock PDBQT format (prepared with `prepare_receptor`).",
+      "examples": ["/abs/path/receptor.pdbqt"],
+      "vpa:digest": "sha256"
+    },
+    "ligand_pdbqt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the ligand in AutoDock PDBQT format (prepared with `prepare_ligand`).",
+      "examples": ["/abs/path/ligand.pdbqt"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from upstream tools. Requires at least two items: the first's structure_path is treated as `receptor_pdbqt`, the second's as `ligand_pdbqt`.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "rec", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/recep.pdbqt"}, {"schema_version": "candidate_v1", "candidate_id": "lig", "source": {"tool": "literature_search", "local_id": "0"}, "structure_path": "/abs/lig.pdbqt"}]]
+    },
     "center": {
       "type": "array",
       "items": {"type": "number"},
       "minItems": 3,
-      "maxItems": 3
+      "maxItems": 3,
+      "description": "Cartesian center of the docking search box in Å: `[x, y, z]`. Determined from a known binding pocket or computed via a pocket-finder.",
+      "examples": [[12.3, 4.5, -6.7], [0.0, 0.0, 0.0]]
     },
     "box_size": {
       "type": "array",
       "items": {"type": "number", "exclusiveMinimum": 0.0},
       "minItems": 3,
-      "maxItems": 3
+      "maxItems": 3,
+      "description": "Docking search-box dimensions in Å along x, y, z: `[sx, sy, sz]`. Each must be > 0. Typical 20-30 Å per dimension for small pockets.",
+      "examples": [[20.0, 20.0, 20.0], [25.0, 30.0, 20.0]]
     },
-    "exhaustiveness": {"type": "integer", "minimum": 1, "default": 8},
-    "num_modes": {"type": "integer", "minimum": 1, "default": 9},
-    "seed": {"type": ["integer", "null"], "default": null}
+    "exhaustiveness": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 8,
+      "description": "AutoDock Vina `--exhaustiveness` parameter. Higher values run more Monte-Carlo searches (more thorough but slower); 8 is the default, 32+ is recommended for production.",
+      "examples": [8, 16, 32]
+    },
+    "num_modes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 9,
+      "description": "Maximum number of binding modes returned (`--num_modes`).",
+      "examples": [9, 20]
+    },
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "Optional integer RNG seed for reproducibility (forwarded as `--seed`).",
+      "examples": [42, null]
+    }
   },
   "additionalProperties": false
 }

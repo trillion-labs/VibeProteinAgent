@@ -1,0 +1,389 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.0.3, pluggy-1.6.0
+rootdir: /mnt/vast/trillion/hyunjin/VibeProteinAgent
+configfile: pyproject.toml
+testpaths: tests
+plugins: anyio-4.13.0, hydra-core-1.3.2, zarr-3.2.1
+collected 1589 items / 53 deselected / 1536 selected
+
+tests/test_adapter_bindcraft_candidates.py ....                          [  0%]
+tests/test_adapter_bindcraft_unit.py ......................              [  1%]
+tests/test_adapter_boltz2_affinity_candidates.py ....                    [  1%]
+tests/test_adapter_boltz2_affinity_unit.py ..........                    [  2%]
+tests/test_adapter_boltzgen_candidates.py ....                           [  2%]
+tests/test_adapter_boltzgen_unit.py .................                    [  3%]
+tests/test_adapter_colabdesign_utils.py ......                           [  4%]
+tests/test_adapter_dssp.py ........                                      [  4%]
+tests/test_adapter_dssp_candidates.py ....                               [  5%]
+tests/test_adapter_esm2_candidates.py .......                            [  5%]
+tests/test_adapter_esm2_unit.py .......                                  [  6%]
+tests/test_adapter_esm3_candidates.py .....                              [  6%]
+tests/test_adapter_esm3_real.py ...........                              [  7%]
+tests/test_adapter_foldseek_candidates.py .....                          [  7%]
+tests/test_adapter_foldseek_real.py ....                                 [  7%]
+tests/test_adapter_go_sequences.py .                                     [  7%]
+tests/test_adapter_go_sequences_candidates.py ..                         [  7%]
+tests/test_adapter_interpro_sequences.py .                               [  7%]
+tests/test_adapter_interpro_sequences_candidates.py ...                  [  8%]
+tests/test_adapter_ipsae.py ........                                     [  8%]
+tests/test_adapter_ipsae_candidates.py ....                              [  8%]
+tests/test_adapter_ligandmpnn_candidates.py ....                         [  9%]
+tests/test_adapter_ligandmpnn_unit.py .......                            [  9%]
+tests/test_adapter_literature_search.py ........                         [ 10%]
+tests/test_adapter_mmseqs2_gpu_candidates.py ....                        [ 10%]
+tests/test_adapter_mmseqs2_gpu_real.py ....                              [ 10%]
+tests/test_adapter_mpnn_to_protenix_input.py ......                      [ 11%]
+tests/test_adapter_noop.py ....                                          [ 11%]
+tests/test_adapter_prodigy.py ......                                     [ 11%]
+tests/test_adapter_prodigy_candidates.py ....                            [ 11%]
+tests/test_adapter_protein_qc.py ........                                [ 12%]
+tests/test_adapter_protein_qc_candidates.py ....                         [ 12%]
+tests/test_adapter_proteina_complexa_candidates.py .....                 [ 13%]
+tests/test_adapter_proteina_complexa_unit.py .........                   [ 13%]
+tests/test_adapter_proteinmpnn_candidates.py ....                        [ 13%]
+tests/test_adapter_proteinmpnn_unit.py ...........                       [ 14%]
+tests/test_adapter_protenix_v2_candidates.py .......                     [ 15%]
+tests/test_adapter_protenix_v2_unit.py ...................               [ 16%]
+tests/test_adapter_pxdesign_candidates.py .....                          [ 16%]
+tests/test_adapter_pxdesign_pipeline_multi_gpu_candidates.py ....        [ 16%]
+tests/test_adapter_pxdesign_pipeline_unit.py ........................... [ 18%]
+..............                                                           [ 19%]
+tests/test_adapter_pxdesign_unit.py .......................              [ 21%]
+tests/test_adapter_pxmeter_candidates.py ....                            [ 21%]
+tests/test_adapter_pxmeter_real.py ..........                            [ 22%]
+tests/test_adapter_pyrosetta_candidates.py .....                         [ 22%]
+tests/test_adapter_pyrosetta_unit.py ..............................      [ 24%]
+tests/test_adapter_rank_designs.py ......                                [ 24%]
+tests/test_adapter_rank_designs_canonical.py ....                        [ 24%]
+tests/test_adapter_rfdiffusion3_candidates.py ....                       [ 25%]
+tests/test_adapter_rfdiffusion3_unit.py ............                     [ 25%]
+tests/test_adapter_rfdiffusion_candidates.py ....                        [ 26%]
+tests/test_adapter_rfdiffusion_unit.py ......................            [ 27%]
+tests/test_adapter_rfpeptides_candidates.py ....                         [ 27%]
+tests/test_adapter_rfpeptides_unit.py ................                   [ 28%]
+tests/test_adapter_sequence_analysis.py ...........                      [ 29%]
+tests/test_adapter_sequence_analysis_candidates.py ..                    [ 29%]
+tests/test_adapter_sequence_analysis_consumer.py ...                     [ 30%]
+tests/test_adapter_sequence_edit.py .........                            [ 30%]
+tests/test_adapter_sequence_edit_candidates.py .....                     [ 30%]
+tests/test_adapter_sequence_to_protenix_input.py ....                    [ 31%]
+tests/test_adapter_structure_analysis.py .....                           [ 31%]
+tests/test_adapter_structure_analysis_candidates.py ...                  [ 31%]
+tests/test_adapter_submit_candidate.py .....                             [ 32%]
+tests/test_adapter_submit_candidate_canonical.py ....                    [ 32%]
+tests/test_adapter_template_select.py ..                                 [ 32%]
+tests/test_adapter_template_select_candidates.py ....                    [ 32%]
+tests/test_adapter_tmalign_candidates.py ....                            [ 32%]
+tests/test_adapter_tmalign_real.py .......                               [ 33%]
+tests/test_adapter_vina_candidates.py ....                               [ 33%]
+tests/test_adapter_vina_real.py ......                                   [ 34%]
+tests/test_agent_layer.py .............................................. [ 37%]
+......                                                                   [ 37%]
+tests/test_artifact_path_containment.py .....                            [ 37%]
+tests/test_artifact_store.py ....                                        [ 38%]
+tests/test_benchmark_harness.py .......                                  [ 38%]
+tests/test_bindcraft_sidecar_smoke_import_deps.py ..                     [ 38%]
+tests/test_call_id_idempotency.py ....                                   [ 38%]
+tests/test_call_id_race.py ....                                          [ 39%]
+tests/test_candidate_hash.py ........                                    [ 39%]
+tests/test_candidate_v1_schema.py .............                          [ 40%]
+tests/test_catalog_filters_unavailable_tools.py ...                      [ 40%]
+tests/test_cli_aliases.py ss                                             [ 40%]
+tests/test_cli_doctor.py ....                                            [ 41%]
+tests/test_cli_install.py .......                                        [ 41%]
+tests/test_cli_jobs.py ........                                          [ 42%]
+tests/test_cli_no_color.py .....                                         [ 42%]
+tests/test_cli_quiet.py .....                                            [ 42%]
+tests/test_cli_report.py .............                                   [ 43%]
+tests/test_cli_retry.py ....                                             [ 43%]
+tests/test_cli_run.py .......                                            [ 44%]
+tests/test_cli_smoke.py ........................................         [ 46%]
+tests/test_cli_tools.py .......                                          [ 47%]
+tests/test_cli_visualize.py ......                                       [ 47%]
+tests/test_cli_workspace.py ....                                         [ 47%]
+tests/test_compat_registry.py ..                                         [ 48%]
+tests/test_compiler_basic.py ..                                          [ 48%]
+tests/test_compiler_fixup.py .....                                       [ 48%]
+tests/test_compiler_foreach.py .                                         [ 48%]
+tests/test_compiler_multi_upstream.py ..                                 [ 48%]
+tests/test_compiler_prior_round_virtual_node.py ...                      [ 48%]
+tests/test_controller_answer_branch.py .....                             [ 49%]
+tests/test_controller_fixup_transport.py ...                             [ 49%]
+tests/test_controller_planner_routing.py ....                            [ 49%]
+tests/test_decision_contract_v2_default_strict.py ...                    [ 49%]
+tests/test_decision_normalization_modes.py .......                       [ 50%]
+tests/test_decision_prompt_answer_examples.py .......                    [ 50%]
+tests/test_decision_prompt_matches_strict_schema.py ...                  [ 51%]
+tests/test_decision_retry_boundary.py ...                                [ 51%]
+tests/test_decision_schema_forbids_next_round_plan.py ...                [ 51%]
+tests/test_decision_v1_answer.py ............                            [ 52%]
+tests/test_decision_v1_schema.py .........                               [ 52%]
+tests/test_default_flag_is_v1.py ....                                    [ 53%]
+tests/test_descriptor.py ..............                                  [ 53%]
+tests/test_deterministic_job_ids.py ........                             [ 54%]
+tests/test_dgl_probe_does_not_allocate_cuda.py ....                      [ 54%]
+tests/test_error_details_persistence.py .                                [ 54%]
+tests/test_explicit_mode_dispatch.py .............                       [ 55%]
+tests/test_first_round_prior_round_rejected.py ...........               [ 56%]
+tests/test_fixup_malformed_response_handling.py ....                     [ 56%]
+tests/test_follow_idempotent.py ...                                      [ 56%]
+tests/test_http_retry_after.py ...............                           [ 57%]
+tests/test_ids.py ............                                           [ 58%]
+tests/test_incompatibility.py ......                                     [ 58%]
+tests/test_install_manifest.py ...................                       [ 60%]
+tests/test_ipc_framing.py ........                                       [ 60%]
+tests/test_job_store.py ...........                                      [ 61%]
+tests/test_legacy_next_round_still_works.py ..                           [ 61%]
+tests/test_legacy_planner_still_runs_when_opted_in.py ..                 [ 61%]
+tests/test_legacy_prompt_is_trimmed.py ...                               [ 61%]
+tests/test_log_format.py ......                                          [ 62%]
+tests/test_logs.py ....                                                  [ 62%]
+tests/test_mcp_dynamic.py ......                                         [ 62%]
+tests/test_mcp_force_new_parity.py ..........                            [ 63%]
+tests/test_mcp_tools_unit.py ..........................                  [ 65%]
+tests/test_mcp_warm_tool.py ....                                         [ 65%]
+tests/test_merge_candidates_adapter.py ...                               [ 65%]
+tests/test_msa_policy.py ....                                            [ 66%]
+tests/test_multi_gpu_queueing.py ........                                [ 66%]
+tests/test_nested_artifact_introspection.py .....                        [ 66%]
+tests/test_on_failure_transitive_cascade.py ..                           [ 66%]
+tests/test_output_schema_enforcement.py ......                           [ 67%]
+tests/test_param_aware_vram_admission.py ....                            [ 67%]
+tests/test_params_stdin.py ....                                          [ 67%]
+tests/test_partial_availability_surface.py ..                            [ 68%]
+tests/test_path_content_digest.py .............                          [ 68%]
+tests/test_persistent_sidecar.py ...                                     [ 69%]
+tests/test_planner_ir_v1_schema.py .................                     [ 70%]
+tests/test_planner_v1_compiler_integration.py ...                        [ 70%]
+tests/test_planner_v1_prompt.py ...                                      [ 70%]
+tests/test_planner_v1_schema_retry.py ..                                 [ 70%]
+tests/test_registry.py ........                                          [ 71%]
+tests/test_remote_helpers.py ......                                      [ 71%]
+tests/test_render_basic.py ...............                               [ 72%]
+tests/test_residue_mapping.py .......                                    [ 73%]
+tests/test_retry_policy.py .......                                       [ 73%]
+tests/test_round_state_cleanup.py ......                                 [ 73%]
+tests/test_runs_table_multi_gpu.py ....                                  [ 74%]
+tests/test_runtime_contracts.py .....                                    [ 74%]
+tests/test_scheduler_affinity.py ..........                              [ 75%]
+tests/test_scheduler_priority.py ....                                    [ 75%]
+tests/test_schema_description_coverage.py .............................. [ 77%]
+........................................................................ [ 82%]
+........................................................................ [ 86%]
+........................................................                 [ 90%]
+tests/test_source_kind_preserved_on_next_round.py .                      [ 90%]
+tests/test_supervisor_client.py .                                        [ 90%]
+tests/test_third_party_asset_licenses.py ..                              [ 90%]
+tests/test_v1_bypasses_legacy_validators.py ..                           [ 90%]
+tests/test_v1_next_round_routing.py .                                    [ 90%]
+tests/test_validation_error_enrichment.py ....................           [ 92%]
+tests/test_vram_admission_alignment.py ......                            [ 92%]
+tests/test_vram_admission_no_false_reject.py ....                        [ 92%]
+tests/test_vram_disagreement_self_heals.py .....                         [ 93%]
+tests/test_warm_busy_visibility.py ...                                   [ 93%]
+tests/test_warm_pool.py ..........                                       [ 93%]
+tests/test_worker_artifact_introspection.py .......                      [ 94%]
+tests/test_workers_cancel.py ......                                      [ 94%]
+tests/test_workers_claim.py ......                                       [ 95%]
+tests/test_workflow_cache.py .....                                       [ 95%]
+tests/test_workflow_cache_lookup.py ..                                   [ 95%]
+tests/test_workflow_components.py .......                                [ 96%]
+tests/test_workflow_dag_validation.py .......                            [ 96%]
+tests/test_workflow_descriptor.py .........                              [ 97%]
+tests/test_workflow_engine_noop.py ............                          [ 97%]
+tests/test_workflow_input_validation.py ......                           [ 98%]
+tests/test_workflow_on_failure.py ...                                    [ 98%]
+tests/test_workflow_resolver.py .............                            [ 99%]
+tests/test_workspace_layout.py ..........                                [100%]
+
+=============================== warnings summary ===============================
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=N) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CA) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=C) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=O) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CB) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CG1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CG2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OG1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CG) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CD) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OE1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=NE2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OG) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=NE) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CZ) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=NH1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=NH2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OD1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=ND2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CE) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=NZ) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OE2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CD1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CD2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'S' for Atom (name=SG) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=ND1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CE1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'S' for Atom (name=SD) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CE2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OH) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'N' for Atom (name=NE1) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CE3) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CZ2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CZ3) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'C' for Atom (name=CH2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OD2) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+tests/test_adapter_prodigy.py::test_run_end_to_end_on_3bzd
+tests/test_adapter_prodigy.py::test_run_rejects_unknown_chain
+  /mnt/vast/trillion/env/miniconda3/envs/vpa/lib/python3.12/site-packages/Bio/PDB/Atom.py:237: PDBConstructionWarning: Used element 'O' for Atom (name=OXT) with given element ''
+    warnings.warn(msg, PDBConstructionWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_cli_aliases.py:24: package not installed
+SKIPPED [1] tests/test_cli_aliases.py:36: both scripts must be installed
+=== 1534 passed, 2 skipped, 53 deselected, 74 warnings in 1134.56s (0:18:54) ===

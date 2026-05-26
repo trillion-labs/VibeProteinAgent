@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.config import vpa_home
 
 # --------------------------------------------------------------------------- paths
@@ -77,6 +78,7 @@ def _check_paths() -> None:
 class BoltzGenInput(BaseModel):
     target_pdb: str | None = Field(default=None)
     target_yaml: str | None = Field(default=None)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_chain: str = Field(default="A", min_length=1)
     binder_length: int = Field(default=60, ge=20, le=200)
     num_designs: int = Field(default=10, ge=1, le=256)
@@ -85,6 +87,29 @@ class BoltzGenInput(BaseModel):
     design_only: bool = Field(default=True)
     budget: int = Field(default=10, ge=1, le=256)
     seed: int | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_target(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError("boltzgen canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("target_pdb", structure_path)
+            return out
+        return data
 
     @model_validator(mode="after")
     def _exactly_one_target(self) -> BoltzGenInput:
@@ -107,6 +132,7 @@ class BoltzGenDesign(BaseModel):
 
 class BoltzGenOutput(BaseModel):
     designs: list[BoltzGenDesign]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     num_designs_returned: int
     seeds_used: list[int] = Field(default_factory=list)
@@ -195,6 +221,7 @@ class BoltzGenAdapter(ToolAdapter):
         seeds = [params.seed] if params.seed is not None else []
         return BoltzGenOutput(
             designs=designs,
+            candidates=_boltzgen_candidates(params, designs),
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
             seeds_used=seeds,
@@ -495,6 +522,58 @@ def _safe_float(s: str | None) -> float | None:
         return float(s)
     except (TypeError, ValueError):
         return None
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _boltzgen_candidates(
+    params: BoltzGenInput,
+    designs: list[BoltzGenDesign],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, design in enumerate(designs):
+        local_id = f"design_{index:04d}"
+        structure_path = design.pdb_path or design.cif_path
+        candidate: dict[str, Any] = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "boltzgen",
+                local_id,
+                native_id=design.candidate_id,
+                sequence=design.sequence,
+                structure_path=structure_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "boltzgen",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": design.candidate_id,
+                "index": index,
+            },
+            "structure_path": structure_path,
+            "scores": {
+                "boltzgen": {
+                    "length": design.length,
+                    "score": design.score,
+                    "affinity_pred_value": design.affinity_pred_value,
+                    "affinity_probability_binary": design.affinity_probability_binary,
+                    "confidence": design.confidence,
+                }
+            },
+            "artifacts": {"boltzgen": {"cif_path": design.cif_path, "pdb_path": design.pdb_path}},
+        }
+        if design.sequence:
+            candidate["sequence"] = design.sequence
+        if params.candidates and _is_canonical_candidate(params.candidates[0]):
+            upstream_scores = params.candidates[0].get("scores")
+            if isinstance(upstream_scores, dict):
+                candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        candidates.append(candidate)
+    return candidates
 
 
 __all__ = [

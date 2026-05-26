@@ -1,0 +1,25 @@
+name: vina
+version: "1.0.0"
+category: docking
+description: "AutoDock Vina molecular docking of a small-molecule ligand into a receptor pocket defined by a 3-D center and box size. Inputs: receptor and ligand PDBQT files. Outputs ranked poses and Vina scores. Use for small-molecule docking, not for protein-protein binders."
+runtime: python
+backend: binary
+gpu_required: false
+gpus_required: 1
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.vina:availability_skip_reason"
+supported_tasks: [docking]
+input_schema: schemas/vina.input.json
+output_schema: schemas/vina.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.vina.adapter:VinaAdapter"

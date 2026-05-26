@@ -7,10 +7,11 @@ from typing import Any
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.compat import ensure_esm3_shared_hf_cache
 from vibeproteinagent.core.config import model_cache_root
 from vibeproteinagent.core.errors import DependencyError
@@ -68,16 +69,42 @@ def _looks_gated(model_name: str) -> bool:
 
 class ESM3Input(BaseModel):
     sequence: str = Field(..., min_length=1)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     model_name: str = Field(_DEFAULT_MODEL)
     tracks: list[str] = Field(default_factory=lambda: ["sequence", "structure"])
     num_steps: int = Field(default=20, ge=1)
     temperature: float = Field(default=0.5, ge=0.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_sequence(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        first = candidates[0]
+        sequence = first.get("sequence")
+        if not sequence:
+            raise ValueError("esm3 canonical Candidate[] input requires sequence")
+        out = dict(data)
+        out.setdefault("sequence", sequence)
+        return out
 
 
 class ESM3Output(BaseModel):
     per_residue_embeddings_npz: str | None
     predicted_pdb: str | None
     confidence_scores: dict[str, Any] | None
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     num_residues: int
     model_name: str
     runtime_ms: int
@@ -200,7 +227,7 @@ class ESM3Adapter(ToolAdapter):
 
         runtime_ms = int((time.time() - t0) * 1000)
         ctx.emit_progress(1.0)
-        return ESM3Output(
+        output = ESM3Output(
             per_residue_embeddings_npz=per_residue_npz,
             predicted_pdb=predicted_pdb,
             confidence_scores=confidence,
@@ -208,6 +235,8 @@ class ESM3Adapter(ToolAdapter):
             model_name=self.loaded_model_name or params.model_name,
             runtime_ms=runtime_ms,
         )
+        output.candidates = _esm3_candidates(params, output)
+        return output
 
     def estimate_vram(self, params: ESM3Input) -> int:
         # esm3_sm_open_v1: 1.4 B params x bf16 = ~3 GiB resident, plus
@@ -233,3 +262,49 @@ __all__ = [
     "_looks_gated",
     "_normalize_model_name",
 ]
+
+
+def _esm3_candidates(params: ESM3Input, output: ESM3Output) -> list[dict[str, Any]]:
+    local_id = "esm3_0000"
+    scores: dict[str, Any] = {
+        "model_name": output.model_name,
+        "num_residues": output.num_residues,
+        "tracks": [track.lower() for track in params.tracks],
+        "embedding_present": output.per_residue_embeddings_npz is not None,
+        "structure_predicted": output.predicted_pdb is not None,
+    }
+    if output.confidence_scores is not None:
+        scores.update(output.confidence_scores)
+
+    candidate: dict[str, Any] = {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "esm3",
+            local_id,
+            sequence=params.sequence,
+            structure_path=output.predicted_pdb,
+            index=0,
+        ),
+        "source": {
+            "tool": "esm3",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": None,
+            "index": 0,
+        },
+        "sequence": params.sequence,
+        "scores": {"esm3": scores},
+        "artifacts": {},
+    }
+    if output.predicted_pdb:
+        candidate["structure_path"] = output.predicted_pdb
+    if output.per_residue_embeddings_npz:
+        candidate["artifacts"]["esm3"] = {
+            "per_residue_embeddings_npz": output.per_residue_embeddings_npz
+        }
+    return [candidate]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"

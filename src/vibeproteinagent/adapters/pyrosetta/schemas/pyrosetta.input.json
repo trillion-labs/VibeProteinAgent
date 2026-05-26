@@ -7,41 +7,55 @@
     "pdb_path": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to the input PDB structure.",
+      "description": "Path to the input PDB structure that PyRosetta will score, relax, pack, or analyze.",
+      "examples": ["/abs/path/struct.pdb", "outputs/design.pdb"],
       "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream structure tool. Promotes the first item's structure_path into `pdb_path` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/design.pdb"}]]
     },
     "mode": {
       "type": "string",
       "enum": ["score", "interface", "relax", "pack"],
       "default": "score",
-      "description": "Operation to perform: score = REF2015 total_score; interface = InterfaceAnalyzerMover metrics; relax = FastRelax; pack = pack_rotamers."
+      "description": "Operation to perform: `score` = REF2015 total_score; `interface` = InterfaceAnalyzerMover metrics (requires `chains_a`+`chains_b`); `relax` = FastRelax energy minimization; `pack` = pack_rotamers side-chain repacking.",
+      "examples": ["score", "interface", "relax", "pack"]
     },
     "score_fn": {
       "type": "string",
       "default": "ref2015",
-      "description": "Rosetta score function tag (e.g., ref2015, ref2015_cart, beta_nov16)."
+      "description": "Rosetta score function tag (e.g. `ref2015`, `ref2015_cart`, `beta_nov16`).",
+      "examples": ["ref2015", "ref2015_cart", "beta_nov16"]
     },
     "chains_a": {
       "type": ["string", "null"],
       "default": null,
-      "description": "First side of the binding interface (chain ids, e.g. 'A'). Required for mode=interface."
+      "description": "First side of the binding interface as a chain-id string (e.g. `A` or `AB`). Required for `mode=interface`.",
+      "examples": ["A", "AB", null]
     },
     "chains_b": {
       "type": ["string", "null"],
       "default": null,
-      "description": "Second side of the binding interface (chain ids, e.g. 'B'). Required for mode=interface."
+      "description": "Second side of the binding interface (chain ids). Required for `mode=interface`.",
+      "examples": ["B", "CD", null]
     },
     "max_relax_cycles": {
       "type": "integer",
       "minimum": 1,
       "maximum": 25,
       "default": 5,
-      "description": "FastRelax cycle count (relax mode only)."
+      "description": "FastRelax cycle count (relax mode only). More cycles improve relaxation at proportional cost.",
+      "examples": [5, 10]
     },
     "seed": {
       "type": ["integer", "null"],
       "default": null,
-      "description": "Random seed forwarded to PyRosetta's `-constant_seed -jran` init flags."
+      "description": "Random seed forwarded to PyRosetta's `-constant_seed -jran` init flags. Affects sidecar selection.",
+      "examples": [42, null]
     }
   },
   "additionalProperties": false

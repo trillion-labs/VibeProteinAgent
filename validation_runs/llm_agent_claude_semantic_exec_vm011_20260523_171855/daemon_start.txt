@@ -1,0 +1,4 @@
+ supervisor running    pid=681198  socket=/run/user/1002/vpa/supervisor.sock
+  workspace=llm_agent_claude_semantic_exec_vm011_20260523_171855  workers=2
+ worker -1  pid=681278  cpu  vram=cpu
+ worker -2  pid=681279  cpu  vram=cpu

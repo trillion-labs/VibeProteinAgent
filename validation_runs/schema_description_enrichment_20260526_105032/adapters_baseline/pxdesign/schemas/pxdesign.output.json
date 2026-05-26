@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/pxdesign.output.json",
+  "type": "object",
+  "required": ["designs", "runtime_ms", "num_samples"],
+  "properties": {
+    "designs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pdb_path",
+          "cif_path",
+          "score",
+          "sequence",
+          "binder_length"
+        ],
+        "properties": {
+          "candidate_id": {"type": ["string", "null"], "minLength": 1},
+          "pdb_path": {"type": ["string", "null"]},
+          "cif_path": {"type": "string"},
+          "score": {"type": ["number", "null"]},
+          "sequence": {"type": "string"},
+          "binder_length": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0},
+    "num_samples": {"type": "integer", "minimum": 1},
+    "task_name": {"type": ["string", "null"]},
+    "seed": {"type": ["integer", "null"]}
+  },
+  "additionalProperties": false
+}

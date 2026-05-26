@@ -3,12 +3,13 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 _AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 _MUTATION_RE = re.compile(r"^([ACDEFGHIKLMNPQRSTVWY])([1-9][0-9]*)([ACDEFGHIKLMNPQRSTVWY])$")
@@ -22,6 +23,7 @@ class ParsedMutation(BaseModel):
 
 class SequenceEditInput(BaseModel):
     operation: Literal["mutate_residues", "check_wt_consistency"]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     sequence: str | None = None
     wild_type_sequence: str | None = None
     mutant_sequence: str | None = None
@@ -30,6 +32,37 @@ class SequenceEditInput(BaseModel):
     allow_noop: bool = False
     strict_wild_type: bool = True
     output_name: str = Field("mutant", pattern=r"^[A-Za-z0-9_.-]+$")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_sequences(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        out = dict(data)
+        operation = out.get("operation")
+        if operation == "mutate_residues":
+            sequence = candidates[0].get("sequence")
+            if not sequence:
+                raise ValueError("sequence_edit canonical Candidate[] input requires sequence")
+            out.setdefault("sequence", sequence)
+        elif operation == "check_wt_consistency":
+            if len(candidates) >= 2:
+                out.setdefault("wild_type_sequence", candidates[0].get("sequence"))
+                out.setdefault("mutant_sequence", candidates[1].get("sequence"))
+            elif candidates[0].get("sequence"):
+                out.setdefault("mutant_sequence", candidates[0].get("sequence"))
+        return out
 
     @field_validator("sequence", "wild_type_sequence", "mutant_sequence")
     @classmethod
@@ -120,6 +153,7 @@ class SequenceEditOutput(BaseModel):
     mismatch_count: int
     expected_mutations_match: bool | None = None
     warnings: list[str] = Field(default_factory=list)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
 
 
@@ -252,6 +286,15 @@ class SequenceEditAdapter(ToolAdapter):
             mutant_fasta=str(fasta_path),
             mismatch_count=len(changed_positions),
             warnings=warnings,
+            candidates=_sequence_edit_candidates(
+                params,
+                mutant_sequence,
+                str(fasta_path),
+                {
+                    "mismatch_count": len(changed_positions),
+                    "changed_positions": changed_positions,
+                },
+            ),
             runtime_ms=int((time.time() - t0) * 1000),
         )
 
@@ -303,11 +346,62 @@ class SequenceEditAdapter(ToolAdapter):
             mismatch_count=len(inferred),
             expected_mutations_match=expected_match,
             warnings=warnings,
+            candidates=_sequence_edit_candidates(
+                params,
+                mutant,
+                None,
+                {
+                    "mismatch_count": len(inferred),
+                    "expected_mutations_match": expected_match,
+                    "is_consistent": expected_match is not False,
+                },
+            ),
             runtime_ms=int((time.time() - t0) * 1000),
         )
 
     def estimate_vram(self, params: SequenceEditInput) -> int:
         return 0
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _sequence_edit_candidates(
+    params: SequenceEditInput,
+    mutant_sequence: str,
+    mutant_fasta: str | None,
+    scores: dict[str, Any],
+) -> list[dict[str, Any]]:
+    local_id = "seq_0000"
+    source_candidate = params.candidates[0] if params.candidates else {}
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "sequence_edit",
+            local_id,
+            sequence=mutant_sequence,
+            index=0,
+        ),
+        "source": {
+            "tool": "sequence_edit",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": None,
+            "index": 0,
+        },
+        "sequence": mutant_sequence,
+        "scores": {"sequence_edit": scores},
+        "artifacts": {"sequence_edit": {"mutant_fasta": mutant_fasta}},
+    }
+    if _is_canonical_candidate(source_candidate):
+        upstream_scores = source_candidate.get("scores")
+        if isinstance(upstream_scores, dict):
+            candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        if source_candidate.get("structure_path"):
+            candidate["structure_path"] = source_candidate.get("structure_path")
+    return [candidate]
 
 
 __all__ = ["SequenceEditAdapter", "SequenceEditInput", "SequenceEditOutput"]

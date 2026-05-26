@@ -1,0 +1,15 @@
+case	mode	provider	model	status	exit_code	seconds	output
+plan_semantic_codex	plan	codex	gpt-5.4	BLOCKED	127	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_semantic_codex.blocked.txt
+plan_binder_codex	plan	codex	gpt-5.4	BLOCKED	127	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_binder_codex.blocked.txt
+plan_denovo_codex	plan	codex	gpt-5.4	BLOCKED	127	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_denovo_codex.blocked.txt
+plan_semantic_claude	plan	claude-code	sonnet	PASS	0	154	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_semantic_claude.json
+plan_binder_claude	plan	claude-code	sonnet	PASS	0	229	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_binder_claude.json
+plan_denovo_claude	plan	claude-code	sonnet	PASS	0	276	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_denovo_claude.json
+plan_semantic_openrouter	plan	openrouter	qwen/qwen3.5-9b	PASS	0	113	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_semantic_openrouter.json
+plan_binder_openrouter	plan	openrouter	qwen/qwen3.5-9b	FAIL	1	182	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_binder_openrouter.json
+plan_denovo_openrouter	plan	openrouter	qwen/qwen3.5-9b	PASS	0	199	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/plan_denovo_openrouter.json
+actual_semantic_codex	actual	codex	gpt-5.4	BLOCKED	127	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/actual_semantic_codex.blocked.txt
+actual_binder_codex	actual	codex	gpt-5.4	BLOCKED	127	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/actual_binder_codex.blocked.txt
+actual_denovo_codex	actual	codex	gpt-5.4	BLOCKED	127	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/actual_denovo_codex.blocked.txt
+actual_semantic_claude	actual	claude-code	sonnet	FAIL	0	289	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/actual_semantic_claude.json
+actual_binder_claude	actual	claude-code	sonnet	FAIL	0	301	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_095840/outputs/actual_binder_claude.json

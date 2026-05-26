@@ -6,7 +6,9 @@
   "properties": {
     "outcome": {
       "type": "string",
-      "enum": ["accepted", "no_acceptable_candidate"]
+      "enum": ["accepted", "no_acceptable_candidate"],
+      "description": "Decision: `accepted` records the candidates in `candidates` as the submission; `no_acceptable_candidate` records that the workflow could not produce an acceptable design (the `candidates` array must be empty in that case).",
+      "examples": ["accepted", "no_acceptable_candidate"]
     },
     "candidates": {
       "type": "array",
@@ -14,22 +16,56 @@
         "type": "object",
         "required": ["job_id", "justification"],
         "properties": {
-          "job_id": {"type": "string", "pattern": "^job_[A-Za-z0-9]+$"},
-          "candidate_id": {"type": "string", "minLength": 1},
-          "index": {"type": "integer", "minimum": 0},
-          "justification": {"type": "string", "minLength": 1},
+          "job_id": {
+            "type": "string",
+            "pattern": "^job_[A-Za-z0-9]+$",
+            "description": "Job id (`job_<hex>`) of the tool run that produced the candidate. Must match a prior job from this session.",
+            "examples": ["job_abc123def", "job_4f2a91"]
+          },
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional Candidate v1 identifier within the job's candidates list. Use when the job emitted multiple candidates and you want to pin one by ID.",
+            "examples": ["cand_0", "design_4"]
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional 0-indexed offset into the job's candidate list. Alternative to `candidate_id`; pick one form per entry.",
+            "examples": [0, 2]
+          },
+          "justification": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Short natural-language explanation for selecting this candidate (e.g. cites scores that drove the decision). Stored in submission audit log.",
+            "examples": ["Highest ipSAE among AF2-IG passing designs", "Lowest binding ΔG and best DSSP helicity"]
+          },
           "scores_to_highlight": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
-            "default": []
+            "default": [],
+            "description": "Names of score fields that drove the selection. Stored verbatim in the submission record so reviewers know which metrics were decisive.",
+            "examples": [["ipsae", "plddt"], ["dG_binding", "polybasic_clusters"]]
           }
         },
         "additionalProperties": false
       },
-      "default": []
+      "default": [],
+      "description": "List of accepted candidates. Required non-empty when `outcome=accepted`; must be empty when `outcome=no_acceptable_candidate`.",
+      "examples": [[{"job_id": "job_abc123", "candidate_id": "cand_0", "justification": "best ipSAE"}], []]
     },
-    "reasoning": {"type": "string", "minLength": 1},
-    "supersedes": {"type": ["string", "null"], "default": null}
+    "reasoning": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-text natural-language explanation of the submission decision, summarizing what was tried and why these candidates (or none) were selected.",
+      "examples": ["After three RFdiffusion+MPNN cycles, candidate cand_0 had the highest ipSAE and passed all QC; submitting.", "All three design pipelines produced binders with pLDDT < 70; no acceptable candidate."]
+    },
+    "supersedes": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional submission id this submission replaces (chain-of-custody for revised submissions).",
+      "examples": ["sub_abc123", null]
+    }
   },
   "additionalProperties": false
 }

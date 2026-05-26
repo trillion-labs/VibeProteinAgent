@@ -33,8 +33,8 @@ canonical ~5.3 GiB tarball from
 """
 from __future__ import annotations
 
-import hashlib
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
@@ -54,6 +54,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_positions,
 )
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.errors import VPAError
 from vibeproteinagent.workers.sidecar import PersistentPythonSidecar, SidecarRuntimeSpec
 
@@ -227,7 +228,8 @@ def _explicit_bindcraft_python() -> Path | None:
 
 
 class BindCraftInput(BaseModel):
-    target_pdb: str = Field(..., min_length=1)
+    target_pdb: str | None = Field(None, min_length=1)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_chain: str = Field(default="A", min_length=1)
     target_hotspots: list[int] = Field(default_factory=list)
     target_hotspot_residue_ids: list[str] = Field(default_factory=list)
@@ -240,6 +242,37 @@ class BindCraftInput(BaseModel):
     seed: int | None = Field(default=None)
     max_trajectories: int | None = Field(default=None, ge=1, le=10_000)
     filter_mode: Literal["default", "permissive"] = "default"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_target(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        first = candidates[0]
+        structure_path = first.get("structure_path")
+        if not structure_path:
+            raise ValueError("bindcraft canonical Candidate[] target requires structure_path")
+        out = dict(data)
+        out.setdefault("target_pdb", structure_path)
+        out.setdefault("target_sequence", first.get("sequence"))
+        return out
+
+    @model_validator(mode="after")
+    def _require_target_pdb(self) -> BindCraftInput:
+        if not self.target_pdb:
+            raise ValueError("bindcraft requires target_pdb")
+        return self
 
 
 class BindCraftDesign(BaseModel):
@@ -255,6 +288,7 @@ class BindCraftDesign(BaseModel):
 
 class BindCraftOutput(BaseModel):
     designs: list[BindCraftDesign]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     num_designs_returned: int
     seeds_used: list[int]
@@ -310,6 +344,7 @@ class BindCraftAdapter(ToolAdapter):
                 f"$VPA_BINDCRAFT_CONDA_ENV if the env name differs."
             )
 
+        assert params.target_pdb is not None
         target_src = Path(params.target_pdb).expanduser().resolve()
         if not target_src.is_file():
             raise FileNotFoundError(f"target_pdb not found: {target_src}")
@@ -371,6 +406,10 @@ class BindCraftAdapter(ToolAdapter):
         ctx.emit_progress(1.0)
         return BindCraftOutput(
             designs=designs,
+            candidates=[
+                _canonical_candidate_from_design(design.model_dump(), index)
+                for index, design in enumerate(designs)
+            ],
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
             seeds_used=[params.seed] if params.seed is not None else [],
@@ -691,6 +730,47 @@ def _bindcraft_candidate_id(pdb_path: Path, index: int, sequence: str) -> str:
     stem = re.sub(r"_model\d+$", "", pdb_path.stem)
     token = hashlib.sha256(f"{stem}:{sequence}".encode()).hexdigest()[:10]
     return f"bindcraft:{stem or f'design_{index}'}:{token}"
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _canonical_candidate_from_design(design: dict[str, Any], index: int) -> dict[str, Any]:
+    local_id = f"binder_{index:04d}"
+    sequence = str(design.get("sequence") or "")
+    structure_path = str(design.get("pdb_path") or "")
+    return {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "bindcraft",
+            local_id,
+            native_id=design.get("candidate_id"),
+            sequence=sequence,
+            structure_path=structure_path,
+            index=index,
+        ),
+        "source": {
+            "tool": "bindcraft",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": design.get("candidate_id"),
+            "index": index,
+        },
+        "sequence": sequence,
+        "structure_path": structure_path,
+        "scores": {
+            "bindcraft": {
+                "iptm": design.get("iptm"),
+                "plddt": design.get("plddt"),
+                "pae_interaction": design.get("pae_interaction"),
+                "sap_score": design.get("sap_score"),
+                "binder_length": design.get("binder_length"),
+            }
+        },
+        "artifacts": {},
+    }
 
 
 # Three-letter → one-letter map for the 20 canonical amino acids. Anything

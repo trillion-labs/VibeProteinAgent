@@ -2,14 +2,39 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/tmalign.input.json",
   "type": "object",
-  "required": ["pdb_a", "pdb_b"],
+  "anyOf": [
+    {"required": ["pdb_a", "pdb_b"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
-    "pdb_a": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "pdb_b": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "pdb_a": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the first structure (PDB or mmCIF) for pairwise TM-align comparison.",
+      "examples": ["/abs/path/struct_a.pdb"],
+      "vpa:digest": "sha256"
+    },
+    "pdb_b": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the second structure (PDB or mmCIF) for pairwise TM-align comparison.",
+      "examples": ["/abs/path/struct_b.pdb"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from upstream tools. Requires at least two items: the first's structure_path is `pdb_a`, the second's is `pdb_b`.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "a", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/a.pdb"}, {"schema_version": "candidate_v1", "candidate_id": "b", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/b.pdb"}]]
+    },
     "normalize_by": {
       "type": "string",
       "enum": ["a", "b", "average", "shorter", "longer"],
-      "default": "shorter"
+      "default": "shorter",
+      "description": "TM-score normalization basis. `a` normalizes by structure A length; `b` by B length; `average` by mean length; `shorter`/`longer` by the shorter/longer of the two.",
+      "examples": ["shorter", "a", "average"]
     }
   },
   "additionalProperties": false

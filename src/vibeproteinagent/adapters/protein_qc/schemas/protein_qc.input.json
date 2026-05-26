@@ -4,15 +4,32 @@
   "type": "object",
   "anyOf": [
     {"required": ["sequence"]},
-    {"required": ["pdb_path"]}
+    {"required": ["pdb_path"]},
+    {"required": ["candidates"]}
   ],
   "properties": {
     "sequence": {
       "type": ["string", "null"],
       "pattern": "^[A-Za-z]*$",
-      "default": null
+      "default": null,
+      "description": "Protein sequence to score (canonical 1-letter codes only). Used for sequence-only metrics (GRAVY, polybasic, instability index, pI).",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
     },
-    "pdb_path": {"type": ["string", "null"], "default": null, "vpa:digest": "sha256-if-path"},
+    "pdb_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Path to a structure file to score (PDB or mmCIF). Required for the `plddt` metric and for any structure-dependent QC checks.",
+      "examples": ["/abs/path/design.pdb", null],
+      "vpa:digest": "sha256-if-path"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` and/or `structure_path` when those direct inputs are omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
+    },
     "metrics": {
       "type": "array",
       "items": {
@@ -20,7 +37,9 @@
         "enum": ["plddt", "polybasic", "gravy", "instability_index", "pi"]
       },
       "uniqueItems": true,
-      "default": ["plddt", "polybasic", "gravy", "instability_index", "pi"]
+      "default": ["plddt", "polybasic", "gravy", "instability_index", "pi"],
+      "description": "Which QC metrics to compute. `plddt` reads predicted-confidence from a structure; `polybasic` detects polybasic clusters; `gravy` is the Grand Average of Hydropathy; `instability_index` is the Guruprasad instability; `pi` is the isoelectric point.",
+      "examples": [["plddt", "polybasic"], ["gravy", "pi"]]
     }
   },
   "additionalProperties": false

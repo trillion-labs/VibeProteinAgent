@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, Field, model_validator
@@ -33,6 +33,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_position_range,
     resolve_positions,
 )
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
 _ADAPTER_DIR = Path(__file__).parent
@@ -68,6 +69,7 @@ _SIMPLE_RF_SELECTOR = re.compile(r"^(?P<chain>[A-Za-z_]?)(?P<start>\d+)(?:-(?P<e
 
 class RFdiffusionInput(BaseModel):
     mode: RFdiffusionMode = "unconditional"
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_pdb: str | None = Field(
         default=None,
         json_schema_extra={"vpa:digest": "sha256-if-path"},
@@ -122,6 +124,38 @@ class RFdiffusionInput(BaseModel):
     olig_inter_all: bool | None = None
     hydra_overrides: list[str] = Field(default_factory=list)
     seed: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_target(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        first = candidates[0]
+        out = dict(data)
+        if first.get("structure_path"):
+            out.setdefault("target_pdb", first["structure_path"])
+            if out.get("mode") in (
+                None,
+                "unconditional",
+                "unconditional_generation",
+                "backbone_generation",
+            ):
+                out["mode"] = "partial_diffusion"
+                out.setdefault("partial_T", min(int(out.get("num_diffusion_steps") or 50), 20))
+        if first.get("sequence"):
+            out.setdefault("target_sequence", first["sequence"])
+        return out
 
     @model_validator(mode="after")
     def validate_mode_contract(self) -> RFdiffusionInput:
@@ -180,6 +214,7 @@ class RFdiffusionOutput(BaseModel):
     backbone_dir: str = ""
     manifest_jsonl: str = ""
     top_candidates: list[RFdiffusionDesign] = Field(default_factory=list)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     num_requested: int = 0
     num_generated: int = 0
@@ -265,6 +300,10 @@ class RFdiffusionAdapter(ToolAdapter):
             backbone_dir=str(run_outputs),
             manifest_jsonl=str(manifest_jsonl),
             top_candidates=designs[: min(5, len(designs))],
+            candidates=[
+                _canonical_candidate_from_design(design.model_dump(), index, params=params)
+                for index, design in enumerate(designs)
+            ],
             runtime_ms=runtime_ms,
             num_requested=params.num_designs,
             num_generated=len(designs),
@@ -346,20 +385,28 @@ def availability_report() -> dict[str, object]:
             failures.append("RFdiffusion requires CUDA; no CUDA device is visible.")
         else:
             checks["cuda"] = {"ok": True}
-            try:
-                g = dgl.graph(([0, 1], [1, 0])).to("cuda")
-                _ = g.all_edges()
-            except Exception as exc:
-                checks["dgl_cuda"] = {
-                    "ok": False,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-                failures.append(
-                    f"DGL CUDA graph ops unavailable: {type(exc).__name__}: {exc}. "
-                    "Install a CUDA-enabled DGL build for this torch/CUDA stack."
-                )
+            if os.environ.get("VPA_DGL_PROBE_CUDA_ALLOC") == "1":
+                try:
+                    g = dgl.graph(([0, 1], [1, 0])).to("cuda")
+                    _ = g.all_edges()
+                except Exception as exc:
+                    checks["dgl_cuda"] = {
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    failures.append(
+                        f"DGL CUDA graph ops unavailable: {type(exc).__name__}: {exc}. "
+                        "Install a CUDA-enabled DGL build for this torch/CUDA stack."
+                    )
+                else:
+                    checks["dgl_cuda"] = {"ok": True}
             else:
-                checks["dgl_cuda"] = {"ok": True}
+                # Intentionally do not allocate a CUDA graph here. The probe
+                # answers "is the tool installed?", while live GPU memory state
+                # belongs to execution-time error handling. An OOM at run()
+                # surfaces via the executor; an OOM here would hide RFdiffusion
+                # from the planner catalog during unrelated GPU saturation.
+                checks["dgl_cuda"] = {"ok": "skipped_at_probe"}
 
     return {
         "available": not failures,
@@ -869,6 +916,58 @@ def _collect_designs(prefix: Path, contigs: list[str]) -> list[RFdiffusionDesign
             )
         )
     return designs
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _canonical_candidate_from_design(
+    design: dict[str, Any],
+    index: int,
+    *,
+    params: RFdiffusionInput,
+) -> dict[str, Any]:
+    local_id = f"design_{index:04d}"
+    sequence = design.get("sequence")
+    structure_path = design.get("pdb_path")
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "rfdiffusion",
+            local_id,
+            sequence=sequence,
+            structure_path=structure_path,
+            index=index,
+        ),
+        "source": {
+            "tool": "rfdiffusion",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": None,
+            "index": index,
+        },
+        "scores": {
+            "rfdiffusion": {
+                "score": design.get("score"),
+                "length": design.get("length"),
+                "mode": params.mode,
+                "num_diffusion_steps": params.num_diffusion_steps,
+                "partial_T": params.partial_T,
+                "noise_scale_ca": params.noise_scale_ca,
+                "noise_scale_frame": params.noise_scale_frame,
+            }
+        },
+        "artifacts": {},
+    }
+    if sequence:
+        candidate["sequence"] = sequence
+    if structure_path:
+        candidate["structure_path"] = structure_path
+    if design.get("trb_path"):
+        candidate["artifacts"]["rfdiffusion"] = {"trb_path": design["trb_path"]}
+    return candidate
 
 
 def _write_manifest_jsonl(path: Path, designs: list[RFdiffusionDesign]) -> Path:

@@ -63,6 +63,15 @@ def test_go_sequences_mocked_go_first_then_uniprot_filter(tmp_path, monkeypatch)
     assert seen["taxon_id"] == 9606
     assert out.go_label == "test function"
     assert out.kept_sequences == 1
+    assert out.sequences == [
+        {
+            "candidate_id": "go:GO:0003824:P00001",
+            "accession": "P00001",
+            "sequence": "M11111",
+            "length": 6,
+            "reviewed": True,
+        }
+    ]
     assert out.dropped["temporal_filter"] == 1
     assert out.dropped["unresolved_identifier"] == 1
     assert fallback_seen["query"].startswith("go:0003824")

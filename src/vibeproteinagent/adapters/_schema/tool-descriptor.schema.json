@@ -166,6 +166,16 @@
       "type": "boolean",
       "default": false
     },
+    "planner_visible": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether the planner LLM may select this tool directly."
+    },
+    "audit_visible": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether executed nodes for this tool appear in audit/user reports."
+    },
     "incompatible_with": {
       "type": "array",
       "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},

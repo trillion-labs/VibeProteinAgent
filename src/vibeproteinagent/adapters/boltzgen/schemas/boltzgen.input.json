@@ -4,47 +4,61 @@
   "type": "object",
   "oneOf": [
     {"required": ["target_pdb"]},
-    {"required": ["target_yaml"]}
+    {"required": ["target_yaml"]},
+    {"required": ["candidates"]}
   ],
   "properties": {
     "target_pdb": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to a target structure (.pdb or .cif). When provided, the adapter generates a minimal BoltzGen design YAML using ``target_chain`` and ``binder_length``.",
+      "description": "Path to a target structure (.pdb or .cif). When provided, the adapter generates a minimal BoltzGen design YAML using `target_chain` and `binder_length`. Mutually exclusive with `target_yaml`.",
+      "examples": ["/abs/path/target.pdb", "outputs/target.cif"],
       "vpa:digest": "sha256-if-path"
     },
     "target_yaml": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to a BoltzGen-format design specification YAML. Mutually exclusive with ``target_pdb``.",
+      "description": "Path to a BoltzGen-format design specification YAML. Use this for advanced configurations (multi-target, custom ligand pockets). Mutually exclusive with `target_pdb`.",
+      "examples": ["/abs/path/spec.yaml"],
       "vpa:digest": "sha256-if-path"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path into `target_pdb` when neither `target_pdb` nor `target_yaml` is provided.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c1", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/target.pdb"}]]
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
       "default": "A",
-      "description": "Target chain id to bind against (used only when generating a YAML from ``target_pdb``)."
+      "description": "Target chain id to bind against. Used only when generating a YAML from `target_pdb`.",
+      "examples": ["A", "B"]
     },
     "binder_length": {
       "type": "integer",
       "minimum": 20,
       "maximum": 200,
       "default": 60,
-      "description": "Fixed length of the binder chain (used only when generating a YAML from ``target_pdb``)."
+      "description": "Fixed length of the generated binder chain in residues. Used only when generating a YAML from `target_pdb`. Typical mini-binder range 50-100.",
+      "examples": [60, 90]
     },
     "num_designs": {
       "type": "integer",
       "minimum": 1,
       "maximum": 256,
       "default": 10,
-      "description": "Number of design backbones to generate."
+      "description": "Number of design backbones to generate per BoltzGen run.",
+      "examples": [10, 50]
     },
     "num_diffusion_steps": {
       "type": "integer",
       "minimum": 5,
       "maximum": 1000,
       "default": 500,
-      "description": "Number of denoising steps per sample. Lower means faster, lower quality."
+      "description": "Number of denoising/diffusion steps per sample. Lower means faster but lower-quality samples.",
+      "examples": [100, 500]
     },
     "protocol": {
       "type": "string",
@@ -57,24 +71,28 @@
         "protein-redesign"
       ],
       "default": "protein-anything",
-      "description": "BoltzGen protocol controlling which pipeline steps run and the default model choices."
+      "description": "BoltzGen protocol controlling which pipeline steps run and default model choices. Use `protein-anything` for generic mini-binders, `peptide-anything` for short peptides, `protein-small_molecule` for ligand-binding pockets, `antibody-anything`/`nanobody-anything` for antibody-domain designs.",
+      "examples": ["protein-anything", "peptide-anything", "protein-small_molecule"]
     },
     "design_only": {
       "type": "boolean",
       "default": true,
-      "description": "If true, run only the diffusion backbone generation step. If false, run the full pipeline (design + inverse_fold + folding + analyze + filter)."
+      "description": "If true, run only the diffusion backbone generation step. If false, run the full pipeline (design + inverse_fold + folding + analyze + filter) which is slower but emits sequenced and ranked designs.",
+      "examples": [true, false]
     },
     "budget": {
       "type": "integer",
       "minimum": 1,
       "maximum": 256,
       "default": 10,
-      "description": "Final ranked design set size (only meaningful when ``design_only`` is false)."
+      "description": "Final ranked design set size after filtering. Only meaningful when `design_only` is false.",
+      "examples": [10, 50]
     },
     "seed": {
       "type": ["integer", "null"],
       "default": null,
-      "description": "Optional random seed forwarded to BoltzGen via PYTHONHASHSEED."
+      "description": "Optional random seed forwarded to BoltzGen via `PYTHONHASHSEED`. Null lets BoltzGen choose its own seed.",
+      "examples": [42, null]
     }
   },
   "additionalProperties": false

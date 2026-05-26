@@ -2,18 +2,61 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/proteinmpnn.input.json",
   "type": "object",
-  "required": ["pdb_path"],
+  "anyOf": [
+    {"required": ["pdb_path"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
-    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "pdb_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the input PDB whose backbone is held fixed while ProteinMPNN samples sequences.",
+      "examples": ["/abs/path/scaffold.pdb", "outputs/rfdiffusion/design_0.pdb"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream backbone-design tool (e.g. RFdiffusion). Promotes the first item's structure_path into `pdb_path` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/design.pdb"}]]
+    },
     "chains": {
       "type": ["array", "null"],
       "items": {"type": "string", "minLength": 1},
-      "default": null
+      "default": null,
+      "description": "Chain identifiers to design. Null designs every chain in the structure (typical for de novo monomer or binder design).",
+      "examples": [["A"], ["A", "B"], null]
     },
-    "num_designs": {"type": "integer", "minimum": 1, "maximum": 1024, "default": 8},
-    "temperature": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.1},
-    "omit_aas": {"type": "string", "default": "X"},
-    "seed": {"type": ["integer", "null"], "default": null}
+    "num_designs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024,
+      "default": 8,
+      "description": "Number of sequences sampled per input structure.",
+      "examples": [8, 32, 100]
+    },
+    "temperature": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "maximum": 2.0,
+      "default": 0.1,
+      "description": "Sampling temperature. 0.1 (default) gives high-confidence sequences near the model argmax; raise toward 0.3-0.5 for diversity.",
+      "examples": [0.1, 0.3, 0.5]
+    },
+    "omit_aas": {
+      "type": "string",
+      "default": "X",
+      "description": "Amino-acid one-letter codes to forbid at every position. Default `X` blocks the unknown token; concatenate letters with no separator.",
+      "examples": ["X", "CX"]
+    },
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "Optional RNG seed for reproducibility. Null lets the model choose its own seed.",
+      "examples": [42, null]
+    }
   },
   "additionalProperties": false
 }

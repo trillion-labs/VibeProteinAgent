@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/protenix_v2.output.json",
+  "type": "object",
+  "required": ["predicted_cif", "metrics", "runtime_ms", "seeds_used"],
+  "properties": {
+    "predicted_cif": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the top-ranked predicted CIF (across all seeds)."
+    },
+    "predicted_pdb": {"type": ["string", "null"], "default": null},
+    "pae_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "AF3-style confidence JSON containing the top-ranked prediction PAE matrix for downstream tools such as ipSAE."
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["plddt", "iptm", "ptm", "ranking_score"],
+      "properties": {
+        "plddt": {"type": "number"},
+        "iptm": {"type": "number"},
+        "ptm": {"type": "number"},
+        "ranking_score": {"type": "number"},
+        "summary_json": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "all_predictions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["seed", "rank", "cif_path", "summary_json"],
+        "properties": {
+          "candidate_id": {"type": ["string", "null"], "minLength": 1},
+          "seed": {"type": "integer"},
+          "rank": {"type": "integer"},
+          "cif_path": {"type": "string"},
+          "summary_json": {"type": "string"},
+          "pae_path": {"type": ["string", "null"]},
+          "full_confidence_json": {"type": ["string", "null"]},
+          "ranking_score": {"type": ["number", "null"]},
+          "plddt": {"type": ["number", "null"]},
+          "iptm": {"type": ["number", "null"]},
+          "ptm": {"type": ["number", "null"]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 output emitted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0},
+    "seeds_used": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false
+}

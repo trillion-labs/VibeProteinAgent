@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/ipsae.output.json",
+  "type": "object",
+  "required": [
+    "ipsae_score",
+    "ipsae_asym_ab",
+    "ipsae_asym_ba",
+    "ipsae_max",
+    "interface_residues_a",
+    "interface_residues_b",
+    "runtime_ms"
+  ],
+  "properties": {
+    "ipsae_score": {
+      "type": "number",
+      "description": "Representative ipSAE score for the requested chain pair; same as ipsae_max."
+    },
+    "ipsae_asym_ab": {
+      "type": "number",
+      "description": "Directional asymmetric ipSAE for chain_a scored against chain_b."
+    },
+    "ipsae_asym_ba": {
+      "type": "number",
+      "description": "Directional asymmetric ipSAE for chain_b scored against chain_a."
+    },
+    "ipsae_max": {
+      "type": "number",
+      "description": "Maximum of the two directional asymmetric ipSAE values."
+    },
+    "interface_residues_a": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "interface_residues_b": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "scoreboard_path": {"type": "string", "minLength": 1},
+    "byres_path": {"type": "string", "minLength": 1},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

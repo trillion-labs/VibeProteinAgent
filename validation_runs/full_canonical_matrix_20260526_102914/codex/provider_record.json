@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "validation_runs/full_canonical_matrix_20260526_102914/codex",
+  "duration_seconds": 905.0,
+  "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent LLM entry budget exhausted\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 3, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"params for go_sequences failed validation: 'MF' is not one of [None, 'function', 'molecular_function', 'process', 'biological_process', 'component', 'cellular_component', 'mf', 'bp', 'cc'] at 'aspect'\", \"details\": {\"tool\": \"go_",
+  "provider": "codex",
+  "reason": "workflow_failed",
+  "status": "FAIL"
+}

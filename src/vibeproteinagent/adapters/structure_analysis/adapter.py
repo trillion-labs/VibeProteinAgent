@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
@@ -21,6 +21,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     residue_refs_from_objects,
     resolve_positions,
 )
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.binary import find_binary
 
 AA3 = {
@@ -317,7 +318,12 @@ def _patches(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class StructureAnalysisInput(BaseModel):
-    structure_path: str = Field(min_length=1, json_schema_extra={"vpa:digest": "sha256-if-path"})
+    structure_path: str | None = Field(
+        None,
+        min_length=1,
+        json_schema_extra={"vpa:digest": "sha256-if-path"},
+    )
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     sequence: str | None = None
     fasta_path: str | None = Field(None, min_length=1)
     position_basis: PositionBasis = "auto"
@@ -332,6 +338,39 @@ class StructureAnalysisInput(BaseModel):
     run_dssp: bool = True
     output_prefix: str = Field("structure_analysis", pattern=r"^[A-Za-z0-9_.-]+$")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_structure(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            first = candidates[0]
+            structure_path = first.get("structure_path")
+            if not structure_path:
+                raise ValueError(
+                    "structure_analysis canonical Candidate[] input requires structure_path"
+                )
+            out = dict(data)
+            out.setdefault("structure_path", structure_path)
+            out.setdefault("sequence", first.get("sequence"))
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_structure_path(self) -> StructureAnalysisInput:
+        if not self.structure_path:
+            raise ValueError("structure_analysis requires structure_path")
+        return self
+
 
 class StructureAnalysisOutput(BaseModel):
     structure_path: str
@@ -345,6 +384,7 @@ class StructureAnalysisOutput(BaseModel):
     annotation_scope: dict[str, Any]
     artifacts: dict[str, str]
     warnings: list[str]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
 
 
@@ -359,6 +399,7 @@ class StructureAnalysisAdapter(ToolAdapter):
         ctx: AdapterRunContext,
     ) -> StructureAnalysisOutput:
         t0 = time.time()
+        assert params.structure_path is not None
         path = Path(params.structure_path).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"structure_analysis input not found: {path}")
@@ -655,6 +696,7 @@ class StructureAnalysisAdapter(ToolAdapter):
             annotation_scope=annotation_scope,
             artifacts=summary["artifacts"],
             warnings=warnings,
+            candidates=_structure_analysis_candidates(params, summary, str(path)),
             runtime_ms=int((time.time() - t0) * 1000),
         )
 
@@ -668,3 +710,73 @@ __all__ = [
     "StructureAnalysisOutput",
     "_parse_structure",
 ]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _structure_analysis_candidates(
+    params: StructureAnalysisInput,
+    summary: dict[str, Any],
+    structure_path: str,
+) -> list[dict[str, Any]]:
+    upstream = params.candidates if params.candidates else [{}]
+    scores = {
+        "secondary_structure": summary["secondary_structure"],
+        "burial": summary["burial"],
+        "interface": summary["interface"],
+        "ligand_contacts": summary["ligand_contacts"],
+        "liability_count": len(summary["liabilities"]),
+        "secondary_structure_source": summary["secondary_structure_source"],
+    }
+    candidates: list[dict[str, Any]] = []
+    for index, source_candidate in enumerate(upstream):
+        local_id = _source_local_id(source_candidate, f"analysis_{index:04d}")
+        candidate_structure = source_candidate.get("structure_path") or structure_path
+        if _is_canonical_candidate(source_candidate):
+            candidate = _copy_candidate(source_candidate)
+        else:
+            candidate = {
+                "schema_version": "candidate_v1",
+                "candidate_id": stable_candidate_id(
+                    "structure_analysis",
+                    local_id,
+                    sequence=params.sequence,
+                    structure_path=candidate_structure,
+                    index=index,
+                ),
+                "source": {
+                    "tool": "structure_analysis",
+                    "node_id": None,
+                    "job_id": None,
+                    "local_id": local_id,
+                    "native_id": None,
+                    "index": index,
+                },
+                "structure_path": candidate_structure,
+                "scores": {},
+                "artifacts": {},
+            }
+            if params.sequence:
+                candidate["sequence"] = params.sequence
+        candidate.setdefault("scores", {})["structure_analysis"] = scores
+        candidate.setdefault("artifacts", {})["structure_analysis"] = dict(summary["artifacts"])
+        candidates.append(candidate)
+    return candidates
+
+
+def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        key: value
+        for key, value in candidate.items()
+        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+    }
+    out["scores"] = dict(candidate.get("scores") or {})
+    out["artifacts"] = dict(candidate.get("artifacts") or {})
+    return out
+
+
+def _source_local_id(candidate: dict[str, Any], fallback: str) -> str:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    return str(source.get("local_id") or fallback)

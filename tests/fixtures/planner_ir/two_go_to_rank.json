@@ -1,0 +1,32 @@
+{
+  "version": "planner_ir_v1",
+  "goal": "Merge and rank candidates from two GO terms.",
+  "assumptions": [],
+  "missing_inputs": [],
+  "nodes": [
+    {
+      "id": "go_a",
+      "tool": "go_sequences",
+      "intent": "Retrieve candidates for the first GO term.",
+      "inputs": {"go_id": "GO:0003824"},
+      "upstream": []
+    },
+    {
+      "id": "go_b",
+      "tool": "go_sequences",
+      "intent": "Retrieve candidates for the second GO term.",
+      "inputs": {"go_id": "GO:0008150"},
+      "upstream": []
+    },
+    {
+      "id": "rank",
+      "tool": "rank_designs",
+      "intent": "Rank all candidates.",
+      "inputs": {"top_k": 5},
+      "upstream": [
+        {"node": "go_a", "relationship": "candidate_source"},
+        {"node": "go_b", "relationship": "candidate_source"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "counts": {
+    "BLOCKED": 3,
+    "FAIL": 0,
+    "PASS": 0
+  },
+  "flag": {
+    "VPA_PLANNER_IR": "v1"
+  },
+  "notes": "first cycle; acceptance is informational, not gating.",
+  "pr": "pr5_first_live_cycle",
+  "providers": [
+    {
+      "artifacts_path": "validation_runs/pr5_first_live_cycle_20260525_152000/claude",
+      "duration_seconds": 0.0,
+      "first_error": "claude command not found",
+      "provider": "claude",
+      "reason": "preflight_failed",
+      "status": "BLOCKED"
+    },
+    {
+      "artifacts_path": "validation_runs/pr5_first_live_cycle_20260525_152000/codex",
+      "duration_seconds": 0.0,
+      "first_error": "codex command not found",
+      "provider": "codex",
+      "reason": "preflight_failed",
+      "status": "BLOCKED"
+    },
+    {
+      "artifacts_path": "validation_runs/pr5_first_live_cycle_20260525_152000/qwen",
+      "duration_seconds": 0.0,
+      "first_error": "OpenRouter credential is unset",
+      "provider": "qwen",
+      "reason": "preflight_failed",
+      "status": "BLOCKED"
+    }
+  ],
+  "timestamp": "2026-05-25T06:25:03.371185+00:00"
+}

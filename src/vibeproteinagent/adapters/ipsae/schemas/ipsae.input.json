@@ -2,14 +2,60 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/ipsae.input.json",
   "type": "object",
-  "required": ["pae_path", "pdb_path", "chain_a", "chain_b"],
+  "required": ["pae_path", "chain_a", "chain_b"],
+  "anyOf": [
+    {"required": ["pdb_path"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
-    "pae_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "chain_a": {"type": "string", "minLength": 1},
-    "chain_b": {"type": "string", "minLength": 1},
-    "cutoff": {"type": "number", "exclusiveMinimum": 0.0, "default": 10.0},
-    "dist_cutoff": {"type": "number", "exclusiveMinimum": 0.0, "default": 10.0}
+    "pae_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the predicted-aligned-error file. Accepts AF2 PAE JSON, AF3 confidence JSON, or Boltz NPZ outputs depending on the upstream predictor.",
+      "examples": ["/abs/path/pae.json", "/abs/path/confidence.npz"],
+      "vpa:digest": "sha256"
+    },
+    "pdb_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Predicted complex structure (PDB or mmCIF) corresponding to `pae_path`.",
+      "examples": ["/abs/path/predicted_complex.pdb", "/abs/path/predicted.cif"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream structure predictor (e.g. Boltz, Protenix). Promotes the first item's structure_path into `pdb_path` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/pred.cif"}]]
+    },
+    "chain_a": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Chain id for the first side of the interface (e.g. the target receptor).",
+      "examples": ["A", "T"]
+    },
+    "chain_b": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Chain id for the second side of the interface (e.g. the designed binder).",
+      "examples": ["B", "L"]
+    },
+    "cutoff": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 10.0,
+      "description": "PAE cutoff (in PAE-score units, Å-equivalent) for interface contact selection. Pairs with PAE above this value are excluded from the ipSAE score.",
+      "examples": [10.0, 15.0]
+    },
+    "dist_cutoff": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 10.0,
+      "description": "Inter-residue Cα distance cutoff in Å used to define the interaction interface.",
+      "examples": [10.0, 8.0]
+    }
   },
   "additionalProperties": false
 }

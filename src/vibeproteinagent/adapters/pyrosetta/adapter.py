@@ -42,12 +42,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import torch
 from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.core.errors import VPAError
 from vibeproteinagent.workers.sidecar import (
@@ -161,7 +163,8 @@ def availability_skip_reason() -> str | None:
 
 
 class PyRosettaInput(BaseModel):
-    pdb_path: str = Field(..., min_length=1)
+    pdb_path: str | None = Field(None, min_length=1)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     mode: str = Field(default="score", pattern=r"^(score|interface|relax|pack)$")
     score_fn: str = Field(default="ref2015", min_length=1)
     chains_a: str | None = Field(default=None)
@@ -169,8 +172,33 @@ class PyRosettaInput(BaseModel):
     max_relax_cycles: int = Field(default=5, ge=1, le=25)
     seed: int | None = Field(default=None)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_pdb_path(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError("pyrosetta canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("pdb_path", structure_path)
+            return out
+        return data
+
     @model_validator(mode="after")
     def _interface_needs_chains(self) -> PyRosettaInput:
+        if not self.pdb_path:
+            raise ValueError("pyrosetta requires pdb_path")
         if self.mode == "interface":
             if not self.chains_a or not self.chains_b:
                 raise ValueError(
@@ -194,6 +222,7 @@ class PyRosettaOutput(BaseModel):
     total_score: float
     interface_metrics: PyRosettaInterfaceMetrics | None = None
     relaxed_pdb_path: str | None = None
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     seed_used: int | None = None
 
@@ -229,6 +258,7 @@ class PyRosettaAdapter(ToolAdapter):
 
         self._ensure_available_once()
 
+        assert params.pdb_path is not None
         pdb_src = Path(params.pdb_path).expanduser().resolve()
         if not pdb_src.is_file():
             raise FileNotFoundError(f"pdb_path not found: {pdb_src}")
@@ -285,6 +315,12 @@ class PyRosettaAdapter(ToolAdapter):
                 else None
             ),
             relaxed_pdb_path=payload.get("relaxed_pdb_path"),
+            candidates=_pyrosetta_candidates(
+                params,
+                float(payload["total_score"]),
+                payload.get("interface_metrics"),
+                payload.get("relaxed_pdb_path") or str(staged_pdb),
+            ),
             runtime_ms=int((time.time() - t0) * 1000),
             seed_used=payload.get("seed_used"),
         )
@@ -361,6 +397,53 @@ def _safe_read_json(path: Path) -> dict | None:
         return json.loads(path.read_text())
     except json.JSONDecodeError:
         return None
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _pyrosetta_candidates(
+    params: PyRosettaInput,
+    total_score: float,
+    interface_metrics: dict[str, Any] | None,
+    structure_path: str,
+) -> list[dict[str, Any]]:
+    local_id = f"{params.mode}_0000"
+    scores: dict[str, Any] = {
+        "mode": params.mode,
+        "total_score": total_score,
+    }
+    if interface_metrics:
+        scores["interface_metrics"] = interface_metrics
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "pyrosetta",
+            local_id,
+            structure_path=structure_path,
+            index=0,
+        ),
+        "source": {
+            "tool": "pyrosetta",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": None,
+            "index": 0,
+        },
+        "structure_path": structure_path,
+        "scores": {"pyrosetta": scores},
+        "artifacts": {"pyrosetta": {"relaxed_pdb_path": structure_path}},
+    }
+    if params.candidates and _is_canonical_candidate(params.candidates[0]):
+        source = params.candidates[0]
+        upstream_scores = source.get("scores")
+        if isinstance(upstream_scores, dict):
+            candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        if source.get("sequence"):
+            candidate["sequence"] = source.get("sequence")
+    return [candidate]
 
 
 __all__ = [

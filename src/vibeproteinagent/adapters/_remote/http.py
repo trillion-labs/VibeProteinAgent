@@ -8,10 +8,46 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
 USER_AGENT = "VibeProteinAgent/1.0 (+https://github.com/) protein-retrieval"
+
+# Upper bound on how long we honor a server-supplied Retry-After before
+# falling back to standard exponential backoff. Prevents bogus or hostile
+# values from stalling agent runs.
+RETRY_AFTER_CEILING_S = 60.0
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse an HTTP `Retry-After` header value (RFC 7231).
+
+    Accepts either a non-negative integer/float seconds or an HTTP-date.
+    Returns the number of seconds to wait, or ``None`` if absent / unparseable.
+    """
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        pass
+    else:
+        return seconds if seconds >= 0 else None
+    try:
+        retry_dt = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if retry_dt is None:
+        return None
+    if retry_dt.tzinfo is None:
+        retry_dt = retry_dt.replace(tzinfo=timezone.utc)
+    delta = (retry_dt - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, delta)
 
 
 @dataclass(frozen=True)
@@ -27,10 +63,20 @@ class HttpResponse:
 
 
 class HttpError(RuntimeError):
-    def __init__(self, message: str, *, status: int | None = None, url: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        url: str | None = None,
+        retry_after_seconds: float | None = None,
+    ):
         super().__init__(message)
         self.status = status
         self.url = url
+        # Server-supplied Retry-After (in seconds), if any. Populated for
+        # HTTP 429 responses when the header is present and parseable.
+        self.retry_after_seconds = retry_after_seconds
 
 
 Transport = Callable[[str, dict[str, str], float], HttpResponse]
@@ -132,7 +178,9 @@ class HttpClient:
             )
 
         last_exc: Exception | None = None
+        retry_after_seconds: float | None = None
         for attempt in range(self.retries + 1):
+            retry_after_seconds = None
             try:
                 if self.transport is not None:
                     out = self.transport(url, headers, self.timeout_s)
@@ -147,10 +195,16 @@ class HttpClient:
                             text=text,
                         )
                 if out.status >= 400:
+                    if out.status == 429:
+                        retry_after_seconds = _parse_retry_after(
+                            out.headers.get("Retry-After")
+                            or out.headers.get("retry-after")
+                        )
                     raise HttpError(
                         f"GET {url} failed with HTTP {out.status}",
                         status=out.status,
                         url=url,
+                        retry_after_seconds=retry_after_seconds,
                     )
                 if cache_path:
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,14 +212,22 @@ class HttpClient:
                 return out
             except urllib.error.HTTPError as exc:
                 last_exc = exc
+                if exc.code == 429:
+                    header_value = None
+                    if getattr(exc, "headers", None) is not None:
+                        header_value = exc.headers.get("Retry-After")
+                    retry_after_seconds = _parse_retry_after(header_value)
                 if exc.code not in {408, 429, 500, 502, 503, 504} or attempt >= self.retries:
                     raise HttpError(
                         f"GET {url} failed with HTTP {exc.code}",
                         status=exc.code,
                         url=url,
+                        retry_after_seconds=retry_after_seconds,
                     ) from exc
             except HttpError as exc:
                 last_exc = exc
+                if retry_after_seconds is None:
+                    retry_after_seconds = exc.retry_after_seconds
                 retryable = exc.status in {408, 429, 500, 502, 503, 504} or exc.status is None
                 if not retryable or attempt >= self.retries:
                     raise
@@ -173,5 +235,10 @@ class HttpClient:
                 last_exc = exc
                 if attempt >= self.retries:
                     raise HttpError(f"GET {url} failed: {exc}", url=url) from exc
-            time.sleep(self.backoff_s * (2 ** attempt))
+            if retry_after_seconds is not None:
+                sleep_s = min(retry_after_seconds, RETRY_AFTER_CEILING_S)
+            else:
+                sleep_s = self.backoff_s * (2 ** attempt)
+            if sleep_s > 0:
+                time.sleep(sleep_s)
         raise HttpError(f"GET {url} failed: {last_exc}", url=url)

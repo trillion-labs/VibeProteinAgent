@@ -5886,39 +5886,33 @@ def _pxmeter_widget(output: dict[str, Any]) -> str:
 
 def _lit_normalize(r: dict[str, Any]) -> dict[str, Any]:
     """Normalise a EuropePMC result (or a tool ``top_records`` entry) into a
-    common record shape used by the literature-search cards."""
+    common record shape used by the literature-search cards.
+
+    Accepts both shapes: the raw Europe PMC keys (``authorString``,
+    ``journalTitle``, ``isOpenAccess`` …) and the snake_case names the
+    adapter writes into ``top_records`` (``authors``, ``journal``,
+    ``is_open_access`` …).
+    """
+    open_access = r.get("is_open_access")
+    if not isinstance(open_access, bool):
+        open_access = str(r.get("isOpenAccess") or "").upper() == "Y"
     return {
         "title": str(r.get("title") or "").strip().rstrip("."),
         "authors": str(r.get("authorString") or r.get("authors") or "").strip(),
         "journal": str(r.get("journalTitle") or r.get("journal") or "").strip(),
-        "volume": str(r.get("journalVolume") or "").strip(),
+        "volume": str(r.get("journalVolume") or r.get("journal_volume") or "").strip(),
         "issue": str(r.get("issue") or "").strip(),
-        "page": str(r.get("pageInfo") or "").strip(),
+        "page": str(r.get("pageInfo") or r.get("page") or "").strip(),
         "year": str(r.get("pubYear") or r.get("year") or "").strip(),
         "doi": (str(r["doi"]).strip() or None) if r.get("doi") else None,
         "pmid": (str(r["pmid"]).strip() or None) if r.get("pmid") else None,
         "pmcid": (str(r["pmcid"]).strip() or None) if r.get("pmcid") else None,
         "source": (str(r.get("source")).strip() or None) if r.get("source") else None,
-        "open_access": str(r.get("isOpenAccess") or "").upper() == "Y",
-        "cited_by": r.get("citedByCount"),
+        "open_access": open_access,
+        "cited_by": r.get("citedByCount") or r.get("cited_by_count"),
         "date": str(r.get("firstPublicationDate") or r.get("first_publication_date") or ""),
         "snippet": str(r.get("abstract_snippet") or r.get("abstractText") or "").strip(),
     }
-
-
-def _lit_records_from_raw(raw_pages: Any) -> list[dict[str, Any]]:
-    """Flatten EuropePMC raw search pages into a list of normalised records."""
-    out: list[dict[str, Any]] = []
-    if not isinstance(raw_pages, list):
-        return out
-    for page in raw_pages:
-        if not isinstance(page, dict):
-            continue
-        results = page.get("resultList")
-        results = results.get("result") if isinstance(results, dict) else None
-        if isinstance(results, list):
-            out.extend(_lit_normalize(r) for r in results if isinstance(r, dict))
-    return out
 
 
 def _lit_record_link(rec: dict[str, Any]) -> str:
@@ -5997,60 +5991,39 @@ def _lit_card(rec: dict[str, Any], idx: int) -> str:
 
 def _literature_search_widget(output: dict[str, Any]) -> str:
     """Literature-search widget — query / backend summary plus a structured
-    card per retrieved record (title + link + citation + snippet)."""
+    card per retrieved record (title + link + citation + snippet).
+
+    Render is self-contained: every field consumed here lives in the tool's
+    JSON output, so moving / archiving the workspace doesn't blank the
+    widget. (Previously this read ``literature_raw_pages.json`` from disk.)
+    """
     if not output:
         return ""
-    query = output.get("query")
+    query = output.get("normalized_query") or output.get("query")
     backend = output.get("backend")
     runtime = _num(output.get("runtime_ms"))
     result_count = _num(output.get("result_count"))
+    total_hits = _num(output.get("total_hits"))
+    status = output.get("status")
     date_filter = (
         output.get("date_filter") if isinstance(output.get("date_filter"), dict) else {}
     )
 
-    # Prefer the rich raw EuropePMC pages; fall back to the curated top_records.
-    raw_pages = None
-    artifacts = output.get("artifacts")
-    if isinstance(artifacts, dict):
-        raw_pages = _load_json_artifact(artifacts.get("raw_pages_json"))
-    records = _lit_records_from_raw(raw_pages)
     top = output.get("top_records") if isinstance(output.get("top_records"), list) else []
-    if not records:
-        records = [_lit_normalize(r) for r in top if isinstance(r, dict)]
-    else:
-        # Carry over abstract snippets from top_records (keyed by id).
-        snip: dict[str, str] = {}
-        for r in top:
-            if not isinstance(r, dict):
-                continue
-            s = str(r.get("abstract_snippet") or "").strip()
-            if not s:
-                continue
-            for key in (r.get("pmid"), r.get("doi"), str(r.get("title") or "").lower()):
-                if key:
-                    snip[str(key)] = s
-        for rec in records:
-            if rec["snippet"]:
-                continue
-            for key in (rec.get("pmid"), rec.get("doi"), rec["title"].lower()):
-                if key and str(key) in snip:
-                    rec["snippet"] = snip[str(key)]
-                    break
-
-    hit_count = None
-    if isinstance(raw_pages, list) and raw_pages and isinstance(raw_pages[0], dict):
-        hit_count = raw_pages[0].get("hitCount")
+    records = [_lit_normalize(r) for r in top if isinstance(r, dict)]
 
     stats: list[str] = []
     if backend:
         stats.append(f'<span class="lit-stat">backend <b>{_h(str(backend))}</b></span>')
-    if hit_count is not None:
+    if total_hits is not None:
         stats.append(
             f'<span class="lit-stat"><b>{len(records)}</b> shown · '
-            f'<b>{int(_num(hit_count) or 0)}</b> total hits</span>'
+            f'<b>{int(total_hits)}</b> total hits</span>'
         )
     elif result_count is not None:
         stats.append(f'<span class="lit-stat"><b>{int(result_count)}</b> results</span>')
+    if status and status != "ok":
+        stats.append(f'<span class="lit-stat lit-status">status <b>{_h(str(status))}</b></span>')
     if runtime is not None:
         stats.append(f'<span class="lit-stat"><b>{int(runtime)}</b> ms</span>')
     pa = date_filter.get("published_after")
@@ -6073,6 +6046,13 @@ def _literature_search_widget(output: dict[str, Any]) -> str:
     if records:
         cards = "".join(_lit_card(rec, i + 1) for i, rec in enumerate(records))
         body = f'<div class="lit-list">{cards}</div>'
+    elif status == "no_hits":
+        body = '<p class="note">Europe PMC returned no matches for this query.</p>'
+    elif status == "filtered_out":
+        body = (
+            '<p class="note">Europe PMC matched records, but all were dropped '
+            'by the local date filter.</p>'
+        )
     else:
         body = '<p class="note">No literature records were returned for this query.</p>'
 

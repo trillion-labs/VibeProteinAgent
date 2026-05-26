@@ -4,12 +4,14 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import torch
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.binary import find_binary
 
 _BINARY_CANDIDATES = ("vina",)
@@ -40,13 +42,47 @@ class VinaMode(BaseModel):
 
 
 class VinaInput(BaseModel):
-    receptor_pdbqt: str = Field(..., min_length=1)
-    ligand_pdbqt: str = Field(..., min_length=1)
+    receptor_pdbqt: str | None = Field(None, min_length=1)
+    ligand_pdbqt: str | None = Field(None, min_length=1)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     center: list[float] = Field(..., min_length=3, max_length=3)
     box_size: list[float] = Field(..., min_length=3, max_length=3)
     exhaustiveness: int = Field(8, ge=1)
     num_modes: int = Field(9, ge=1)
     seed: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_paths(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            if len(candidates) < 2:
+                raise ValueError("vina canonical Candidate[] input requires receptor and ligand")
+            receptor = candidates[0].get("structure_path")
+            ligand = candidates[1].get("structure_path")
+            if not receptor or not ligand:
+                raise ValueError("vina canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("receptor_pdbqt", receptor)
+            out.setdefault("ligand_pdbqt", ligand)
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_paths(self) -> VinaInput:
+        if not self.receptor_pdbqt or not self.ligand_pdbqt:
+            raise ValueError("vina requires receptor_pdbqt and ligand_pdbqt")
+        return self
 
     @field_validator("box_size")
     @classmethod
@@ -60,6 +96,7 @@ class VinaOutput(BaseModel):
     docked_pdbqt: str
     best_affinity_kcal_mol: float
     modes: list[VinaMode]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int = Field(..., ge=0)
 
 
@@ -106,6 +143,7 @@ class VinaAdapter(ToolAdapter):
         t0 = time.time()
         ctx.emit_progress(0.05)
 
+        assert params.receptor_pdbqt is not None and params.ligand_pdbqt is not None
         receptor = Path(params.receptor_pdbqt).expanduser().resolve()
         ligand = Path(params.ligand_pdbqt).expanduser().resolve()
         for label, p in (("receptor_pdbqt", receptor), ("ligand_pdbqt", ligand)):
@@ -154,6 +192,7 @@ class VinaAdapter(ToolAdapter):
             docked_pdbqt=str(docked),
             best_affinity_kcal_mol=best.affinity_kcal_mol,
             modes=modes,
+            candidates=_vina_candidates(params, modes, str(docked)),
             runtime_ms=runtime_ms,
         )
 
@@ -169,3 +208,50 @@ class VinaAdapter(ToolAdapter):
 
 
 __all__ = ["VinaAdapter", "VinaInput", "VinaMode", "VinaOutput", "_parse_modes"]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _vina_candidates(
+    params: VinaInput,
+    modes: list[VinaMode],
+    docked_pdbqt: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, mode in enumerate(modes):
+        local_id = f"mode_{index:04d}"
+        candidates.append({
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "vina",
+                local_id,
+                structure_path=docked_pdbqt,
+                index=index,
+            ),
+            "source": {
+                "tool": "vina",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": str(mode.rank),
+                "index": index,
+            },
+            "structure_path": docked_pdbqt,
+            "scores": {
+                "vina": {
+                    "rank": mode.rank,
+                    "affinity_kcal_mol": mode.affinity_kcal_mol,
+                    "rmsd_lb": mode.rmsd_lb,
+                    "rmsd_ub": mode.rmsd_ub,
+                }
+            },
+            "artifacts": {"vina": {"docked_pdbqt": docked_pdbqt}},
+        })
+    if params.candidates and all(_is_canonical_candidate(item) for item in params.candidates):
+        upstream_scores = params.candidates[0].get("scores")
+        if isinstance(upstream_scores, dict):
+            for candidate in candidates:
+                candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+    return candidates

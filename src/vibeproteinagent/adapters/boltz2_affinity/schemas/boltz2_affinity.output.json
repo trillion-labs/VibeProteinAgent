@@ -36,6 +36,12 @@
       "items": {"type": "integer"},
       "minItems": 1
     },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "pae_path": {"type": ["string", "null"], "default": null},
     "msa_paths": {
       "type": "array",

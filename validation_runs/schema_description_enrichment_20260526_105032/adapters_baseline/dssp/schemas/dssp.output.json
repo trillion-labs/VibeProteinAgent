@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/dssp.output.json",
+  "type": "object",
+  "required": [
+    "dssp_output_path",
+    "secondary_structure_string",
+    "helix_fraction",
+    "sheet_fraction",
+    "coil_fraction",
+    "runtime_ms"
+  ],
+  "properties": {
+    "dssp_output_path": {"type": "string", "minLength": 1},
+    "secondary_structure_string": {"type": "string"},
+    "helix_fraction": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "sheet_fraction": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "coil_fraction": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "num_residues": {"type": "integer", "minimum": 0},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

@@ -68,6 +68,10 @@ class OpenRouterProvider:
         }
         if response_format is not None:
             body["response_format"] = response_format
+        if self.config.max_tokens is not None:
+            body["max_tokens"] = self.config.max_tokens
+        if self.config.disable_reasoning:
+            body["reasoning"] = {"enabled": False}
 
         data = json.dumps(body).encode("utf-8")
         headers = {

@@ -1,0 +1,14 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.0.3, pluggy-1.6.0 -- /mnt/vast/trillion/env/miniconda3/envs/vpa/bin/python
+cachedir: .pytest_cache
+rootdir: /mnt/vast/trillion/hyunjin/VibeProteinAgent
+configfile: pyproject.toml
+plugins: anyio-4.13.0, hydra-core-1.3.2, zarr-3.2.1
+collecting ... collected 4 items
+
+tests/test_dgl_probe_does_not_allocate_cuda.py::test_rfdiffusion_default_probe_does_not_allocate_cuda PASSED [ 25%]
+tests/test_dgl_probe_does_not_allocate_cuda.py::test_rfdiffusion_escape_hatch_restores_cuda_allocation PASSED [ 50%]
+tests/test_dgl_probe_does_not_allocate_cuda.py::test_rfpeptides_default_probe_does_not_allocate_cuda PASSED [ 75%]
+tests/test_dgl_probe_does_not_allocate_cuda.py::test_rfpeptides_escape_hatch_restores_cuda_allocation PASSED [100%]
+
+============================== 4 passed in 0.17s ===============================

@@ -31,12 +31,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_structure_residue_refs,
@@ -87,8 +89,8 @@ def _import_dgl_for_rfpeptides():
     return import_dgl_with_graphbolt_guard()
 
 
-def availability_skip_reason() -> str | None:
-    """Return a precise skip reason if RFpeptides cannot run, else ``None``.
+def availability_report() -> dict[str, object]:
+    """Return descriptor-level readiness without probing live GPU memory.
 
     Surfaced by ``vpa daemon warm rfpeptides --json`` so operators see
     the concrete missing piece (tree, weights, or a CUDA-enabled DGL
@@ -96,38 +98,89 @@ def availability_skip_reason() -> str | None:
     (monomer vs binder); the *monomer* weight is required at minimum
     because that's the lowest-friction promotion target.
     """
+    checks: dict[str, object] = {}
+    failures: list[str] = []
+
     run_inference = RFPEPTIDES_TREE / "scripts" / "run_inference.py"
-    if not RFPEPTIDES_TREE.is_dir() or not run_inference.is_file():
-        return (
+    tree_ok = RFPEPTIDES_TREE.is_dir() and run_inference.is_file()
+    checks["tree"] = {
+        "ok": tree_ok,
+        "path": str(RFPEPTIDES_TREE),
+        "run_inference": str(run_inference),
+    }
+    if not tree_ok:
+        failures.append(
             f"RFpeptides tree not present at {RFPEPTIDES_TREE}. "
             f"Clone the rfpeptides branch of RFdiffusion "
             f"(or set $VPA_RFPEPTIDES_TREE)."
         )
-    if not (RFPEPTIDES_WEIGHTS / "Base_ckpt.pt").is_file():
-        return (
+
+    base_checkpoint = RFPEPTIDES_WEIGHTS / "Base_ckpt.pt"
+    base_ok = base_checkpoint.is_file()
+    checks["base_checkpoint"] = {
+        "ok": base_ok,
+        "path": str(base_checkpoint),
+    }
+    if not base_ok:
+        failures.append(
             f"RFpeptides Base_ckpt.pt missing under {RFPEPTIDES_WEIGHTS}. "
             f"See vendor/rfpeptides/UPSTREAM.md for the canonical URL list."
         )
+
     try:
         dgl = _import_dgl_for_rfpeptides()
     except Exception as exc:
-        return (
+        checks["dgl"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        failures.append(
             f"DGL import failed under this env: {type(exc).__name__}: {exc}. "
             "RFpeptides needs a CUDA-enabled DGL build plus the GraphBolt "
             "torch-2.7 stub described in vendor/rfpeptides/UPSTREAM.md."
         )
-    if not torch.cuda.is_available():
-        return "RFpeptides requires CUDA for the real rfdiffusion path; no CUDA device is visible."
-    try:
-        g = dgl.graph(([0, 1], [1, 0])).to("cuda")
-        _ = g.all_edges()
-    except Exception as exc:
-        return (
-            f"DGL CUDA graph ops unavailable under this env: {type(exc).__name__}: {exc}. "
-            "Install a CUDA-enabled DGL wheel/build compatible with this "
-            "torch/CUDA/B200 environment per vendor/rfpeptides/UPSTREAM.md."
-        )
-    return None
+    else:
+        checks["dgl"] = {"ok": True}
+        if not torch.cuda.is_available():
+            checks["cuda"] = {"ok": False}
+            failures.append(
+                "RFpeptides requires CUDA for the real rfdiffusion path; no CUDA device is visible."
+            )
+        else:
+            checks["cuda"] = {"ok": True}
+            if os.environ.get("VPA_DGL_PROBE_CUDA_ALLOC") == "1":
+                try:
+                    g = dgl.graph(([0, 1], [1, 0])).to("cuda")
+                    _ = g.all_edges()
+                except Exception as exc:
+                    checks["dgl_cuda"] = {
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    failures.append(
+                        f"DGL CUDA graph ops unavailable under this env: {type(exc).__name__}: {exc}. "
+                        "Install a CUDA-enabled DGL wheel/build compatible with this "
+                        "torch/CUDA/B200 environment per vendor/rfpeptides/UPSTREAM.md."
+                    )
+                else:
+                    checks["dgl_cuda"] = {"ok": True}
+            else:
+                # Intentionally do not allocate a CUDA graph here. The probe
+                # answers "is the tool installed?", while live GPU memory state
+                # belongs to execution-time error handling. An OOM at run()
+                # surfaces via the executor; an OOM here would hide RFpeptides
+                # from the planner catalog during unrelated GPU saturation.
+                checks["dgl_cuda"] = {"ok": "skipped_at_probe"}
+
+    return {
+        "available": not failures,
+        "reason": "; ".join(failures) if failures else None,
+        "checks": checks,
+    }
+
+
+def availability_skip_reason() -> str | None:
+    """Return a precise skip reason if RFpeptides cannot run, else ``None``."""
+    report = availability_report()
+    reason = report.get("reason")
+    return str(reason) if reason else None
 
 
 # --------------------------------------------------------------------------- I/O models
@@ -135,6 +188,7 @@ def availability_skip_reason() -> str | None:
 
 class RFPeptidesInput(BaseModel):
     target_pdb: str | None = Field(default=None)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_chain: str = Field(default="A", min_length=1, max_length=1)
     target_residues: str | None = Field(default=None, pattern=r"^[0-9]+-[0-9]+$")
     target_hotspots: list[int] = Field(default_factory=list)
@@ -148,6 +202,29 @@ class RFPeptidesInput(BaseModel):
     noise_scale: float = Field(default=1.0, ge=0.0, le=1.0)
     seed: int | None = Field(default=None)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_target(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError("rfpeptides canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("target_pdb", structure_path)
+            return out
+        return data
+
 
 class RFPeptidesDesign(BaseModel):
     pdb_path: str
@@ -159,6 +236,7 @@ class RFPeptidesDesign(BaseModel):
 
 class RFPeptidesOutput(BaseModel):
     designs: list[RFPeptidesDesign]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     num_designs_returned: int
     position_mappings: dict[str, object] = Field(default_factory=dict)
@@ -250,6 +328,7 @@ class RFPeptidesAdapter(ToolAdapter):
         ctx.emit_progress(1.0)
         return RFPeptidesOutput(
             designs=designs,
+            candidates=_rfpeptides_candidates(params, designs),
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
             position_mappings=position_mappings,
@@ -448,6 +527,53 @@ def _collect_designs(*, prefix: Path, peptide_length: int) -> list[RFPeptidesDes
     return designs
 
 
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _rfpeptides_candidates(
+    params: RFPeptidesInput,
+    designs: list[RFPeptidesDesign],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, design in enumerate(designs):
+        local_id = f"design_{index:04d}"
+        candidate: dict[str, Any] = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "rfpeptides",
+                local_id,
+                sequence=design.sequence,
+                structure_path=design.pdb_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "rfpeptides",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": None,
+                "index": index,
+            },
+            "structure_path": design.pdb_path,
+            "scores": {
+                "rfpeptides": {
+                    "length": design.length,
+                    "score": design.score,
+                }
+            },
+            "artifacts": {"rfpeptides": {"trb_path": design.trb_path}},
+        }
+        if design.sequence:
+            candidate["sequence"] = design.sequence
+        if params.candidates and _is_canonical_candidate(params.candidates[0]):
+            upstream_scores = params.candidates[0].get("scores")
+            if isinstance(upstream_scores, dict):
+                candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        candidates.append(candidate)
+    return candidates
+
+
 __all__ = [
     "RFPEPTIDES_TREE",
     "RFPEPTIDES_WEIGHTS",
@@ -455,5 +581,6 @@ __all__ = [
     "RFPeptidesDesign",
     "RFPeptidesInput",
     "RFPeptidesOutput",
+    "availability_report",
     "availability_skip_reason",
 ]

@@ -148,7 +148,8 @@ python -c "import torch" >/dev/null 2>&1 || \
   pip install torch --index-url https://download.pytorch.org/whl/cpu || { echo -e "Error: Failed to install PyTorch"; exit 1; }
 python -c "import torch" >/dev/null 2>&1 || { echo -e "Error: torch module not found after installation"; exit 1; }
 
-# install VPA sidecar runtime dependencies imported before BindCraft starts.
+# install VPA sidecar runtime dependencies imported before BindCraft starts:
+# pydantic (adapter models), msgpack (IPC), aiosqlite (workspace.store).
 echo -e "Installing VPA sidecar runtime dependencies\n"
 python -c "import pydantic" >/dev/null 2>&1 || \
   pip install 'pydantic>=2,<3' || { echo -e "Error: Failed to install pydantic"; exit 1; }
@@ -156,6 +157,9 @@ python -c "import pydantic" >/dev/null 2>&1 || { echo -e "Error: pydantic module
 python -c "import msgpack" >/dev/null 2>&1 || \
   pip install 'msgpack>=1.0' || { echo -e "Error: Failed to install msgpack"; exit 1; }
 python -c "import msgpack" >/dev/null 2>&1 || { echo -e "Error: msgpack module not found after installation"; exit 1; }
+python -c "import aiosqlite" >/dev/null 2>&1 || \
+  pip install 'aiosqlite>=0.20' || { echo -e "Error: Failed to install aiosqlite"; exit 1; }
+python -c "import aiosqlite" >/dev/null 2>&1 || { echo -e "Error: aiosqlite module not found after installation"; exit 1; }
 
 # install ColabDesign
 echo -e "Installing ColabDesign\n"

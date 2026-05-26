@@ -1,0 +1,1 @@
+{"ok": true, "data": {"report_html": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/agent_tool_coverage_vm007_direct_retry_optree_20260523_121447/03_report.html", "format": "html", "source": {"kind": "workflow", "id": "wf_722f106149be4e72ab8fea0b7a16dd38"}, "candidate_count": 4, "top_k": 5, "warnings": [], "opened": false}}

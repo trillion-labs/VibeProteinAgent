@@ -27,6 +27,7 @@ from vibeproteinagent.adapters._remote.uniprot import (
 )
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 
 class GOSequencesInput(BaseModel):
@@ -60,6 +61,8 @@ class GOSequencesOutput(BaseModel):
     association_records: int
     resolved_uniprot_accessions: int
     kept_sequences: int
+    sequences: list[dict[str, Any]]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     fasta_path: str
     metadata_jsonl: str
     dropped: dict[str, int]
@@ -304,12 +307,28 @@ class GOSequencesAdapter(ToolAdapter):
         }
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         ctx.emit_progress(1.0)
+        sequences = [
+            {
+                "candidate_id": f"go:{params.go_id}:{r.accession}",
+                "accession": r.accession,
+                "sequence": r.sequence,
+                "length": r.length,
+                "reviewed": r.reviewed,
+            }
+            for r in kept
+        ]
+        candidates = [
+            _canonical_candidate_from_sequence(row, index)
+            for index, row in enumerate(sequences)
+        ]
         return GOSequencesOutput(
             go_id=params.go_id,
             go_label=raw_go.get("label") or raw_go.get("name"),
             association_records=len(filtered_assoc),
             resolved_uniprot_accessions=sum(1 for _a, record, _e in fetched if record is not None),
             kept_sequences=len(kept),
+            sequences=sequences,
+            candidates=candidates,
             fasta_path=str(fasta_path),
             metadata_jsonl=str(metadata_path),
             dropped=dropped,
@@ -326,6 +345,38 @@ class GOSequencesAdapter(ToolAdapter):
 
     def estimate_vram(self, params: GOSequencesInput) -> int:
         return 0
+
+
+def _canonical_candidate_from_sequence(row: dict[str, Any], index: int) -> dict[str, Any]:
+    local_id = f"seq_{index:04d}"
+    native_id = row.get("accession")
+    sequence = str(row.get("sequence") or "")
+    return {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "go_sequences",
+            local_id,
+            native_id=str(native_id) if native_id else None,
+            sequence=sequence,
+            index=index,
+        ),
+        "source": {
+            "tool": "go_sequences",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": str(native_id) if native_id else None,
+            "index": index,
+        },
+        "sequence": sequence,
+        "scores": {
+            "go_sequences": {
+                "length": row.get("length"),
+                "reviewed": row.get("reviewed"),
+            }
+        },
+        "artifacts": {},
+    }
 
 
 __all__ = ["GOSequencesAdapter", "GOSequencesInput", "GOSequencesOutput"]

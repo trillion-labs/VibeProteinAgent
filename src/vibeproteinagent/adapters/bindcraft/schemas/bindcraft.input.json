@@ -2,85 +2,112 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/bindcraft.input.json",
   "type": "object",
-  "required": ["target_pdb"],
+  "anyOf": [
+    {"required": ["target_pdb"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
     "target_pdb": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to the target structure (.pdb) the binder is designed against.",
+      "description": "Filesystem path to the target structure (.pdb) the binder is hallucinated against. Either supply this directly or pass upstream `candidates` carrying a structure_path.",
+      "examples": ["/abs/path/to/target.pdb", "outputs/target_chainA.pdb"],
       "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path into `target_pdb` when `target_pdb` is omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c1", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/target.pdb"}]]
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
       "default": "A",
-      "description": "Chain id(s) on the target to design against (BindCraft accepts a comma-separated list)."
+      "description": "Target chain id(s) on the target PDB to design against. BindCraft accepts a comma-separated list to design against multi-chain epitopes.",
+      "examples": ["A", "A,B"]
     },
     "target_hotspots": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "default": [],
-      "description": "FASTA/sequence 1-indexed target positions when target_sequence/target_fasta_path is provided; otherwise legacy structure residue numbers."
+      "description": "Hotspot residue positions on the target where the binder should engage. Interpreted as FASTA/sequence 1-indexed positions when `target_sequence`/`target_fasta_path` is supplied; otherwise treated as legacy PDB structure residue numbers.",
+      "examples": [[12, 14, 16], [45]]
     },
     "target_hotspot_residue_ids": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
       "default": [],
-      "description": "Explicit structure residue IDs such as A10 or B82A."
+      "description": "Explicit hotspot residue identifiers using the PDB residue naming convention `<chain><resnum>[icode]`. Use this when residue numbering does not start at 1 or when insertion codes are present.",
+      "examples": [["A10", "A11", "B82A"], ["A42"]]
     },
     "target_sequence": {
       "type": ["string", "null"],
       "default": null,
-      "description": "Reference FASTA/sequence used to map integer target_hotspots onto PDB residue IDs."
+      "description": "Reference protein FASTA/sequence for the target. When provided, integer `target_hotspots` are interpreted as 1-indexed positions in this sequence and mapped onto PDB residue IDs.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ...", null]
     },
     "target_fasta_path": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
+      "description": "Path to a FASTA file containing the target sequence. Alternative to inline `target_sequence` for position-mapping integer hotspots.",
+      "examples": ["/abs/path/target.fasta", null],
       "vpa:digest": "sha256-if-path"
     },
     "position_basis": {
       "type": "string",
       "enum": ["auto", "sequence", "structure"],
-      "default": "auto"
+      "default": "auto",
+      "description": "How to interpret integer position inputs (`target_hotspots`). `auto` picks sequence when a target sequence is provided, else structure; `sequence` forces 1-indexed FASTA positions; `structure` forces legacy PDB residue numbering.",
+      "examples": ["auto", "sequence", "structure"]
     },
     "binder_length": {
       "type": "integer",
       "minimum": 30,
       "maximum": 150,
       "default": 60,
-      "description": "Fixed binder length (BindCraft also supports a [min,max] range; we pin both bounds equal here for determinism)."
+      "description": "Fixed binder length in residues (BindCraft accepts a [min,max] range upstream; we pin both bounds equal here for determinism). Typical mini-binder range 50-80.",
+      "examples": [60, 80]
     },
     "num_designs": {
       "type": "integer",
       "minimum": 1,
       "maximum": 32,
       "default": 10,
-      "description": "Target ``number_of_final_designs`` written into the generated settings JSON."
+      "description": "Number of final accepted designs to produce (`number_of_final_designs` in BindCraft settings). BindCraft loops trajectories until this many designs pass the filter cascade.",
+      "examples": [4, 10]
     },
     "num_recycles": {
       "type": "integer",
       "minimum": 0,
       "maximum": 8,
       "default": 1,
-      "description": "AF2 recycles during the design trajectory (``num_recycles_design`` in BindCraft's advanced settings)."
+      "description": "AF2 recycles during the design trajectory (`num_recycles_design` in BindCraft's advanced settings). More recycles improve quality at higher cost.",
+      "examples": [1, 3]
     },
     "seed": {
       "type": ["integer", "null"],
-      "default": null
+      "default": null,
+      "description": "Optional integer RNG seed for reproducibility. Null lets BindCraft choose its own seed.",
+      "examples": [42, null]
     },
     "max_trajectories": {
       "type": ["integer", "null"],
       "minimum": 1,
       "maximum": 10000,
       "default": null,
-      "description": "Optional upper bound on attempted BindCraft trajectories. Null leaves upstream behavior unbounded until requested designs are accepted."
+      "description": "Optional upper bound on attempted BindCraft trajectories. Null leaves upstream behavior unbounded until `num_designs` designs are accepted; useful for capping smoke/CI runs.",
+      "examples": [50, 200, null]
     },
     "filter_mode": {
       "type": "string",
       "enum": ["default", "permissive"],
       "default": "default",
-      "description": "Filter cascade to use. `default` preserves upstream BindCraft thresholds; `permissive` disables thresholds for bounded smoke validation."
+      "description": "Filter cascade strictness. `default` preserves upstream BindCraft thresholds; `permissive` disables thresholds for bounded smoke validation.",
+      "examples": ["default", "permissive"]
     }
   },
   "additionalProperties": false

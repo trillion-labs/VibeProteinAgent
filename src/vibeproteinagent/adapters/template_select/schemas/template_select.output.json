@@ -10,6 +10,12 @@
     "templates_json": {"type": "string"},
     "templates_tsv": {"type": "string"},
     "top_templates": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "artifacts": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
     "runtime_ms": {"type": "integer", "minimum": 0}
   },

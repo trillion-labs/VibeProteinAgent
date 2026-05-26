@@ -4,7 +4,7 @@ from typing import Any
 
 from vibeproteinagent.core.errors import InvalidParamsError
 
-from .descriptor import Workflow, WorkflowNode
+from .descriptor import VIRTUAL_OUTPUT_NODES, Workflow, WorkflowNode
 from .resolver import iter_refs, resolve
 
 
@@ -46,7 +46,7 @@ class WorkflowPlanner:
             name = rest.split(".", 1)[0]
             if "[" in name:
                 name = name.split("[", 1)[0]
-            if name:
+            if name and name not in VIRTUAL_OUTPUT_NODES:
                 upstream.add(name)
         return sorted(upstream)
 

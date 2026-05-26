@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/pxdesign_pipeline_multi_gpu.input.json",
+  "type": "object",
+  "required": ["target_chain", "binder_length", "mode"],
+  "properties": {
+    "target_pdb": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the target structure (PDB or CIF).",
+      "vpa:digest": "sha256"
+    },
+    "candidates": {"type": "array", "items": {"type": "object", "additionalProperties": true}, "default": []},
+    "target_chain": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Chain ID of the target on the target_pdb."
+    },
+    "binder_length": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 200,
+      "description": "Desired binder residue count."
+    },
+    "num_samples": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 256,
+      "default": 5,
+      "description": "Total samples across ranks. Must be divisible by world size."
+    },
+    "num_steps": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 1000,
+      "default": 400
+    },
+    "seed": {"type": ["integer", "null"], "default": null},
+    "temperature": {"type": "number", "default": 1.0},
+    "hotspots": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "default": []
+    },
+    "crop": {"type": ["string", "null"], "default": null},
+    "mode": {
+      "const": "pipeline",
+      "default": "pipeline",
+      "description": "Required pipeline mode for the multi-GPU descriptor alias."
+    },
+    "top_k_designs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "default": 4,
+      "description": "Number of top filtered designs to return."
+    },
+    "mpnn_temperature": {
+      "type": "number",
+      "minimum": 0.0001,
+      "maximum": 5.0,
+      "default": 0.1,
+      "description": "ProteinMPNN sampling temperature."
+    },
+    "af2_init_guess": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable AF2 initial-guess co-folding for sequence filtering."
+    },
+    "preset": {
+      "type": "string",
+      "enum": ["preview", "extended"],
+      "default": "preview",
+      "description": "PXDesign upstream preset."
+    }
+  },
+  "additionalProperties": false
+}

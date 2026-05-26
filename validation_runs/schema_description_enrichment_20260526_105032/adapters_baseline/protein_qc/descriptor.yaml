@@ -1,0 +1,22 @@
+name: protein_qc
+version: "1.0.0"
+category: scoring
+description: "Lightweight QC scalars (pLDDT, polybasic-patch, GRAVY, instability index, pI) for a sequence or structure. Cheap pre-filter before expensive scoring or refolding; selectable metric subset. Adopted from https://proteinbase.com/protein-design-skills/protein-qc"
+runtime: python
+backend: biopython
+gpu_required: false
+gpus_required: 1
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: true
+pin_warm: true
+supported_tasks: [scoring, quality_control]
+input_schema: schemas/protein_qc.input.json
+output_schema: schemas/protein_qc.output.json
+supported_precisions: [fp32]
+supports_batching: false
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.protein_qc.adapter:ProteinQCAdapter"

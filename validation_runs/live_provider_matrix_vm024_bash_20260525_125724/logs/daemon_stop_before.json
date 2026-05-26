@@ -1,0 +1,1 @@
+{"ok": false, "error": {"code": "E_DAEMON_UNAVAILABLE", "message": "supervisor is not running", "details": {"socket": "/tmp/vpa-runtime-1002/feb8b69c88ddd920/supervisor.sock"}}}

@@ -2,75 +2,110 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/pxdesign_pipeline_multi_gpu.input.json",
   "type": "object",
-  "required": ["target_pdb", "target_chain", "binder_length", "mode"],
+  "required": ["target_chain", "binder_length", "mode"],
   "properties": {
     "target_pdb": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the target structure (PDB or CIF).",
+      "description": "Absolute path to the target structure (PDB or mmCIF) the binder is designed against. (Shares the pxdesign schema; this multi-GPU alias forces `mode=pipeline`.)",
+      "examples": ["/abs/path/target.pdb"],
       "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path into `target_pdb` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/target.pdb"}]]
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
-      "description": "Chain ID of the target on the target_pdb."
+      "description": "Chain id of the target on `target_pdb`.",
+      "examples": ["A", "B"]
     },
     "binder_length": {
       "type": "integer",
       "minimum": 30,
       "maximum": 200,
-      "description": "Desired binder residue count."
+      "description": "Desired binder residue count.",
+      "examples": [60, 80, 120]
     },
     "num_samples": {
       "type": "integer",
       "minimum": 2,
       "maximum": 256,
       "default": 5,
-      "description": "Total samples across ranks. Must be divisible by world size."
+      "description": "Total samples across ranks. Must be divisible by the world size of GPUs available.",
+      "examples": [8, 16]
     },
     "num_steps": {
       "type": "integer",
       "minimum": 5,
       "maximum": 1000,
-      "default": 400
+      "default": 400,
+      "description": "Diffusion sampling steps per sample.",
+      "examples": [100, 400]
     },
-    "seed": {"type": ["integer", "null"], "default": null},
-    "temperature": {"type": "number", "default": 1.0},
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "Optional integer RNG seed (forwarded to each rank with a rank-offset).",
+      "examples": [42, null]
+    },
+    "temperature": {
+      "type": "number",
+      "default": 1.0,
+      "description": "Diffusion sampling temperature.",
+      "examples": [1.0, 0.7]
+    },
     "hotspots": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
-      "default": []
+      "default": [],
+      "description": "1-indexed target residue positions where the binder should engage.",
+      "examples": [[12, 14, 16], [42]]
     },
-    "crop": {"type": ["string", "null"], "default": null},
+    "crop": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional target-region crop selector. Null uses the full target chain.",
+      "examples": ["A:1-150", null]
+    },
     "mode": {
       "const": "pipeline",
       "default": "pipeline",
-      "description": "Required pipeline mode for the multi-GPU descriptor alias."
+      "description": "Required pipeline mode for the multi-GPU descriptor alias. Only `pipeline` is valid here.",
+      "examples": ["pipeline"]
     },
     "top_k_designs": {
       "type": "integer",
       "minimum": 1,
       "maximum": 64,
       "default": 4,
-      "description": "Number of top filtered designs to return."
+      "description": "Number of top filtered designs to return from the pipeline.",
+      "examples": [4, 10]
     },
     "mpnn_temperature": {
       "type": "number",
       "minimum": 0.0001,
       "maximum": 5.0,
       "default": 0.1,
-      "description": "ProteinMPNN sampling temperature."
+      "description": "ProteinMPNN sampling temperature for the sequence-design stage.",
+      "examples": [0.1, 0.3]
     },
     "af2_init_guess": {
       "type": "boolean",
       "default": true,
-      "description": "Enable AF2 initial-guess co-folding for sequence filtering."
+      "description": "Enable AF2 initial-guess co-folding for sequence filtering.",
+      "examples": [true, false]
     },
     "preset": {
       "type": "string",
       "enum": ["preview", "extended"],
       "default": "preview",
-      "description": "PXDesign upstream preset."
+      "description": "PXDesign upstream preset. `preview` is AF2-only (lighter, faster); `extended` adds Protenix ranking.",
+      "examples": ["preview", "extended"]
     }
   },
   "additionalProperties": false

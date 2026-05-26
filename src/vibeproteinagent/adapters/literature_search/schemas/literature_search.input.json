@@ -4,19 +4,106 @@
   "type": "object",
   "required": ["query"],
   "properties": {
-    "query": {"type": "string", "minLength": 1},
-    "functional_description": {"type": ["string", "null"], "default": null},
-    "must_include": {"type": "array", "items": {"type": "string"}, "default": []},
-    "organism": {"type": ["string", "null"], "default": null},
-    "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
-    "published_before": {"type": ["string", "null"], "default": null},
-    "published_after": {"type": ["string", "null"], "default": null},
-    "temporal_cutoff": {"type": ["string", "null"], "default": null},
-    "result_type": {"type": "string", "enum": ["lite", "core"], "default": "lite"},
-    "open_access_only": {"type": "boolean", "default": false},
-    "include_abstracts": {"type": "boolean", "default": true},
-    "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
-    "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 120, "default": 20}
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-text search query against Europe PMC. Combine keywords, protein names, function descriptions; field-qualified Europe PMC syntax (e.g. `TITLE:'...'`) is also accepted.",
+      "examples": ["PD-L1 nanobody binder", "dehydratase thermostable", "lysozyme substrate specificity"]
+    },
+    "functional_description": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Additional natural-language context describing what the user is trying to design. Used to refine query expansion and constraint extraction; not sent verbatim to Europe PMC.",
+      "examples": ["binder to checkpoint receptor on T cells", "enzyme that cleaves polysaccharide X", null]
+    },
+    "must_include": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Terms that MUST appear in matching records (post-filter). Useful when the base `query` is broad and you want to require specific keywords.",
+      "examples": [["IC50"], ["nanobody", "VHH"]]
+    },
+    "organism": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Species filter (free text matched against organism mentions). Null disables organism filtering.",
+      "examples": ["Homo sapiens", "Escherichia coli", null]
+    },
+    "max_results": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200,
+      "default": 25,
+      "description": "Cap on the number of records returned after filtering. Larger values incur more API calls.",
+      "examples": [25, 100]
+    },
+    "published_before": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "ISO date (YYYY-MM-DD); only records published on/before this date are returned.",
+      "examples": ["2024-12-31", "2023-06-30", null]
+    },
+    "published_after": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "ISO date (YYYY-MM-DD); only records published on/after this date are returned.",
+      "examples": ["2020-01-01", "2023-01-01", null]
+    },
+    "temporal_cutoff": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Deprecated alias for `published_before`. Supplying both with different values is rejected; prefer `published_before` for new code.",
+      "examples": ["2024-12-31", null]
+    },
+    "result_type": {
+      "type": "string",
+      "enum": ["lite", "core"],
+      "default": "core",
+      "description": "`core` (default) returns full records including abstracts; `lite` is metadata-only. Setting `include_abstracts=true` automatically coerces `lite` up to `core`.",
+      "examples": ["core", "lite"]
+    },
+    "open_access_only": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, restrict to open-access articles (Europe PMC `OPEN_ACCESS:Y`).",
+      "examples": [false, true]
+    },
+    "include_abstracts": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, abstract snippets are populated on top_records (requires `result_type=core`; coerced automatically when needed).",
+      "examples": [true, false]
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 25,
+      "description": "Records per Europe PMC API page request.",
+      "examples": [25, 100]
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 120,
+      "default": 20,
+      "description": "Per-request HTTP timeout in seconds.",
+      "examples": [20, 60]
+    },
+    "max_query_terms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32,
+      "default": 8,
+      "description": "Upper bound on tokens after query normalization. LLM-authored multi-concept queries are truncated to this many terms to keep the Europe PMC query within sane length.",
+      "examples": [8, 16]
+    },
+    "fetch_text_mined_terms": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, calls Europe PMC's annotations API for records flagged `hasTextMinedTerms=Y` and populates `constraint_evidence` + `text_mined_annotations` in the output. Slower but vastly richer per-record metadata.",
+      "examples": [true, false]
+    }
   },
   "additionalProperties": false
 }

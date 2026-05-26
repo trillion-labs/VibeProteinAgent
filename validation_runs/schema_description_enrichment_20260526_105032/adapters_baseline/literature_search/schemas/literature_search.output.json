@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/literature_search.output.json",
+  "type": "object",
+  "required": [
+    "query",
+    "normalized_query",
+    "backend",
+    "status",
+    "result_count",
+    "total_hits",
+    "date_filter",
+    "constraint_evidence",
+    "text_mined_annotations",
+    "top_records",
+    "artifacts",
+    "runtime_ms"
+  ],
+  "properties": {
+    "query": {"type": "string"},
+    "normalized_query": {
+      "type": "string",
+      "description": "The exact string sent to Europe PMC after normalization (token quoting, dedup, truncation)."
+    },
+    "backend": {"type": "string"},
+    "status": {
+      "type": "string",
+      "enum": ["ok", "no_hits", "filtered_out"],
+      "description": "ok: records returned and constraint_evidence populated. no_hits: Europe PMC returned hitCount=0. filtered_out: hits existed but were dropped by the local date filter. Downstream tools MUST treat no_hits / filtered_out as missing literature grounding."
+    },
+    "result_count": {"type": "integer", "minimum": 0},
+    "total_hits": {"type": ["integer", "null"], "minimum": 0},
+    "date_filter": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
+    "constraint_evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Structured IDs (go_terms, uniprot_accessions, interpro_ids) derived from text-mined annotations, plus pH/temperature scraped from abstracts. Empty {} when status != 'ok'."
+    },
+    "text_mined_annotations": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Raw Europe PMC annotation entities bucketed by type (gene_proteins, chemicals, organisms, accession_numbers, go_terms, diseases)."
+    },
+    "top_records": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "artifacts": {"type": "object", "additionalProperties": {"type": "string"}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

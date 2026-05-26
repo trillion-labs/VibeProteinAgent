@@ -3,12 +3,14 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 _AA3_TO_1 = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
@@ -29,7 +31,30 @@ _INSTABILITY_HIGH = 40.0  # Guruprasad heuristic: > 40 is "unstable".
 class ProteinQCInput(BaseModel):
     sequence: str | None = Field(None)
     pdb_path: str | None = Field(None)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     metrics: list[str] = Field(default_factory=lambda: list(_DEFAULT_METRICS))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_legacy_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        first = candidates[0]
+        out = dict(data)
+        out.setdefault("sequence", first.get("sequence"))
+        out.setdefault("pdb_path", first.get("structure_path"))
+        return out
 
     @model_validator(mode="after")
     def _at_least_one(self) -> ProteinQCInput:
@@ -41,6 +66,7 @@ class ProteinQCInput(BaseModel):
 class ProteinQCOutput(BaseModel):
     metrics: dict[str, float | str | None]
     flags: list[str]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
 
 
@@ -154,6 +180,7 @@ class ProteinQCAdapter(ToolAdapter):
         return ProteinQCOutput(
             metrics=metrics,
             flags=flags,
+            candidates=_protein_qc_candidates(params, metrics, flags),
             runtime_ms=runtime_ms,
         )
 
@@ -165,3 +192,85 @@ class ProteinQCAdapter(ToolAdapter):
 
 
 __all__ = ["ProteinQCAdapter", "ProteinQCInput", "ProteinQCOutput"]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _protein_qc_candidates(
+    params: ProteinQCInput,
+    metrics: dict[str, float | str | None],
+    flags: list[str],
+) -> list[dict[str, Any]]:
+    upstream = params.candidates if params.candidates else [{}]
+    candidates: list[dict[str, Any]] = []
+    for index, source_candidate in enumerate(upstream):
+        sequence = source_candidate.get("sequence") or params.sequence
+        structure_path = source_candidate.get("structure_path") or params.pdb_path
+        local_id = _source_local_id(source_candidate, f"qc_{index:04d}")
+        candidate = _base_candidate(
+            "protein_qc",
+            local_id,
+            index,
+            sequence=sequence,
+            structure_path=structure_path,
+            upstream=source_candidate if _is_canonical_candidate(source_candidate) else None,
+        )
+        candidate.setdefault("scores", {})["protein_qc"] = {
+            **metrics,
+            "passes_filters": not flags,
+            "flags": list(flags),
+        }
+        candidates.append(candidate)
+    return candidates
+
+
+def _base_candidate(
+    tool: str,
+    local_id: str,
+    index: int,
+    *,
+    sequence: str | None,
+    structure_path: str | None,
+    upstream: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if upstream is not None:
+        candidate = {
+            key: value
+            for key, value in upstream.items()
+            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+        }
+        candidate["scores"] = dict(upstream.get("scores") or {})
+        candidate["artifacts"] = dict(upstream.get("artifacts") or {})
+        return candidate
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            tool,
+            local_id,
+            sequence=sequence,
+            structure_path=structure_path,
+            index=index,
+        ),
+        "source": {
+            "tool": tool,
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": None,
+            "index": index,
+        },
+        "scores": {},
+        "artifacts": {},
+    }
+    if sequence:
+        candidate["sequence"] = sequence
+    if structure_path:
+        candidate["structure_path"] = structure_path
+    return candidate
+
+
+def _source_local_id(candidate: dict[str, Any], fallback: str) -> str:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    return str(source.get("local_id") or fallback)

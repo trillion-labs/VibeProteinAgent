@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/ligandmpnn.output.json",
+  "type": "object",
+  "required": ["designs", "designs_fasta", "num_residues", "runtime_ms"],
+  "properties": {
+    "designs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sequence", "score"],
+        "properties": {
+          "sequence": {"type": "string", "minLength": 1},
+          "score": {"type": "number"},
+          "seq_recovery": {"type": ["number", "null"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "designs_fasta": {"type": "string", "minLength": 1},
+    "num_residues": {"type": "integer", "minimum": 1},
+    "runtime_ms": {"type": "integer", "minimum": 0},
+    "position_mappings": {"type": "object", "additionalProperties": true, "default": {}},
+    "warnings": {"type": "array", "items": {"type": "string"}, "default": []}
+  },
+  "additionalProperties": false
+}

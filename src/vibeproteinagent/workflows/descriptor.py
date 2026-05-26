@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ParamType = Literal["str", "int", "float", "bool", "path", "list", "dict"]
 OnFailure = Literal["stop", "continue", "skip"]
+VIRTUAL_OUTPUT_NODES = frozenset({"prior_round"})
 
 
 class WorkflowParam(BaseModel):
@@ -179,7 +180,7 @@ class Workflow(BaseModel):
                     # caught by the topological sort below.
                     deps[node.id].add(upstream)
 
-        missing = sorted(referenced_upstream - declared)
+        missing = sorted(referenced_upstream - declared - VIRTUAL_OUTPUT_NODES)
         if missing:
             raise InvalidParamsError(
                 f"workflow {self.name!r} references undeclared upstream nodes",

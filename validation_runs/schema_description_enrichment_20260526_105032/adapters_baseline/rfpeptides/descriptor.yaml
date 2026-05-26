@@ -1,0 +1,32 @@
+name: rfpeptides
+version: "1.1.0"
+category: protein_design
+description: "Generates cyclic peptide backbones. Target hotspot/range integers are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; explicit residue-id fields use PDB numbering."
+runtime: python
+backend: pytorch
+gpu_required: true
+gpus_required: 1
+vram_min_gib: 12
+startup_cost: high
+estimated_runtime_s: 600
+warm_load_capable: false
+pin_warm: false
+execution_isolation: subprocess
+environment_reason: "Each run launches RFdiffusion in a fresh child process to isolate Hydra/RFdiffusion import-time global state; no checkpoint state remains resident across calls."
+support_status: verified
+support_status_reason: null
+availability_probe: "vibeproteinagent.adapters.rfpeptides:availability_skip_reason"
+supported_tasks: [peptide_design, macrocycle_design]
+input_schema: schemas/rfpeptides.input.json
+output_schema: schemas/rfpeptides.output.json
+supported_precisions: [fp32]
+supports_batching: false
+sharding:
+  strategy: design_seed_shards
+  shardable_fields: [num_designs, seed]
+  recommended_shard_size: 1
+  default_max_parallel: 4
+fusion:
+  output_kind: disk
+  input_kinds: [disk]
+entry_point: "vibeproteinagent.adapters.rfpeptides.adapter:RFPeptidesAdapter"

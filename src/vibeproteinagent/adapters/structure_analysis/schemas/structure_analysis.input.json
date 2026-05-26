@@ -2,22 +2,119 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/structure_analysis.input.json",
   "type": "object",
-  "required": ["structure_path"],
+  "anyOf": [
+    {"required": ["structure_path"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
-    "structure_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256-if-path"},
-    "sequence": {"type": ["string", "null"], "default": null},
-    "fasta_path": {"type": ["string", "null"], "minLength": 1, "default": null, "vpa:digest": "sha256-if-path"},
-    "position_basis": {"type": "string", "enum": ["auto", "sequence", "structure"], "default": "auto"},
-    "chain_id": {"type": ["string", "null"], "default": null},
-    "interface_chain_ids": {"type": "array", "items": {"type": "string"}, "default": []},
-    "ligand_resnames": {"type": "array", "items": {"type": "string"}, "default": []},
-    "positions": {"type": "array", "items": {"type": "integer", "minimum": 1}, "default": [], "description": "FASTA/sequence 1-indexed positions when sequence/fasta_path is provided; otherwise legacy structure residue numbers."},
-    "max_annotations": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 200},
-    "contact_distance_angstrom": {"type": "number", "exclusiveMinimum": 0, "maximum": 20, "default": 5.0},
-    "surface_rsa_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.25},
-    "buried_rsa_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.10},
-    "run_dssp": {"type": "boolean", "default": true},
-    "output_prefix": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "default": "structure_analysis"}
+    "structure_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the input structure (PDB or mmCIF) to analyze for residue burial, secondary structure, interface contacts, and liability flags.",
+      "examples": ["/abs/path/struct.pdb", "outputs/pred.cif"],
+      "vpa:digest": "sha256-if-path"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream structure tool. Promotes the first item's structure_path into `structure_path` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/pred.cif"}]]
+    },
+    "sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional reference sequence for mapping integer `positions` onto PDB residue ids. Null uses the sequence implied by the structure.",
+      "examples": ["MKTAYIAKQRQ", null]
+    },
+    "fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "Alternative to inline `sequence`: a FASTA file with the reference sequence.",
+      "examples": ["/abs/path/ref.fasta", null],
+      "vpa:digest": "sha256-if-path"
+    },
+    "position_basis": {
+      "type": "string",
+      "enum": ["auto", "sequence", "structure"],
+      "default": "auto",
+      "description": "How to interpret integer `positions`. `auto` picks sequence when a reference sequence is provided, else structure.",
+      "examples": ["auto", "sequence", "structure"]
+    },
+    "chain_id": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Restrict analysis to a single chain id. Null analyzes all chains.",
+      "examples": ["A", "B", null]
+    },
+    "interface_chain_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Optional list of chain ids whose pairwise interfaces should be analyzed. Empty list reports every cross-chain interface.",
+      "examples": [["A", "B"], []]
+    },
+    "ligand_resnames": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "PDB residue names (CCD codes) of ligands/cofactors to analyze for contacts.",
+      "examples": [["ATP", "MG"], ["HEM"]]
+    },
+    "positions": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "default": [],
+      "description": "FASTA/sequence 1-indexed positions to annotate when `sequence`/`fasta_path` is provided; otherwise legacy structure residue numbers.",
+      "examples": [[10, 11, 12], [42]]
+    },
+    "max_annotations": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "default": 200,
+      "description": "Cap on the number of per-residue annotations emitted in the artifact (caps both auto-selected and explicit positions).",
+      "examples": [200, 1000]
+    },
+    "contact_distance_angstrom": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 20,
+      "default": 5.0,
+      "description": "Inter-atom distance threshold in Å for counting an inter-residue (or residue-ligand) contact.",
+      "examples": [5.0, 4.0]
+    },
+    "surface_rsa_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.25,
+      "description": "Relative-solvent-accessibility threshold above which a residue is labelled `exposed`.",
+      "examples": [0.25, 0.30]
+    },
+    "buried_rsa_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.10,
+      "description": "Relative-solvent-accessibility threshold below which a residue is labelled `buried`.",
+      "examples": [0.10, 0.05]
+    },
+    "run_dssp": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, run DSSP internally to assign secondary structure. Disable to skip DSSP dependency when only contact/RSA analysis is needed.",
+      "examples": [true, false]
+    },
+    "output_prefix": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "default": "structure_analysis",
+      "description": "Filename prefix for generated TSV/JSON artifacts. Filesystem-safe characters only.",
+      "examples": ["structure_analysis", "design_qc_v1"]
+    }
   },
   "additionalProperties": false
 }

@@ -35,10 +35,10 @@ def test_parse_fasta_skips_input_and_extracts_scores(tmp_path: Path) -> None:
     p = _make_fasta(tmp_path)
     records = _parse_mpnn_fasta(p)
     assert len(records) == 3
-    seqs = [s for s, _ in records]
+    seqs = [record["sequence"] for record in records]
     assert "MKAILVAA" not in seqs  # the |input record is skipped
     assert seqs == ["MKAILVAB", "MKAILVCC", "MKAILVDD"]
-    scores = [score for _, score in records]
+    scores = [record["score"] for record in records]
     assert scores == pytest.approx([1.2345, 0.4567, 2.0001])
 
 

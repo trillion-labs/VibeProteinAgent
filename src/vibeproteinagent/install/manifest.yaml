@@ -198,6 +198,9 @@ tools:
     disk_bytes: 1000000000
   literature_search:
     runtime: shared
+  merge_candidates:
+    runtime: shared
+    required: false
   mmseqs2_gpu:
     runtime: external_binary
     required: false

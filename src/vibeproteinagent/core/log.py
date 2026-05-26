@@ -20,9 +20,16 @@ import sys
 import threading
 import time
 from datetime import datetime
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, TextIO
+
+try:
+    from enum import StrEnum
+except ImportError:  # pragma: no cover - exercised by Python 3.10 sidecars
+    from enum import Enum
+
+    class StrEnum(str, Enum):  # noqa: UP042
+        pass
 
 # ---------------------------------------------------------------- style + verbosity
 

@@ -2,33 +2,60 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/esm2.input.json",
   "type": "object",
-  "required": ["sequence"],
+  "anyOf": [
+    {"required": ["sequence"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
-    "sequence": {"type": "string", "minLength": 1},
+    "sequence": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Protein sequence to embed or to redesign. For `mode=embedding` must contain only canonical amino-acid letters; for `mode=sequence_generation` may include `<mask>` markers (or use `mask_positions`).",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", "MKTAY<mask>AKQ"]
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` field into the `sequence` input when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
+    },
     "mode": {
       "type": "string",
       "enum": ["embedding", "sequence_generation"],
-      "default": "embedding"
+      "default": "embedding",
+      "description": "Operation mode. `embedding` returns per-residue and pooled ESM2 representations; `sequence_generation` runs masked-language-model fill-in at positions given by `mask_positions` or `<mask>` markers in the input sequence.",
+      "examples": ["embedding", "sequence_generation"]
     },
     "model_name": {
       "type": "string",
       "minLength": 1,
-      "default": "facebook/esm2_t12_35M_UR50D"
+      "default": "facebook/esm2_t12_35M_UR50D",
+      "description": "HuggingFace model name for the ESM2 checkpoint. Larger checkpoints (e.g. `facebook/esm2_t33_650M_UR50D`) give better embeddings at higher VRAM cost.",
+      "examples": ["facebook/esm2_t12_35M_UR50D", "facebook/esm2_t33_650M_UR50D"]
     },
-    "return_attention": {"type": "boolean", "default": false},
+    "return_attention": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, include per-layer self-attention weights in the output. Increases artifact size substantially; use sparingly for interpretability work.",
+      "examples": [false, true]
+    },
     "mask_positions": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "uniqueItems": true,
       "default": [],
-      "description": "FASTA/sequence 1-indexed positions to mask."
+      "description": "FASTA/sequence 1-indexed positions to mask for `mode=sequence_generation`. Each listed position is replaced with `<mask>` and predicted from the language model.",
+      "examples": [[10, 15, 22]]
     },
     "mask_indices_zero_based": {
       "type": "array",
       "items": {"type": "integer", "minimum": 0},
       "uniqueItems": true,
       "default": [],
-      "description": "Advanced compatibility field for zero-based mask indices."
+      "description": "Advanced compatibility field: 0-based mask indices into the sequence. Prefer `mask_positions` (1-indexed) unless integrating with code that uses 0-based offsets.",
+      "examples": [[9, 14, 21]]
     }
   },
   "additionalProperties": false,

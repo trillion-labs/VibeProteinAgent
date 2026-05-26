@@ -2,14 +2,59 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/mmseqs2_gpu.input.json",
   "type": "object",
-  "required": ["query_fasta", "target_db"],
+  "required": ["target_db"],
   "properties": {
-    "query_fasta": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "target_db": {"type": "string", "minLength": 1},
-    "min_seq_id": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.3},
-    "coverage": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.8},
-    "sensitivity": {"type": "number", "minimum": 1.0, "maximum": 7.5, "default": 7.5},
-    "max_seqs": {"type": "integer", "minimum": 1, "default": 300}
+    "query_fasta": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the query FASTA file containing one or more sequences for MMseqs2 to search against `target_db`.",
+      "examples": ["/abs/path/query.fasta", "outputs/sequences.faa"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream sequence-producing tool. Translates to a temporary FASTA when `query_fasta` is omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
+    },
+    "target_db": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to an MMseqs2 target database directory or single-file index (typically UniRef30/UniRef50 or a custom domain set).",
+      "examples": ["/data/mmseqs/uniref30", "/data/custom/family.fasta"]
+    },
+    "min_seq_id": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.3,
+      "description": "Minimum sequence identity threshold for reporting hits (0.0-1.0). Lower values return more remote homologs.",
+      "examples": [0.3, 0.5, 0.9]
+    },
+    "coverage": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.8,
+      "description": "Minimum coverage fraction (`-c`) the alignment must span on the shorter of query/target.",
+      "examples": [0.5, 0.8]
+    },
+    "sensitivity": {
+      "type": "number",
+      "minimum": 1.0,
+      "maximum": 7.5,
+      "default": 7.5,
+      "description": "MMseqs2 sensitivity (`-s`). 7.5 is the most sensitive (and slowest); 1.0-4.0 are fast but miss remote hits.",
+      "examples": [7.5, 5.7]
+    },
+    "max_seqs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 300,
+      "description": "Maximum number of hits per query (`--max-seqs`).",
+      "examples": [300, 1000]
+    }
   },
   "additionalProperties": false
 }

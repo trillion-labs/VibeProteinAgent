@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/bindcraft.input.json",
+  "type": "object",
+  "anyOf": [
+    {"required": ["target_pdb"]},
+    {"required": ["candidates"]}
+  ],
+  "properties": {
+    "target_pdb": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the target structure (.pdb) the binder is designed against.",
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "target_chain": {
+      "type": "string",
+      "minLength": 1,
+      "default": "A",
+      "description": "Chain id(s) on the target to design against (BindCraft accepts a comma-separated list)."
+    },
+    "target_hotspots": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "default": [],
+      "description": "FASTA/sequence 1-indexed target positions when target_sequence/target_fasta_path is provided; otherwise legacy structure residue numbers."
+    },
+    "target_hotspot_residue_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "default": [],
+      "description": "Explicit structure residue IDs such as A10 or B82A."
+    },
+    "target_sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Reference FASTA/sequence used to map integer target_hotspots onto PDB residue IDs."
+    },
+    "target_fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "vpa:digest": "sha256-if-path"
+    },
+    "position_basis": {
+      "type": "string",
+      "enum": ["auto", "sequence", "structure"],
+      "default": "auto"
+    },
+    "binder_length": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 150,
+      "default": 60,
+      "description": "Fixed binder length (BindCraft also supports a [min,max] range; we pin both bounds equal here for determinism)."
+    },
+    "num_designs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32,
+      "default": 10,
+      "description": "Target ``number_of_final_designs`` written into the generated settings JSON."
+    },
+    "num_recycles": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8,
+      "default": 1,
+      "description": "AF2 recycles during the design trajectory (``num_recycles_design`` in BindCraft's advanced settings)."
+    },
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null
+    },
+    "max_trajectories": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 10000,
+      "default": null,
+      "description": "Optional upper bound on attempted BindCraft trajectories. Null leaves upstream behavior unbounded until requested designs are accepted."
+    },
+    "filter_mode": {
+      "type": "string",
+      "enum": ["default", "permissive"],
+      "default": "default",
+      "description": "Filter cascade to use. `default` preserves upstream BindCraft thresholds; `permissive` disables thresholds for bounded smoke validation."
+    }
+  },
+  "additionalProperties": false
+}

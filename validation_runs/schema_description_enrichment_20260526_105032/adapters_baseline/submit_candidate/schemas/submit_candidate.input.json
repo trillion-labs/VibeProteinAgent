@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/submit_candidate.input.json",
+  "type": "object",
+  "required": ["outcome", "candidates", "reasoning"],
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["accepted", "no_acceptable_candidate"]
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["job_id", "justification"],
+        "properties": {
+          "job_id": {"type": "string", "pattern": "^job_[A-Za-z0-9]+$"},
+          "candidate_id": {"type": "string", "minLength": 1},
+          "index": {"type": "integer", "minimum": 0},
+          "justification": {"type": "string", "minLength": 1},
+          "scores_to_highlight": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "default": []
+    },
+    "reasoning": {"type": "string", "minLength": 1},
+    "supersedes": {"type": ["string", "null"], "default": null}
+  },
+  "additionalProperties": false
+}

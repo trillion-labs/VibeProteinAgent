@@ -2,12 +2,46 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/prodigy.input.json",
   "type": "object",
-  "required": ["pdb_path", "chain_a", "chain_b"],
+  "required": ["chain_a", "chain_b"],
+  "anyOf": [
+    {"required": ["pdb_path"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
-    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "chain_a": {"type": "string", "minLength": 1},
-    "chain_b": {"type": "string", "minLength": 1},
-    "temperature_k": {"type": "number", "exclusiveMinimum": 0.0, "default": 298.15}
+    "pdb_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to a complex PDB structure (≥2 chains) PRODIGY will analyze for binding affinity via contact-count regression.",
+      "examples": ["/abs/path/complex.pdb", "outputs/predicted_complex.pdb"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream complex-prediction tool. Promotes the first item's structure_path into `pdb_path` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/complex.pdb"}]]
+    },
+    "chain_a": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Chain id (or comma-separated list) for the first binding partner (e.g. the target receptor).",
+      "examples": ["A", "A,B"]
+    },
+    "chain_b": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Chain id (or comma-separated list) for the second binding partner (e.g. the designed binder).",
+      "examples": ["B", "L"]
+    },
+    "temperature_k": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 298.15,
+      "description": "Temperature in Kelvin used by PRODIGY's ΔG-to-Kd conversion. Default 298.15 K (~25 °C); set to 310.15 K for physiological conditions.",
+      "examples": [298.15, 310.15]
+    }
   },
   "additionalProperties": false
 }

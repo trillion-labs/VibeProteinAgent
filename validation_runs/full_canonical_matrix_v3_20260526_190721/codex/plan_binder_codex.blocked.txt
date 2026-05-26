@@ -1,0 +1,1 @@
+provider preflight failed; see validation_runs/full_canonical_matrix_v3_20260526_190721/logs/preflight_codex.log

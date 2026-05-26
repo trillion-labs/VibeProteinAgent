@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 _AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 _AA_SET = frozenset(_AMINO_ACIDS)
@@ -45,6 +46,7 @@ _PKA_NEGATIVE = {"c_term": 2.34, "D": 3.86, "E": 4.25, "C": 8.33, "Y": 10.07}
 class SequenceAnalysisInput(BaseModel):
     sequence: str | None = None
     fasta_path: str | None = Field(None, min_length=1)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     positions: list[int] = Field(default_factory=list)
     ph: float = Field(7.4, ge=0.0, le=14.0)
     max_annotations: int = Field(100, ge=0)
@@ -61,11 +63,32 @@ class SequenceAnalysisInput(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_sequence_source(self) -> SequenceAnalysisInput:
-        if not self.sequence and not self.fasta_path:
-            raise ValueError("sequence_analysis requires sequence or fasta_path")
+        if not self.sequence and not self.fasta_path and not self.candidates:
+            raise ValueError("sequence_analysis requires sequence, fasta_path, or candidates")
         if any(pos < 1 for pos in self.positions):
             raise ValueError("positions are 1-indexed and must be positive")
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_sequence(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        for candidate in candidates:
+            if not candidate.get("sequence"):
+                raise ValueError("sequence_analysis canonical Candidate[] input requires sequence")
+        return data
 
 
 class SequenceLiability(BaseModel):
@@ -92,6 +115,7 @@ class SequenceAnalysisOutput(BaseModel):
     sequence_length: int
     metrics: dict[str, Any]
     representative_sequences: list[dict[str, Any]] = Field(default_factory=list)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     liabilities: list[SequenceLiability]
     top_annotations: list[ResidueAnnotation]
     artifacts: dict[str, str | None]
@@ -133,6 +157,12 @@ def _parse_fasta_records(text: str) -> list[tuple[str | None, str]]:
 
 
 def _read_sequences(params: SequenceAnalysisInput) -> list[tuple[str | None, str]]:
+    if params.candidates:
+        return [
+            (_candidate_header(candidate, index), str(candidate["sequence"]))
+            for index, candidate in enumerate(params.candidates)
+            if _is_canonical_candidate(candidate)
+        ]
     if params.sequence:
         if params.sequence.lstrip().startswith(">"):
             records = _parse_fasta_records(params.sequence)
@@ -144,9 +174,12 @@ def _read_sequences(params: SequenceAnalysisInput) -> list[tuple[str | None, str
     if not fasta_path.exists():
         raise FileNotFoundError(f"sequence_analysis FASTA not found: {fasta_path}")
     records = _parse_fasta_records(fasta_path.read_text())
-    if not records:
-        raise ValueError(f"sequence_analysis FASTA contains no sequence: {fasta_path}")
     return records
+
+
+def _candidate_header(candidate: dict[str, Any], index: int) -> str:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    return str(candidate.get("candidate_id") or source.get("local_id") or f"candidate_{index}")
 
 
 def _counts(sequence: str) -> dict[str, int]:
@@ -516,8 +549,6 @@ class SequenceAnalysisAdapter(ToolAdapter):
         records = _read_sequences(params)
         sequence = "".join(seq for _header, seq in records)
         fasta_header = records[0][0] if len(records) == 1 else None
-        if not sequence:
-            raise ValueError("sequence_analysis sequence must not be empty")
         if len(records) > 1 and params.positions:
             raise ValueError(
                 "positions are only supported for single-sequence analysis; "
@@ -534,7 +565,11 @@ class SequenceAnalysisAdapter(ToolAdapter):
         metrics = _metrics(sequence, params.ph)
         if fasta_header:
             metrics["fasta_header"] = fasta_header
-        if len(records) > 1:
+        if not records:
+            metrics["analysis_mode"] = "empty_fasta"
+            metrics["family_summary"] = _family_summary(records)
+            metrics["warnings"] = ["no_sequences_found"]
+        elif len(records) > 1:
             metrics["analysis_mode"] = "multi_fasta"
             metrics["family_summary"] = _family_summary(records)
         else:
@@ -589,10 +624,24 @@ class SequenceAnalysisAdapter(ToolAdapter):
         else:
             per_sequence_metrics = None
 
+        representatives = _representative_sequences(records, params.ph)
         output = SequenceAnalysisOutput(
             sequence_length=len(sequence),
             metrics=metrics,
-            representative_sequences=_representative_sequences(records, params.ph),
+            representative_sequences=representatives,
+            candidates=[
+                _canonical_candidate_from_representative(
+                    row,
+                    index,
+                    upstream=(
+                        params.candidates[index]
+                        if index < len(params.candidates)
+                        and _is_canonical_candidate(params.candidates[index])
+                        else None
+                    ),
+                )
+                for index, row in enumerate(representatives)
+            ],
             liabilities=liabilities,
             top_annotations=top_annotations,
             artifacts={
@@ -615,3 +664,55 @@ class SequenceAnalysisAdapter(ToolAdapter):
 
 
 __all__ = ["SequenceAnalysisAdapter", "SequenceAnalysisInput", "SequenceAnalysisOutput"]
+
+
+def _canonical_candidate_from_representative(
+    row: dict[str, Any],
+    index: int,
+    *,
+    upstream: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    local_id = f"representative_{index:04d}"
+    sequence = str(row.get("sequence") or "")
+    scores = {
+        "gravy": row.get("gravy"),
+        "pI": row.get("pI"),
+        "net_charge": row.get("net_charge"),
+        "liability_count": row.get("liability_count"),
+        "liability_types": row.get("liability_types") or [],
+    }
+    if upstream is not None:
+        candidate = {
+            key: value
+            for key, value in upstream.items()
+            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+        }
+        candidate["scores"] = dict(upstream.get("scores") or {})
+        candidate["artifacts"] = dict(upstream.get("artifacts") or {})
+        candidate.setdefault("sequence", sequence)
+        candidate["scores"]["sequence_analysis"] = scores
+        return candidate
+    return {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "sequence_analysis",
+            local_id,
+            sequence=sequence,
+            index=index,
+        ),
+        "source": {
+            "tool": "sequence_analysis",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": None,
+            "index": index,
+        },
+        "sequence": sequence,
+        "scores": {"sequence_analysis": scores},
+        "artifacts": {},
+    }
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"

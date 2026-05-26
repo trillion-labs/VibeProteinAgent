@@ -1,0 +1,3 @@
+case	mode	provider	model	status	exit_code	seconds	output
+plan_semantic_codex	plan	codex	gpt-5.4	FAIL	1	101	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_003155/outputs/plan_semantic_codex.json
+plan_binder_codex	plan	codex	gpt-5.4	FAIL	1	102	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_20260525_003155/outputs/plan_binder_codex.json

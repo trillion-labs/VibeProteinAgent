@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/mpnn_to_protenix_input.output.json",
+  "type": "object",
+  "required": ["input_jsons", "names", "candidates", "count"],
+  "properties": {
+    "input_jsons": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "names": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["candidate_id", "sequence"],
+        "properties": {
+          "candidate_id": {"type": "string", "minLength": 1},
+          "sequence": {"type": "string", "minLength": 1},
+          "score": {"type": ["number", "null"]},
+          "source_header": {"type": ["string", "null"]},
+          "protenix_input_json": {"type": "string", "minLength": 1},
+          "protenix_name": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "count": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

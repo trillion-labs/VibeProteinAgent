@@ -43,6 +43,7 @@ from vibeproteinagent.adapters.msa_policy import (
     strip_prepared_msa,
     yaml_file_has_prepared_msa,
 )
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.compat import ensure_rdkit_allchem_descriptors
 from vibeproteinagent.core.config import vpa_home
 from vibeproteinagent.core.torch_compat import allow_full_torch_load
@@ -134,6 +135,7 @@ class Boltz2AffinityInput(BaseModel):
         default=None,
         description="Inline list of typed inputs (mutually exclusive with input_yaml).",
     )
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     binder_chain: str | None = Field(
         default=None,
         description="Chain id of the binder ligand to score (only used with `sequences`).",
@@ -147,6 +149,39 @@ class Boltz2AffinityInput(BaseModel):
     use_msa: bool = Field(default=False)
     msa_backend: MSABackend = Field(default="auto")
     affinity_mw_correction: bool = Field(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_sequences(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        out = dict(data)
+        if out.get("input_yaml") is not None or out.get("sequences") is not None:
+            return out
+        sequences = []
+        for index, candidate in enumerate(candidates):
+            sequence = candidate.get("sequence")
+            if not sequence:
+                raise ValueError(
+                    "boltz2_affinity canonical Candidate[] input requires sequence "
+                    "when input_yaml/sequences are not provided"
+                )
+            chain_id = chr(ord("A") + index)
+            sequences.append({"type": "protein", "id": chain_id, "sequence": sequence})
+        out["sequences"] = sequences
+        out.setdefault("binder_chain", sequences[-1]["id"])
+        return out
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> Boltz2AffinityInput:
@@ -164,6 +199,7 @@ class Boltz2AffinityOutput(BaseModel):
     confidence_score: float
     runtime_ms: int
     seeds_used: list[int]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     pae_path: str | None = None
     msa_paths: list[str] = Field(default_factory=list)
     msa_index_csv: str | None = None
@@ -299,6 +335,18 @@ class Boltz2AffinityAdapter(ToolAdapter):
             confidence_score=float(result["confidence_score"]),
             runtime_ms=runtime_ms,
             seeds_used=[seed],
+            candidates=_boltz2_affinity_candidates(
+                params,
+                str(result["predicted_cif"]),
+                {
+                    "predicted_affinity": float(result["affinity_pred_value"]),
+                    "affinity_pred_value": float(result["affinity_pred_value"]),
+                    "affinity_probability_binary": float(
+                        result["affinity_probability_binary"]
+                    ),
+                    "confidence_score": float(result["confidence_score"]),
+                },
+            ),
             pae_path=None,
             msa_paths=list(result["msa_paths"]),
             msa_index_csv=result["msa_index_csv"],
@@ -474,6 +522,60 @@ def _collect_outputs(job_outputs: Path, record_stem: str) -> dict[str, Any]:
         "msa_paths": [str(path) for path in msa_paths],
         "msa_index_csv": str(msa_index_csv) if msa_index_csv.is_file() else None,
     }
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _boltz2_affinity_candidates(
+    params: Boltz2AffinityInput,
+    predicted_cif: str,
+    scores: dict[str, Any],
+) -> list[dict[str, Any]]:
+    source = params.candidates[-1] if params.candidates else {}
+    sequence = source.get("sequence") if isinstance(source, dict) else None
+    local_id = _source_local_id(source, "boltz2_affinity_0000") if isinstance(source, dict) else "boltz2_affinity_0000"
+    if _is_canonical_candidate(source):
+        candidate = {
+            key: value
+            for key, value in source.items()
+            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+        }
+        candidate["scores"] = dict(source.get("scores") or {})
+        candidate["artifacts"] = dict(source.get("artifacts") or {})
+        candidate["structure_path"] = predicted_cif
+    else:
+        candidate = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "boltz2_affinity",
+                local_id,
+                sequence=sequence,
+                structure_path=predicted_cif,
+                index=0,
+            ),
+            "source": {
+                "tool": "boltz2_affinity",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": None,
+                "index": 0,
+            },
+            "structure_path": predicted_cif,
+            "scores": {},
+            "artifacts": {},
+        }
+        if sequence:
+            candidate["sequence"] = sequence
+    candidate.setdefault("scores", {})["boltz2_affinity"] = scores
+    return [candidate]
+
+
+def _source_local_id(candidate: dict[str, Any], fallback: str) -> str:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    return str(source.get("local_id") or fallback)
 
 
 __all__ = [

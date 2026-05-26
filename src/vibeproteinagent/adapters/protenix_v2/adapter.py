@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
@@ -27,6 +27,7 @@ from vibeproteinagent.adapters.msa_policy import (
     should_use_remote_msa,
     strip_prepared_msa,
 )
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 # --------------------------------------------------------------------------- paths
 
@@ -157,9 +158,10 @@ def _ensure_protenix_importable() -> None:
 
 
 class ProtenixV2Input(BaseModel):
-    input_json: str = Field(
-        ..., description="Absolute path to a Protenix-format input JSON."
+    input_json: str | None = Field(
+        None, description="Absolute path to a Protenix-format input JSON."
     )
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     seeds: list[int] = Field(default_factory=lambda: [101], min_length=1)
     use_msa: bool = Field(default=False)
     msa_backend: MSABackend = Field(default="auto")
@@ -170,6 +172,36 @@ class ProtenixV2Input(BaseModel):
     n_sample: int = Field(default=5, ge=1, le=25)
     n_step: int = Field(default=200, ge=10, le=1000)
     n_cycle: int = Field(default=10, ge=1, le=20)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_canonical_candidates(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        for candidate in candidates:
+            if not candidate.get("sequence"):
+                raise ValueError("protenix_v2 canonical Candidate[] input requires sequence")
+        return data
+
+    @model_validator(mode="after")
+    def _has_input_source(self) -> ProtenixV2Input:
+        has_canonical_candidates = bool(self.candidates) and all(
+            _is_canonical_candidate(item) for item in self.candidates
+        )
+        if not self.input_json and not has_canonical_candidates:
+            raise ValueError("protenix_v2 requires input_json or canonical Candidate[]")
+        return self
 
 
 class ProtenixV2PredictionRecord(BaseModel):
@@ -200,6 +232,7 @@ class ProtenixV2Output(BaseModel):
     pae_path: str | None = None
     metrics: ProtenixV2Metrics
     all_predictions: list[ProtenixV2PredictionRecord]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     seeds_used: list[int]
 
@@ -399,14 +432,21 @@ class ProtenixV2Adapter(ToolAdapter):
         t0 = time.time()
         ctx.emit_progress(0.02)
 
-        input_path = Path(params.input_json).expanduser()
-        if not input_path.is_file():
-            raise FileNotFoundError(f"input_json not found: {input_path}")
-
         job_inputs = ctx.job_dir / "inputs"
         job_outputs = ctx.job_dir / "outputs"
         job_inputs.mkdir(parents=True, exist_ok=True)
         job_outputs.mkdir(parents=True, exist_ok=True)
+
+        if params.input_json:
+            input_path = Path(params.input_json).expanduser()
+            if not input_path.is_file():
+                raise FileNotFoundError(f"input_json not found: {input_path}")
+        else:
+            input_path = _write_protenix_input_json_from_candidates(
+                params.candidates,
+                params.seeds,
+                job_inputs / "canonical_candidates.json",
+            )
 
         # Copy the input json into the job dir so the artifact is self-contained.
         staged = job_inputs / input_path.name
@@ -471,7 +511,7 @@ class ProtenixV2Adapter(ToolAdapter):
 
         ctx.emit_progress(1.0)
         runtime_ms = int((time.time() - t0) * 1000)
-        return ProtenixV2Output(
+        output = ProtenixV2Output(
             predicted_cif=str(best.cif_path),
             predicted_pdb=None,
             pae_path=best.pae_path,
@@ -488,6 +528,8 @@ class ProtenixV2Adapter(ToolAdapter):
             runtime_ms=runtime_ms,
             seeds_used=list(params.seeds),
         )
+        output.candidates = _protenix_v2_candidates(params, all_records)
+        return output
 
     @staticmethod
     def _collect_outputs(
@@ -588,3 +630,107 @@ __all__ = [
     "ProtenixV2Output",
     "ProtenixV2PredictionRecord",
 ]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _write_protenix_input_json_from_candidates(
+    candidates: list[dict[str, Any]],
+    seeds: list[int],
+    path: Path,
+) -> Path:
+    sequences: list[dict[str, Any]] = []
+    for candidate in candidates:
+        sequence = candidate.get("sequence")
+        if not sequence:
+            raise ValueError("protenix_v2 canonical Candidate[] input requires sequence")
+        sequences.append({"proteinChain": {"sequence": str(sequence), "count": 1}})
+    if not sequences:
+        raise ValueError("protenix_v2 canonical Candidate[] input requires at least one candidate")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [
+        {
+            "name": "canonical_candidates",
+            "sequences": sequences,
+            "modelSeeds": list(seeds),
+        }
+    ]
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    return path
+
+
+def _protenix_v2_candidates(
+    params: ProtenixV2Input,
+    records: list[ProtenixV2PredictionRecord],
+) -> list[dict[str, Any]]:
+    sequence = _source_sequence(params)
+    candidates: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        local_id = f"protenix_{index:04d}"
+        scores = {
+            "seed": record.seed,
+            "rank": record.rank,
+            "ranking_score": record.ranking_score,
+            "plddt": record.plddt,
+            "iptm": record.iptm,
+            "ptm": record.ptm,
+        }
+        artifacts = {
+            "protenix_v2": {
+                "summary_json": record.summary_json,
+                "pae_path": record.pae_path,
+                "full_confidence_json": record.full_confidence_json,
+            }
+        }
+        candidate: dict[str, Any] = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "protenix_v2",
+                local_id,
+                native_id=record.candidate_id,
+                sequence=sequence,
+                structure_path=record.cif_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "protenix_v2",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": record.candidate_id,
+                "index": index,
+            },
+            "structure_path": record.cif_path,
+            "scores": {"protenix_v2": scores},
+            "artifacts": artifacts,
+        }
+        if sequence:
+            candidate["sequence"] = sequence
+        candidates.append(candidate)
+    return candidates
+
+
+def _source_sequence(params: ProtenixV2Input) -> str | None:
+    for candidate in params.candidates:
+        if _is_canonical_candidate(candidate) and candidate.get("sequence"):
+            return str(candidate["sequence"])
+    if not params.input_json:
+        return None
+    try:
+        payload = json.loads(Path(params.input_json).expanduser().read_text())
+    except Exception:
+        return None
+    if not isinstance(payload, list):
+        return None
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        for sequence_item in item.get("sequences") or []:
+            if not isinstance(sequence_item, dict):
+                continue
+            chain = sequence_item.get("proteinChain")
+            if isinstance(chain, dict) and chain.get("sequence"):
+                return str(chain["sequence"])
+    return None

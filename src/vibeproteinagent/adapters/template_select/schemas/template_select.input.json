@@ -4,18 +4,92 @@
   "type": "object",
   "required": ["template_db"],
   "properties": {
-    "query_sequence": {"type": ["string", "null"], "default": null},
-    "query_fasta": {"type": ["string", "null"], "default": null, "vpa:digest": "sha256-if-path"},
-    "query_structure": {"type": ["string", "null"], "default": null, "vpa:digest": "sha256-if-path"},
-    "template_db": {"type": "string", "minLength": 1, "vpa:digest": "sha256-if-path"},
-    "template_db_kind": {"type": "string", "enum": ["fasta", "mmseqs", "foldseek"], "default": "fasta"},
-    "max_templates": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
-    "min_identity": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
-    "min_coverage": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5},
-    "max_evalue": {"type": "number", "exclusiveMinimum": 0, "default": 0.001},
-    "temporal_cutoff": {"type": ["string", "null"], "default": null},
-    "metadata_table": {"type": ["string", "null"], "default": null, "vpa:digest": "sha256-if-path"}
+    "query_sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Inline query protein sequence (uppercase 1-letter codes). Use for `fasta` or `mmseqs` template_db_kind.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
+    },
+    "query_fasta": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Path to a FASTA file containing the query sequence(s).",
+      "examples": ["/abs/path/query.fasta", null],
+      "vpa:digest": "sha256-if-path"
+    },
+    "query_structure": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Path to a query structure (PDB or mmCIF). Required for `template_db_kind=foldseek`.",
+      "examples": ["/abs/path/query.pdb", null],
+      "vpa:digest": "sha256-if-path"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` or `structure_path` into the appropriate query field when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
+    },
+    "template_db": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the template database (FASTA file, MMseqs2 index, or Foldseek index depending on `template_db_kind`).",
+      "examples": ["/data/templates/pdb_seqres.fasta", "/data/mmseqs/pdb70", "/data/foldseek/pdb100"],
+      "vpa:digest": "sha256-if-path"
+    },
+    "template_db_kind": {
+      "type": "string",
+      "enum": ["fasta", "mmseqs", "foldseek"],
+      "default": "fasta",
+      "description": "Database type. `fasta` does in-process BLAST-style scan; `mmseqs` calls MMseqs2 (sequence); `foldseek` calls Foldseek (structure).",
+      "examples": ["fasta", "mmseqs", "foldseek"]
+    },
+    "max_templates": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 50,
+      "description": "Maximum number of templates to return after filtering.",
+      "examples": [10, 50]
+    },
+    "min_identity": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.2,
+      "description": "Minimum sequence-identity threshold (0.0-1.0). Lower returns more remote templates.",
+      "examples": [0.2, 0.3, 0.6]
+    },
+    "min_coverage": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.5,
+      "description": "Minimum query-coverage fraction the alignment must span.",
+      "examples": [0.5, 0.8]
+    },
+    "max_evalue": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "default": 0.001,
+      "description": "E-value cutoff for reporting hits (lower = stricter).",
+      "examples": [0.001, 0.01]
+    },
+    "temporal_cutoff": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional release-date cutoff (ISO YYYY-MM-DD) for template entries; supports reproducing benchmark snapshots. Null disables filtering.",
+      "examples": ["2024-06-30", null]
+    },
+    "metadata_table": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional TSV/JSONL of per-template metadata (release dates, resolution) used by the temporal_cutoff filter.",
+      "examples": ["/abs/path/templates.tsv", null],
+      "vpa:digest": "sha256-if-path"
+    }
   },
-  "anyOf": [{"required": ["query_sequence"]}, {"required": ["query_fasta"]}, {"required": ["query_structure"]}],
+  "anyOf": [{"required": ["query_sequence"]}, {"required": ["query_fasta"]}, {"required": ["query_structure"]}, {"required": ["candidates"]}],
   "additionalProperties": false
 }

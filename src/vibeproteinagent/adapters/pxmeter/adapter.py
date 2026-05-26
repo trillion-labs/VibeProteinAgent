@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _VENDOR_ROOT = _PROJECT_ROOT / "vendor" / "pxmeter"
@@ -35,19 +36,55 @@ class ChainPair(BaseModel):
 
 
 class PXMeterInput(BaseModel):
-    predicted_cif: str = Field(
-        ..., min_length=1, description="Model-predicted structure (mmCIF)."
+    predicted_cif: str | None = Field(
+        None, min_length=1, description="Model-predicted structure (mmCIF)."
     )
-    reference_cif: str = Field(
-        ...,
+    reference_cif: str | None = Field(
+        None,
         min_length=1,
         description="Reference / ground-truth structure (mmCIF).",
     )
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     metrics: list[str] = Field(default_factory=lambda: ["lddt", "dockq"])
     chain_pairs: list[ChainPair] | None = Field(
         default=None,
         description="Restrict DockQ to these chain pairs. If null, all pairs are scored.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_cifs(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            if len(candidates) < 2:
+                raise ValueError(
+                    "pxmeter canonical Candidate[] input requires reference and predicted candidates"
+                )
+            reference_cif = candidates[0].get("structure_path")
+            predicted_cif = candidates[1].get("structure_path")
+            if not reference_cif or not predicted_cif:
+                raise ValueError("pxmeter canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("reference_cif", reference_cif)
+            out.setdefault("predicted_cif", predicted_cif)
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_cifs(self) -> PXMeterInput:
+        if not self.predicted_cif or not self.reference_cif:
+            raise ValueError("pxmeter requires predicted_cif and reference_cif")
+        return self
 
 
 class DockQEntry(BaseModel):
@@ -58,6 +95,7 @@ class DockQEntry(BaseModel):
 class PXMeterOutput(BaseModel):
     metrics: dict[str, Any]
     report_json_path: str
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
 
 
@@ -84,6 +122,7 @@ class PXMeterAdapter(ToolAdapter):
         t0 = time.time()
         ctx.emit_progress(0.05)
 
+        assert params.reference_cif is not None and params.predicted_cif is not None
         ref_src = Path(params.reference_cif).expanduser().resolve()
         pred_src = Path(params.predicted_cif).expanduser().resolve()
         if not ref_src.exists():
@@ -123,6 +162,7 @@ class PXMeterAdapter(ToolAdapter):
         return PXMeterOutput(
             metrics=metrics_out,
             report_json_path=str(report_path),
+            candidates=_pxmeter_candidates(params, str(pred_src), metrics_out, str(report_path)),
             runtime_ms=runtime_ms,
         )
 
@@ -178,3 +218,63 @@ class PXMeterAdapter(ToolAdapter):
 
 
 __all__ = ["ChainPair", "PXMeterAdapter", "PXMeterInput", "PXMeterOutput"]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _pxmeter_candidates(
+    params: PXMeterInput,
+    predicted_cif: str,
+    metrics: dict[str, Any],
+    report_json_path: str,
+) -> list[dict[str, Any]]:
+    upstream = [params.candidates[1]] if params.candidates and len(params.candidates) >= 2 else [{}]
+    out: list[dict[str, Any]] = []
+    for index, source_candidate in enumerate(upstream):
+        structure_path = source_candidate.get("structure_path") or predicted_cif
+        local_id = _source_local_id(source_candidate, f"pxmeter_{index:04d}")
+        if _is_canonical_candidate(source_candidate):
+            candidate = _copy_candidate(source_candidate)
+        else:
+            candidate = {
+                "schema_version": "candidate_v1",
+                "candidate_id": stable_candidate_id(
+                    "pxmeter",
+                    local_id,
+                    structure_path=structure_path,
+                    index=index,
+                ),
+                "source": {
+                    "tool": "pxmeter",
+                    "node_id": None,
+                    "job_id": None,
+                    "local_id": local_id,
+                    "native_id": None,
+                    "index": index,
+                },
+                "structure_path": structure_path,
+                "scores": {},
+                "artifacts": {},
+            }
+        candidate.setdefault("scores", {})["pxmeter"] = metrics
+        candidate.setdefault("artifacts", {})["pxmeter"] = {"report_json_path": report_json_path}
+        out.append(candidate)
+    return out
+
+
+def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        key: value
+        for key, value in candidate.items()
+        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+    }
+    out["scores"] = dict(candidate.get("scores") or {})
+    out["artifacts"] = dict(candidate.get("artifacts") or {})
+    return out
+
+
+def _source_local_id(candidate: dict[str, Any], fallback: str) -> str:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    return str(source.get("local_id") or fallback)

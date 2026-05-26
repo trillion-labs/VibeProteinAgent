@@ -4,20 +4,102 @@
   "type": "object",
   "required": ["interpro_id"],
   "properties": {
-    "interpro_id": {"type": "string", "pattern": "^IPR[0-9]{6}$"},
-    "max_sequences": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1000},
-    "reviewed": {"type": ["boolean", "null"], "default": null},
-    "taxon_id": {"type": ["integer", "null"], "default": null},
-    "min_length": {"type": ["integer", "null"], "minimum": 1, "default": null},
-    "max_length": {"type": ["integer", "null"], "minimum": 1, "default": null},
-    "temporal_cutoff": {"type": ["string", "null"], "default": null},
-    "include_fragments": {"type": "boolean", "default": false},
-    "include_undated": {"type": "boolean", "default": false},
-    "deduplicate_sequences": {"type": "boolean", "default": true},
-    "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
-    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
-    "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 120, "default": 20},
-    "max_scan_accessions": {"type": ["integer", "null"], "minimum": 1, "maximum": 50000, "default": null}
+    "interpro_id": {
+      "type": "string",
+      "pattern": "^IPR[0-9]{6}$",
+      "description": "InterPro family/domain accession in IPRNNNNNN format. Selects the InterPro entry whose member UniProt sequences are returned. Use literature_search to discover the right InterPro ID for a keyword.",
+      "examples": ["IPR000001", "IPR036291", "IPR011009"]
+    },
+    "max_sequences": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "default": 1000,
+      "description": "Maximum number of UniProt sequences to return from this InterPro entry.",
+      "examples": [100, 500, 2000]
+    },
+    "reviewed": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "If true, restrict to Swiss-Prot (reviewed) entries; if false, restrict to TrEMBL. Null returns both.",
+      "examples": [true, false, null]
+    },
+    "taxon_id": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "NCBI taxonomy id to restrict results to a clade. Null disables taxonomy filtering.",
+      "examples": [9606, 562, null]
+    },
+    "min_length": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "default": null,
+      "description": "Optional minimum sequence length (inclusive) in amino acids.",
+      "examples": [50, 100, null]
+    },
+    "max_length": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "default": null,
+      "description": "Optional maximum sequence length (inclusive) in amino acids.",
+      "examples": [500, 1000, null]
+    },
+    "temporal_cutoff": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "ISO date (YYYY-MM-DD); only sequences with UniProt entry dates on/before this date are returned, for reproducing historic snapshots.",
+      "examples": ["2023-01-01", "2024-06-30", null]
+    },
+    "include_fragments": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, include sequences flagged by UniProt as `Fragment` (incomplete N- or C-terminus). Default excludes them.",
+      "examples": [false, true]
+    },
+    "include_undated": {
+      "type": "boolean",
+      "default": false,
+      "description": "When `temporal_cutoff` is set, controls whether records without a parseable entry date are included.",
+      "examples": [false, true]
+    },
+    "deduplicate_sequences": {
+      "type": "boolean",
+      "default": true,
+      "description": "Drop duplicate sequence strings across accessions so each returned sequence is unique.",
+      "examples": [true, false]
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 200,
+      "description": "Number of records fetched per InterPro/UniProt API page.",
+      "examples": [200, 500]
+    },
+    "max_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5,
+      "description": "Maximum parallel HTTP requests.",
+      "examples": [5, 10]
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 120,
+      "default": 20,
+      "description": "Per-request HTTP timeout in seconds.",
+      "examples": [20, 60]
+    },
+    "max_scan_accessions": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 50000,
+      "default": null,
+      "description": "Upper bound on accessions scanned during the InterPro traversal. Null means no cap.",
+      "examples": [5000, 20000, null]
+    }
   },
   "additionalProperties": false
 }

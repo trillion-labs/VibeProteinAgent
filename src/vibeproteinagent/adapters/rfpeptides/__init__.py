@@ -7,6 +7,7 @@ from .adapter import (
     RFPeptidesDesign,
     RFPeptidesInput,
     RFPeptidesOutput,
+    availability_report,
     availability_skip_reason,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "RFPeptidesDesign",
     "RFPeptidesInput",
     "RFPeptidesOutput",
+    "availability_report",
     "availability_skip_reason",
 ]

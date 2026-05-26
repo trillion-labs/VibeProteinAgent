@@ -1,0 +1,21 @@
+LLM agent design run summary
+Workspace: llm_agent_design_gpt54_vm011_success_20260523_151520
+Provider/model: codex / gpt-5.4
+State: completed
+Primary workflow: wf_4df2b27e04244db89ce999c2d9cae9d2
+Follow-up workflow: wf_ef8671e8a35148b4bf18d39eede463fc
+
+Tools completed:
+- rfdiffusion: de novo backbone generation
+- proteinmpnn: inverse-folding sequence generation
+- mpnn_to_protenix_input: conversion for refolding
+- protenix_v2: refolding / confidence prediction
+- structure_analysis: structure annotation
+- protein_qc: sequence/structure QC
+- rank_designs: candidate ranking
+
+Selected output sequence:
+KIKEEVEELLERLEEELEELEEEYEELLANPDSEEEKEELLEEAEEFLEELKEAAELLKELLKKGYLKEALLVFLALLRAALELLRILREVSEEFPEYKEEFEELYKEVVKLLSEASKEMLEYILKKEKENGEKLKKEAEEIKKLFLGDEESKKKALEKIKELVEKALSGENPEGSLLKLTYILSYLFEDEETLLKLLEENSEYIEEIVELVKELLEKLR
+
+Ranking/QC note:
+This is a de novo structural design because no ligand-bound NAD(P)HX repair scaffold was provided. The run completed structurally, but functional Mg2+/AMP/NADPHX activity is not experimentally validated by this workflow.

@@ -1,0 +1,1 @@
+{"ok": false, "error": {"code": "E_INVALID_PARAMS", "message": "agent workflow runtime param has the wrong type", "details": {"workflow": "NADPHX_repair_protein_sequence_analysis", "param": "go_terms", "expected_type": "list", "actual_type": "dict", "value": {"type": "list"}}}}

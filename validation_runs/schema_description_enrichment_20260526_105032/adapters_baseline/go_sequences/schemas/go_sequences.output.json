@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/go_sequences.output.json",
+  "type": "object",
+  "required": ["go_id", "association_records", "resolved_uniprot_accessions", "kept_sequences", "sequences", "fasta_path", "metadata_jsonl", "dropped", "summary", "artifacts", "runtime_ms"],
+  "properties": {
+    "go_id": {"type": "string"},
+    "go_label": {"type": ["string", "null"]},
+    "association_records": {"type": "integer", "minimum": 0},
+    "resolved_uniprot_accessions": {"type": "integer", "minimum": 0},
+    "kept_sequences": {"type": "integer", "minimum": 0},
+    "sequences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["candidate_id", "accession", "sequence"],
+        "properties": {
+          "candidate_id": {"type": "string"},
+          "accession": {"type": "string"},
+          "sequence": {"type": "string"},
+          "length": {"type": ["integer", "null"], "minimum": 0},
+          "reviewed": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "candidate_id", "source"],
+        "properties": {
+          "schema_version": {"const": "candidate_v1"},
+          "candidate_id": {"type": "string", "minLength": 1},
+          "source": {
+            "type": "object",
+            "required": ["tool", "local_id"],
+            "properties": {
+              "tool": {"type": "string", "minLength": 1},
+              "node_id": {"type": ["string", "null"], "minLength": 1},
+              "job_id": {"type": ["string", "null"], "minLength": 1},
+              "local_id": {"type": "string", "minLength": 1},
+              "native_id": {"type": ["string", "null"], "minLength": 1},
+              "index": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": false
+          },
+          "sequence": {"type": "string", "minLength": 1},
+          "structure_path": {"type": "string", "minLength": 1},
+          "scores": {
+            "type": "object",
+            "additionalProperties": {"type": "object", "additionalProperties": true}
+          },
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": {"type": "object", "additionalProperties": true}
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "fasta_path": {"type": "string"},
+    "metadata_jsonl": {"type": "string"},
+    "dropped": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "summary": {"type": "object", "additionalProperties": true},
+    "artifacts": {"type": "object", "additionalProperties": {"type": "string"}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

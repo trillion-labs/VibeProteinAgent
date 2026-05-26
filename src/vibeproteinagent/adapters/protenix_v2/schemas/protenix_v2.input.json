@@ -2,34 +2,95 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/protenix_v2.input.json",
   "type": "object",
-  "required": ["input_json"],
+  "anyOf": [
+    {"required": ["input_json"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
     "input_json": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to a Protenix-format input JSON describing the molecular system.",
+      "description": "Absolute path to a Protenix-format input JSON describing the molecular system (chains, ligands, optional MSA/template hints).",
+      "examples": ["/abs/path/protenix_input.json"],
       "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from upstream sequence-producing tools. Promotes the first item's `sequence` into a generated Protenix input JSON when `input_json` is omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
     },
     "seeds": {
       "type": "array",
       "items": {"type": "integer"},
       "minItems": 1,
-      "default": [101]
+      "default": [101],
+      "description": "List of integer RNG seeds. Protenix runs one prediction per seed; multiple seeds yield independent diffusion samples for confidence estimation.",
+      "examples": [[101], [101, 137, 311]]
     },
-    "use_msa": {"type": "boolean", "default": false},
+    "use_msa": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable multiple-sequence-alignment features for protein chains. Improves accuracy but requires a precomputed MSA or remote MSA generation.",
+      "examples": [false, true]
+    },
     "msa_backend": {
       "type": "string",
       "enum": ["auto", "none", "remote"],
       "default": "auto",
-      "description": "MSA backend policy. With use_msa=true, auto uses a prepared MSA if present and otherwise falls back to remote generation; none disables MSA; remote always calls the remote MSA path."
+      "description": "MSA backend policy. With `use_msa=true`, `auto` uses a prepared MSA if present and otherwise falls back to remote generation; `none` disables MSA; `remote` always calls the remote MSA path.",
+      "examples": ["auto", "remote", "none"]
     },
-    "use_template": {"type": "boolean", "default": false},
-    "use_rna_msa": {"type": "boolean", "default": false},
-    "enable_cache": {"type": "boolean", "default": true},
-    "enable_tf32": {"type": "boolean", "default": true},
-    "n_sample": {"type": "integer", "minimum": 1, "maximum": 25, "default": 5},
-    "n_step": {"type": "integer", "minimum": 10, "maximum": 1000, "default": 200},
-    "n_cycle": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}
+    "use_template": {
+      "type": "boolean",
+      "default": false,
+      "description": "Use template structures during prediction. Templates must be present in the input JSON or fetched via Protenix's template pipeline.",
+      "examples": [false, true]
+    },
+    "use_rna_msa": {
+      "type": "boolean",
+      "default": false,
+      "description": "Include RNA MSA features when the system contains RNA chains.",
+      "examples": [false, true]
+    },
+    "enable_cache": {
+      "type": "boolean",
+      "default": true,
+      "description": "Cache diffusion state tensors during inference to speed up multi-seed runs. Disable only when debugging or under memory pressure.",
+      "examples": [true, false]
+    },
+    "enable_tf32": {
+      "type": "boolean",
+      "default": true,
+      "description": "Allow TF32 tensor operations on NVIDIA Ampere+ GPUs (faster, slightly lower precision).",
+      "examples": [true, false]
+    },
+    "n_sample": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 25,
+      "default": 5,
+      "description": "Number of diffusion samples per seed. Increasing yields more candidate structures at proportional GPU cost.",
+      "examples": [5, 10]
+    },
+    "n_step": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 1000,
+      "default": 200,
+      "description": "Diffusion sampling steps per sample. Higher values improve structure quality at higher cost.",
+      "examples": [50, 200]
+    },
+    "n_cycle": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 10,
+      "description": "AR-flow recycle count. Analogous to AF2 recycles: more cycles improve quality with diminishing returns.",
+      "examples": [10, 3]
+    }
   },
   "additionalProperties": false
 }

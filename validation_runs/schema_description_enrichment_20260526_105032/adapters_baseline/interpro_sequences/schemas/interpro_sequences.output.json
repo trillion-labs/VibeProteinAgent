@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/interpro_sequences.output.json",
+  "type": "object",
+  "required": ["interpro_id", "retrieved_accessions", "kept_sequences", "dropped_by_temporal_filter", "fasta_path", "metadata_jsonl", "summary", "artifacts", "runtime_ms"],
+  "properties": {
+    "interpro_id": {"type": "string"},
+    "retrieved_accessions": {"type": "integer", "minimum": 0},
+    "kept_sequences": {"type": "integer", "minimum": 0},
+    "dropped_by_temporal_filter": {"type": "integer", "minimum": 0},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "fasta_path": {"type": "string"},
+    "metadata_jsonl": {"type": "string"},
+    "summary": {"type": "object", "additionalProperties": true},
+    "artifacts": {"type": "object", "additionalProperties": {"type": "string"}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

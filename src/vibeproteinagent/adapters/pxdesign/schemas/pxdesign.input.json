@@ -7,70 +7,106 @@
     "target_pdb": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the target structure (PDB or CIF).",
+      "description": "Absolute path to the target structure (PDB or mmCIF) the binder is designed against.",
+      "examples": ["/abs/path/target.pdb", "outputs/target.cif"],
       "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path into `target_pdb` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/target.pdb"}]]
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
-      "description": "Chain ID of the target on the target_pdb."
+      "description": "Chain id of the target on `target_pdb`.",
+      "examples": ["A", "B"]
     },
     "binder_length": {
       "type": "integer",
       "minimum": 30,
       "maximum": 200,
-      "description": "Desired binder residue count."
+      "description": "Desired binder residue count.",
+      "examples": [60, 80, 120]
     },
     "num_samples": {
       "type": "integer",
       "minimum": 1,
       "maximum": 256,
-      "default": 5
+      "default": 5,
+      "description": "Number of diffusion samples to draw.",
+      "examples": [5, 20]
     },
     "num_steps": {
       "type": "integer",
       "minimum": 5,
       "maximum": 1000,
-      "default": 400
+      "default": 400,
+      "description": "Diffusion sampling steps.",
+      "examples": [100, 400]
     },
-    "seed": {"type": ["integer", "null"], "default": null},
-    "temperature": {"type": "number", "default": 1.0},
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "Optional integer RNG seed.",
+      "examples": [42, null]
+    },
+    "temperature": {
+      "type": "number",
+      "default": 1.0,
+      "description": "Diffusion sampling temperature. 1.0 is the model's calibrated default; tweak for diversity/quality trade-offs.",
+      "examples": [1.0, 0.7]
+    },
     "hotspots": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
-      "default": []
+      "default": [],
+      "description": "1-indexed target residue positions where the binder should engage (PXDesign hotspot syntax).",
+      "examples": [[12, 14, 16], [42]]
     },
-    "crop": {"type": ["string", "null"], "default": null},
+    "crop": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional target-region selector (chain-specific crop). Null uses the full target chain.",
+      "examples": ["A:1-150", null]
+    },
     "mode": {
       "type": "string",
       "enum": ["infer", "pipeline"],
       "default": "infer",
-      "description": "Runtime mode. 'infer' (default) runs diffusion-only in-process and emits backbone-only outputs with sequence unavailable. 'pipeline' uses a persistent sidecar in the dedicated `pxdesign-pipeline-vpa` conda env to run AF2-IG initial guess + ProteinMPNN sequence design + filtering and produce real designed amino-acid sequences."
+      "description": "Runtime mode. `infer` (default) runs diffusion-only in-process and emits backbone-only outputs with sequence unavailable. `pipeline` uses a persistent sidecar in the dedicated `pxdesign-pipeline-vpa` conda env to run AF2-IG initial guess + ProteinMPNN sequence design + filtering and produce real designed amino-acid sequences.",
+      "examples": ["infer", "pipeline"]
     },
     "top_k_designs": {
       "type": "integer",
       "minimum": 1,
       "maximum": 64,
       "default": 4,
-      "description": "Pipeline mode only: number of top filtered designs to return."
+      "description": "Pipeline mode only: number of top filtered designs to return.",
+      "examples": [4, 10]
     },
     "mpnn_temperature": {
       "type": "number",
       "minimum": 0.0001,
       "maximum": 5.0,
       "default": 0.1,
-      "description": "Pipeline mode only: ProteinMPNN sampling temperature."
+      "description": "Pipeline mode only: ProteinMPNN sampling temperature used in the sequence-design stage.",
+      "examples": [0.1, 0.3]
     },
     "af2_init_guess": {
       "type": "boolean",
       "default": true,
-      "description": "Pipeline mode only: enable AF2 initial-guess co-folding for sequence filtering."
+      "description": "Pipeline mode only: enable AF2 initial-guess co-folding for sequence filtering.",
+      "examples": [true, false]
     },
     "preset": {
       "type": "string",
       "enum": ["preview", "extended"],
       "default": "preview",
-      "description": "Pipeline mode only: PXDesign upstream preset. 'preview' is AF2-only (lighter, faster); 'extended' adds Protenix ranking. Overrides the af2_init_guess shortcut when set explicitly."
+      "description": "Pipeline mode only: PXDesign upstream preset. `preview` is AF2-only (lighter, faster); `extended` adds Protenix ranking. Overrides the `af2_init_guess` shortcut when set explicitly.",
+      "examples": ["preview", "extended"]
     }
   },
   "additionalProperties": false

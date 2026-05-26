@@ -4,13 +4,15 @@ import hashlib
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 # Project root is parents[4] from this file:
 #   src/vibeproteinagent/adapters/proteinmpnn/adapter.py
@@ -37,7 +39,8 @@ _ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"
 
 
 class ProteinMPNNInput(BaseModel):
-    pdb_path: str = Field(..., description="Absolute path to the input PDB.")
+    pdb_path: str | None = Field(None, description="Absolute path to the input PDB.")
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     chains: list[str] | None = Field(
         None, description="Chain identifiers to design; None designs every chain."
     )
@@ -45,6 +48,35 @@ class ProteinMPNNInput(BaseModel):
     temperature: float = Field(0.1, gt=0.0, le=2.0)
     omit_aas: str = Field("X", description="Amino acids disallowed at every position.")
     seed: int | None = Field(None, description="Optional RNG seed for reproducibility.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_pdb_path(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError("proteinmpnn canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("pdb_path", structure_path)
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_pdb_path(self) -> ProteinMPNNInput:
+        if not self.pdb_path:
+            raise ValueError("proteinmpnn requires pdb_path")
+        return self
 
 
 class ProteinMPNNDesign(BaseModel):
@@ -56,6 +88,7 @@ class ProteinMPNNDesign(BaseModel):
 
 class ProteinMPNNOutput(BaseModel):
     designs: list[ProteinMPNNDesign]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     designs_fasta: str
     log_prob_npz: str
     num_residues: int
@@ -113,6 +146,7 @@ class ProteinMPNNAdapter(ToolAdapter):
             if self.device.type == "cuda":
                 torch.cuda.manual_seed_all(int(params.seed))
 
+        assert params.pdb_path is not None
         pdb_path = str(Path(params.pdb_path).expanduser())
         pdb_dict_list = parse_PDB(pdb_path, input_chain_list=params.chains, ca_only=False)
         if not pdb_dict_list:
@@ -273,6 +307,15 @@ class ProteinMPNNAdapter(ToolAdapter):
         runtime_ms = int((time.time() - t0) * 1000)
         return ProteinMPNNOutput(
             designs=designs,
+            candidates=[
+                _canonical_candidate_from_design(
+                    design.model_dump(),
+                    index,
+                    params=params,
+                    structure_path=pdb_path,
+                )
+                for index, design in enumerate(designs)
+            ],
             designs_fasta=str(fasta_path),
             log_prob_npz=str(npz_path),
             num_residues=int(num_residues or 0),
@@ -300,3 +343,51 @@ __all__ = [
     "ProteinMPNNInput",
     "ProteinMPNNOutput",
 ]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _canonical_candidate_from_design(
+    design: dict[str, Any],
+    index: int,
+    *,
+    params: ProteinMPNNInput,
+    structure_path: str,
+) -> dict[str, Any]:
+    local_id = f"seq_{index:04d}"
+    sequence = str(design.get("sequence") or "")
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "proteinmpnn",
+            local_id,
+            native_id=design.get("candidate_id"),
+            sequence=sequence,
+            structure_path=structure_path,
+            index=index,
+        ),
+        "source": {
+            "tool": "proteinmpnn",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": design.get("candidate_id"),
+            "index": index,
+        },
+        "sequence": sequence,
+        "structure_path": structure_path,
+        "scores": {
+            "proteinmpnn": {
+                "score": design.get("score"),
+                "seq_recovery": design.get("seq_recovery"),
+            }
+        },
+        "artifacts": {},
+    }
+    if params.candidates and _is_canonical_candidate(params.candidates[0]):
+        upstream_scores = params.candidates[0].get("scores")
+        if isinstance(upstream_scores, dict):
+            candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+    return candidate

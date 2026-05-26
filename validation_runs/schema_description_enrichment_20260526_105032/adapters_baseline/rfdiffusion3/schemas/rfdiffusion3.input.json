@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/rfdiffusion3.input.json",
+  "type": "object",
+  "required": ["target_pdb"],
+  "properties": {
+    "target_pdb": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the target structure (.pdb) the binder is designed against.",
+      "vpa:digest": "sha256"
+    },
+    "candidates": {"type": "array", "items": {"type": "object", "additionalProperties": true}, "default": []},
+    "target_chain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1,
+      "default": "A"
+    },
+    "target_hotspots": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "default": [],
+      "description": "FASTA/sequence 1-indexed hotspot positions when target_sequence/target_fasta_path is provided; otherwise legacy structure residue numbers."
+    },
+    "target_hotspot_residue_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "default": [],
+      "description": "Explicit structure residue IDs such as A10 or B82A."
+    },
+    "target_sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Full FASTA/sequence for integer hotspot sequence-to-structure mapping."
+    },
+    "target_fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "FASTA file for integer hotspot sequence-to-structure mapping.",
+      "vpa:digest": "sha256-if-path"
+    },
+    "position_basis": {
+      "type": "string",
+      "enum": ["auto", "sequence", "structure"],
+      "default": "auto"
+    },
+    "binder_length": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 200,
+      "default": 60
+    },
+    "num_designs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "default": 8
+    },
+    "num_diffusion_steps": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 200,
+      "default": 200
+    },
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null
+    }
+  },
+  "additionalProperties": false
+}

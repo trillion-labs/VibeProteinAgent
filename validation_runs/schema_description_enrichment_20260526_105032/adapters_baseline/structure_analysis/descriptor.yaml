@@ -1,0 +1,17 @@
+name: structure_analysis
+version: "1.0.0"
+category: analysis
+description: "Per-residue structure analysis: exposure, contacts, interfaces, ligand contacts, and liabilities. Integer positions are FASTA/sequence 1-indexed with sequence/fasta_path; otherwise legacy structure numbers."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 20
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [structure_analysis]
+input_schema: schemas/structure_analysis.input.json
+output_schema: schemas/structure_analysis.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.structure_analysis.adapter:StructureAnalysisAdapter"

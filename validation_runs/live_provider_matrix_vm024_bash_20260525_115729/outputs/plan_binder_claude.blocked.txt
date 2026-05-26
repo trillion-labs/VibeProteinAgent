@@ -1,0 +1,1 @@
+provider preflight failed; see /mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/live_provider_matrix_vm024_bash_20260525_115729/logs/preflight_claude.log

@@ -6,7 +6,7 @@ from typing import Any
 
 from vibeproteinagent.adapters import ToolRegistry, validate_params
 from vibeproteinagent.adapters.availability import descriptor_availability
-from vibeproteinagent.adapters.descriptor import resolve_input_schema_dict
+from vibeproteinagent.adapters.descriptor import drop_optional_none_params, resolve_input_schema_dict
 from vibeproteinagent.core.errors import (
     DependencyError,
     ErrorCode,
@@ -60,12 +60,15 @@ class WorkflowExecutor:
         workspace: Workspace,
         registry: ToolRegistry,
         supervisor: Any | None = None,
+        *,
+        virtual_outputs: dict[str, Any] | None = None,
     ) -> None:
         self.workspace = workspace
         self.registry = registry
         self.supervisor = supervisor  # SupervisorClient or None (skip-execution mode)
         self.store = WorkflowStore(workspace)
         self.jobs = JobStore(workspace)
+        self.virtual_outputs = dict(virtual_outputs or {})
 
     # ------------------------------------------------------------ submit
 
@@ -373,6 +376,7 @@ class WorkflowExecutor:
                 # Same JSON-Schema validator the CLI uses, so workflow nodes can't
                 # bypass param validation (Architecture v1 §6 + §8).
                 try:
+                    resolved = drop_optional_none_params(descriptor, resolved)
                     validate_params(descriptor, resolved)
                     if descriptor.name == "rfdiffusion":
                         mode_status = _rfdiffusion_mode_readiness(resolved)
@@ -675,14 +679,17 @@ class WorkflowExecutor:
     def _upstream_ok(rt: _NodeRuntime, runtime: dict[str, _NodeRuntime]) -> bool:
         return WorkflowStateMachine.upstream_ok(rt, runtime)
 
-    @staticmethod
     def _build_scope(
+        self,
         params: dict[str, Any],
         runtime: dict[str, _NodeRuntime],
         *,
         current: _NodeRuntime | None = None,
     ) -> dict[str, Any]:
-        return WorkflowStateMachine.build_scope(params, runtime, current=current)
+        scope = WorkflowStateMachine.build_scope(params, runtime, current=current)
+        if self.virtual_outputs:
+            scope["outputs"] = {**self.virtual_outputs, **scope.get("outputs", {})}
+        return scope
 
     def _resolve_iterable(self, expr: str, scope: dict[str, Any]) -> list[Any]:
         return _resolve_iterable(expr, scope)

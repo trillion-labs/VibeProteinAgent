@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/protein_qc.output.json",
+  "type": "object",
+  "required": ["metrics", "flags", "runtime_ms"],
+  "properties": {
+    "metrics": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["number", "string", "null"]
+      }
+    },
+    "flags": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,22 @@
+{
+  "version": "planner_ir_v1",
+  "goal": "Rank candidates from a non-canonical producer.",
+  "assumptions": [],
+  "missing_inputs": [],
+  "nodes": [
+    {
+      "id": "noop_step",
+      "tool": "noop",
+      "intent": "Produce a placeholder output.",
+      "inputs": {"payload": "not candidates"},
+      "upstream": []
+    },
+    {
+      "id": "rank",
+      "tool": "rank_designs",
+      "intent": "Rank candidate-like rows.",
+      "inputs": {},
+      "upstream": [{"node": "noop_step", "relationship": "candidate_source"}]
+    }
+  ]
+}

@@ -4,62 +4,149 @@
   "type": "object",
   "oneOf": [
     {"required": ["input_yaml"]},
-    {"required": ["sequences"]}
+    {"required": ["sequences"]},
+    {"required": ["candidates"]}
   ],
   "properties": {
     "input_yaml": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to a Boltz-format YAML describing protein chain(s) + ligand and (optionally) the affinity property to score.",
+      "description": "Absolute path to a Boltz-format YAML describing protein chain(s) + ligand and (optionally) the affinity property to score. Mutually exclusive with `sequences` and `candidates`.",
+      "examples": ["/abs/path/complex.yaml"],
       "vpa:digest": "sha256-if-path"
     },
     "sequences": {
       "type": "array",
       "minItems": 1,
-      "description": "Inline list of typed inputs Boltz accepts. Mutually exclusive with input_yaml.",
+      "description": "Inline list of typed inputs Boltz accepts (protein/rna/dna/ligand entities). Mutually exclusive with `input_yaml`.",
+      "examples": [[{"type": "protein", "id": "A", "sequence": "MKTAYI..."}, {"type": "ligand", "id": "L", "smiles": "CCO"}]],
       "items": {
         "type": "object",
         "properties": {
-          "type": {"type": "string", "enum": ["protein", "rna", "dna", "ligand"]},
+          "type": {
+            "type": "string",
+            "enum": ["protein", "rna", "dna", "ligand"],
+            "description": "Entity type: protein/rna/dna for biopolymers (use `sequence`); ligand for small molecules (use `smiles` or `ccd`).",
+            "examples": ["protein", "ligand"]
+          },
           "id": {
+            "description": "Chain identifier or list of identifiers for this entity. Strings for a single chain; arrays for multi-copy entities sharing the same sequence/structure.",
+            "examples": ["A", ["A", "B"]],
             "oneOf": [
               {"type": "string"},
               {"type": "array", "items": {"type": "string"}}
             ]
           },
-          "sequence": {"type": "string"},
-          "smiles": {"type": "string"},
-          "ccd": {"type": "string"},
-          "msa": {"type": "string"},
-          "binder": {"type": "boolean"}
+          "sequence": {
+            "type": "string",
+            "description": "Amino-acid (proteins) or nucleotide (rna/dna) sequence for the entity. Ignored for ligand entries.",
+            "examples": ["MKTAYIAKQRQISFVKSHFSRQ"]
+          },
+          "smiles": {
+            "type": "string",
+            "description": "SMILES string for a ligand entity. Mutually exclusive with `ccd` within the same entry.",
+            "examples": ["CCO", "C(=O)([O-])CCS(=O)(=O)O"]
+          },
+          "ccd": {
+            "type": "string",
+            "description": "PDB CCD (Chemical Component Dictionary) code for a known ligand. Use instead of `smiles` for canonical small molecules.",
+            "examples": ["ATP", "HEM", "NAG"]
+          },
+          "msa": {
+            "type": "string",
+            "description": "Optional path to a precomputed multiple-sequence alignment (a3m) for this protein chain.",
+            "examples": ["/abs/path/chainA.a3m"]
+          },
+          "binder": {
+            "type": "boolean",
+            "description": "Mark this entity as the binder for affinity scoring (Boltz routes the affinity head to the chain flagged binder=true).",
+            "examples": [true, false]
+          }
         },
         "required": ["type", "id"],
         "additionalProperties": false
       }
     },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool (e.g. ProteinMPNN sequences for affinity scoring). Translates to `sequences` when neither `input_yaml` nor `sequences` is given.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "ligandmpnn", "local_id": "0"}, "sequence": "MKTAYI..."}]]
+    },
     "binder_chain": {
       "type": "string",
-      "description": "Chain id of the binder ligand to score for affinity. Required when using `sequences`; ignored when `input_yaml` already declares a `properties.affinity` block."
+      "description": "Chain id of the binder ligand or protein whose affinity is scored. Required when using `sequences`; ignored when `input_yaml` already declares a `properties.affinity` block.",
+      "examples": ["L", "B"]
     },
     "seeds": {
       "type": "array",
       "items": {"type": "integer"},
       "minItems": 1,
-      "default": [42]
+      "default": [42],
+      "description": "List of integer RNG seeds. Boltz runs one prediction per seed; multiple seeds yield diversity for ensemble downstream scoring.",
+      "examples": [[42], [42, 101, 137]]
     },
-    "recycling_steps": {"type": "integer", "minimum": 1, "maximum": 20, "default": 3},
-    "sampling_steps": {"type": "integer", "minimum": 5, "maximum": 1000, "default": 200},
-    "diffusion_samples": {"type": "integer", "minimum": 1, "maximum": 25, "default": 1},
-    "sampling_steps_affinity": {"type": "integer", "minimum": 5, "maximum": 1000, "default": 200},
-    "diffusion_samples_affinity": {"type": "integer", "minimum": 1, "maximum": 25, "default": 3},
-    "use_msa": {"type": "boolean", "default": false},
+    "recycling_steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 3,
+      "description": "Number of structure-prediction recycling iterations (Boltz `--recycling_steps`). Higher values improve accuracy with diminishing returns; 3 is the typical default.",
+      "examples": [3, 6]
+    },
+    "sampling_steps": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 1000,
+      "default": 200,
+      "description": "Diffusion sampling steps used during structure inference. Larger values improve structural quality at the cost of runtime.",
+      "examples": [50, 200, 500]
+    },
+    "diffusion_samples": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 25,
+      "default": 1,
+      "description": "Number of independent diffusion samples drawn per seed during structure inference. Increase for ensemble structures.",
+      "examples": [1, 5]
+    },
+    "sampling_steps_affinity": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 1000,
+      "default": 200,
+      "description": "Diffusion sampling steps used by the affinity prediction head. Independent from the structure-head `sampling_steps`.",
+      "examples": [50, 200]
+    },
+    "diffusion_samples_affinity": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 25,
+      "default": 3,
+      "description": "Number of diffusion samples for the affinity head per seed. Increasing reduces stochastic noise in the predicted affinity.",
+      "examples": [3, 5]
+    },
+    "use_msa": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable multiple-sequence-alignment features for the protein chain(s). MSAs improve structural accuracy but require either a pre-built MSA or a remote ColabFold call.",
+      "examples": [false, true]
+    },
     "msa_backend": {
       "type": "string",
       "enum": ["auto", "none", "remote"],
       "default": "auto",
-      "description": "MSA backend policy. With use_msa=true, auto uses a prepared MSA if present and otherwise falls back to the remote ColabFold server; none disables MSA; remote always calls the remote MSA server."
+      "description": "MSA backend policy. With `use_msa=true`, `auto` uses a prepared MSA if present and otherwise falls back to the remote ColabFold server; `none` disables MSA; `remote` always calls the remote MSA server.",
+      "examples": ["auto", "remote", "none"]
     },
-    "affinity_mw_correction": {"type": "boolean", "default": false}
+    "affinity_mw_correction": {
+      "type": "boolean",
+      "default": false,
+      "description": "Apply a molecular-weight correction to the predicted affinity (Boltz `affinity_mw_correction`). Useful when comparing across ligands of different sizes.",
+      "examples": [false, true]
+    }
   },
   "additionalProperties": false
 }

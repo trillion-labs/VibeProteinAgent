@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/structure_analysis.input.json",
+  "type": "object",
+  "anyOf": [
+    {"required": ["structure_path"]},
+    {"required": ["candidates"]}
+  ],
+  "properties": {
+    "structure_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256-if-path"},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "sequence": {"type": ["string", "null"], "default": null},
+    "fasta_path": {"type": ["string", "null"], "minLength": 1, "default": null, "vpa:digest": "sha256-if-path"},
+    "position_basis": {"type": "string", "enum": ["auto", "sequence", "structure"], "default": "auto"},
+    "chain_id": {"type": ["string", "null"], "default": null},
+    "interface_chain_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+    "ligand_resnames": {"type": "array", "items": {"type": "string"}, "default": []},
+    "positions": {"type": "array", "items": {"type": "integer", "minimum": 1}, "default": [], "description": "FASTA/sequence 1-indexed positions when sequence/fasta_path is provided; otherwise legacy structure residue numbers."},
+    "max_annotations": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 200},
+    "contact_distance_angstrom": {"type": "number", "exclusiveMinimum": 0, "maximum": 20, "default": 5.0},
+    "surface_rsa_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.25},
+    "buried_rsa_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.10},
+    "run_dssp": {"type": "boolean", "default": true},
+    "output_prefix": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "default": "structure_analysis"}
+  },
+  "additionalProperties": false
+}

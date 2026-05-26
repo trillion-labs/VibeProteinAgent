@@ -14,6 +14,12 @@
       },
       "additionalProperties": true
     },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 output emitted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "num_residues": {"type": "integer", "minimum": 1},
     "model_name": {"type": "string", "minLength": 1},
     "runtime_ms": {"type": "integer", "minimum": 0}

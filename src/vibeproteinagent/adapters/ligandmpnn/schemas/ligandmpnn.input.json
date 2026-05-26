@@ -4,26 +4,96 @@
   "type": "object",
   "required": ["pdb_path"],
   "properties": {
-    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "pdb_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the input PDB structure containing the protein backbone(s) and (optionally) heteroatoms/ligands that LigandMPNN conditions the sequence design on.",
+      "examples": ["/abs/path/scaffold.pdb", "outputs/binder_with_ligand.pdb"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream structure tool. Promotes the first item's structure_path into `pdb_path` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/scaffold.pdb"}]]
+    },
     "chains": {
       "type": ["array", "null"],
       "items": {"type": "string", "minLength": 1},
-      "default": null
+      "default": null,
+      "description": "Chain identifiers to design. Null designs every protein chain in the structure.",
+      "examples": [["A"], ["A", "B"], null]
     },
-    "num_designs": {"type": "integer", "minimum": 1, "maximum": 1024, "default": 8},
-    "temperature": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.1},
-    "omit_aas": {"type": "string", "default": "X"},
-    "seed": {"type": ["integer", "null"], "default": null},
+    "num_designs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024,
+      "default": 8,
+      "description": "Number of candidate sequences to sample.",
+      "examples": [8, 32]
+    },
+    "temperature": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "maximum": 2.0,
+      "default": 0.1,
+      "description": "Sampling temperature. 0.1 (default) gives high-confidence sequences close to the model's argmax; raise toward 0.5-1.0 for diversity.",
+      "examples": [0.1, 0.3, 0.5]
+    },
+    "omit_aas": {
+      "type": "string",
+      "default": "X",
+      "description": "Amino-acid one-letter codes to forbid at every position. Default `X` blocks the unknown token. Concatenate letters with no separator.",
+      "examples": ["X", "CX", "XCM"]
+    },
+    "seed": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "Optional RNG seed for reproducibility. Null lets the model choose its own seed.",
+      "examples": [42, null]
+    },
     "model_type": {
       "type": "string",
       "enum": ["protein_mpnn", "ligand_mpnn", "soluble_mpnn", "ca_mpnn"],
-      "default": "ligand_mpnn"
+      "default": "ligand_mpnn",
+      "description": "Which MPNN checkpoint to use. `ligand_mpnn` (default) conditions on heteroatoms; `protein_mpnn` ignores ligands; `soluble_mpnn` is biased toward solubility; `ca_mpnn` is a Cα-only variant for low-resolution backbones.",
+      "examples": ["ligand_mpnn", "protein_mpnn", "soluble_mpnn"]
     },
-    "redesigned_residues": {"type": ["string", "null"], "default": null, "description": "Explicit structure residue IDs such as A10 A11 B25."},
-    "redesigned_positions": {"type": "array", "items": {"type": "integer", "minimum": 1}, "default": [], "description": "FASTA/sequence 1-indexed positions to redesign when sequence/fasta_path is provided."},
-    "sequence": {"type": ["string", "null"], "default": null},
-    "fasta_path": {"type": ["string", "null"], "minLength": 1, "default": null, "vpa:digest": "sha256-if-path"},
-    "position_basis": {"type": "string", "enum": ["auto", "sequence", "structure"], "default": "auto"}
+    "redesigned_residues": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Explicit structure residue IDs (space-separated, chain+number format) marking the designable positions. Use when `position_basis=structure` or when residue numbering is non-trivial.",
+      "examples": ["A10 A11 B25", "A30 A31 A32 A33"]
+    },
+    "redesigned_positions": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "default": [],
+      "description": "FASTA/sequence 1-indexed positions to redesign when `sequence` or `fasta_path` is provided. Positions are mapped onto the corresponding structure residue ids before MPNN runs.",
+      "examples": [[10, 11, 25], [30, 31, 32]]
+    },
+    "sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Reference protein sequence for position mapping (paired with `redesigned_positions`). Null uses the sequence implied by the PDB.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
+    },
+    "fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "FASTA file containing the reference sequence. Alternative to inline `sequence` for position mapping.",
+      "examples": ["/abs/path/ref.fasta", null],
+      "vpa:digest": "sha256-if-path"
+    },
+    "position_basis": {
+      "type": "string",
+      "enum": ["auto", "sequence", "structure"],
+      "default": "auto",
+      "description": "How to interpret integer positions in `redesigned_positions`. `auto` picks sequence when a reference sequence/fasta is given, else structure; `sequence` forces 1-indexed FASTA positions; `structure` forces legacy PDB residue numbering.",
+      "examples": ["auto", "sequence", "structure"]
+    }
   },
   "additionalProperties": false
 }

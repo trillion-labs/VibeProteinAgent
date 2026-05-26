@@ -4,7 +4,12 @@
   "type": "object",
   "required": ["go_id"],
   "properties": {
-    "go_id": {"type": "string", "pattern": "^GO:[0-9]{7}$"},
+    "go_id": {
+      "type": "string",
+      "pattern": "^GO:[0-9]{7}$",
+      "description": "Gene Ontology identifier in GO:NNNNNNN format. Specifies the biological function, process, or component used to retrieve associated UniProt sequences. Use literature_search or interpro_sequences to discover the right GO ID before calling this tool.",
+      "examples": ["GO:0070204", "GO:0006066", "GO:0008152"]
+    },
     "aspect": {
       "type": ["string", "null"],
       "enum": [
@@ -19,22 +24,107 @@
         "bp",
         "cc"
       ],
-      "default": null
+      "default": null,
+      "description": "GO aspect filter. Use `molecular_function` (or `mf`) for catalytic/binding roles, `biological_process` (or `bp`) for pathways, `cellular_component` (or `cc`) for subcellular localization. Leave null to disable filtering.",
+      "examples": ["molecular_function", "mf", null]
     },
-    "max_sequences": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1000},
-    "reviewed": {"type": ["boolean", "null"], "default": null},
-    "taxon_id": {"type": ["integer", "null"], "default": null},
-    "evidence_codes": {"type": "array", "items": {"type": "string"}, "default": []},
-    "exclude_iea": {"type": "boolean", "default": false},
-    "min_length": {"type": ["integer", "null"], "minimum": 1, "default": null},
-    "max_length": {"type": ["integer", "null"], "minimum": 1, "default": null},
-    "temporal_cutoff": {"type": ["string", "null"], "default": null},
-    "include_undated": {"type": "boolean", "default": false},
-    "deduplicate_sequences": {"type": "boolean", "default": true},
-    "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
-    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
-    "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 120, "default": 20},
-    "max_scan_accessions": {"type": ["integer", "null"], "minimum": 1, "maximum": 50000, "default": null}
+    "max_sequences": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "default": 1000,
+      "description": "Maximum number of UniProt sequences to return for the GO term. Typical values: 50-200 for narrow design, 500+ for broad family analysis.",
+      "examples": [100, 500, 2000]
+    },
+    "reviewed": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "If true, return only Swiss-Prot (manually reviewed) sequences; if false, only TrEMBL (unreviewed). Null returns both.",
+      "examples": [true, false, null]
+    },
+    "taxon_id": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "NCBI taxonomy id to restrict the returned sequences to a single organism or clade. Null disables taxonomy filtering.",
+      "examples": [9606, 10090, null]
+    },
+    "evidence_codes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Allowlist of GO evidence codes (e.g. EXP, IDA, IMP, ISS, IEA). Empty list disables this filter.",
+      "examples": [["EXP", "IDA", "IMP"], []]
+    },
+    "exclude_iea": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, exclude `IEA` (Inferred from Electronic Annotation) computational predictions and keep only experimentally validated annotations.",
+      "examples": [true, false]
+    },
+    "min_length": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "default": null,
+      "description": "Optional minimum sequence length (inclusive) in amino acids.",
+      "examples": [50, 100, null]
+    },
+    "max_length": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "default": null,
+      "description": "Optional maximum sequence length (inclusive) in amino acids.",
+      "examples": [500, 1000, null]
+    },
+    "temporal_cutoff": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "ISO date (YYYY-MM-DD); only sequences with a UniProt entry date on/before this date are returned. Use to reproduce benchmarks tied to historical UniProt releases.",
+      "examples": ["2023-01-01", "2024-06-30", null]
+    },
+    "include_undated": {
+      "type": "boolean",
+      "default": false,
+      "description": "When `temporal_cutoff` is set, controls whether records lacking a parseable entry date are included.",
+      "examples": [false, true]
+    },
+    "deduplicate_sequences": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, drop duplicate sequences across UniProt accessions so each returned sequence string is unique.",
+      "examples": [true, false]
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 200,
+      "description": "Number of records fetched per UniProt API request. Larger pages reduce request overhead but increase per-request latency.",
+      "examples": [200, 500]
+    },
+    "max_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5,
+      "description": "Maximum parallel HTTP requests when fetching pages.",
+      "examples": [5, 10]
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 120,
+      "default": 20,
+      "description": "Per-request HTTP timeout in seconds.",
+      "examples": [20, 60]
+    },
+    "max_scan_accessions": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 50000,
+      "default": null,
+      "description": "Upper bound on the number of UniProt accessions scanned during the GO term traversal. Null means no cap. Use to bound runtime on very broad GO terms.",
+      "examples": [5000, 20000, null]
+    }
   },
   "additionalProperties": false
 }

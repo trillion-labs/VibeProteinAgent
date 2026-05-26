@@ -4,26 +4,73 @@
   "type": "object",
   "anyOf": [
     {"required": ["sequence"]},
-    {"required": ["fasta_path"]}
+    {"required": ["fasta_path"]},
+    {"required": ["candidates"]}
   ],
   "properties": {
-    "sequence": {"type": ["string", "null"], "default": null},
+    "sequence": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Protein sequence (uppercase 1-letter codes) to analyze. Mutually exclusive with `fasta_path`.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ"]
+    },
     "fasta_path": {
-      "type": ["string", "null"],
-      "default": null,
+      "type": "string",
+      "minLength": 1,
+      "description": "FASTA file path containing one or more sequences to analyze. Multi-sequence inputs are treated as a family/MSA-style batch.",
+      "examples": ["/abs/path/family.fasta"],
       "vpa:digest": "sha256-if-path"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` into the `sequence` input when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
     },
     "positions": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "uniqueItems": true,
-      "default": []
+      "default": [],
+      "description": "1-indexed residue positions to annotate explicitly. Empty list annotates everything up to `max_annotations`.",
+      "examples": [[1, 5, 12], [42, 43]]
     },
-    "ph": {"type": "number", "minimum": 0.0, "maximum": 14.0, "default": 7.4},
-    "max_annotations": {"type": "integer", "minimum": 0, "default": 100},
-    "include_regions": {"type": "boolean", "default": true},
-    "include_residue_table": {"type": "boolean", "default": true},
-    "output_prefix": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "default": "sequence_analysis"}
+    "ph": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 14.0,
+      "default": 7.4,
+      "description": "pH at which charged-residue and isoelectric calculations are performed. Default 7.4 (physiological).",
+      "examples": [7.4, 6.5, 8.0]
+    },
+    "max_annotations": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 100,
+      "description": "Cap on per-residue annotations emitted. 0 disables per-residue annotation entirely; raise for full sequences.",
+      "examples": [100, 500]
+    },
+    "include_regions": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, include detected liability regions (deamidation, oxidation, isomerization, polybasic) in the output.",
+      "examples": [true, false]
+    },
+    "include_residue_table": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, write the per-residue annotation TSV artifact for downstream tools.",
+      "examples": [true, false]
+    },
+    "output_prefix": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "default": "sequence_analysis",
+      "description": "Filename prefix for the generated artifacts (TSV/JSON). Filesystem-safe characters only.",
+      "examples": ["sequence_analysis", "binder_v1"]
+    }
   },
   "additionalProperties": false
 }

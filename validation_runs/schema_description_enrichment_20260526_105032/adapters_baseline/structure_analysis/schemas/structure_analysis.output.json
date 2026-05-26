@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/structure_analysis.output.json",
+  "type": "object",
+  "required": ["structure_path", "chains", "residue_counts", "secondary_structure", "burial", "interface", "ligand_contacts", "liabilities", "annotation_scope", "artifacts", "warnings", "runtime_ms"],
+  "properties": {
+    "structure_path": {"type": "string"},
+    "chains": {"type": "array", "items": {"type": "string"}},
+    "residue_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "secondary_structure": {"type": "object", "additionalProperties": {"type": "number"}},
+    "burial": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "interface": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "ligand_contacts": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "liabilities": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "annotation_scope": {"type": "object", "additionalProperties": true},
+    "artifacts": {"type": "object", "additionalProperties": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

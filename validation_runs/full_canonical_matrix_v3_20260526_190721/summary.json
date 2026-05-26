@@ -1,0 +1,39 @@
+{
+  "counts": {
+    "BLOCKED": 0,
+    "FAIL": 3,
+    "PASS": 0
+  },
+  "flag": {
+    "VPA_PLANNER_IR": "v1"
+  },
+  "notes": "live provider matrix cycle with current defaults.",
+  "pr": "live_provider_matrix",
+  "providers": [
+    {
+      "artifacts_path": "validation_runs/full_canonical_matrix_v3_20260526_190721/claude",
+      "duration_seconds": 1088.0,
+      "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent LLM entry budget exhausted\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 3, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"params for go_sequences failed validation: Additional properties are not allowed ('reviewed_only' was unexpected) Constraint: type `object`. at '<root>'\", \"details\": {\"tool\": \"go_sequences\", \"field\": \"<root>\", \"errors\": [{\"fiel",
+      "provider": "claude",
+      "reason": "workflow_failed",
+      "status": "FAIL"
+    },
+    {
+      "artifacts_path": "validation_runs/full_canonical_matrix_v3_20260526_190721/codex",
+      "duration_seconds": 1792.0,
+      "first_error": "Setting the default backend to \"pytorch\". You can change it in the ~/.dgl/config.json file or export the DGLBACKEND environment variable.  Valid options are: pytorch, mxnet, tensorflow (all lowercase)\n{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent LLM entry budget exhausted\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 3, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"params for go_sequences fa",
+      "provider": "codex",
+      "reason": "planner_json_parse_or_validation_failed",
+      "status": "FAIL"
+    },
+    {
+      "artifacts_path": "validation_runs/full_canonical_matrix_v3_20260526_190721/qwen",
+      "duration_seconds": 1104.0,
+      "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent LLM entry budget exhausted\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 3, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"params for pxdesign failed validation: 'target_pdb' is a required property Constraint: type `object`. at '<root>'\", \"details\": {\"tool\": \"pxdesign\", \"field\": \"<root>\", \"errors\": [{\"field\": \"<root>\", \"message\": \"'target_pdb' is a",
+      "provider": "qwen",
+      "reason": "workflow_failed",
+      "status": "FAIL"
+    }
+  ],
+  "timestamp": "2026-05-26T11:16:35.676414+00:00"
+}

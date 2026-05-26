@@ -1,0 +1,9 @@
+semantic_codex	codex	0
+binder_codex	codex	0
+denovo_codex	codex	0
+semantic_claude	claude-code	0
+binder_claude	claude-code	0
+denovo_claude	claude-code	0
+semantic_qwen	openrouter	0
+binder_qwen	openrouter	0
+denovo_qwen	openrouter	0

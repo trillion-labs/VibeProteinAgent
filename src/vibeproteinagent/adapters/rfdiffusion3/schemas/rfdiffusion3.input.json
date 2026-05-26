@@ -7,65 +7,89 @@
     "target_pdb": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to the target structure (.pdb) the binder is designed against.",
+      "description": "Path to the target structure (.pdb) the binder is designed against (RFdiffusion3 Foundry binder-design mode).",
+      "examples": ["/abs/path/target.pdb", "outputs/target.pdb"],
       "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path into `target_pdb` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/target.pdb"}]]
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
       "maxLength": 1,
-      "default": "A"
+      "default": "A",
+      "description": "Single-letter chain id on `target_pdb` to design against.",
+      "examples": ["A", "B"]
     },
     "target_hotspots": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},
       "default": [],
-      "description": "FASTA/sequence 1-indexed hotspot positions when target_sequence/target_fasta_path is provided; otherwise legacy structure residue numbers."
+      "description": "Hotspot residue positions on the target. FASTA/sequence 1-indexed when `target_sequence`/`target_fasta_path` is provided; otherwise legacy PDB residue numbers.",
+      "examples": [[12, 14, 16], [42]]
     },
     "target_hotspot_residue_ids": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
       "default": [],
-      "description": "Explicit structure residue IDs such as A10 or B82A."
+      "description": "Explicit hotspot residue identifiers `<chain><resnum>[icode]`.",
+      "examples": [["A10", "A11", "B82A"]]
     },
     "target_sequence": {
       "type": ["string", "null"],
       "default": null,
-      "description": "Full FASTA/sequence for integer hotspot sequence-to-structure mapping."
+      "description": "Full FASTA/sequence for integer hotspot sequence-to-structure mapping.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
     },
     "target_fasta_path": {
       "type": ["string", "null"],
       "minLength": 1,
       "default": null,
-      "description": "FASTA file for integer hotspot sequence-to-structure mapping.",
+      "description": "FASTA file for integer hotspot sequence-to-structure mapping. Alternative to inline `target_sequence`.",
+      "examples": ["/abs/path/target.fasta", null],
       "vpa:digest": "sha256-if-path"
     },
     "position_basis": {
       "type": "string",
       "enum": ["auto", "sequence", "structure"],
-      "default": "auto"
+      "default": "auto",
+      "description": "How to interpret integer hotspot positions: `auto` picks sequence when a target sequence is provided, else structure; `sequence` forces 1-indexed FASTA positions; `structure` forces legacy PDB residue numbering.",
+      "examples": ["auto", "sequence", "structure"]
     },
     "binder_length": {
       "type": "integer",
       "minimum": 30,
       "maximum": 200,
-      "default": 60
+      "default": 60,
+      "description": "Binder chain length in residues.",
+      "examples": [60, 80, 120]
     },
     "num_designs": {
       "type": "integer",
       "minimum": 1,
       "maximum": 64,
-      "default": 8
+      "default": 8,
+      "description": "Number of designs sampled per run.",
+      "examples": [8, 32]
     },
     "num_diffusion_steps": {
       "type": "integer",
       "minimum": 10,
       "maximum": 200,
-      "default": 200
+      "default": 200,
+      "description": "Diffusion timesteps. Larger values improve quality at proportional cost.",
+      "examples": [200, 100]
     },
     "seed": {
       "type": ["integer", "null"],
-      "default": null
+      "default": null,
+      "description": "Optional integer RNG seed.",
+      "examples": [42, null]
     }
   },
   "additionalProperties": false

@@ -341,6 +341,14 @@ public VPA tool list. VPA is
 provider-flexible: you can use Codex, Claude Code, or OpenRouter-backed models
 without changing the underlying tool/workflow runtime.
 
+The agent supports two output modes from the same `vpa agent run` interface:
+**design / retrieval** (returns submitted candidates with structures, sequences,
+and scores) and **understanding / Q&A** (returns a free-form text answer with
+optional citations to workflow nodes). The agent decides which mode fits the
+request based on the user's verb — "design / generate / find me a binder /
+retrieve" maps to candidate submission, while "what is / compare / explain /
+how does" maps to a text answer.
+
 ```bash
 vpa agent run \
   "Design binder backbones for target.pdb, design sequences, refold candidates, run QC, and rank the best designs." \
@@ -375,6 +383,16 @@ vpa agent run "Plan a binder design round for target.pdb" --provider openrouter 
 
 Use `--plan-only` when you want to inspect the proposed plan without running
 tools.
+
+For an understanding / Q&A query, the same command returns a text answer
+once the agent has run the supporting workflow:
+
+```bash
+vpa agent run \
+  "What is the pI of UniProt P44612, and does it carry any common sequence liabilities?" \
+  --provider codex --model gpt-5.2 \
+  --workspace qa_round
+```
 
 Guide: [docs/use_llm_agent.md](docs/use_llm_agent.md)
 Notebook: [demo/use_llm_agent_demo.ipynb](demo/use_llm_agent_demo.ipynb)

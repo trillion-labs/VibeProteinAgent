@@ -1,0 +1,23 @@
+{
+  "version": "planner_ir_v1",
+  "goal": "Rank GO sequence candidates.",
+  "assumptions": [],
+  "missing_inputs": [],
+  "nodes": [
+    {
+      "id": "go_fetch",
+      "tool": "go_sequences",
+      "intent": "Retrieve candidate sequences from a GO term.",
+      "inputs": {"go_id": "GO:0003824"},
+      "upstream": []
+    },
+    {
+      "id": "rank",
+      "tool": "rank_designs",
+      "intent": "Rank the candidate sequences.",
+      "inputs": {"top_k": 3},
+      "upstream": [{"node": "go_fetch", "relationship": "candidate_source"}]
+    }
+  ],
+  "finalization": {"ranking_preference": null, "success_criteria": {}}
+}

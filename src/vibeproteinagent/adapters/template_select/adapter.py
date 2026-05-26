@@ -15,6 +15,7 @@ from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext, null_context
 from vibeproteinagent.adapters.foldseek.adapter import FoldseekAdapter, FoldseekInput
 from vibeproteinagent.adapters.mmseqs2_gpu.adapter import MMseqs2GpuAdapter, MMseqs2GpuInput
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 
 def _read_first_fasta(path: str) -> FastaRecord:
@@ -216,6 +217,7 @@ class TemplateSelectInput(BaseModel):
     query_sequence: str | None = None
     query_fasta: str | None = Field(None, json_schema_extra={"vpa:digest": "sha256-if-path"})
     query_structure: str | None = Field(None, json_schema_extra={"vpa:digest": "sha256-if-path"})
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     template_db: str = Field(min_length=1, json_schema_extra={"vpa:digest": "sha256-if-path"})
     template_db_kind: str = Field("fasta", pattern=r"^(fasta|mmseqs|foldseek)$")
     max_templates: int = Field(50, ge=1, le=1000)
@@ -224,6 +226,37 @@ class TemplateSelectInput(BaseModel):
     max_evalue: float = Field(0.001, gt=0)
     temporal_cutoff: str | None = None
     metadata_table: str | None = Field(None, json_schema_extra={"vpa:digest": "sha256-if-path"})
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_query(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if not all(canonical):
+            return data
+        out = dict(data)
+        first = candidates[0]
+        if out.get("template_db_kind") == "foldseek":
+            structure_path = first.get("structure_path")
+            if not structure_path:
+                raise ValueError("template_select canonical Candidate[] input requires structure_path")
+            out.setdefault("query_structure", structure_path)
+        else:
+            sequence = first.get("sequence")
+            if sequence:
+                out.setdefault("query_sequence", sequence)
+            elif first.get("structure_path"):
+                out.setdefault("query_structure", first.get("structure_path"))
+        return out
 
     @model_validator(mode="after")
     def _has_query(self) -> TemplateSelectInput:
@@ -245,6 +278,7 @@ class TemplateSelectOutput(BaseModel):
     templates_json: str
     templates_tsv: str
     top_templates: list[dict[str, Any]]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: dict[str, str | None]
     runtime_ms: int
 
@@ -390,6 +424,7 @@ class TemplateSelectAdapter(ToolAdapter):
             templates_json=str(json_path),
             templates_tsv=str(tsv_path),
             top_templates=selected[:10],
+            candidates=_template_select_candidates(selected, str(tsv_path)),
             artifacts={
                 "template_sequences_fasta": template_sequences_fasta,
                 "summary_json": str(summary_path),
@@ -402,3 +437,43 @@ class TemplateSelectAdapter(ToolAdapter):
 
 
 __all__ = ["TemplateSelectAdapter", "TemplateSelectInput", "TemplateSelectOutput"]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _template_select_candidates(
+    templates: list[dict[str, Any]],
+    templates_tsv: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, row in enumerate(templates):
+        native_id = str(row.get("template_id") or f"template_{index:04d}")
+        local_id = f"template_{index:04d}"
+        candidates.append({
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "template_select",
+                local_id,
+                native_id=native_id,
+                index=index,
+            ),
+            "source": {
+                "tool": "template_select",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": native_id,
+                "index": index,
+            },
+            "scores": {
+                "template_select": {
+                    "identity": row.get("identity"),
+                    "coverage": row.get("coverage"),
+                    "evalue": row.get("evalue"),
+                }
+            },
+            "artifacts": {"template_select": {"templates_tsv": templates_tsv}},
+        })
+    return candidates

@@ -2,17 +2,32 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/esm3.input.json",
   "type": "object",
-  "required": ["sequence"],
+  "anyOf": [
+    {"required": ["sequence"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
     "sequence": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[A-Za-z]+$"
+      "pattern": "^[A-Za-z]+$",
+      "description": "Protein sequence (single letters, A-Z) to run ESM3 against. The model emits per-residue embeddings and (when requested) a predicted backbone structure.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ"]
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` into the `sequence` input when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
     },
     "model_name": {
       "type": "string",
       "minLength": 1,
-      "default": "esm3_sm_open_v1"
+      "default": "esm3_sm_open_v1",
+      "description": "ESM3 checkpoint identifier. `esm3_sm_open_v1` is the openly released 1.4B-parameter model; larger gated variants require a HuggingFace token configured outside this schema.",
+      "examples": ["esm3_sm_open_v1", "esm3_medium_2024_03"]
     },
     "tracks": {
       "type": "array",
@@ -21,10 +36,24 @@
         "enum": ["sequence", "structure", "embedding"]
       },
       "uniqueItems": true,
-      "default": ["sequence", "structure"]
+      "default": ["sequence", "structure"],
+      "description": "Output tracks to compute. `sequence` returns token logits, `structure` predicts a backbone (PDB output), `embedding` returns per-residue model representations.",
+      "examples": [["sequence", "structure"], ["embedding"]]
     },
-    "num_steps": {"type": "integer", "minimum": 1, "default": 20},
-    "temperature": {"type": "number", "minimum": 0.0, "default": 0.5}
+    "num_steps": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 20,
+      "description": "Number of iterative generation/sampling steps when ESM3 fills masked positions or generates structure. Larger values give higher fidelity at proportionally higher cost.",
+      "examples": [20, 50]
+    },
+    "temperature": {
+      "type": "number",
+      "minimum": 0.0,
+      "default": 0.5,
+      "description": "Sampling temperature for token generation. 0.0 is greedy; higher values increase diversity at the cost of fidelity.",
+      "examples": [0.0, 0.5, 1.0]
+    }
   },
   "additionalProperties": false
 }

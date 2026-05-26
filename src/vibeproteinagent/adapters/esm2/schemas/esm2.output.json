@@ -35,6 +35,12 @@
       "items": {"type": "string", "minLength": 1},
       "default": []
     },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 output emitted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "filled_positions": {
       "type": "array",
       "items": {"type": "integer", "minimum": 1},

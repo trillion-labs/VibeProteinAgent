@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "validation_runs/full_canonical_matrix_v3_20260526_190721/codex",
+  "duration_seconds": 1792.0,
+  "first_error": "Setting the default backend to \"pytorch\". You can change it in the ~/.dgl/config.json file or export the DGLBACKEND environment variable.  Valid options are: pytorch, mxnet, tensorflow (all lowercase)\n{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent LLM entry budget exhausted\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 3, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"params for go_sequences fa",
+  "provider": "codex",
+  "reason": "planner_json_parse_or_validation_failed",
+  "status": "FAIL"
+}

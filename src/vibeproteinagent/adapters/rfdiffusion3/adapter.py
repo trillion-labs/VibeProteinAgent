@@ -20,12 +20,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_structure_residue_refs,
@@ -80,7 +82,8 @@ def availability_skip_reason() -> str | None:
 
 
 class RFdiffusion3Input(BaseModel):
-    target_pdb: str = Field(..., min_length=1)
+    target_pdb: str | None = Field(None, min_length=1)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_chain: str = Field(default="A", min_length=1, max_length=1)
     target_hotspots: list[int] = Field(default_factory=list)
     target_hotspot_residue_ids: list[str] = Field(default_factory=list)
@@ -92,6 +95,35 @@ class RFdiffusion3Input(BaseModel):
     num_diffusion_steps: int = Field(default=200, ge=10, le=200)
     seed: int | None = Field(default=None)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_target(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError("rfdiffusion3 canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("target_pdb", structure_path)
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_target_pdb(self) -> RFdiffusion3Input:
+        if not self.target_pdb:
+            raise ValueError("rfdiffusion3 requires target_pdb")
+        return self
+
 
 class RFdiffusion3Design(BaseModel):
     pdb_path: str
@@ -102,6 +134,7 @@ class RFdiffusion3Design(BaseModel):
 
 class RFdiffusion3Output(BaseModel):
     designs: list[RFdiffusion3Design]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     num_designs_returned: int
     position_mappings: dict[str, object] = Field(default_factory=dict)
@@ -134,6 +167,7 @@ class RFdiffusion3Adapter(ToolAdapter):
         ckpt = rfdiffusion3_checkpoint()
         assert exe is not None and ckpt is not None
 
+        assert params.target_pdb is not None
         target = Path(params.target_pdb).expanduser().resolve()
         if not target.is_file():
             raise FileNotFoundError(f"target_pdb not found: {target}")
@@ -182,6 +216,7 @@ class RFdiffusion3Adapter(ToolAdapter):
         ctx.emit_progress(1.0)
         return RFdiffusion3Output(
             designs=designs,
+            candidates=_rfdiffusion3_candidates(params, designs),
             runtime_ms=_format_runtime_ms(t0),
             num_designs_returned=len(designs),
             position_mappings=position_mappings,
@@ -368,6 +403,53 @@ def _infer_length(path: Path) -> int | None:
 
 def _format_runtime_ms(t0: float) -> int:
     return int((time.time() - t0) * 1000)
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _rfdiffusion3_candidates(
+    params: RFdiffusion3Input,
+    designs: list[RFdiffusion3Design],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, design in enumerate(designs):
+        local_id = f"design_{index:04d}"
+        candidate: dict[str, Any] = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "rfdiffusion3",
+                local_id,
+                sequence=design.sequence,
+                structure_path=design.pdb_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "rfdiffusion3",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": None,
+                "index": index,
+            },
+            "structure_path": design.pdb_path,
+            "scores": {
+                "rfdiffusion3": {
+                    "length": design.length,
+                    "score": design.score,
+                }
+            },
+            "artifacts": {},
+        }
+        if design.sequence:
+            candidate["sequence"] = design.sequence
+        if params.candidates and _is_canonical_candidate(params.candidates[0]):
+            upstream_scores = params.candidates[0].get("scores")
+            if isinstance(upstream_scores, dict):
+                candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        candidates.append(candidate)
+    return candidates
 
 
 __all__ = [

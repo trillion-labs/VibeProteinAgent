@@ -1,0 +1,1 @@
+ supervisor stopped  pid=681198

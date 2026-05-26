@@ -4,12 +4,14 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.binary import find_binary
 
 _BINARY_CANDIDATES = ("TMalign", "tmalign")
@@ -34,9 +36,45 @@ def _find_binary() -> Path:
 
 
 class TMalignInput(BaseModel):
-    pdb_a: str = Field(..., min_length=1)
-    pdb_b: str = Field(..., min_length=1)
+    pdb_a: str | None = Field(None, min_length=1)
+    pdb_b: str | None = Field(None, min_length=1)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     normalize_by: str = Field("shorter", pattern=r"^(a|b|average|shorter|longer)$")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_pdbs(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            if len(candidates) < 2:
+                raise ValueError(
+                    "tmalign canonical Candidate[] input requires at least two structure candidates"
+                )
+            pdb_a = candidates[0].get("structure_path")
+            pdb_b = candidates[1].get("structure_path")
+            if not pdb_a or not pdb_b:
+                raise ValueError("tmalign canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("pdb_a", pdb_a)
+            out.setdefault("pdb_b", pdb_b)
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_pdbs(self) -> TMalignInput:
+        if not self.pdb_a or not self.pdb_b:
+            raise ValueError("tmalign requires pdb_a and pdb_b")
+        return self
 
 
 class TMalignOutput(BaseModel):
@@ -49,6 +87,7 @@ class TMalignOutput(BaseModel):
     length_b: int
     seq_identity: float
     superposition_pdb: str | None = None
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
 
 
@@ -98,6 +137,7 @@ class TMalignAdapter(ToolAdapter):
         t0 = time.time()
         ctx.emit_progress(0.05)
 
+        assert params.pdb_a is not None and params.pdb_b is not None
         pdb_a = Path(params.pdb_a).expanduser().resolve()
         pdb_b = Path(params.pdb_b).expanduser().resolve()
         for label, p in (("pdb_a", pdb_a), ("pdb_b", pdb_b)):
@@ -169,6 +209,20 @@ class TMalignAdapter(ToolAdapter):
             length_b=parsed["length_b"],
             seq_identity=parsed["seq_identity"],
             superposition_pdb=sup_path,
+            candidates=_tmalign_candidates(
+                params,
+                str(pdb_b),
+                {
+                    "tm_score": normalized,
+                    "tm_score_normalized": normalized,
+                    "tm_score_normalized_by_a": parsed["tm_a"],
+                    "tm_score_normalized_by_b": parsed["tm_b"],
+                    "rmsd": parsed["rmsd"],
+                    "aligned_length": parsed["aligned_length"],
+                    "seq_identity": parsed["seq_identity"],
+                },
+                sup_path,
+            ),
             runtime_ms=runtime_ms,
         )
 
@@ -184,3 +238,69 @@ class TMalignAdapter(ToolAdapter):
 
 
 __all__ = ["TMalignAdapter", "TMalignInput", "TMalignOutput", "_parse_tmalign_stdout"]
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _tmalign_candidates(
+    params: TMalignInput,
+    query_path: str,
+    scores: dict[str, Any],
+    superposition_pdb: str | None,
+) -> list[dict[str, Any]]:
+    if params.candidates and len(params.candidates) >= 2:
+        upstream = [params.candidates[1]]
+    else:
+        upstream = [{}]
+    out: list[dict[str, Any]] = []
+    for index, source_candidate in enumerate(upstream):
+        structure_path = source_candidate.get("structure_path") or query_path
+        local_id = _source_local_id(source_candidate, f"tmalign_{index:04d}")
+        if _is_canonical_candidate(source_candidate):
+            candidate = _copy_candidate(source_candidate)
+        else:
+            candidate = {
+                "schema_version": "candidate_v1",
+                "candidate_id": stable_candidate_id(
+                    "tmalign",
+                    local_id,
+                    structure_path=structure_path,
+                    index=index,
+                ),
+                "source": {
+                    "tool": "tmalign",
+                    "node_id": None,
+                    "job_id": None,
+                    "local_id": local_id,
+                    "native_id": None,
+                    "index": index,
+                },
+                "structure_path": structure_path,
+                "scores": {},
+                "artifacts": {},
+            }
+        candidate.setdefault("scores", {})["tmalign"] = scores
+        if superposition_pdb:
+            candidate.setdefault("artifacts", {})["tmalign"] = {
+                "superposition_pdb": superposition_pdb
+            }
+        out.append(candidate)
+    return out
+
+
+def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        key: value
+        for key, value in candidate.items()
+        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+    }
+    out["scores"] = dict(candidate.get("scores") or {})
+    out["artifacts"] = dict(candidate.get("artifacts") or {})
+    return out
+
+
+def _source_local_id(candidate: dict[str, Any], fallback: str) -> str:
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    return str(source.get("local_id") or fallback)

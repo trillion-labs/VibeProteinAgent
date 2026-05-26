@@ -39,10 +39,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.core.errors import DependencyError, InvalidParamsError, VPAError
 from vibeproteinagent.workers.sidecar import (
@@ -229,7 +230,8 @@ def _ensure_pxdesign_importable() -> None:
 
 
 class PXDesignInput(BaseModel):
-    target_pdb: str = Field(..., description="Path to target structure (PDB or CIF).")
+    target_pdb: str | None = Field(None, description="Path to target structure (PDB or CIF).")
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_chain: str = Field(..., min_length=1)
     binder_length: int = Field(..., ge=30, le=200)
     num_samples: int = Field(default=5, ge=1, le=256)
@@ -244,6 +246,35 @@ class PXDesignInput(BaseModel):
     af2_init_guess: bool = Field(default=True)
     preset: str = Field(default="preview", pattern=r"^(preview|extended)$")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_target(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError("pxdesign canonical Candidate[] input requires structure_path")
+            out = dict(data)
+            out.setdefault("target_pdb", structure_path)
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _require_target_pdb(self) -> PXDesignInput:
+        if not self.target_pdb:
+            raise ValueError("pxdesign requires target_pdb")
+        return self
+
 
 class PXDesignDesign(BaseModel):
     candidate_id: str | None = None
@@ -256,6 +287,7 @@ class PXDesignDesign(BaseModel):
 
 class PXDesignOutput(BaseModel):
     designs: list[PXDesignDesign]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     num_samples: int
     task_name: str | None = None
@@ -727,6 +759,7 @@ class PXDesignAdapter(ToolAdapter):
         runtime_ms = int((time.time() - t0) * 1000)
         return PXDesignOutput(
             designs=designs,
+            candidates=_pxdesign_candidates(params, designs),
             runtime_ms=runtime_ms,
             num_samples=len(designs),
             task_name=task_name,
@@ -803,6 +836,7 @@ class PXDesignAdapter(ToolAdapter):
         runtime_ms = int((time.time() - t0) * 1000)
         return PXDesignOutput(
             designs=designs,
+            candidates=_pxdesign_candidates(params, designs),
             runtime_ms=runtime_ms,
             num_samples=len(designs),
             task_name=task_name,
@@ -1109,6 +1143,7 @@ def run_distributed(params: PXDesignInput, ctx: Any) -> PXDesignOutput | dict[st
         )
     return PXDesignOutput(
         designs=designs,
+        candidates=_pxdesign_candidates(params, designs),
         runtime_ms=int((time.time() - started) * 1000),
         num_samples=len(designs),
         task_name=invocation.task_name,
@@ -1342,6 +1377,55 @@ def _collect_preview_pipeline_outputs(
             if len(designs) >= top_k:
                 return designs
     return designs
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _pxdesign_candidates(
+    params: PXDesignInput,
+    designs: list[PXDesignDesign],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, design in enumerate(designs):
+        local_id = f"design_{index:04d}"
+        structure_path = design.pdb_path or design.cif_path
+        candidate = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "pxdesign",
+                local_id,
+                native_id=design.candidate_id,
+                sequence=design.sequence,
+                structure_path=structure_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "pxdesign",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": design.candidate_id,
+                "index": index,
+            },
+            "sequence": design.sequence,
+            "structure_path": structure_path,
+            "scores": {
+                "pxdesign": {
+                    "score": design.score,
+                    "binder_length": design.binder_length,
+                    "mode": params.mode,
+                }
+            },
+            "artifacts": {"pxdesign": {"cif_path": design.cif_path, "pdb_path": design.pdb_path}},
+        }
+        if params.candidates and _is_canonical_candidate(params.candidates[0]):
+            upstream_scores = params.candidates[0].get("scores")
+            if isinstance(upstream_scores, dict):
+                candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        candidates.append(candidate)
+    return candidates
 
 
 __all__ = [

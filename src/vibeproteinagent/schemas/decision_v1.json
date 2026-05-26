@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/decision_v1.json",
+  "title": "VPA Decision v1",
+  "type": "object",
+  "required": ["decision", "reasoning", "metrics_used"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["submit_candidate", "next_round", "no_acceptable_candidate", "stop", "answer"]
+    },
+    "reasoning": {
+      "type": "string",
+      "minLength": 1
+    },
+    "submit_candidate": {
+      "type": "object",
+      "required": ["candidates"],
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["job_id", "justification"],
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "candidate_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "justification": {
+                "type": "string",
+                "minLength": 1
+              },
+              "scores_to_highlight": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "anyOf": [
+              {"required": ["candidate_id"]},
+              {"required": ["index"]}
+            ],
+            "additionalProperties": false
+          }
+        },
+        "supersedes": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "next_round": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recommended": {
+          "type": "boolean"
+        },
+        "changes": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "no_acceptable_candidate": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "node_id": {"type": "string"},
+              "field": {"type": "string"},
+              "summary": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "metrics_used": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision": {"const": "submit_candidate"}}},
+      "then": {
+        "required": ["submit_candidate"],
+        "not": {
+          "anyOf": [
+            {"required": ["next_round"]},
+            {"required": ["no_acceptable_candidate"]},
+            {"required": ["answer"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"decision": {"const": "next_round"}}},
+      "then": {
+        "required": ["next_round"],
+        "not": {
+          "anyOf": [
+            {"required": ["submit_candidate"]},
+            {"required": ["no_acceptable_candidate"]},
+            {"required": ["answer"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"decision": {"const": "no_acceptable_candidate"}}},
+      "then": {
+        "required": ["no_acceptable_candidate"],
+        "not": {
+          "anyOf": [
+            {"required": ["submit_candidate"]},
+            {"required": ["next_round"]},
+            {"required": ["answer"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"decision": {"const": "stop"}}},
+      "then": {
+        "not": {
+          "anyOf": [
+            {"required": ["submit_candidate"]},
+            {"required": ["next_round"]},
+            {"required": ["no_acceptable_candidate"]},
+            {"required": ["answer"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"decision": {"const": "answer"}}},
+      "then": {
+        "required": ["answer"],
+        "not": {
+          "anyOf": [
+            {"required": ["submit_candidate"]},
+            {"required": ["next_round"]},
+            {"required": ["no_acceptable_candidate"]}
+          ]
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

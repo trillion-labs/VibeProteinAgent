@@ -63,6 +63,23 @@ python bindcraft.py …``.
 
 Override the env name via `$VPA_BINDCRAFT_CONDA_ENV` if you renamed it.
 
+## Repairing an existing sidecar env
+
+The installer is idempotent for packages that are already present. If a
+previously-created VPA BindCraft sidecar is missing a newly-added lightweight
+runtime dependency, operators can repair it without rebuilding the heavy
+BindCraft stack:
+
+```bash
+source "$VPA_HOME/env.sh"
+bash vendor/bindcraft/install_bindcraft.sh --pkg_manager micromamba \
+    --env-prefix "$VPA_BINDCRAFT_ENV_PATH" --cuda "${VPA_BINDCRAFT_CUDA:-12.8}"
+```
+
+The smoke-checked VPA sidecar dependencies currently include `pydantic`,
+`msgpack`, and `aiosqlite`; the latter is imported transitively by
+`vibeproteinagent.workspace.store` before BindCraft starts.
+
 ## Env vars consumed by the adapter
 
 - `VPA_BINDCRAFT_TREE` — root of the BindCraft checkout (must contain

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/planner_ir_v1.json",
+  "title": "VPA Planner IR v1",
+  "type": "object",
+  "required": ["version", "goal", "nodes"],
+  "properties": {
+    "version": {
+      "const": "planner_ir_v1"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "missing_inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "reason", "required_for_execution"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required_for_execution": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "default": []
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "tool", "intent"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]{0,63}$"
+          },
+          "tool": {
+            "type": "string",
+            "minLength": 1
+          },
+          "intent": {
+            "type": "string",
+            "minLength": 1
+          },
+          "inputs": {
+            "type": "object",
+            "additionalProperties": true,
+            "default": {}
+          },
+          "upstream": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["node", "relationship"],
+              "properties": {
+                "node": {
+                  "type": "string",
+                  "pattern": "^[a-z_][a-z0-9_]{0,63}$"
+                },
+                "relationship": {
+                  "const": "candidate_source"
+                }
+              },
+              "additionalProperties": false
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "finalization": {
+      "type": "object",
+      "properties": {
+        "ranking_preference": {
+          "type": ["string", "null"]
+        },
+        "success_criteria": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

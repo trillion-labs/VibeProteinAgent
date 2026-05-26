@@ -1,0 +1,17 @@
+name: template_select
+version: "1.0.0"
+category: retrieval
+description: "Selects sequence or structure templates from a local FASTA, MMseqs, or Foldseek database for a query (sequence, FASTA, or structure), filtered by identity, coverage, e-value, and optional date cutoff. Use to assemble template sets before design or structure prediction."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 30
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [template_select]
+input_schema: schemas/template_select.input.json
+output_schema: schemas/template_select.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.template_select.adapter:TemplateSelectAdapter"

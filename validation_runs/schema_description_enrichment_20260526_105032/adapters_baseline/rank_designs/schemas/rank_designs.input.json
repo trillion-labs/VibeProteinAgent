@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/rank_designs.input.json",
+  "type": "object",
+  "properties": {
+    "predictions": {
+      "$ref": "#/$defs/rows",
+      "default": []
+    },
+    "analyses": {
+      "$ref": "#/$defs/rows",
+      "default": []
+    },
+    "qc_results": {
+      "$ref": "#/$defs/rows",
+      "default": []
+    },
+    "candidates": {
+      "$ref": "#/$defs/rows",
+      "default": []
+    },
+    "top_k": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 10},
+    "output_prefix": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "default": "rank_designs"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "row": {"type": "object", "additionalProperties": true},
+    "row_or_rows": {
+      "anyOf": [
+        {"$ref": "#/$defs/row"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/row"}
+        }
+      ]
+    },
+    "rows": {
+      "anyOf": [
+        {"$ref": "#/$defs/row"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/row_or_rows"}
+        }
+      ]
+    }
+  }
+}

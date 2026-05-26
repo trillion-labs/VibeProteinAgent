@@ -25,6 +25,12 @@
     "mismatch_count": {"type": "integer", "minimum": 0},
     "expected_mutations_match": {"type": ["boolean", "null"], "default": null},
     "warnings": {"type": "array", "items": {"type": "string"}},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "runtime_ms": {"type": "integer", "minimum": 0}
   },
   "additionalProperties": false

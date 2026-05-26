@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/protenix_v2.input.json",
+  "type": "object",
+  "anyOf": [
+    {"required": ["input_json"]},
+    {"required": ["candidates"]}
+  ],
+  "properties": {
+    "input_json": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to a Protenix-format input JSON describing the molecular system.",
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "seeds": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "minItems": 1,
+      "default": [101]
+    },
+    "use_msa": {"type": "boolean", "default": false},
+    "msa_backend": {
+      "type": "string",
+      "enum": ["auto", "none", "remote"],
+      "default": "auto",
+      "description": "MSA backend policy. With use_msa=true, auto uses a prepared MSA if present and otherwise falls back to remote generation; none disables MSA; remote always calls the remote MSA path."
+    },
+    "use_template": {"type": "boolean", "default": false},
+    "use_rna_msa": {"type": "boolean", "default": false},
+    "enable_cache": {"type": "boolean", "default": true},
+    "enable_tf32": {"type": "boolean", "default": true},
+    "n_sample": {"type": "integer", "minimum": 1, "maximum": 25, "default": 5},
+    "n_step": {"type": "integer", "minimum": 10, "maximum": 1000, "default": 200},
+    "n_cycle": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}
+  },
+  "additionalProperties": false
+}

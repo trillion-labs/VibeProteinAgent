@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, Field, model_validator
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 from vibeproteinagent.adapters import _proteina_complexa_common as common
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.proteina_complexa import availability_skip_reason
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
@@ -72,6 +73,7 @@ class ProteinaComplexaInput(BaseModel):
             "ligand_binder."
         ),
     )
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_chain: str = Field(default="A", min_length=1, max_length=1)
     target_pocket_residues: list[int] = Field(default_factory=list)
     target_pocket_residue_ids: list[str] = Field(default_factory=list)
@@ -113,6 +115,38 @@ class ProteinaComplexaInput(BaseModel):
             "for fast design-only smoke runs that skip expensive evaluation."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical_candidates_to_structure(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        candidates = data.get("candidates")
+        if not candidates:
+            return data
+        canonical = [_is_canonical_candidate(item) for item in candidates]
+        if any(canonical) and not all(canonical):
+            raise ValueError(
+                "Mixed canonical and legacy candidate items are not supported. "
+                "Pass either all canonical Candidate[] or all legacy items."
+            )
+        if all(canonical):
+            structure_path = candidates[0].get("structure_path")
+            if not structure_path:
+                raise ValueError(
+                    "proteina_complexa canonical Candidate[] input requires structure_path"
+                )
+            out = dict(data)
+            if out.get("mode") == "motif":
+                out.setdefault("motif_pdb", structure_path)
+                if candidates[0].get("sequence"):
+                    out.setdefault("motif_sequence", candidates[0].get("sequence"))
+            else:
+                out.setdefault("target_pdb", structure_path)
+                if candidates[0].get("sequence"):
+                    out.setdefault("target_sequence", candidates[0].get("sequence"))
+            return out
+        return data
 
     @model_validator(mode="after")
     def _validate_mode_specific_inputs(self) -> ProteinaComplexaInput:
@@ -164,6 +198,7 @@ class ProteinaComplexaDesign(BaseModel):
 class ProteinaComplexaOutput(BaseModel):
     mode: ProteinaComplexaMode
     designs: list[ProteinaComplexaDesign]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
     num_designs_returned: int
     seeds_used: list[int]
@@ -243,6 +278,7 @@ class ProteinaComplexaAdapter(ToolAdapter):
         return ProteinaComplexaOutput(
             mode=params.mode,
             designs=designs,
+            candidates=_proteina_complexa_candidates(params, designs),
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
             seeds_used=[params.seed] if params.seed is not None else [],
@@ -651,6 +687,62 @@ def _maybe_str(value: object) -> str | None:
     if value is None or value == "" or value == "NA":
         return None
     return str(value)
+
+
+def _is_canonical_candidate(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _proteina_complexa_candidates(
+    params: ProteinaComplexaInput,
+    designs: list[ProteinaComplexaDesign],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, design in enumerate(designs):
+        local_id = f"design_{index:04d}"
+        candidate: dict[str, Any] = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "proteina_complexa",
+                local_id,
+                sequence=design.sequence,
+                structure_path=design.pdb_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "proteina_complexa",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": None,
+                "index": index,
+            },
+            "structure_path": design.pdb_path,
+            "scores": {
+                "proteina_complexa": {
+                    "mode": params.mode,
+                    "length": design.length,
+                    "score": design.score,
+                    "iptm": design.iptm,
+                    "plddt": design.plddt,
+                    "binder_refold_rmsd": design.binder_refold_rmsd,
+                    "ligand_contacts": design.ligand_contacts,
+                    "ligand_rmsd": design.ligand_rmsd,
+                    "motif_rmsd": design.motif_rmsd,
+                    "scaffold_plddt": design.scaffold_plddt,
+                    "designability": design.designability,
+                }
+            },
+            "artifacts": {},
+        }
+        if design.sequence:
+            candidate["sequence"] = design.sequence
+        if params.candidates and _is_canonical_candidate(params.candidates[0]):
+            upstream_scores = params.candidates[0].get("scores")
+            if isinstance(upstream_scores, dict):
+                candidate["scores"] = {**upstream_scores, **candidate["scores"]}
+        candidates.append(candidate)
+    return candidates
 
 
 __all__ = [

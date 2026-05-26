@@ -7,23 +7,41 @@
     {"required": ["fasta_path"]}
   ],
   "properties": {
-    "sequence": {"type": ["string", "null"], "default": null},
+    "sequence": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Protein sequence to format (uppercase 1-letter codes). Mutually exclusive with `fasta_path`.",
+      "examples": ["MKTAYIAKQRQISFVKSHFSRQ", null]
+    },
     "fasta_path": {
       "type": ["string", "null"],
       "default": null,
+      "description": "Path to a FASTA file with one or more sequences. Each sequence becomes a separate Protenix input JSON.",
+      "examples": ["/abs/path/sequences.fasta", null],
       "vpa:digest": "sha256-if-path"
     },
     "name": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_.-]+$",
-      "default": "sequence"
+      "default": "sequence",
+      "description": "Sequence/job name embedded in the generated Protenix input JSON. Filesystem-safe characters only.",
+      "examples": ["sequence", "binder_v1"]
     },
-    "count": {"type": "integer", "minimum": 1, "maximum": 1024, "default": 1},
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024,
+      "default": 1,
+      "description": "Number of identical chain copies to include in the generated input JSON (e.g. set to 2 for homodimer prediction).",
+      "examples": [1, 2, 3]
+    },
     "seeds": {
       "type": "array",
       "items": {"type": "integer"},
       "minItems": 1,
-      "default": [101]
+      "default": [101],
+      "description": "Model RNG seeds embedded in the Protenix input JSON.",
+      "examples": [[101], [101, 137, 311]]
     }
   },
   "additionalProperties": false

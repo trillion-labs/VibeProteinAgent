@@ -4,31 +4,65 @@
   "type": "object",
   "properties": {
     "predictions": {
-      "type": "array",
-      "items": {"type": "object", "additionalProperties": true},
-      "default": []
+      "$ref": "#/$defs/rows",
+      "default": [],
+      "description": "Per-design structure-prediction records (e.g. AF2/Protenix outputs with pLDDT, pTM, ipTM, PAE summaries). Each row is keyed by an identifier the joiner can match against `analyses`/`qc_results`/`candidates`.",
+      "examples": [[{"id": "design_0", "plddt": 84.2, "ptm": 0.78}]]
     },
     "analyses": {
-      "type": "array",
-      "items": {"type": "object", "additionalProperties": true},
-      "default": []
+      "$ref": "#/$defs/rows",
+      "default": [],
+      "description": "Per-design structural-analysis records (e.g. interface contacts, RMSD, ipSAE).",
+      "examples": [[{"id": "design_0", "ipsae": 0.62, "rmsd_target": 1.2}]]
     },
     "qc_results": {
-      "type": "array",
-      "items": {"type": "object", "additionalProperties": true},
-      "default": []
+      "$ref": "#/$defs/rows",
+      "default": [],
+      "description": "Per-design quality-control records (e.g. protein_qc metrics: pI, GRAVY, polybasic clusters).",
+      "examples": [[{"id": "design_0", "gravy": -0.21, "instability_index": 32.4}]]
     },
     "candidates": {
-      "type": "array",
-      "items": {"type": "object", "additionalProperties": true},
-      "default": []
+      "$ref": "#/$defs/rows",
+      "default": [],
+      "description": "Canonical Candidate[] or legacy candidate records carrying identifier and supplementary scores to merge into ranking.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "design_0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/design_0.pdb"}]]
     },
-    "top_k": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 10},
+    "top_k": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 10,
+      "description": "Number of top-ranked candidates to keep after weighted ranking.",
+      "examples": [10, 50]
+    },
     "output_prefix": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_.-]+$",
-      "default": "rank_designs"
+      "default": "rank_designs",
+      "description": "Filename prefix for the generated ranking TSV/JSON artifacts. Must be filesystem-safe.",
+      "examples": ["rank_designs", "binder_run_v1"]
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "row": {"type": "object", "additionalProperties": true},
+    "row_or_rows": {
+      "anyOf": [
+        {"$ref": "#/$defs/row"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/row"}
+        }
+      ]
+    },
+    "rows": {
+      "anyOf": [
+        {"$ref": "#/$defs/row"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/row_or_rows"}
+        }
+      ]
+    }
+  }
 }

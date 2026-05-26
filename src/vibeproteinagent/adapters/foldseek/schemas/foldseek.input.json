@@ -2,18 +2,57 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/foldseek.input.json",
   "type": "object",
-  "required": ["query_pdb", "target_db"],
+  "required": ["target_db"],
   "properties": {
-    "query_pdb": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
-    "target_db": {"type": "string", "minLength": 1},
+    "query_pdb": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the query structure (PDB or mmCIF) that Foldseek searches against `target_db`.",
+      "examples": ["/abs/path/query.pdb", "outputs/design.cif"],
+      "vpa:digest": "sha256"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] from an upstream structure-producing tool. Promotes the first item's structure_path into `query_pdb` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/design.pdb"}]]
+    },
+    "target_db": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to a Foldseek target database directory or single-file index. Typical databases: PDB100, AlphaFold-Swissprot, AlphaFold-UniProt-50.",
+      "examples": ["/data/foldseek/pdb100", "/data/foldseek/afdb_swissprot"]
+    },
     "mode": {
       "type": "string",
       "enum": ["easy-search", "easy-cluster"],
-      "default": "easy-search"
+      "default": "easy-search",
+      "description": "Foldseek subcommand. `easy-search` finds nearest structural neighbours; `easy-cluster` groups the query (and database hits) into structural clusters.",
+      "examples": ["easy-search", "easy-cluster"]
     },
-    "alignment_type": {"type": "integer", "minimum": 0, "maximum": 4, "default": 2},
-    "e_value": {"type": "number", "exclusiveMinimum": 0.0, "default": 0.001},
-    "max_seqs": {"type": "integer", "minimum": 1, "default": 1000}
+    "alignment_type": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "default": 2,
+      "description": "Foldseek `--alignment-type`: 0=3di, 1=TM-align, 2=3di+aa (default), 3=tm-rescored, 4=structural global. 2 is the recommended balance of speed and quality.",
+      "examples": [2, 1]
+    },
+    "e_value": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 0.001,
+      "description": "E-value threshold (lower = stricter). Hits above this E-value are filtered out.",
+      "examples": [0.001, 0.01]
+    },
+    "max_seqs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1000,
+      "description": "Maximum number of hits reported per query (`--max-seqs`).",
+      "examples": [1000, 100]
+    }
   },
   "additionalProperties": false
 }

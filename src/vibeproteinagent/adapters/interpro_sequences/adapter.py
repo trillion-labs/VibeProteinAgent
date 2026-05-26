@@ -22,6 +22,7 @@ from vibeproteinagent.adapters._remote.uniprot import (
 )
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 
 def _keep_record(
@@ -146,6 +147,7 @@ class InterProSequencesOutput(BaseModel):
     retrieved_accessions: int
     kept_sequences: int
     dropped_by_temporal_filter: int
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
     fasta_path: str
     metadata_jsonl: str
     summary: dict[str, Any]
@@ -282,6 +284,10 @@ class InterProSequencesAdapter(ToolAdapter):
             dropped_by_temporal_filter=sum(
                 1 for d in dropped if d.get("reason") == "temporal_filter"
             ),
+            candidates=[
+                _canonical_candidate_from_record(record, index)
+                for index, record in enumerate(kept)
+            ],
             fasta_path=str(fasta_path),
             metadata_jsonl=str(metadata_path),
             summary=summary,
@@ -296,6 +302,36 @@ class InterProSequencesAdapter(ToolAdapter):
 
     def estimate_vram(self, params: InterProSequencesInput) -> int:
         return 0
+
+
+def _canonical_candidate_from_record(record: UniProtRecord, index: int) -> dict[str, Any]:
+    local_id = f"seq_{index:04d}"
+    return {
+        "schema_version": "candidate_v1",
+        "candidate_id": stable_candidate_id(
+            "interpro_sequences",
+            local_id,
+            native_id=record.accession,
+            sequence=record.sequence,
+            index=index,
+        ),
+        "source": {
+            "tool": "interpro_sequences",
+            "node_id": None,
+            "job_id": None,
+            "local_id": local_id,
+            "native_id": record.accession,
+            "index": index,
+        },
+        "sequence": record.sequence,
+        "scores": {
+            "interpro_sequences": {
+                "length": record.length,
+                "reviewed": record.reviewed,
+            }
+        },
+        "artifacts": {},
+    }
 
 
 __all__ = [

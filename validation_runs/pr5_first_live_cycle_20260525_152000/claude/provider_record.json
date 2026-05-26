@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "validation_runs/pr5_first_live_cycle_20260525_152000/claude",
+  "duration_seconds": 0.0,
+  "first_error": "claude command not found",
+  "provider": "claude",
+  "reason": "preflight_failed",
+  "status": "BLOCKED"
+}

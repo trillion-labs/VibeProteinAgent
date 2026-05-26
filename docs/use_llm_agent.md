@@ -2,6 +2,13 @@
 
 Use this path when you want to describe the goal in natural language and let the agent choose tools or workflows.
 
+The agent supports two output modes from the same interface:
+
+- **Design / retrieval mode**: returns submitted candidates (sequences, structures, scores). Used for "design", "generate", "find me a binder", "retrieve" style requests.
+- **Understanding / Q&A mode**: returns a free-form text answer with optional citations to workflow nodes that supplied the information. Used for "what is", "compare", "explain", "how does" style requests.
+
+The agent picks the mode automatically based on the request. Both modes flow through the same planner + decision pipeline; only the final return shape differs.
+
 Demo notebook: [`demo/use_llm_agent_demo.ipynb`](../demo/use_llm_agent_demo.ipynb)
 shows how to inspect the public tool surface, draft an agent plan for a
 generation/prediction/QC loop, and run it once a provider is configured.
@@ -105,15 +112,28 @@ curl https://openrouter.ai/api/v1/models | python -m json.tool
 ## 3. Ask For A Plan First
 
 `--plan-only` uses the same VPA-level planning flow for every provider. VPA sends
-the planner system prompt, your request, the available VPA tools, and a strict
-JSON output contract. The planner must return an explicit `workflow_plan.nodes[]`
-tool chain. VPA validates the returned plan locally, but does not submit jobs,
-start tool execution, or warm models.
+the planner system prompt, your request, and the available VPA tools to the
+provider. The planner returns a Planner IR — a tool topology with semantic
+intent (which tool, in what order, which upstream feeds which downstream). VPA
+validates the IR against `planner_ir_v1.json` and then a local compiler converts
+it into an executable workflow plan, automatically wiring the canonical
+`candidates` flow between producer and consumer tools and inserting
+`merge_candidates` when multiple sources feed one consumer. The compiler runs
+locally; no jobs are submitted, no tools execute, and no models are warmed.
 
-For tools that advertise sharding metadata, the planner should prefer `foreach`
-fan-out with small seed/candidate shards and `max_parallel` set to the available
-GPU budget. ProteinMPNN/LigandMPNN keep warm batches together unless the design
-count is above their sharding threshold.
+For tools with multiple operating modes — `rfdiffusion`, `esm2`, `foldseek`,
+`pxdesign`, `sequence_edit`, `pyrosetta`, `proteina_complexa` — the planner must
+set `inputs.mode` to one of the tool's allowed modes; the tool catalog shows
+each tool's `allowed_modes`. If the planner omits or misuses `inputs.mode`, the
+compiler raises a structured fixup and asks the planner to choose a valid mode.
+
+For canonical-wired tools, candidate lists flow between adapters automatically;
+batched per-item work is handled inside the adapter. User-authored workflow YAML
+(via `vpa workflow run`) can still use `foreach` and `max_parallel` explicitly
+when needed.
+
+See [`docs/architecture/planner_ir.md`](architecture/planner_ir.md) for the
+full Planner IR / compiler contract.
 
 NOTE: You can skip this preview and run everything at once by omitting `--plan-only`.
 
@@ -167,6 +187,24 @@ vpa agent submit-plan plan.json \
   --workspace agent_round \
   --max-wait-s 7200
 ```
+
+### Understanding / Q&A queries
+
+For informational requests, the same `vpa agent run` command returns a text
+answer once the agent's workflow finishes. Citation metadata records which
+workflow nodes supplied the information (informational only — no code-level
+validation of the citation contents).
+
+```bash
+vpa agent run \
+  "What is the pI of UniProt P44612, and does it carry any common sequence liabilities?" \
+  --workspace qa_round
+```
+
+The decision LLM picks `answer` rather than `submit_candidate` for these
+requests. The agent does not submit a candidate; it returns a textual response
+plus the cited node ids. Heuristic: user verb "what / compare / explain / how"
+→ `answer`; "design / generate / find / retrieve" → candidate submission.
 
 ## 5. Inspect The Agent Run
 

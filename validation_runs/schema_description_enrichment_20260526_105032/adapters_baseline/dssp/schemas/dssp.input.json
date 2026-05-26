@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/dssp.input.json",
+  "type": "object",
+  "anyOf": [
+    {"required": ["pdb_path"]},
+    {"required": ["candidates"]}
+  ],
+  "properties": {
+    "pdb_path": {"type": "string", "minLength": 1, "vpa:digest": "sha256"},
+    "candidates": {
+      "$comment": "Canonical Candidate v1 input accepted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "format": {
+      "type": "string",
+      "enum": ["dssp", "mmcif", "json"],
+      "default": "json"
+    }
+  },
+  "additionalProperties": false
+}

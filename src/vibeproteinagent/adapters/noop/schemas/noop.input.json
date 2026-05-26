@@ -4,7 +4,11 @@
   "type": "object",
   "required": ["payload"],
   "properties": {
-    "payload": {"type": "string"}
+    "payload": {
+      "type": "string",
+      "description": "Arbitrary string payload returned verbatim in the output. Used by tests and by smoke checks to verify the adapter dispatch and worker plumbing.",
+      "examples": ["hello", "smoke-test-payload"]
+    }
   },
   "additionalProperties": false
 }
