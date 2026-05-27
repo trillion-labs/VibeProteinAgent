@@ -1,0 +1,11 @@
+case	mode	provider	model	status	exit_code	seconds	output
+plan_semantic_codex	plan	codex	gpt-5.4	FAIL	1	462	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/codex/plan_semantic_codex.json
+plan_binder_codex	plan	codex	gpt-5.4	FAIL	1	234	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/codex/plan_binder_codex.json
+plan_denovo_codex	plan	codex	gpt-5.4	FAIL	1	284	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/codex/plan_denovo_codex.json
+plan_semantic_claude	plan	claude-code	sonnet	FAIL	1	345	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/claude/plan_semantic_claude.json
+plan_binder_claude	plan	claude-code	sonnet	FAIL	1	192	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/claude/plan_binder_claude.json
+plan_denovo_claude	plan	claude-code	sonnet	FAIL	1	283	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/claude/plan_denovo_claude.json
+plan_semantic_qwen	plan	openrouter	qwen/qwen3.5-9b	FAIL	1	395	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/qwen/plan_semantic_qwen.json
+plan_binder_qwen	plan	openrouter	qwen/qwen3.5-9b	FAIL	1	70	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/qwen/plan_binder_qwen.json
+plan_denovo_qwen	plan	openrouter	qwen/qwen3.5-9b	FAIL	1	284	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/qwen/plan_denovo_qwen.json
+actual_semantic_codex	actual	codex	gpt-5.4	FAIL	130	240	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_012934/codex/actual_semantic_codex.json

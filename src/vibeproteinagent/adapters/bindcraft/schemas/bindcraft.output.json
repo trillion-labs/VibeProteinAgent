@@ -9,6 +9,11 @@
     "seeds_used"
   ],
   "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "no_acceptable_candidate"],
+      "default": "completed"
+    },
     "designs": {
       "type": "array",
       "items": {
@@ -64,7 +69,17 @@
       "items": {"type": "integer"}
     },
     "position_mappings": {"type": "object", "additionalProperties": true, "default": {}},
-    "warnings": {"type": "array", "items": {"type": "string"}, "default": []}
+    "warnings": {"type": "array", "items": {"type": "string"}, "default": []},
+    "failure_summary": {
+      "type": "object",
+      "additionalProperties": {"type": "integer"},
+      "default": {}
+    },
+    "run_metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {}
+    }
   },
   "additionalProperties": false
 }

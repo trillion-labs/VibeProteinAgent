@@ -47,6 +47,8 @@ def test_sequence_edit_consumes_canonical_legacy_and_rejects_mixed() -> None:
 def test_sequence_edit_explicit_mode_enforcement() -> None:
     with pytest.raises(StructuredFixup):
         compile_planner_ir(_ir())
-    assert compile_planner_ir(_ir({"mode": "mutate_residues"}))["workflow_plan"]["nodes"][0]["inputs"]["mode"] == "mutate_residues"
+    compiled = compile_planner_ir(_ir({"mode": "mutate_residues"}))
+    assert compiled["workflow_plan"]["nodes"][0]["inputs"]["operation"] == "mutate_residues"
+    assert "mode" not in compiled["workflow_plan"]["nodes"][0]["inputs"]
     with pytest.raises(StructuredFixup):
         compile_planner_ir(_ir({"mode": "bad"}))

@@ -14,6 +14,21 @@ human-readable reports.
 <!-- ![VibeProteinAgent hero](assets/readme/vpa-hero.png) -->
 ![VPA report snapshot](assets/readme/vpa-report-snapshot.svg)
 
+## Agent Training Research Report
+
+This checkout includes a self-contained research report on budget-aware LLM
+agent training and protein/scientific-agent design:
+
+- [`agent_training_report.html`](agent_training_report.html) is the full report.
+- [`sources.md`](sources.md) lists papers, repositories, documentation, and local
+  files used while preparing it.
+
+Open the report directly in a browser:
+
+```bash
+xdg-open agent_training_report.html
+```
+
 > [!IMPORTANT]
 > **Non-commercial use only.** VibeProteinAgent is licensed under the
 > [PolyForm Noncommercial License 1.0.0](LICENSE) — free for academic research,

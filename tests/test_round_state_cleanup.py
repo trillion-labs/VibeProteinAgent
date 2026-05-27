@@ -37,7 +37,7 @@ def _classification() -> ModeClassification:
 def _compiled_plan(node_id: str = "go_candidates") -> dict[str, Any]:
     return {
         "mode": "agent_plan",
-        "source_kind": "planner_ir_compiled",
+        "source_kind": "planner_compiled",
         "goal": "Test plan.",
         "assumptions": [],
         "missing_inputs": [],

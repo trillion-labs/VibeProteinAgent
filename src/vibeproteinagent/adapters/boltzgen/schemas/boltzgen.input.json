@@ -76,9 +76,9 @@
     },
     "design_only": {
       "type": "boolean",
-      "default": true,
-      "description": "If true, run only the diffusion backbone generation step. If false, run the full pipeline (design + inverse_fold + folding + analyze + filter) which is slower but emits sequenced and ranked designs.",
-      "examples": [true, false]
+      "default": false,
+      "description": "If false, run the full pipeline (design + inverse_fold + folding + analyze + filter) and emit sequenced, refolded, ranked designs. If true, run only the diffusion backbone generation step.",
+      "examples": [false, true]
     },
     "budget": {
       "type": "integer",

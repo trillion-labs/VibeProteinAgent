@@ -1,0 +1,17 @@
+name: go_term_search
+version: "1.0.0"
+category: retrieval
+description: "Lightweight resolver that searches public GO ontology services for term IDs matching a natural-language biological function, process, or component phrase. Use before go_sequences when the user did not provide an exact GO:NNNNNNN identifier."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 5
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [go_term_search]
+input_schema: schemas/go_term_search.input.json
+output_schema: schemas/go_term_search.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.go_term_search.adapter:GOTermSearchAdapter"

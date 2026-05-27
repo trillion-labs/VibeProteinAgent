@@ -88,15 +88,15 @@ class DecisionEngine:
         criteria = success_criteria or {}
         metrics_used = summary.get("metrics_used") or []
         if state != "completed":
-            decision = "workflow_not_completed"
+            decision = "next_round_with_no_acceptable_candidate"
             recommended = False
             reason = f"state is {state!r}"
         elif criteria:
-            decision = "completed_review_metrics"
-            recommended = False
+            decision = "next_round_with_surviving_candidate"
+            recommended = True
             reason = "workflow completed; criteria should be reviewed against compact metrics"
         else:
-            decision = "completed_no_additional_round_recommended"
+            decision = "next_round_with_no_acceptable_candidate"
             recommended = False
             reason = "workflow completed and no explicit success criteria require another round"
         return {
@@ -112,13 +112,31 @@ class DecisionEngine:
         local: dict[str, Any],
     ) -> dict[str, Any]:
         label = decision.get("decision")
-        allowed = {"submit_candidate", "next_round", "no_acceptable_candidate", "stop", "answer"}
+        legacy_map = {
+            "next_round": "next_round_with_surviving_candidate",
+            "no_acceptable_candidate": "next_round_with_no_acceptable_candidate",
+            "stop": "next_round_with_no_acceptable_candidate",
+        }
+        if isinstance(label, str) and label in legacy_map:
+            label = legacy_map[label]
+        allowed = {
+            "submit_candidate",
+            "next_round_with_surviving_candidate",
+            "next_round_with_no_acceptable_candidate",
+        }
         if label not in allowed:
-            label = "next_round" if _next_round_recommended(decision) else "stop"
+            label = (
+                "next_round_with_surviving_candidate"
+                if _next_round_recommended(decision)
+                else "next_round_with_no_acceptable_candidate"
+            )
         next_round = decision.get("next_round")
         if not isinstance(next_round, dict):
             next_round = {}
-        if label == "next_round":
+        if label in {
+            "next_round_with_surviving_candidate",
+            "next_round_with_no_acceptable_candidate",
+        }:
             next_round.setdefault("recommended", True)
         else:
             next_round.setdefault("recommended", False)
@@ -150,23 +168,11 @@ class DecisionEngine:
                 )
             normalized["submit_candidate"] = submit
             return cast(dict[str, Any], normalized)
-        if label == "next_round":
+        if label in {
+            "next_round_with_surviving_candidate",
+            "next_round_with_no_acceptable_candidate",
+        }:
             normalized["next_round"] = next_round
-            return cast(dict[str, Any], normalized)
-        if label == "no_acceptable_candidate":
-            no_candidate = decision.get("no_acceptable_candidate")
-            if not isinstance(no_candidate, dict):
-                no_candidate = {"reason": next_round.get("reason") or reasoning.strip()}
-            normalized["no_acceptable_candidate"] = no_candidate
-            return cast(dict[str, Any], normalized)
-        if label == "answer":
-            answer = decision.get("answer")
-            if not isinstance(answer, dict):
-                raise InvalidParamsError(
-                    "answer decision missing answer payload",
-                    details={"decision": decision},
-                )
-            normalized["answer"] = answer
             return cast(dict[str, Any], normalized)
         return cast(dict[str, Any], normalized)
 

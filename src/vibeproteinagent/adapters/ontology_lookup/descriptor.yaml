@@ -1,0 +1,17 @@
+name: ontology_lookup
+version: "1.0.0"
+category: retrieval
+description: "Lightweight ontology lookup that validates and enriches a known GO:NNNNNNN term using public ontology APIs. Use when the user or another resolver already supplied a GO accession."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 5
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [ontology_lookup]
+input_schema: schemas/ontology_lookup.input.json
+output_schema: schemas/ontology_lookup.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.ontology_lookup.adapter:OntologyLookupAdapter"

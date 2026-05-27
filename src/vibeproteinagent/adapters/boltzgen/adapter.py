@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -36,8 +37,10 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.config import vpa_home
+from vibeproteinagent.core.errors import DependencyError, TimeoutError_
 
 # --------------------------------------------------------------------------- paths
 
@@ -58,6 +61,37 @@ def _check_paths() -> None:
             f"BoltzGen source tree not found at {BOLTZGEN_TREE}. "
             f"Set $VPA_BOLTZGEN_TREE to a BoltzGen checkout (must contain src/boltzgen/)."
         )
+
+
+def availability_skip_reason() -> str | None:
+    try:
+        _check_paths()
+    except FileNotFoundError as exc:
+        return str(exc)
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import hydride; "
+                "import boltzgen.task.analyze.analyze; "
+                "import boltzgen.task.analyze.analyze_utils; "
+                "print('ok')"
+            ),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=_build_env(seed=None),
+        timeout=60,
+    )
+    if probe.returncode == 0:
+        return None
+    stderr = (probe.stderr or probe.stdout or "").strip()
+    return (
+        "BoltzGen analyze-stack import probe failed. Install BoltzGen shared "
+        f"runtime dependencies in the active VPA env. Details: {stderr[-1000:]}"
+    )
     main_py = BOLTZGEN_TREE / "src" / "boltzgen" / "cli" / "boltzgen.py"
     if not main_py.is_file():
         raise FileNotFoundError(
@@ -84,7 +118,7 @@ class BoltzGenInput(BaseModel):
     num_designs: int = Field(default=10, ge=1, le=256)
     num_diffusion_steps: int = Field(default=500, ge=5, le=1000)
     protocol: str = Field(default="protein-anything")
-    design_only: bool = Field(default=True)
+    design_only: bool = Field(default=False)
     budget: int = Field(default=10, ge=1, le=256)
     seed: int | None = Field(default=None)
 
@@ -172,8 +206,10 @@ class BoltzGenAdapter(ToolAdapter):
 
         job_inputs = ctx.job_dir / "inputs"
         job_outputs = ctx.job_dir / "outputs"
+        job_logs = ctx.job_dir / "logs"
         job_inputs.mkdir(parents=True, exist_ok=True)
         job_outputs.mkdir(parents=True, exist_ok=True)
+        job_logs.mkdir(parents=True, exist_ok=True)
 
         design_spec = _stage_design_spec(params, job_inputs)
         ctx.emit_progress(0.08)
@@ -195,19 +231,53 @@ class BoltzGenAdapter(ToolAdapter):
         env = _build_env(params.seed)
 
         ctx.emit_progress(0.10)
-        # Inherit the parent stdio so the supervisor's log fan-out can see
-        # BoltzGen's progress prints; subprocess.run with no capture is fine.
+        stdout_path = job_logs / "boltzgen.stdout.log"
+        stderr_path = job_logs / "boltzgen.stderr.log"
+        command_path = job_logs / "boltzgen.command.json"
+        command_path.write_text(
+            json.dumps({"cmd": cmd, "cwd": str(job_outputs)}, indent=2, sort_keys=True)
+            + "\n"
+        )
         try:
-            subprocess.run(
-                cmd,
-                check=True,
-                env=env,
-                cwd=str(job_outputs),  # so relative file refs resolve under our jobdir
-                timeout=3600,
-            )
+            with stdout_path.open("w") as stdout_fh, stderr_path.open("w") as stderr_fh:
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    env=env,
+                    cwd=str(job_outputs),  # so relative file refs resolve under our jobdir
+                    timeout=3600,
+                    stdout=stdout_fh,
+                    stderr=stderr_fh,
+                    text=True,
+                )
         except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                f"BoltzGen subprocess failed with exit code {exc.returncode}"
+            stage = _detect_failure_stage(stdout_path, stderr_path)
+            raise DependencyError(
+                f"BoltzGen subprocess failed with exit code {exc.returncode}",
+                details={
+                    "returncode": exc.returncode,
+                    "cmd": cmd,
+                    "cwd": str(job_outputs),
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "command_path": str(command_path),
+                    "stage": stage,
+                    "stderr_tail": _tail(stderr_path),
+                    "stdout_tail": _tail(stdout_path),
+                },
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError_(
+                "BoltzGen subprocess timed out",
+                details={
+                    "cmd": cmd,
+                    "cwd": str(job_outputs),
+                    "timeout_s": exc.timeout,
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "command_path": str(command_path),
+                    "stage": _detect_failure_stage(stdout_path, stderr_path),
+                },
             ) from exc
         ctx.emit_progress(0.92)
 
@@ -391,12 +461,30 @@ def _build_env(seed: int | None) -> dict[str, str]:
     # pip install was performed.
     src = str(BOLTZGEN_TREE / "src")
     env["PYTHONPATH"] = src
+    env["HYDRA_FULL_ERROR"] = "1"
     # BoltzGen reads HF_HOME / HF_HUB_CACHE for some auxiliary downloads
     # (e.g. tokenizer). Point both at our cache.
     env["HF_HUB_CACHE"] = str(BOLTZGEN_CACHE)
     if seed is not None:
         env["PYTHONHASHSEED"] = str(seed)
     return env
+
+
+def _tail(path: Path, *, limit: int = 4000) -> str:
+    if not path.is_file():
+        return ""
+    text = path.read_text(errors="replace")
+    return text[-limit:]
+
+
+def _detect_failure_stage(stdout_path: Path, stderr_path: Path) -> str | None:
+    text = f"{_tail(stdout_path, limit=12000)}\n{_tail(stderr_path, limit=12000)}".lower()
+    positions = {
+        stage: text.rfind(stage)
+        for stage in ("design", "inverse_fold", "folding", "analyze", "filter")
+    }
+    stage, pos = max(positions.items(), key=lambda item: item[1])
+    return stage if pos >= 0 else None
 
 
 def _collect_designs(
@@ -565,6 +653,12 @@ def _boltzgen_candidates(
                 }
             },
             "artifacts": {"boltzgen": {"cif_path": design.cif_path, "pdb_path": design.pdb_path}},
+            "capabilities": candidate_capability_flags(
+                has_sequence=bool(design.sequence),
+                has_backbone_structure=bool(structure_path),
+                has_full_structure=bool(structure_path) and not params.design_only,
+                has_candidate_scores=True,
+            ),
         }
         if design.sequence:
             candidate["sequence"] = design.sequence
@@ -583,4 +677,5 @@ __all__ = [
     "BoltzGenDesign",
     "BoltzGenInput",
     "BoltzGenOutput",
+    "availability_skip_reason",
 ]

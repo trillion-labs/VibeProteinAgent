@@ -27,6 +27,7 @@ from vibeproteinagent.adapters.msa_policy import (
     should_use_remote_msa,
     strip_prepared_msa,
 )
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 # --------------------------------------------------------------------------- paths
@@ -705,6 +706,12 @@ def _protenix_v2_candidates(
             "structure_path": record.cif_path,
             "scores": {"protenix_v2": scores},
             "artifacts": artifacts,
+            "capabilities": candidate_capability_flags(
+                has_sequence=bool(sequence),
+                has_backbone_structure=bool(record.cif_path),
+                has_full_structure=bool(record.cif_path),
+                has_candidate_scores=True,
+            ),
         }
         if sequence:
             candidate["sequence"] = sequence

@@ -48,6 +48,17 @@ def _candidate() -> dict[str, Any]:
     }
 
 
+def _selection(*tools: str) -> dict[str, Any]:
+    return {
+        "mode": "tool_selection",
+        "selected_tools": [
+            {"name": tool, "reason": "selected for test"}
+            for tool in tools
+        ],
+        "missing_inputs": [],
+    }
+
+
 def _initial_ir() -> dict[str, Any]:
     return {
         "version": "planner_ir_v1",
@@ -99,9 +110,15 @@ def test_next_round_v1_plan_preserves_source_kind_and_skips_legacy_validators(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("VPA_PLANNER_IR", raising=False)
     _allow_tool_environment(monkeypatch)
-    provider = _Provider([_initial_ir(), _next_ir()])
+    provider = _Provider(
+        [
+            _selection("go_sequences"),
+            _initial_ir(),
+            _selection("rank_designs"),
+            _next_ir(),
+        ]
+    )
     monkeypatch.setattr(controller_mod, "provider_from_config", lambda _config: provider)
     validator_calls = {
         "_validate_static_output_refs": 0,
@@ -181,10 +198,9 @@ def test_next_round_v1_plan_preserves_source_kind_and_skips_legacy_validators(
         )
     )
 
-    assert executed_plans[1]["source_kind"] == "planner_ir_compiled"
+    assert executed_plans[1]["source_kind"] == "planner_compiled"
     assert validator_calls == {
         "_validate_static_output_refs": 0,
         "_validate_static_output_ref_types": 0,
         "_validate_static_job_refs": 0,
     }
-

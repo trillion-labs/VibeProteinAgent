@@ -60,6 +60,17 @@ def _valid_ir() -> dict[str, Any]:
     }
 
 
+def _selection() -> dict[str, Any]:
+    return {
+        "mode": "tool_selection",
+        "selected_tools": [
+            {"name": "go_sequences", "reason": "Use retrieval followed by ranking."},
+            {"name": "rank_designs", "reason": "Use retrieval followed by ranking."},
+        ],
+        "missing_inputs": [],
+    }
+
+
 def _invalid_relationship_ir() -> dict[str, Any]:
     ir = _valid_ir()
     ir["nodes"][1]["upstream"][0]["relationship"] = "evidence"
@@ -67,7 +78,7 @@ def _invalid_relationship_ir() -> dict[str, Any]:
 
 
 def test_planner_v1_retries_with_structured_schema_error() -> None:
-    provider = _PlannerProvider([_invalid_relationship_ir(), _valid_ir()])
+    provider = _PlannerProvider([_selection(), _invalid_relationship_ir(), _valid_ir()])
     planner = WorkflowPlanner(ToolRegistry(), provider)
 
     plan = asyncio.run(
@@ -81,8 +92,8 @@ def test_planner_v1_retries_with_structured_schema_error() -> None:
         )
     )
 
-    assert len(provider.messages) == 2
-    retry_prompt = json.loads(provider.messages[1][1].content)
+    assert len(provider.messages) == 3
+    retry_prompt = json.loads(provider.messages[2][1].content)
     structured_error = retry_prompt["previous_planner_ir_error"]["structured_error"]
     assert structured_error["error_kind"] == "planner_ir_schema_violation"
     assert structured_error["violations"][0]["issue"] == (
@@ -94,7 +105,7 @@ def test_planner_v1_retries_with_structured_schema_error() -> None:
 
 
 def test_planner_v1_raises_after_schema_retry_exhaustion() -> None:
-    provider = _PlannerProvider([_invalid_relationship_ir()])
+    provider = _PlannerProvider([_selection(), _invalid_relationship_ir()])
     planner = WorkflowPlanner(ToolRegistry(), provider)
 
     with pytest.raises(PlannerIRSchemaViolation) as excinfo:
@@ -109,7 +120,7 @@ def test_planner_v1_raises_after_schema_retry_exhaustion() -> None:
             )
         )
 
-    assert len(provider.messages) == 2
+    assert len(provider.messages) == 3
     assert excinfo.value.structured_error["violations"][0]["issue"] == (
         "relationship_not_allowed_in_v1"
     )

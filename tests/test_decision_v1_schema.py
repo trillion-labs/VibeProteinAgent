@@ -34,7 +34,7 @@ def test_valid_submit_candidate_decision_passes() -> None:
 def test_valid_next_round_decision_passes() -> None:
     validate_decision_v1(
         {
-            "decision": "next_round",
+            "decision": "next_round_with_surviving_candidate",
             "reasoning": "More exploration is needed.",
             "next_round": {"reason": "Improve diversity.", "recommended": True},
             "metrics_used": ["diversity"],
@@ -42,12 +42,12 @@ def test_valid_next_round_decision_passes() -> None:
     )
 
 
-def test_valid_no_acceptable_candidate_decision_passes() -> None:
+def test_valid_no_acceptable_next_round_intent_passes() -> None:
     validate_decision_v1(
         {
-            "decision": "no_acceptable_candidate",
+            "decision": "next_round_with_no_acceptable_candidate",
             "reasoning": "All candidates fall below the threshold.",
-            "no_acceptable_candidate": {"reason": "All candidates are weak."},
+            "next_round": {"reason": "All candidates are weak."},
             "metrics_used": ["score"],
         }
     )

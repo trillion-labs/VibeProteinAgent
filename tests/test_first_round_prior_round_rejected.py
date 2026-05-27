@@ -129,6 +129,24 @@ def _mixed_upstream_ir() -> dict[str, Any]:
     }
 
 
+def _selection(*tools: str) -> dict[str, Any]:
+    return {
+        "mode": "tool_selection",
+        "selected_tools": [
+            {"name": tool, "reason": "Selected tools for the planner IR fixture."}
+            for tool in tools
+        ],
+        "missing_inputs": [],
+    }
+
+
+def _tools() -> list[dict[str, str]]:
+    return [
+        {"name": "go_sequences", "description": "Retrieve GO sequences."},
+        {"name": "rank_designs", "description": "Rank candidates."},
+    ]
+
+
 def test_canonical_wiring_gates_prior_round_advertisement() -> None:
     first_round = build_canonical_wiring_for_planner(has_prior_round_context=False)
     continuation = build_canonical_wiring_for_planner(has_prior_round_context=True)
@@ -139,28 +157,29 @@ def test_canonical_wiring_gates_prior_round_advertisement() -> None:
 
 
 def test_plan_v1_prompt_excludes_prior_round_without_context() -> None:
-    provider = _PlannerProvider([_go_ir()])
+    provider = _PlannerProvider([_selection("go_sequences"), _go_ir()])
     planner = WorkflowPlanner(ToolRegistry(), provider)
 
-    asyncio.run(planner._plan_v1("Fetch GO candidates."))
+    asyncio.run(planner._plan_v1("Fetch GO candidates.", available_tools=_tools()))
 
-    user_message = json.loads(provider.messages[0][1].content)
+    user_message = json.loads(provider.messages[1][1].content)
     assert "prior_round_context" not in user_message
     assert "prior_round" not in user_message["canonical_wiring"]["candidate_producers"]
 
 
 def test_plan_v1_prompt_includes_prior_round_with_context() -> None:
-    provider = _PlannerProvider([_go_ir()])
+    provider = _PlannerProvider([_selection("go_sequences"), _go_ir()])
     planner = WorkflowPlanner(ToolRegistry(), provider)
 
     asyncio.run(
         planner._plan_v1(
             "Continue ranking candidates.",
+            available_tools=_tools(),
             prior_round_context=_prior_context(),
         )
     )
 
-    user_message = json.loads(provider.messages[0][1].content)
+    user_message = json.loads(provider.messages[1][1].content)
     assert "prior_round_context" in user_message
     assert "prior_round" in user_message["canonical_wiring"]["candidate_producers"]
 
@@ -192,6 +211,55 @@ def test_compiler_allows_prior_round_when_context_exists() -> None:
     assert plan["workflow_plan"]["nodes"][0]["inputs"]["candidates"] == (
         "${outputs.prior_round.candidates}"
     )
+
+
+def test_compiler_uses_actual_prior_round_candidate_capabilities() -> None:
+    context = PriorRoundContext(
+        round_number=2,
+        surviving_candidates=[
+            {
+                "schema_version": "candidate_v1",
+                "candidate_id": "seq_only",
+                "sequence": "ACDE",
+                "capabilities": {
+                    "has_sequence": True,
+                    "has_backbone_structure": False,
+                    "has_full_structure": False,
+                    "has_candidate_scores": False,
+                },
+            }
+        ],
+        prior_decision_reason="Continue with sequence-only survivor.",
+    )
+    ir = {
+        "version": "planner_ir_v1",
+        "goal": "Fold prior sequence.",
+        "assumptions": [],
+        "missing_inputs": [],
+        "nodes": [
+            {
+                "id": "fold_prior",
+                "tool": "protenix_v2",
+                "intent": "Fold the surviving sequence.",
+                "inputs": {},
+                "upstream": [
+                    {"node": "prior_round", "relationship": "candidate_source"}
+                ],
+            }
+        ],
+        "finalization": {"success_criteria": {}},
+    }
+
+    plan = compile_planner_ir(ir, prior_round_context=context)
+    assert plan["workflow_plan"]["nodes"][0]["inputs"]["candidates"] == (
+        "${outputs.prior_round.candidates}"
+    )
+
+    ir["nodes"][0]["tool"] = "proteinmpnn"
+    with pytest.raises(StructuredFixup) as exc_info:
+        compile_planner_ir(ir, prior_round_context=context)
+    assert exc_info.value.payload["error_kind"] == "candidate_capability_mismatch"
+    assert "has_backbone_structure" in exc_info.value.payload["missing_capabilities"]
 
 
 def test_remove_upstream_fixup_preserves_other_edges_and_nodes() -> None:
@@ -250,6 +318,7 @@ def test_first_round_prior_round_fixup_retries_to_compiled_plan(
     tmp_workspace: Workspace,
 ) -> None:
     provider = _PlannerProvider([
+        _selection("rank_designs"),
         _prior_rank_ir(),
         {"choice_id": "remove_upstream"},
     ])
@@ -262,12 +331,13 @@ def test_first_round_prior_round_fixup_retries_to_compiled_plan(
     plan = asyncio.run(
         planner._plan_v1(
             "Rank candidates.",
+            available_tools=_tools(),
             compile_with_fixup=compile_with_fixup,
         )
     )
 
-    assert len(provider.messages) == 2
-    fixup_message = json.loads(provider.messages[1][1].content)
+    assert len(provider.messages) == 3
+    fixup_message = json.loads(provider.messages[2][1].content)
     assert fixup_message["structured_fixup"]["error_kind"] == (
         "prior_round_referenced_without_context"
     )
@@ -282,5 +352,6 @@ def test_fixup_kinds_exact_set() -> None:
         "missing_explicit_mode",
         "missing_canonical_input_slot",
         "upstream_does_not_produce_candidates",
+        "candidate_capability_mismatch",
         "prior_round_referenced_without_context",
     }

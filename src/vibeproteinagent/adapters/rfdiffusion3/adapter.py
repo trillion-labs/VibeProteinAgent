@@ -33,6 +33,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     parse_structure_residue_refs,
     resolve_positions,
 )
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 
 # --------------------------------------------------------------------------- paths
 
@@ -441,6 +442,12 @@ def _rfdiffusion3_candidates(
                 }
             },
             "artifacts": {},
+            "capabilities": candidate_capability_flags(
+                has_sequence=bool(design.sequence),
+                has_backbone_structure=bool(design.pdb_path),
+                has_full_structure=False,
+                has_candidate_scores=True,
+            ),
         }
         if design.sequence:
             candidate["sequence"] = design.sequence

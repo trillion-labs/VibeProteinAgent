@@ -116,39 +116,25 @@ class _DecisionProvider:
         )
 
 
-def _answer_decision() -> dict[str, Any]:
+def _no_acceptable_intent() -> dict[str, Any]:
     return {
-        "decision": "answer",
-        "reasoning": "User asked for pI value; computed via sequence_analysis.",
-        "answer": {
-            "text": "The pI of UniProt P44612 is 6.74.",
-            "evidence": [
-                {
-                    "node_id": "analyze",
-                    "field": "representative_sequences[0].pI",
-                    "summary": "Computed pI from sequence_analysis",
-                }
-            ],
-        },
+        "decision": "next_round_with_no_acceptable_candidate",
+        "reasoning": "No acceptable candidate is available.",
+        "next_round": {"reason": "No acceptable candidate is available."},
         "metrics_used": ["pI"],
     }
 
 
-def test_answer_decision_returns_answer_result_without_submission_or_next_round(
+def test_no_acceptable_intent_stops_without_submission_when_no_rounds_remain(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "off")
-    provider = _DecisionProvider([_answer_decision()])
+    provider = _DecisionProvider([_no_acceptable_intent()])
     execute_calls = {"count": 0}
 
-    async def draft_plan(self, *args, **kwargs):
+    async def plan_v1(self, *args, **kwargs):
         del self, args, kwargs
         return _plan()
-
-    async def fail_next_round(self, *args, **kwargs):
-        del self, args, kwargs
-        raise AssertionError("answer decision must not start another round")
 
     def execute(self, *args, **kwargs):
         del self, args, kwargs
@@ -157,10 +143,9 @@ def test_answer_decision_returns_answer_result_without_submission_or_next_round(
 
     def fail_submit(self, *args, **kwargs):
         del self, args, kwargs
-        raise AssertionError("answer decision must not call submit_candidate")
+        raise AssertionError("non-submit decision must not call submit_candidate")
 
-    monkeypatch.setattr(WorkflowPlanner, "draft_plan", draft_plan)
-    monkeypatch.setattr(WorkflowPlanner, "draft_next_round_plan", fail_next_round)
+    monkeypatch.setattr(WorkflowPlanner, "_plan_v1", plan_v1)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
         lambda _config: provider,
@@ -170,32 +155,21 @@ def test_answer_decision_returns_answer_result_without_submission_or_next_round(
 
     controller = AgentController(
         tmp_workspace,
-        config=AgentConfig.from_env(provider="codex", model="fake", max_rounds=2),
+        config=AgentConfig.from_env(provider="codex", model="fake", max_rounds=1),
     )
     report = _run_controller(controller, tmp_workspace)
 
     assert execute_calls["count"] == 1
     assert report["state"] == "completed"
-    assert report["result"] == {
-        "kind": "answer",
-        "reasoning": "User asked for pI value; computed via sequence_analysis.",
-        "text": "The pI of UniProt P44612 is 6.74.",
-        "evidence": [
-            {
-                "node_id": "analyze",
-                "field": "representative_sequences[0].pI",
-                "summary": "Computed pI from sequence_analysis",
-            }
-        ],
-    }
-    assert report["summary"]["latest"]["answer"] == report["result"]
+    assert report["decision"]["decision"] == "next_round_with_no_acceptable_candidate"
+    assert report["decision"]["resolved_branch"]["action"] == "stop"
+    assert "final_submission" not in report["summary"]["latest"]
 
 
 def test_submit_candidate_decision_behavior_is_unchanged(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "off")
     provider = _DecisionProvider(
         [
             {
@@ -216,7 +190,7 @@ def test_submit_candidate_decision_behavior_is_unchanged(
     )
     submit_calls = {"count": 0}
 
-    async def draft_plan(self, *args, **kwargs):
+    async def plan_v1(self, *args, **kwargs):
         del self, args, kwargs
         return _plan()
 
@@ -239,7 +213,7 @@ def test_submit_candidate_decision_behavior_is_unchanged(
             "job_submit",
         )
 
-    monkeypatch.setattr(WorkflowPlanner, "draft_plan", draft_plan)
+    monkeypatch.setattr(WorkflowPlanner, "_plan_v1", plan_v1)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
         lambda _config: provider,
@@ -261,31 +235,27 @@ def test_next_round_decision_behavior_is_unchanged(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "off")
     provider = _DecisionProvider(
         [
-            {
-                "decision": "next_round",
-                "reasoning": "More local analysis is useful.",
-                "next_round": {"reason": "Run one more pass.", "recommended": True},
-                "metrics_used": ["pI"],
-            },
-            {
-                "decision": "stop",
-                "reasoning": "Second round completed.",
-                "metrics_used": ["pI"],
-            },
+                {
+                    "decision": "next_round_with_surviving_candidate",
+                    "reasoning": "More local analysis is useful.",
+                    "next_round": {"reason": "Run one more pass.", "recommended": True},
+                    "metrics_used": ["pI"],
+                },
+                {
+                    "decision": "next_round_with_no_acceptable_candidate",
+                    "reasoning": "Second round completed.",
+                    "next_round": {"reason": "Second round completed."},
+                    "metrics_used": ["pI"],
+                },
         ]
     )
     executed: list[str] = []
 
-    async def draft_plan(self, *args, **kwargs):
+    async def plan_v1(self, *args, **kwargs):
         del self, args, kwargs
-        return _plan("round1")
-
-    async def draft_next_round(self, *args, **kwargs):
-        del self, args, kwargs
-        return _plan("round2")
+        return _plan(f"round{len(executed) + 1}")
 
     def execute(self, *args, **kwargs):
         del self, args, kwargs
@@ -293,8 +263,7 @@ def test_next_round_decision_behavior_is_unchanged(
         executed.append(f"wf_round{index}")
         return _outcome(f"wf_round{index}", f"job_round{index}")
 
-    monkeypatch.setattr(WorkflowPlanner, "draft_plan", draft_plan)
-    monkeypatch.setattr(WorkflowPlanner, "draft_next_round_plan", draft_next_round)
+    monkeypatch.setattr(WorkflowPlanner, "_plan_v1", plan_v1)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
         lambda _config: provider,
@@ -307,37 +276,35 @@ def test_next_round_decision_behavior_is_unchanged(
     )
 
     assert executed == ["wf_round1", "wf_round2"]
-    assert [item["decision"] for item in report["decisions"]] == ["next_round", "stop"]
+    assert [item["decision"] for item in report["decisions"]] == [
+        "next_round_with_surviving_candidate",
+        "next_round_with_no_acceptable_candidate",
+    ]
     assert report["result"] == {
         "workflow_ids": ["wf_round1", "wf_round2"],
         "state": "completed",
     }
 
 
-def test_multi_round_agent_can_end_with_answer(
+def test_multi_round_agent_can_end_with_non_submit_stop(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "off")
     provider = _DecisionProvider(
         [
-            {
-                "decision": "next_round",
-                "reasoning": "Need a second local calculation.",
-                "next_round": {"reason": "Compute the requested property.", "recommended": True},
-                "metrics_used": ["pI"],
-            },
-            _answer_decision(),
+                {
+                    "decision": "next_round_with_surviving_candidate",
+                    "reasoning": "Need a second local calculation.",
+                    "next_round": {"reason": "Compute the requested property.", "recommended": True},
+                    "metrics_used": ["pI"],
+                },
+            _no_acceptable_intent(),
         ]
     )
 
-    async def draft_plan(self, *args, **kwargs):
+    async def plan_v1(self, *args, **kwargs):
         del self, args, kwargs
-        return _plan("round1")
-
-    async def draft_next_round(self, *args, **kwargs):
-        del self, args, kwargs
-        return _plan("round2")
+        return _plan(f"round{provider.index + 1}")
 
     def execute(self, *args, **kwargs):
         del self, args, kwargs
@@ -346,10 +313,9 @@ def test_multi_round_agent_can_end_with_answer(
 
     def fail_submit(self, *args, **kwargs):
         del self, args, kwargs
-        raise AssertionError("answer decision must not call submit_candidate")
+        raise AssertionError("non-submit stop must not call submit_candidate")
 
-    monkeypatch.setattr(WorkflowPlanner, "draft_plan", draft_plan)
-    monkeypatch.setattr(WorkflowPlanner, "draft_next_round_plan", draft_next_round)
+    monkeypatch.setattr(WorkflowPlanner, "_plan_v1", plan_v1)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
         lambda _config: provider,
@@ -362,9 +328,11 @@ def test_multi_round_agent_can_end_with_answer(
         tmp_workspace,
     )
 
-    assert [item["decision"] for item in report["decisions"]] == ["next_round", "answer"]
-    assert report["result"]["kind"] == "answer"
-    assert report["result"]["text"] == "The pI of UniProt P44612 is 6.74."
+    assert [item["decision"] for item in report["decisions"]] == [
+        "next_round_with_surviving_candidate",
+        "next_round_with_no_acceptable_candidate",
+    ]
+    assert report["decision"]["resolved_branch"]["action"] == "stop"
 
 
 def test_answer_result_requires_text() -> None:

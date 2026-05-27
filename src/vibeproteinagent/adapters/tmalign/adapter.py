@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.binary import find_binary
 
@@ -286,6 +287,15 @@ def _tmalign_candidates(
             candidate.setdefault("artifacts", {})["tmalign"] = {
                 "superposition_pdb": superposition_pdb
             }
+        candidate.setdefault(
+            "capabilities",
+            candidate_capability_flags(
+                has_sequence=bool(candidate.get("sequence")),
+                has_backbone_structure=bool(structure_path),
+                has_full_structure=False,
+                has_candidate_scores=True,
+            ),
+        )
         out.append(candidate)
     return out
 
@@ -294,7 +304,7 @@ def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     out = {
         key: value
         for key, value in candidate.items()
-        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
     }
     out["scores"] = dict(candidate.get("scores") or {})
     out["artifacts"] = dict(candidate.get("artifacts") or {})

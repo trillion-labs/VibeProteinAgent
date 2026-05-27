@@ -1,0 +1,17 @@
+name: interpro_entry_lookup
+version: "1.0.0"
+category: retrieval
+description: "Lightweight lookup that validates and enriches a known InterPro/Pfam/PANTHER accession before it is used by interpro_sequences or downstream analysis."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 5
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [interpro_entry_lookup]
+input_schema: schemas/interpro_entry_lookup.input.json
+output_schema: schemas/interpro_entry_lookup.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.interpro_entry_lookup.adapter:InterProEntryLookupAdapter"

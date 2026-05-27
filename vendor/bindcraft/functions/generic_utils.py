@@ -125,10 +125,22 @@ def update_failures(failure_csv, failure_column_or_dict):
 
 # Check if number of trajectories generated
 def check_n_trajectories(design_paths, advanced_settings):
-    n_trajectories = [f for f in os.listdir(design_paths["Trajectory/Relaxed"]) if f.endswith('.pdb') and not f.startswith('.')]
+    trajectory_stems = set()
+    for trajectory_dir in (
+        "Trajectory",
+        "Trajectory/Relaxed",
+        "Trajectory/Clashing",
+        "Trajectory/LowConfidence",
+    ):
+        path = design_paths.get(trajectory_dir)
+        if path is None or not os.path.isdir(path):
+            continue
+        for filename in os.listdir(path):
+            if filename.endswith('.pdb') and not filename.startswith('.'):
+                trajectory_stems.add(os.path.splitext(filename)[0])
 
-    if advanced_settings["max_trajectories"] is not False and len(n_trajectories) >= advanced_settings["max_trajectories"]:
-        print(f"Target number of {str(len(n_trajectories))} trajectories reached, stopping execution...")
+    if advanced_settings["max_trajectories"] is not False and len(trajectory_stems) >= advanced_settings["max_trajectories"]:
+        print(f"Target number of {str(len(trajectory_stems))} attempted trajectories reached, stopping execution...")
         return True
     else:
         return False

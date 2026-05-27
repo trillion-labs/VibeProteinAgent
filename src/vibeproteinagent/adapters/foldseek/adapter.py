@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.binary import find_binary
 
@@ -177,6 +178,9 @@ def _foldseek_candidates(params: FoldseekInput, hits_tsv: str | Path) -> list[di
                 }
             },
             "artifacts": {"foldseek": {"hits_tsv": str(path)}},
+            "capabilities": candidate_capability_flags(
+                has_candidate_scores=True,
+            ),
         })
     return candidates
 

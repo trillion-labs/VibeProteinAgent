@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import pytest
+import subprocess
 import yaml
 from pydantic import ValidationError
 
+from vibeproteinagent.adapters import null_context
 from vibeproteinagent.adapters.boltzgen.adapter import (
     BOLTZGEN_CACHE,
     BOLTZGEN_TREE,
@@ -15,10 +17,12 @@ from vibeproteinagent.adapters.boltzgen.adapter import (
     _build_cmd,
     _build_env,
     _collect_designs,
+    _detect_failure_stage,
     _safe_float,
     _safe_int,
     _stage_design_spec,
 )
+from vibeproteinagent.core.errors import DependencyError
 
 
 def test_descriptor_fields():
@@ -61,7 +65,7 @@ def test_input_defaults():
     assert p.num_designs == 10
     assert p.num_diffusion_steps == 500
     assert p.protocol == "protein-anything"
-    assert p.design_only is True
+    assert p.design_only is False
     assert p.budget == 10
     assert p.seed is None
 
@@ -173,7 +177,12 @@ def test_stage_design_spec_from_yaml_copies_referenced_files(tmp_path):
 
 
 def test_build_cmd_design_only_includes_steps_filter(tmp_path):
-    p = BoltzGenInput(target_pdb="/tmp/a.pdb", num_designs=1, num_diffusion_steps=10)
+    p = BoltzGenInput(
+        target_pdb="/tmp/a.pdb",
+        design_only=True,
+        num_designs=1,
+        num_diffusion_steps=10,
+    )
     cmd = _build_cmd(
         design_spec=tmp_path / "design.yaml",
         output_dir=tmp_path / "out",
@@ -205,8 +214,49 @@ def test_build_env_hygiene():
     assert env["PYTHONNOUSERSITE"] == "1"
     assert "PYTHONPATH" not in env or env["PYTHONPATH"].endswith("/src")
     assert "HF_HUB_CACHE" in env
+    assert env["HYDRA_FULL_ERROR"] == "1"
     env_seed = _build_env(seed=7)
     assert env_seed["PYTHONHASHSEED"] == "7"
+
+
+def test_detect_failure_stage_from_logs(tmp_path):
+    stdout = tmp_path / "stdout.log"
+    stderr = tmp_path / "stderr.log"
+    stdout.write_text("running design\n")
+    stderr.write_text("hydra failed in analyze stage\n")
+    assert _detect_failure_stage(stdout, stderr) == "analyze"
+
+
+def test_boltzgen_subprocess_failure_records_artifact_paths(monkeypatch, tmp_path):
+    pdb = tmp_path / "target.pdb"
+    pdb.write_text("END\n")
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter._check_paths", lambda: None)
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.BOLTZGEN_CACHE", tmp_path / "cache")
+    (tmp_path / "cache").mkdir()
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.BOLTZGEN_TREE", tmp_path)
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.torch.cuda.is_available", lambda: True)
+
+    def fake_run(cmd, **kwargs):
+        kwargs["stdout"].write("design complete\n")
+        kwargs["stderr"].write("ModuleNotFoundError: No module named 'hydride' during analyze\n")
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.subprocess.run", fake_run)
+    adapter = object.__new__(BoltzGenAdapter)
+    adapter.device = None
+
+    with pytest.raises(DependencyError) as exc_info:
+        adapter.run(
+            BoltzGenInput(target_pdb=str(pdb), num_designs=1, num_diffusion_steps=5),
+            null_context(tmp_path / "job"),
+        )
+
+    details = exc_info.value.details
+    assert details["returncode"] == 1
+    assert details["stage"] == "analyze"
+    assert details["stdout_path"].endswith("boltzgen.stdout.log")
+    assert details["stderr_path"].endswith("boltzgen.stderr.log")
+    assert "hydride" in details["stderr_tail"]
 
 
 def test_collect_designs_design_only_reads_intermediate(tmp_path):
@@ -216,7 +266,7 @@ def test_collect_designs_design_only_reads_intermediate(tmp_path):
     (inter / "1g13_0.cif").write_text("# fake")
     (inter / "1g13_1.cif").write_text("# fake")
     (inter / "1g13_native.cif").write_text("# native — should be skipped")
-    params = BoltzGenInput(target_pdb="/tmp/a.pdb", binder_length=42)
+    params = BoltzGenInput(target_pdb="/tmp/a.pdb", design_only=True, binder_length=42)
     designs = _collect_designs(output_dir=out, params=params)
     assert len(designs) == 2
     assert all(d.length == 42 for d in designs)
@@ -228,7 +278,7 @@ def test_collect_designs_design_only_reads_root_output_fallback(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     (out / "design.cif").write_text("# fake")
-    params = BoltzGenInput(target_pdb="/tmp/a.pdb", binder_length=42)
+    params = BoltzGenInput(target_pdb="/tmp/a.pdb", design_only=True, binder_length=42)
     designs = _collect_designs(output_dir=out, params=params)
     assert len(designs) == 1
     assert designs[0].cif_path.endswith("design.cif")
@@ -238,7 +288,7 @@ def test_collect_designs_design_only_reads_root_output_fallback(tmp_path):
 def test_collect_designs_raises_when_no_designs(tmp_path):
     out = tmp_path / "out"
     (out / "intermediate_designs").mkdir(parents=True)
-    p = BoltzGenInput(target_pdb="/tmp/a.pdb")
+    p = BoltzGenInput(target_pdb="/tmp/a.pdb", design_only=True)
     with pytest.raises(RuntimeError, match="no design CIFs"):
         _collect_designs(output_dir=out, params=p)
 

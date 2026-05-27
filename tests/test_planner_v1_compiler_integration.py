@@ -47,8 +47,22 @@ def _tool_catalog() -> list[dict[str, str]]:
     ]
 
 
+def _selection(*tools: str) -> dict[str, Any]:
+    return {
+        "mode": "tool_selection",
+        "selected_tools": [
+            {"name": tool, "reason": "Selected tools needed for the requested workflow."}
+            for tool in tools
+        ],
+        "missing_inputs": [],
+    }
+
+
 def test_plan_v1_compiles_single_producer_consumer() -> None:
-    provider = _PlannerProvider([_fixture_ir()])
+    provider = _PlannerProvider([
+        _selection("go_sequences", "rank_designs"),
+        _fixture_ir(),
+    ])
     planner = WorkflowPlanner(ToolRegistry(), provider)
 
     plan = asyncio.run(
@@ -72,7 +86,10 @@ def test_plan_v1_compiles_multi_upstream_merge() -> None:
     ir["nodes"][2]["upstream"].append(
         {"node": "go_more_candidates", "relationship": "candidate_source"}
     )
-    provider = _PlannerProvider([ir])
+    provider = _PlannerProvider([
+        _selection("go_sequences", "rank_designs"),
+        ir,
+    ])
     planner = WorkflowPlanner(ToolRegistry(), provider)
 
     plan = asyncio.run(
@@ -99,8 +116,22 @@ def test_plan_v1_compiles_multi_upstream_merge() -> None:
 def test_plan_v1_reuses_controller_fixup_transport(tmp_workspace: Workspace) -> None:
     ir = _fixture_ir()
     ir["nodes"][1]["tool"] = "go_sequences"
+    ir["nodes"][1]["inputs"] = {}
     provider = _PlannerProvider(
-        [ir, {"choice_id": "swap_tool", "tool": "rank_designs"}]
+        [
+            _selection("go_sequences", "rank_designs"),
+            ir,
+            {
+                "add_selected_tools": [],
+                "drop_selected_tools": ["rank_designs"],
+                "remove_node_ids": [],
+                "reason": (
+                    "Let compiler fixup resolve the downstream consumer swap "
+                    "without treating the unused selected tool as a planner IR boundary error."
+                ),
+            },
+            {"choice_id": "swap_tool", "tool": "rank_designs"},
+        ]
     )
     controller = AgentController(tmp_workspace, config=AgentConfig(max_entries=3))
     planner = WorkflowPlanner(ToolRegistry(), provider)
@@ -116,7 +147,7 @@ def test_plan_v1_reuses_controller_fixup_transport(tmp_workspace: Workspace) -> 
         )
     )
 
-    assert len(provider.messages) == 2
+    assert len(provider.messages) == 4
     assert plan["workflow_plan"]["nodes"][1]["tool"] == "rank_designs"
     assert plan["workflow_plan"]["nodes"][1]["inputs"]["candidates"] == (
         "${outputs.go_candidates.candidates}"

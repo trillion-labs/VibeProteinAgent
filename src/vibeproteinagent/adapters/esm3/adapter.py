@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.compat import ensure_esm3_shared_hf_cache
 from vibeproteinagent.core.config import model_cache_root
@@ -296,6 +297,12 @@ def _esm3_candidates(params: ESM3Input, output: ESM3Output) -> list[dict[str, An
         "sequence": params.sequence,
         "scores": {"esm3": scores},
         "artifacts": {},
+        "capabilities": candidate_capability_flags(
+            has_sequence=bool(params.sequence),
+            has_backbone_structure=bool(output.predicted_pdb),
+            has_full_structure=bool(output.predicted_pdb),
+            has_candidate_scores=True,
+        ),
     }
     if output.predicted_pdb:
         candidate["structure_path"] = output.predicted_pdb

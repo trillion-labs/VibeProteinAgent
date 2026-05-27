@@ -263,11 +263,13 @@ def test_planner_prompt_content_sanity_for_multi_mode_guidance() -> None:
     assert "binder_design" not in PLANNER_IR_SYSTEM_PROMPT
     assert "symmetric_oligomer_design" not in PLANNER_IR_SYSTEM_PROMPT
 
-    added = PLANNER_IR_SYSTEM_PROMPT.split("Multi-mode tools", 1)[1].split(
-        "Plan at the level", 1
-    )[0]
-    added_words = re.findall(r"\b\w+\b", "Multi-mode tools" + added)
-    assert 50 <= len(added_words) <= 80
+    multi_mode_sentence = next(
+        sentence
+        for sentence in PLANNER_IR_SYSTEM_PROMPT.split(".")
+        if "Multi-mode tools" in sentence
+    )
+    added_words = re.findall(r"\b\w+\b", multi_mode_sentence)
+    assert 8 <= len(added_words) <= 20
 
 
 def test_single_mode_tool_unaffected() -> None:

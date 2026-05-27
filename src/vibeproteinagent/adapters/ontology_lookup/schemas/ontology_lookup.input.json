@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/ontology_lookup.input.json",
+  "type": "object",
+  "required": ["term_id"],
+  "properties": {
+    "ontology": {
+      "type": "string",
+      "enum": ["go"],
+      "default": "go",
+      "description": "Ontology namespace for exact identifier lookup.",
+      "examples": ["go"]
+    },
+    "term_id": {
+      "type": "string",
+      "pattern": "^GO:[0-9]{7}$",
+      "description": "Exact Gene Ontology identifier to resolve.",
+      "examples": ["GO:0052855"]
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 60,
+      "default": 15,
+      "description": "Maximum wall-clock time in seconds for the ontology lookup request.",
+      "examples": [15]
+    }
+  },
+  "additionalProperties": false
+}

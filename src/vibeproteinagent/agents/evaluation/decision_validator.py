@@ -115,8 +115,9 @@ def _violation_from_error(error: ValidationError) -> DecisionViolation:
             path=path,
             issue="invalid_decision_enum",
             expected=(
-                "decision must be one of submit_candidate, next_round, "
-                "no_acceptable_candidate, stop."
+                "decision must be one of submit_candidate, "
+                "next_round_with_surviving_candidate, "
+                "next_round_with_no_acceptable_candidate."
             ),
         )
     if error.validator == "minItems":

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/go_term_search.output.json",
+  "type": "object",
+  "required": ["query", "status", "matches", "warnings", "resolved_terms", "ambiguous", "ready_for_execution", "raw_result_count", "runtime_ms"],
+  "properties": {
+    "query": {"type": "string"},
+    "status": {"type": "string", "enum": ["resolved", "no_match", "ambiguous", "backend_error", "parse_error"]},
+    "matches": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "resolved_terms": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "ambiguous": {"type": "boolean"},
+    "ready_for_execution": {"type": "boolean"},
+    "selected_go_id": {"type": ["string", "null"]},
+    "selection_reason": {"type": ["string", "null"]},
+    "raw_result_count": {"type": "integer", "minimum": 0},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

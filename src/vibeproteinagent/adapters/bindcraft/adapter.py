@@ -33,6 +33,7 @@ canonical ~5.3 GiB tarball from
 """
 from __future__ import annotations
 
+import csv
 import json
 import hashlib
 import os
@@ -54,6 +55,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_positions,
 )
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.errors import VPAError
 from vibeproteinagent.workers.sidecar import PersistentPythonSidecar, SidecarRuntimeSpec
@@ -77,6 +79,10 @@ BINDCRAFT_CONDA_ENV = os.environ.get("VPA_BINDCRAFT_CONDA_ENV", "BindCraft")
 
 _RUNNER_MODULE = "vibeproteinagent.adapters.bindcraft._runner"
 _RUNNER_SIDECAR_CALL = f"{_RUNNER_MODULE}:run_sidecar"
+
+
+class NoAcceptedBindCraftDesigns(RuntimeError):
+    """BindCraft completed but produced no accepted design PDBs."""
 
 
 def _check_paths() -> None:
@@ -241,6 +247,8 @@ class BindCraftInput(BaseModel):
     num_recycles: int = Field(default=1, ge=0, le=8)
     seed: int | None = Field(default=None)
     max_trajectories: int | None = Field(default=None, ge=1, le=10_000)
+    max_attempted_trajectories: int | None = Field(default=None, ge=1, le=10_000)
+    max_runtime_s: int | None = Field(default=None, ge=1)
     filter_mode: Literal["default", "permissive"] = "default"
 
     @model_validator(mode="before")
@@ -287,6 +295,7 @@ class BindCraftDesign(BaseModel):
 
 
 class BindCraftOutput(BaseModel):
+    status: Literal["completed", "no_acceptable_candidate"] = "completed"
     designs: list[BindCraftDesign]
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
@@ -294,6 +303,8 @@ class BindCraftOutput(BaseModel):
     seeds_used: list[int]
     position_mappings: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    failure_summary: dict[str, int] = Field(default_factory=dict)
+    run_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- adapter
@@ -392,19 +403,29 @@ class BindCraftAdapter(ToolAdapter):
                     "advanced_json": str(advanced_json),
                     "seed": params.seed,
                 },
-                timeout_s=4 * 3600,
+                timeout_s=params.max_runtime_s or 4 * 3600,
             )
         except VPAError as exc:
+            if params.max_runtime_s is not None:
+                self._sidecar_for(params.seed, python).close()
             raise RuntimeError(str(exc)) from exc
         ctx.emit_progress(0.92)
 
-        designs, collect_warnings = _collect_designs(
-            design_path=job_outputs,
-            binder_length=params.binder_length,
-        )
+        try:
+            designs, collect_warnings = _collect_designs(
+                design_path=job_outputs,
+                binder_length=params.binder_length,
+            )
+            status: Literal["completed", "no_acceptable_candidate"] = "completed"
+        except NoAcceptedBindCraftDesigns as exc:
+            designs = []
+            collect_warnings = [str(exc)]
+            status = "no_acceptable_candidate"
+        failure_summary = _bindcraft_failure_summary(job_outputs)
         runtime_ms = int((time.time() - t0) * 1000)
         ctx.emit_progress(1.0)
         return BindCraftOutput(
+            status=status,
             designs=designs,
             candidates=[
                 _canonical_candidate_from_design(design.model_dump(), index)
@@ -416,7 +437,21 @@ class BindCraftAdapter(ToolAdapter):
             position_mappings={
                 "target_hotspots": hotspot_resolution.to_audit()
             },
-            warnings=[*hotspot_resolution.warnings, *collect_warnings],
+            warnings=[
+                *hotspot_resolution.warnings,
+                *collect_warnings,
+                *_bindcraft_budget_warnings(failure_summary, designs),
+            ],
+            failure_summary=failure_summary,
+            run_metadata={
+                "status": status,
+                "target_pdb": str(target_src),
+                "accepted_design_count": len(designs),
+                "failure_summary": failure_summary,
+                "filter_mode": params.filter_mode,
+                "max_attempted_trajectories": params.max_attempted_trajectories,
+                "max_trajectories": params.max_trajectories,
+            },
         )
 
     def estimate_vram(self, params: BindCraftInput) -> int:
@@ -611,12 +646,87 @@ def _build_advanced(params: BindCraftInput, params_dir: Path) -> dict:
         "af_params_dir": str(params_dir),
         "dalphaball_path": str(BINDCRAFT_TREE / "functions" / "DAlphaBall.gcc"),
         "dssp_path": str(BINDCRAFT_TREE / "functions" / "dssp"),
-        "max_trajectories": params.max_trajectories or False,
+        "max_trajectories": (
+            params.max_attempted_trajectories
+            or params.max_trajectories
+            or False
+        ),
         "enable_rejection_check": True,
         "acceptance_rate": 0.05,
         "start_monitoring": 1000,
     }
     return advanced
+
+
+def _count_attempted_bindcraft_trajectories(design_path: Path) -> int:
+    stems: set[str] = set()
+    for rel_dir in (
+        "Trajectory",
+        "Trajectory/Relaxed",
+        "Trajectory/Clashing",
+        "Trajectory/LowConfidence",
+    ):
+        folder = design_path / rel_dir
+        if not folder.is_dir():
+            continue
+        for pdb in folder.glob("*.pdb"):
+            if not pdb.name.startswith("."):
+                stems.add(pdb.stem)
+    return len(stems)
+
+
+def _bindcraft_failure_summary(design_path: Path) -> dict[str, int]:
+    return {
+        "attempted": _count_attempted_bindcraft_trajectories(design_path),
+        "accepted": _count_pdbs(design_path / "Accepted" / "Ranked"),
+        "relaxed": _count_pdbs(design_path / "Trajectory" / "Relaxed"),
+        "clashing": _count_pdbs(design_path / "Trajectory" / "Clashing"),
+        "low_confidence": _count_pdbs(design_path / "Trajectory" / "LowConfidence"),
+        "failure_events": _count_failure_csv_events(design_path / "failure_csv.csv"),
+    }
+
+
+def _count_pdbs(folder: Path) -> int:
+    if not folder.is_dir():
+        return 0
+    return sum(1 for item in folder.glob("*.pdb") if not item.name.startswith("."))
+
+
+def _count_failure_csv_events(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    try:
+        with path.open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except Exception:
+        return 0
+    total = 0
+    for row in rows:
+        for value in row.values():
+            try:
+                total += int(float(value or 0))
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def _bindcraft_budget_warnings(
+    failure_summary: dict[str, int],
+    designs: list[BindCraftDesign],
+) -> list[str]:
+    if designs:
+        return []
+    attempted = failure_summary.get("attempted", 0)
+    if attempted <= 0:
+        return []
+    return [
+        (
+            "BindCraft attempted "
+            f"{attempted} trajectories and accepted 0 designs "
+            f"(clashing={failure_summary.get('clashing', 0)}, "
+            f"low_confidence={failure_summary.get('low_confidence', 0)})."
+        )
+    ]
 
 
 def _build_env(
@@ -664,13 +774,13 @@ def _collect_designs(
     """
     accepted_dir = design_path / "Accepted"
     if not accepted_dir.is_dir():
-        raise RuntimeError(
+        raise NoAcceptedBindCraftDesigns(
             f"BindCraft produced no Accepted/ directory under {design_path}. "
             f"Likely no trajectories passed the filter cascade in the allotted budget."
         )
     pdbs = sorted(accepted_dir.glob("*.pdb"))
     if not pdbs:
-        raise RuntimeError(
+        raise NoAcceptedBindCraftDesigns(
             f"BindCraft Accepted/ directory at {accepted_dir} contains no PDBs."
         )
 
@@ -770,6 +880,12 @@ def _canonical_candidate_from_design(design: dict[str, Any], index: int) -> dict
             }
         },
         "artifacts": {},
+        "capabilities": candidate_capability_flags(
+            has_sequence=bool(sequence),
+            has_backbone_structure=bool(structure_path),
+            has_full_structure=bool(structure_path),
+            has_candidate_scores=True,
+        ),
     }
 
 
@@ -859,5 +975,6 @@ __all__ = [
     "BindCraftDesign",
     "BindCraftInput",
     "BindCraftOutput",
+    "NoAcceptedBindCraftDesigns",
     "availability_skip_reason",
 ]

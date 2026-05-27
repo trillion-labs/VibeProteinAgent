@@ -197,6 +197,8 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
 
 
 def _candidate_rows(output: dict[str, Any]) -> list[dict[str, Any]]:
+    if output.get("status") == "no_acceptable_candidate":
+        return []
     canonical = _canonical_candidate_rows(output)
     if canonical:
         return canonical

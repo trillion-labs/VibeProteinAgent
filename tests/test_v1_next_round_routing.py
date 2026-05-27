@@ -15,7 +15,10 @@ from vibeproteinagent.agents.execution import controller as controller_mod
 from vibeproteinagent.agents.execution.controller import AgentController, WorkflowExecutionOutcome
 from vibeproteinagent.agents.execution.round_state import PriorRoundContext
 from vibeproteinagent.agents.planning import workflow_planner as planner_mod
-from vibeproteinagent.agents.planning.prompts import PLANNER_IR_SYSTEM_PROMPT
+from vibeproteinagent.agents.planning.prompts import (
+    PLANNER_IR_SYSTEM_PROMPT,
+    TOOL_SELECTION_SYSTEM_PROMPT,
+)
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse
 from vibeproteinagent.agents.session import ModeClassification
 from vibeproteinagent.agents.tools import AgentToolBroker
@@ -91,6 +94,17 @@ def _round2_ir() -> dict[str, Any]:
     }
 
 
+def _selection(*tools: str) -> dict[str, Any]:
+    return {
+        "mode": "tool_selection",
+        "selected_tools": [
+            {"name": tool, "reason": "Selected tools for the current planning round."}
+            for tool in tools
+        ],
+        "missing_inputs": [],
+    }
+
+
 def _classification() -> ModeClassification:
     return ModeClassification(
         mode="agent_plan",
@@ -130,28 +144,24 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("VPA_PLANNER_IR", raising=False)
     _allow_tool_environment(monkeypatch)
-    provider = _PlannerProvider([_round1_ir(), _round2_ir()])
+    provider = _PlannerProvider(
+        [
+            _selection("go_sequences"),
+            _round1_ir(),
+            _selection("rank_designs"),
+            _round2_ir(),
+        ]
+    )
     monkeypatch.setattr(controller_mod, "provider_from_config", lambda _config: provider)
-    calls = {"draft_next_round": 0, "plan_v1": 0}
+    calls = {"plan_v1": 0}
     original_plan_v1 = planner_mod.WorkflowPlanner._plan_v1
 
     async def spy_plan_v1(self, *args, **kwargs):
         calls["plan_v1"] += 1
         return await original_plan_v1(self, *args, **kwargs)
 
-    async def fail_draft_next_round(self, *args, **kwargs):
-        del self, args, kwargs
-        calls["draft_next_round"] += 1
-        raise AssertionError("v1 next-round routing must not use draft_next_round_plan")
-
     monkeypatch.setattr(planner_mod.WorkflowPlanner, "_plan_v1", spy_plan_v1)
-    monkeypatch.setattr(
-        planner_mod.WorkflowPlanner,
-        "draft_next_round_plan",
-        fail_draft_next_round,
-    )
 
     async def fake_decide(self, *args, **kwargs):
         del self, args, kwargs
@@ -228,7 +238,7 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
     report = _run_controller(controller, tmp_workspace)
 
     assert report["state"] == "completed"
-    assert calls == {"draft_next_round": 0, "plan_v1": 2}
+    assert calls == {"plan_v1": 2}
     assert not hasattr(controller, "_maybe_compile_planner_ir")
     round2_prior_context = captured["execute_calls"][1]["prior_round_context"]
     assert isinstance(round2_prior_context, PriorRoundContext)
@@ -238,8 +248,13 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
         "Survivors need ranking before final submission."
     )
     assert controller._round_state is None
-    round2_user_message = json.loads(provider.messages[1][1].content)
-    assert provider.messages[1][0].content == PLANNER_IR_SYSTEM_PROMPT
+    assert [message[0].content for message in provider.messages] == [
+        TOOL_SELECTION_SYSTEM_PROMPT,
+        PLANNER_IR_SYSTEM_PROMPT,
+        TOOL_SELECTION_SYSTEM_PROMPT,
+        PLANNER_IR_SYSTEM_PROMPT,
+    ]
+    round2_user_message = json.loads(provider.messages[3][1].content)
     assert "prior_round_context" in round2_user_message
     assert round2_user_message["prior_round_context"]["surviving_candidates"] == [
         _candidate()

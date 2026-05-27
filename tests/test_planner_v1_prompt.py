@@ -30,4 +30,4 @@ def test_planner_ir_prompt_mentions_schema_and_contains_json_example() -> None:
 
 def test_planner_ir_prompt_word_count_budget() -> None:
     words = re.findall(r"\b\w+\b", PLANNER_IR_SYSTEM_PROMPT)
-    assert 700 <= len(words) <= 1100
+    assert 250 <= len(words) <= 500

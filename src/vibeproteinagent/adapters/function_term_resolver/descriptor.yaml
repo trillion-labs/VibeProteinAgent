@@ -1,0 +1,17 @@
+name: function_term_resolver
+version: "1.0.0"
+category: retrieval
+description: "Lightweight resolver that searches GO and InterPro metadata for natural-language protein function terms and returns ranked executable identifier candidates. Use before go_sequences or interpro_sequences when exact accessions are absent."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 10
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [function_term_resolver]
+input_schema: schemas/function_term_resolver.input.json
+output_schema: schemas/function_term_resolver.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.function_term_resolver.adapter:FunctionTermResolverAdapter"

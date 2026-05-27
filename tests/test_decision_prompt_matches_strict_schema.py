@@ -60,7 +60,7 @@ def test_decision_prompt_static_content_matches_strict_schema() -> None:
         assert phrase not in prompt_lower
 
     submit_candidate_section = prompt.split("For `submit_candidate`", 1)[1].split(
-        "For `next_round`", 1
+        "Examples:", 1
     )[0]
     assert "reasoning" not in submit_candidate_section
     assert "decision_v1" in prompt
@@ -72,10 +72,8 @@ def test_decision_prompt_json_examples_validate_against_decision_v1() -> None:
 
     assert {example["decision"] for example in examples} == {
         "submit_candidate",
-        "next_round",
-        "no_acceptable_candidate",
-        "stop",
-        "answer",
+        "next_round_with_surviving_candidate",
+        "next_round_with_no_acceptable_candidate",
     }
     for example in examples:
         validate_decision_v1(example)

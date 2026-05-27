@@ -16,7 +16,7 @@ def test_single_node_ir_compiles_with_inputs_passed_through() -> None:
     plan = compile_planner_ir(_fixture("single_go.json"))
     nodes = plan["workflow_plan"]["nodes"]
 
-    assert plan["source_kind"] == "planner_ir_compiled"
+    assert plan["source_kind"] == "planner_compiled"
     assert nodes == [
         {
             "id": "go_fetch",

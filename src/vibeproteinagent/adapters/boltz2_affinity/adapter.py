@@ -540,7 +540,7 @@ def _boltz2_affinity_candidates(
         candidate = {
             key: value
             for key, value in source.items()
-            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
         }
         candidate["scores"] = dict(source.get("scores") or {})
         candidate["artifacts"] = dict(source.get("artifacts") or {})

@@ -65,6 +65,17 @@ def _allow_tool_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "_descriptor_availability",
         lambda descriptor, adapter_cls: {"available": True},
     )
+
+
+def _selection(*tools: str) -> dict[str, Any]:
+    return {
+        "mode": "tool_selection",
+        "selected_tools": [
+            {"name": tool, "reason": "Selected tools for the fixture."}
+            for tool in tools
+        ],
+        "missing_inputs": [],
+    }
     monkeypatch.setattr(
         planner_mod,
         "_install_readiness",
@@ -78,7 +89,7 @@ def test_plan_v1_compiled_output_skips_legacy_static_validators(
     _allow_tool_environment(monkeypatch)
     calls = _spy_legacy_validators(monkeypatch)
     planner_ir = json.loads(PLANNER_IR_FIXTURE.read_text())
-    provider = _Provider([planner_ir])
+    provider = _Provider([_selection("go_sequences", "rank_designs"), planner_ir])
     planner = WorkflowPlanner(_registry(), provider)
 
     plan = asyncio.run(
@@ -100,66 +111,4 @@ def test_plan_v1_compiled_output_skips_legacy_static_validators(
         "_validate_static_output_refs": 0,
         "_validate_static_output_ref_types": 0,
         "_validate_static_job_refs": 0,
-    }
-
-
-def test_legacy_draft_plan_still_runs_legacy_static_validators(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "off")
-    _allow_tool_environment(monkeypatch)
-    calls = _spy_legacy_validators(monkeypatch)
-    provider = _Provider(
-        [
-            {
-                "mode": "tool_selection",
-                "candidate_tools": ["go_sequences"],
-                "reason": "GO sequence retrieval is enough for this fixture.",
-                "missing_inputs": [],
-            },
-            {
-                "mode": "agent_plan",
-                "goal": "Collect one GO-associated candidate sequence.",
-                "assumptions": [],
-                "missing_inputs": [],
-                "required_tools": ["go_sequences"],
-                "params": {},
-                "workflow_plan": {
-                    "name": "legacy_go_plan",
-                    "version": "0.1.0",
-                    "nodes": [
-                        {
-                            "id": "go_candidates",
-                            "tool": "go_sequences",
-                            "inputs": {"go_id": "GO:0003824", "max_sequences": 1},
-                        }
-                    ],
-                },
-                "success_criteria": {"workflow_completes": True},
-                "warm_tools": [],
-                "estimated_llm_calls": 2,
-            },
-        ]
-    )
-    planner = WorkflowPlanner(_registry(), provider)
-
-    plan = asyncio.run(
-        planner.draft_plan(
-            "Find one representative GO sequence.",
-            available_tools=[
-                {
-                    "name": "go_sequences",
-                    "description": "Retrieve protein sequences associated with a GO term.",
-                }
-            ],
-            workflows=[],
-            model="fake",
-        )
-    )
-
-    assert plan["workflow_plan"]["name"] == "legacy_go_plan"
-    assert calls == {
-        "_validate_static_output_refs": 1,
-        "_validate_static_output_ref_types": 1,
-        "_validate_static_job_refs": 1,
     }

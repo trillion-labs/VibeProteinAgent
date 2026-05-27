@@ -1,0 +1,37 @@
+{
+  "counts": {
+    "BLOCKED": 0,
+    "FAIL": 3,
+    "PASS": 0
+  },
+  "notes": "live provider matrix cycle with current defaults.",
+  "planner": "two_stage_tool_mode_selection_ir",
+  "pr": "live_provider_matrix",
+  "providers": [
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_151735/claude",
+      "duration_seconds": 2185.0,
+      "first_error": "{\"ok\": true, \"data\": {\"run_id\": \"arun_ac50c302513b43eca4d46fed0e2efd9c\", \"mode\": \"agent_plan\", \"classification\": {\"mode\": \"agent_plan\", \"reason\": \"Request is a scientific goal or asks for planning without a concrete workflow.\", \"requires_llm_planning\": true, \"requested_tools\": [], \"workflow_ref\": null, \"job_refs\": [], \"missing_inputs\": [], \"params\": {}, \"force_new\": false, \"action\": \"plan\", \"execution\": {}, \"direct_jobs\": []}, \"state\": \"failed\", \"workflow_ids\": [\"wf_807ad514aa454bbba923eadd9f024",
+      "provider": "claude",
+      "reason": "workflow_failed",
+      "status": "FAIL"
+    },
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_151735/codex",
+      "duration_seconds": 2088.0,
+      "first_error": "{\"ok\": true, \"data\": {\"run_id\": \"arun_4bf02954ffcb4e76a842aa4876b0cce5\", \"mode\": \"agent_plan\", \"classification\": {\"mode\": \"agent_plan\", \"reason\": \"Request is a scientific goal or asks for planning without a concrete workflow.\", \"requires_llm_planning\": true, \"requested_tools\": [], \"workflow_ref\": null, \"job_refs\": [], \"missing_inputs\": [], \"params\": {}, \"force_new\": false, \"action\": \"plan\", \"execution\": {}, \"direct_jobs\": []}, \"state\": \"failed\", \"workflow_ids\": [\"wf_2c026fdfd6934faa8d9a5473dce43",
+      "provider": "codex",
+      "reason": "workflow_failed",
+      "status": "FAIL"
+    },
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_151735/qwen",
+      "duration_seconds": 517.0,
+      "first_error": "{\"ok\": true, \"data\": {\"run_id\": \"arun_0aa030037a6941cfae36eb2a82531115\", \"mode\": \"agent_plan\", \"classification\": {\"mode\": \"agent_plan\", \"reason\": \"Request is a scientific goal or asks for planning without a concrete workflow.\", \"requires_llm_planning\": true, \"requested_tools\": [], \"workflow_ref\": null, \"job_refs\": [], \"missing_inputs\": [], \"params\": {}, \"force_new\": false, \"action\": \"plan\", \"execution\": {}, \"direct_jobs\": []}, \"state\": \"failed\", \"workflow_ids\": [\"wf_be4778e0d98f437ebdf0b0e0275ef",
+      "provider": "qwen",
+      "reason": "workflow_failed",
+      "status": "FAIL"
+    }
+  ],
+  "timestamp": "2026-05-27T07:38:31.531176+00:00"
+}

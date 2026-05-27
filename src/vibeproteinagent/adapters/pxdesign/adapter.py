@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.core.errors import DependencyError, InvalidParamsError, VPAError
@@ -1419,6 +1420,12 @@ def _pxdesign_candidates(
                 }
             },
             "artifacts": {"pxdesign": {"cif_path": design.cif_path, "pdb_path": design.pdb_path}},
+            "capabilities": candidate_capability_flags(
+                has_sequence=bool(design.sequence),
+                has_backbone_structure=bool(structure_path),
+                has_full_structure=bool(structure_path),
+                has_candidate_scores=True,
+            ),
         }
         if params.candidates and _is_canonical_candidate(params.candidates[0]):
             upstream_scores = params.candidates[0].get("scores")

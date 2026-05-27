@@ -173,6 +173,53 @@ def _format_property_suggestion(
     return ". ".join(pieces) + "."
 
 
+def _format_root_schema_hint(
+    *,
+    field_path: str,
+    raw_message: str,
+    subschema: dict[str, Any] | None,
+) -> str | None:
+    if field_path != "<root>" or not isinstance(subschema, dict):
+        return None
+    if "not valid under any of the given schemas" not in raw_message and (
+        "is a required property" not in raw_message
+    ):
+        return None
+    props = subschema.get("properties")
+    valid_fields = list(props) if isinstance(props, dict) else []
+    required = _root_required_options(subschema)
+    pieces: list[str] = []
+    if required:
+        pieces.append("Root schema guidance: satisfy one required input set: " + "; ".join(required))
+    if valid_fields:
+        shown = valid_fields if len(valid_fields) <= 12 else valid_fields[:12]
+        suffix = "" if len(valid_fields) <= 12 else f", ... ({len(valid_fields) - 12} more)"
+        pieces.append("Valid root fields: " + ", ".join(shown) + suffix)
+    return ". ".join(pieces) + "." if pieces else None
+
+
+def _root_required_options(schema: dict[str, Any]) -> list[str]:
+    options: list[str] = []
+    required = schema.get("required")
+    if isinstance(required, list) and required:
+        options.append(", ".join(str(item) for item in required if isinstance(item, str)))
+    for keyword in ("oneOf", "anyOf"):
+        variants = schema.get(keyword)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            branch_required = variant.get("required")
+            if isinstance(branch_required, list) and branch_required:
+                options.append(
+                    ", ".join(
+                        str(item) for item in branch_required if isinstance(item, str)
+                    )
+                )
+    return [item for item in options if item]
+
+
 def _format_description(subschema: dict[str, Any]) -> str | None:
     desc = subschema.get("description")
     if isinstance(desc, str) and desc.strip():
@@ -203,6 +250,14 @@ def enrich_error_message(
     prop_hint = _format_property_suggestion(raw_message, sub)
     if prop_hint:
         parts.append(prop_hint)
+
+    root_hint = _format_root_schema_hint(
+        field_path=field_path,
+        raw_message=raw_message,
+        subschema=sub,
+    )
+    if root_hint:
+        parts.append(root_hint)
 
     constraint = _format_constraint_hint(sub)
     if constraint:

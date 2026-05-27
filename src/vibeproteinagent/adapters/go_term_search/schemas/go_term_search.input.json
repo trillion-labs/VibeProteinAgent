@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/go_term_search.input.json",
+  "type": "object",
+  "required": ["query"],
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Natural-language GO term query, such as an enzyme activity or biological process name."
+    },
+    "aspect": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional GO aspect hint: molecular_function, biological_process, cellular_component, or aliases such as mf/bp/cc."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 10,
+      "description": "Maximum number of GO term candidates to return before force-selecting the best match.",
+      "examples": [10]
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 60,
+      "default": 15,
+      "description": "Maximum wall-clock time in seconds for the GO search request.",
+      "examples": [15]
+    }
+  },
+  "additionalProperties": false
+}

@@ -16,6 +16,7 @@ from vibeproteinagent.install.installer import (
     InstallPaths,
     InstallState,
     ManifestInstaller,
+    _BOLTZGEN_RUNTIME_DEPS,
     _ensure_weight,
     _env_exports,
     _link_prebuilt_sidecar,
@@ -36,6 +37,28 @@ def test_install_manifest_covers_registered_tools(isolated_vpa_home: Path) -> No
     manifest = load_manifest()
     coverage = manifest.validate_registry_coverage(_registry_tool_names())
     assert coverage == {"missing_from_manifest": [], "missing_from_registry": []}
+
+
+def test_resolver_tools_are_shared_install_tools(isolated_vpa_home: Path) -> None:
+    manifest = load_manifest()
+    resolver_tools = {
+        "function_term_resolver",
+        "go_term_search",
+        "ontology_lookup",
+        "interpro_entry_search",
+        "interpro_entry_lookup",
+    }
+
+    assert resolver_tools <= set(manifest.tools)
+    for name in resolver_tools:
+        assert manifest.tools[name].runtime == "shared"
+
+    readiness = installer_module.install_readiness(
+        tuple(sorted(resolver_tools)),
+        runtime_probe=False,
+    )
+    assert readiness["install_ready"] is True
+    assert {tool["name"] for tool in readiness["tools"]} == resolver_tools
 
 
 def test_full_profile_resolves_supported_first_class_tools(isolated_vpa_home: Path) -> None:
@@ -145,6 +168,11 @@ def test_boltz_tools_dry_run_includes_sources_and_caches(
     assert plan["env_exports"]["VPA_BOLTZ_CACHE"].endswith("/cache/boltz")
     assert plan["env_exports"]["VPA_BOLTZGEN_TREE"].endswith("/sidecars/boltzgen")
     assert plan["env_exports"]["VPA_BOLTZGEN_CACHE"].endswith("/cache/boltzgen")
+
+
+def test_boltzgen_shared_deps_include_analyze_stack_requirements() -> None:
+    assert "hydride" in _BOLTZGEN_RUNTIME_DEPS
+    assert "biopython" in _BOLTZGEN_RUNTIME_DEPS
 
 
 def test_manifest_readiness_reports_missing_required_source(

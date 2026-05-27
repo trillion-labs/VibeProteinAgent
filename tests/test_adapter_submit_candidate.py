@@ -132,3 +132,29 @@ def test_submit_candidate_rejects_unresolved_candidate(tmp_workspace: Workspace)
             ),
             null_context(tmp_workspace.job_dir("job_submit")),
         )
+
+
+def test_submit_candidate_does_not_treat_empty_bindcraft_target_as_candidate(
+    tmp_workspace: Workspace,
+) -> None:
+    job_id = _completed_job(
+        tmp_workspace,
+        {
+            "status": "no_acceptable_candidate",
+            "target_pdb": "/tmp/target.pdb",
+            "candidates": [],
+            "designs": [],
+        },
+    )
+
+    with pytest.raises(InvalidParamsError, match="no resolvable candidates"):
+        _adapter(tmp_workspace).run(
+            SubmitCandidateInput(
+                outcome="accepted",
+                candidates=[
+                    {"job_id": job_id, "index": 0, "justification": "should not fallback"}
+                ],
+                reasoning="x",
+            ),
+            null_context(tmp_workspace.job_dir("job_submit")),
+        )

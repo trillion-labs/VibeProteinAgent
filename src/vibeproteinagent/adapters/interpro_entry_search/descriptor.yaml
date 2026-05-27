@@ -1,0 +1,17 @@
+name: interpro_entry_search
+version: "1.0.0"
+category: retrieval
+description: "Lightweight resolver that searches public InterPro entry metadata for a natural-language protein family, domain, or function phrase. Use before interpro_sequences when the user did not provide an exact IPR accession."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 5
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [interpro_entry_search]
+input_schema: schemas/interpro_entry_search.input.json
+output_schema: schemas/interpro_entry_search.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.interpro_entry_search.adapter:InterProEntrySearchAdapter"

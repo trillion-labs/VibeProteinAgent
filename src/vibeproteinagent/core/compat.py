@@ -101,9 +101,24 @@ def install_dgl_graphbolt_stub() -> None:
     sys.modules.setdefault("dgl.graphbolt", graphbolt)
 
 
+def _silence_dgl_backend_banner() -> None:
+    """Ensure DGL doesn't print "Setting the default backend to 'pytorch'..."
+    to STDOUT on first import.
+
+    DGL routes that banner through ``print()`` (stdout, not stderr) when
+    ``DGLBACKEND`` is unset, which pollutes any per-process stdout we
+    capture downstream — most visibly the matrix runner's per-case
+    ``<case>.json`` files (stderr is already isolated to .stderr.log).
+    Using ``setdefault`` preserves an operator's explicit override.
+    """
+
+    os.environ.setdefault("DGLBACKEND", "pytorch")
+
+
 def import_dgl_with_graphbolt_guard() -> Any:
     """Import DGL, retrying once with the documented GraphBolt guard."""
 
+    _silence_dgl_backend_banner()
     try:
         import dgl  # type: ignore
 

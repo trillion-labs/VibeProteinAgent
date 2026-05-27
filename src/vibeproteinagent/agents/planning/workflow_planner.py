@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, is_dataclass
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, is_dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -20,10 +21,21 @@ from vibeproteinagent.adapters.descriptor import (
 )
 from vibeproteinagent.adapters.visibility import is_agent_visible_tool
 from vibeproteinagent.agents.planning.canonical_tools import (
+    CANONICAL_PRODUCERS,
+    CANONICAL_TERM_CONSUMERS,
+    CANONICAL_TERM_PRODUCERS,
     EXPLICIT_MODE_TOOLS,
     build_canonical_wiring_for_planner,
+    candidate_capability_profiles,
+    candidate_contract,
+    candidate_contract_for_inputs,
+    explicit_mode_input_field,
 )
-from vibeproteinagent.agents.planning.compiler import compile_planner_ir
+from vibeproteinagent.agents.planning.compiler import (
+    PLANNER_COMPILED_SOURCE_KIND,
+    compile_planner_ir,
+    validate_compiled_planner_plan,
+)
 from vibeproteinagent.agents.planning.ir import (
     planner_ir_schema,
     validate_planner_ir_v1,
@@ -31,8 +43,11 @@ from vibeproteinagent.agents.planning.ir import (
 from vibeproteinagent.agents.provider import ChatMessage
 from vibeproteinagent.agents.provider.types import ChatProvider
 from vibeproteinagent.agents.tools.schemas import (
+    compact_input_schema_outline,
     compact_tool_outline,
     compact_tool_schema,
+    root_input_fields,
+    tool_role,
     tool_names_from_plan,
 )
 from vibeproteinagent.core.errors import ErrorCode, InvalidParamsError, VPAError
@@ -41,9 +56,8 @@ from vibeproteinagent.workflows.planner import params_dict_from_workflow
 from vibeproteinagent.workflows.resolver import iter_refs, resolve
 
 from .prompts import (
-    NEXT_ROUND_SYSTEM_PROMPT,
+    PLAN_VERIFICATION_SYSTEM_PROMPT,
     PLANNER_IR_SYSTEM_PROMPT,
-    PLANNER_SYSTEM_PROMPT,
     TOOL_SELECTION_SYSTEM_PROMPT,
 )
 
@@ -51,6 +65,7 @@ if TYPE_CHECKING:
     from vibeproteinagent.agents.execution.round_state import PriorRoundContext
 
 _MAX_SELECTED_TOOLS = 6
+_MAX_PLAN_VERIFICATION_REPAIRS = 3
 PlannerIRCompiler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
@@ -59,6 +74,7 @@ class PlannerIRViolation:
     path: str
     issue: str
     expected: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class PlannerIRSchemaViolation(VPAError):
@@ -81,13 +97,14 @@ class PlannerIRSchemaViolation(VPAError):
                     "path": item.path,
                     "issue": item.issue,
                     "expected": item.expected,
+                    **item.metadata,
                 }
                 for item in violations
             ],
             "fix_instruction": (
                 "Re-emit the Planner IR JSON. Use version planner_ir_v1, "
                 "semantic nodes, literal scalar inputs, and upstream entries "
-                "whose relationship is candidate_source. Do not emit executor "
+                "whose relationship is candidate_source or term_source. Do not emit executor "
                 "wiring or decision-time submission nodes."
             ),
         }
@@ -145,18 +162,52 @@ def _phase_idempotency_key(idempotency_key: str | None, phase: str) -> str | Non
     return f"{idempotency_key}:{phase}"
 
 
-def _candidate_tool_names(selection: dict[str, Any]) -> list[str]:
-    names = selection.get("candidate_tools")
-    if not isinstance(names, list):
-        names = tool_names_from_plan(selection)
-    out: list[str] = []
+def _candidate_tool_specs(selection: dict[str, Any]) -> list[dict[str, Any]]:
+    selected = selection.get("selected_tools")
+    if isinstance(selected, list):
+        raw_items = selected
+    else:
+        raw_items = selection.get("candidate_tools")
+        if not isinstance(raw_items, list):
+            raw_items = tool_names_from_plan(selection)
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for name in names:
+    for item in raw_items:
+        if isinstance(item, str):
+            name = item
+            selected_mode = None
+        elif isinstance(item, dict):
+            raw_name = item.get("name") or item.get("tool")
+            if not isinstance(raw_name, str):
+                continue
+            name = raw_name
+            selected_mode = item.get("selected_mode")
+        else:
+            continue
         if not isinstance(name, str) or name in seen:
             continue
         seen.add(name)
-        out.append(name)
+        spec: dict[str, Any] = {"name": name}
+        normalized_mode = _normalize_selected_mode(selected_mode)
+        if normalized_mode is not None:
+            spec["selected_mode"] = normalized_mode
+        out.append(spec)
     return out[:_MAX_SELECTED_TOOLS]
+
+
+def _normalize_selected_mode(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if stripped.lower() in {"", "none", "null", "n/a"}:
+        return None
+    return stripped
+
+
+def _candidate_tool_names(selection: dict[str, Any]) -> list[str]:
+    return [spec["name"] for spec in _candidate_tool_specs(selection)]
 
 
 def _candidate_tool_inventory(
@@ -302,13 +353,16 @@ def _validate_planner_ir_v1_or_raise(payload: dict[str, Any]) -> None:
 def _planner_ir_violation_from_error(error: JSONSchemaValidationError) -> PlannerIRViolation:
     path = _json_pointer(list(error.path)) or "/"
     if (
-        error.validator == "const"
+        error.validator in {"const", "enum"}
         and path.endswith("/relationship")
     ):
         return PlannerIRViolation(
             path=path,
             issue="relationship_not_allowed_in_v1",
-            expected='relationship must equal "candidate_source" in planner_ir_v1',
+            expected=(
+                'relationship must be one of "candidate_source", "term_source", '
+                'or "identifier_source" in planner_ir_v1'
+            ),
         )
     if error.validator == "required":
         missing = _missing_required_property(error.message)
@@ -416,7 +470,8 @@ def _additional_property(message: str) -> str | None:
 def _planner_ir_prompt(
     *,
     user_request: str,
-    tool_catalog: list[dict[str, str]],
+    tool_catalog: list[dict[str, Any]],
+    known_inputs: dict[str, Any] | None,
     retry_context: dict[str, Any] | None,
     prior_round_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -425,6 +480,7 @@ def _planner_ir_prompt(
         prompt["prior_round_context"] = prior_round_context
     prompt.update({
         "request": user_request,
+        "known_inputs": known_inputs or {},
         "tool_catalog": tool_catalog,
         "canonical_wiring": build_canonical_wiring_for_planner(
             has_prior_round_context=prior_round_context is not None,
@@ -449,7 +505,7 @@ def _planner_ir_prompt(
                     "upstream": [
                         {
                             "node": "earlier_node_id",
-                            "relationship": "candidate_source",
+                            "relationship": "candidate_source or term_source",
                         }
                     ],
                 }
@@ -463,6 +519,1092 @@ def _planner_ir_prompt(
     if retry_context is not None:
         prompt["previous_planner_ir_error"] = retry_context
     return prompt
+
+
+def _tool_selection_haystack(
+    user_request: str,
+    prior_round_context: "PriorRoundContext | Any | None" = None,
+) -> str:
+    if prior_round_context is None:
+        return user_request
+    payload = _prior_round_context_payload(prior_round_context)
+    if payload is None:
+        return user_request
+    return f"{user_request}\n{json.dumps(payload, sort_keys=True)}"
+
+
+def _tool_selection_prompt(
+    *,
+    user_request: str,
+    available_tools: list[dict[str, Any]],
+    known_inputs: dict[str, Any] | None = None,
+    prior_round_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    prompt: dict[str, Any] = {
+        "request": user_request,
+        "known_inputs": known_inputs or {},
+        "available_tools": [
+            compact_tool_outline(tool)
+            for tool in available_tools
+        ],
+        "output_contract": {
+            "mode": "tool_selection",
+            "selected_tools": [
+                {
+                    "name": "tool_name",
+                    "selected_mode": (
+                        "one allowed mode, only when available_tools shows allowed_modes"
+                    ),
+                    "reason": "why this tool and mode are useful",
+                }
+            ],
+            "max_selected_tools": _MAX_SELECTED_TOOLS,
+            "missing_inputs": ["string"],
+        },
+    }
+    if prior_round_context is not None:
+        prompt["prior_round_context"] = prior_round_context
+    return prompt
+
+
+def _validate_planner_ir_against_selected_tools(
+    planner_ir: dict[str, Any],
+    selected_tools: list[dict[str, Any]],
+    *,
+    known_inputs: dict[str, Any] | None = None,
+) -> None:
+    by_name = {
+        str(tool.get("name")): tool
+        for tool in selected_tools
+        if isinstance(tool.get("name"), str)
+    }
+    violations: list[PlannerIRViolation] = []
+    used_tools: set[str] = set()
+    known = known_inputs or {}
+    required_missing_inputs = [
+        item
+        for item in planner_ir.get("missing_inputs") or []
+        if isinstance(item, dict) and item.get("required_for_execution") is True
+    ]
+    for item in required_missing_inputs:
+        name = item.get("name")
+        violations.append(
+            PlannerIRViolation(
+                path="/missing_inputs",
+                issue="required_missing_input_blocks_compile",
+                expected=(
+                    "Planner IR may not compile an executable workflow while "
+                    f"required input {name!r} is still missing. Known inputs: "
+                    + ", ".join(sorted(known))
+                ),
+            )
+        )
+    for index, node in enumerate(planner_ir.get("nodes") or []):
+        if not isinstance(node, dict):
+            continue
+        tool_name = node.get("tool")
+        if not isinstance(tool_name, str) or tool_name not in by_name:
+            violations.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{index}/tool",
+                    issue="tool_not_selected",
+                    expected=(
+                        "Use only tool names selected by the tool-selection phase: "
+                        + ", ".join(sorted(by_name))
+                    ),
+                )
+            )
+            continue
+        used_tools.add(tool_name)
+        schema = by_name[tool_name].get("input_schema")
+        selected_mode = by_name[tool_name].get("selected_mode")
+        inputs = node.get("inputs") or {}
+        if selected_mode is not None:
+            mode_field = explicit_mode_input_field(tool_name)
+            received_mode = inputs.get(mode_field) if isinstance(inputs, dict) else None
+            if received_mode is None:
+                violations.append(
+                    PlannerIRViolation(
+                        path=f"/nodes/{index}/inputs/{mode_field}",
+                        issue="selected_mode_missing_from_planner_ir",
+                        expected=(
+                            f"Tool {tool_name!r} was selected with mode "
+                            f"{selected_mode!r}; set inputs.{mode_field} to that exact value."
+                        ),
+                    )
+                )
+            elif received_mode != selected_mode:
+                violations.append(
+                    PlannerIRViolation(
+                        path=f"/nodes/{index}/inputs/{mode_field}",
+                        issue="selected_mode_mismatch",
+                        expected=(
+                            f"Tool {tool_name!r} was selected with mode "
+                            f"{selected_mode!r}; received inputs.{mode_field}={received_mode!r}."
+                        ),
+                    )
+                )
+        if not isinstance(schema, dict):
+            if _node_has_placeholder(node):
+                violations.append(
+                    PlannerIRViolation(
+                        path=f"/nodes/{index}",
+                        issue="placeholder_value_not_allowed",
+                        expected="Use known literal inputs or mark unknown values as missing_inputs.",
+                    )
+                )
+            continue
+        upstream = node.get("upstream")
+        upstreams = upstream if isinstance(upstream, list) else []
+        node_by_id = _planner_ir_nodes_by_id(planner_ir)
+        is_root = not upstreams
+        if (
+            is_root
+            and tool_name not in CANONICAL_PRODUCERS
+            and tool_name not in CANONICAL_TERM_PRODUCERS
+        ):
+            violations.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{index}/tool",
+                    issue="root_tool_not_canonical_producer",
+                    expected=(
+                        f"Root executable tool {tool_name!r} must be a canonical "
+                        "producer or receive candidate_source input from an upstream node."
+                    ),
+                )
+            )
+        term_source_fields = _term_source_input_fields(
+            node=node,
+            tool_name=tool_name,
+            node_by_id=node_by_id,
+        )
+        for term_violation in _term_source_violations(
+            node=node,
+            node_index=index,
+            tool_name=tool_name,
+            upstreams=upstreams,
+            node_by_id=node_by_id,
+        ):
+            violations.append(term_violation)
+        for capability_violation in _candidate_capability_violations(
+            node=node,
+            node_index=index,
+            tool_name=tool_name,
+            upstreams=upstreams,
+            node_by_id=node_by_id,
+        ):
+            violations.append(capability_violation)
+        missing_required = _missing_required_inputs_for_node(
+            node=node,
+            schema=schema,
+            known_inputs=known,
+            is_root=is_root,
+            wired_inputs=term_source_fields,
+        )
+        if missing_required:
+            if is_root:
+                violations.append(
+                    PlannerIRViolation(
+                        path=f"/nodes/{index}/inputs",
+                        issue="unsatisfied_root_required_input",
+                        expected=(
+                            f"Root tool {tool_name!r} node {node.get('id')!r} is missing "
+                            f"required executable inputs {missing_required}. Known inputs: "
+                            f"{sorted(known)}. Valid root inputs: {root_input_fields(schema)}. "
+                            "Use a resolver/lookup producer first when exact identifiers are absent."
+                        ),
+                        metadata={
+                            "tool": tool_name,
+                            "node_id": node.get("id"),
+                            "missing_fields": missing_required,
+                            "known_inputs": sorted(known),
+                            "valid_root_inputs": root_input_fields(schema),
+                            "required_for_execution": True,
+                        },
+                    )
+                )
+            violations.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{index}/inputs",
+                    issue="required_tool_input_missing",
+                    expected=(
+                        f"Tool {tool_name!r} node {node.get('id')!r} is missing "
+                        f"required input fields {missing_required}. Known inputs: "
+                        f"{sorted(known)}. Valid root inputs: {root_input_fields(schema)}."
+                    ),
+                )
+            )
+        if _node_has_placeholder(node):
+            violations.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{index}",
+                    issue="placeholder_value_not_allowed",
+                    expected="Use known literal inputs or mark unknown values as missing_inputs.",
+                )
+            )
+        if schema.get("additionalProperties") is not False:
+            continue
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        valid_fields = {str(name) for name in properties}
+        if not isinstance(inputs, dict):
+            continue
+        for field in inputs:
+            if str(field) not in valid_fields:
+                violations.append(
+                    PlannerIRViolation(
+                        path=f"/nodes/{index}/inputs/{field}",
+                        issue="input_field_not_in_tool_schema",
+                        expected=(
+                            f"Tool {tool_name!r} inputs may use only fields from "
+                            "input_schema_outline.properties: "
+                            + ", ".join(sorted(valid_fields))
+                        ),
+                    )
+                )
+    unused = sorted(set(by_name) - used_tools)
+    for tool_name in unused:
+        violations.append(
+            PlannerIRViolation(
+                path="/nodes",
+                issue="selected_tool_unused",
+                expected=(
+                    f"Tool {tool_name!r} was selected by tool selection but is "
+                    "not present in Planner IR. Use it in the topology or drop "
+                    "it through the bounded verification repair patch."
+                ),
+            )
+        )
+    if violations:
+        raise PlannerIRSchemaViolation(violations, payload=planner_ir)
+
+
+def _prepare_planner_ir_for_verification(
+    planner_ir: dict[str, Any],
+    selected_tools: list[dict[str, Any]],
+    *,
+    known_inputs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    prepared = deepcopy(planner_ir)
+    known_inputs = known_inputs or {}
+    schema_by_name = {
+        str(tool.get("name")): tool.get("input_schema")
+        for tool in selected_tools
+        if isinstance(tool.get("name"), str)
+    }
+    selected_modes = {
+        str(tool.get("name")): tool.get("selected_mode")
+        for tool in selected_tools
+        if isinstance(tool.get("name"), str)
+        and isinstance(tool.get("selected_mode"), str)
+    }
+    satisfied_fields = set(known_inputs)
+    for node in prepared.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        tool_name = node.get("tool")
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            inputs = {}
+            node["inputs"] = inputs
+        if isinstance(tool_name, str):
+            mode_field = explicit_mode_input_field(tool_name)
+            if mode_field != "mode" and "mode" in inputs and mode_field not in inputs:
+                inputs[mode_field] = inputs.pop("mode")
+            selected_mode = selected_modes.get(tool_name)
+            if selected_mode is not None and mode_field not in inputs and "mode" in inputs:
+                inputs[mode_field] = inputs.pop("mode")
+        satisfied_fields.update(str(field) for field in inputs)
+        schema = schema_by_name.get(tool_name)
+        if not isinstance(schema, dict):
+            continue
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        for field in _required_field_options(schema):
+            if field in inputs or field not in properties:
+                continue
+            if field in known_inputs:
+                inputs[field] = known_inputs[field]
+                satisfied_fields.add(field)
+    prepared["missing_inputs"] = _remaining_missing_inputs(
+        prepared.get("missing_inputs"),
+        satisfied_fields,
+    )
+    return prepared
+
+
+def _remaining_missing_inputs(
+    missing_inputs: Any,
+    known_inputs: dict[str, Any],
+) -> list[Any]:
+    if not isinstance(missing_inputs, list):
+        return []
+    remaining: list[Any] = []
+    for item in missing_inputs:
+        if isinstance(item, dict) and item.get("name") in known_inputs:
+            continue
+        remaining.append(item)
+    return remaining
+
+
+def _required_field_options(schema: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    required = schema.get("required")
+    if isinstance(required, list):
+        names.extend(str(item) for item in required if isinstance(item, str))
+    for keyword in ("oneOf", "anyOf"):
+        variants = schema.get(keyword)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            required_variant = variant.get("required")
+            if not isinstance(required_variant, list):
+                continue
+            names.extend(
+                str(item) for item in required_variant if isinstance(item, str)
+            )
+    return sorted(set(names))
+
+
+def _missing_required_inputs_for_node(
+    *,
+    node: dict[str, Any],
+    schema: dict[str, Any],
+    known_inputs: dict[str, Any],
+    is_root: bool,
+    wired_inputs: set[str] | None = None,
+) -> list[str]:
+    if not is_root and not wired_inputs:
+        return []
+    inputs = node.get("inputs")
+    input_names = set(inputs) if isinstance(inputs, dict) else set()
+    available = input_names | set(known_inputs) | set(wired_inputs or set())
+    missing: list[str] = []
+    for field in _required_field_options(schema):
+        if field in available:
+            continue
+        missing.append(field)
+    if _schema_branch_satisfied(schema, available):
+        return []
+    return missing
+
+
+def _planner_ir_nodes_by_id(planner_ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(node.get("id")): node
+        for node in planner_ir.get("nodes") or []
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+
+
+def _term_source_input_fields(
+    *,
+    node: dict[str, Any],
+    tool_name: str,
+    node_by_id: dict[str, dict[str, Any]],
+) -> set[str]:
+    field = CANONICAL_TERM_CONSUMERS.get(tool_name)
+    if field is None:
+        return set()
+    for upstream in node.get("upstream") or []:
+        if not isinstance(upstream, dict):
+            continue
+        if upstream.get("relationship") not in {"term_source", "identifier_source"}:
+            continue
+        upstream_id = upstream.get("node")
+        upstream_node = node_by_id.get(str(upstream_id))
+        upstream_tool = upstream_node.get("tool") if isinstance(upstream_node, dict) else None
+        if isinstance(upstream_tool, str) and field in CANONICAL_TERM_PRODUCERS.get(upstream_tool, {}):
+            return {field}
+    return set()
+
+
+def _term_source_violations(
+    *,
+    node: dict[str, Any],
+    node_index: int,
+    tool_name: str,
+    upstreams: list[Any],
+    node_by_id: dict[str, dict[str, Any]],
+) -> list[PlannerIRViolation]:
+    out: list[PlannerIRViolation] = []
+    for upstream_index, upstream in enumerate(upstreams):
+        if not isinstance(upstream, dict):
+            continue
+        relationship = upstream.get("relationship")
+        if relationship not in {"term_source", "identifier_source"}:
+            continue
+        input_field = CANONICAL_TERM_CONSUMERS.get(tool_name)
+        if input_field is None:
+            out.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{node_index}/upstream/{upstream_index}/relationship",
+                    issue="term_source_consumer_not_supported",
+                    expected=(
+                        f"Tool {tool_name!r} cannot consume term_source. "
+                        "Use term_source only into exact-ID retrieval tools such as "
+                        f"{sorted(CANONICAL_TERM_CONSUMERS)}."
+                    ),
+                )
+            )
+            continue
+        upstream_id = upstream.get("node")
+        upstream_node = node_by_id.get(str(upstream_id))
+        upstream_tool = upstream_node.get("tool") if isinstance(upstream_node, dict) else None
+        if not isinstance(upstream_tool, str) or upstream_tool not in CANONICAL_TERM_PRODUCERS:
+            out.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{node_index}/upstream/{upstream_index}/node",
+                    issue="term_source_not_produced",
+                    expected=(
+                        f"Upstream node {upstream_id!r} must use a resolver/lookup tool "
+                        f"that produces term identifiers: {sorted(CANONICAL_TERM_PRODUCERS)}."
+                    ),
+                )
+            )
+            continue
+        if input_field not in CANONICAL_TERM_PRODUCERS[upstream_tool]:
+            out.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{node_index}/upstream/{upstream_index}/node",
+                    issue="term_source_wrong_identifier_type",
+                    expected=(
+                        f"Resolver tool {upstream_tool!r} cannot provide {input_field!r} "
+                        f"for {tool_name!r}."
+                    ),
+                )
+            )
+    return out
+
+
+def _candidate_capability_violations(
+    *,
+    node: dict[str, Any],
+    node_index: int,
+    tool_name: str,
+    upstreams: list[Any],
+    node_by_id: dict[str, dict[str, Any]],
+) -> list[PlannerIRViolation]:
+    required = candidate_contract_for_inputs(
+        tool_name,
+        node.get("inputs") if isinstance(node.get("inputs"), dict) else {},
+    )
+    if not required.consumes and required.min_candidate_items <= 1:
+        return []
+    out: list[PlannerIRViolation] = []
+    candidate_upstreams = [
+        upstream
+        for upstream in upstreams
+        if isinstance(upstream, dict) and upstream.get("relationship") == "candidate_source"
+    ]
+    if (
+        required.min_candidate_items > 1
+        and 0 < len(candidate_upstreams) < required.min_candidate_items
+    ):
+        upstream_id = str(candidate_upstreams[0].get("node") or "")
+        upstream_node = node_by_id.get(upstream_id)
+        upstream_tool = (
+            "prior_round"
+            if upstream_id == "prior_round"
+            else str((upstream_node or {}).get("tool") or "")
+        )
+        if upstream_tool != "merge_candidates":
+            out.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{node_index}/upstream",
+                    issue="candidate_item_count_mismatch",
+                    expected=(
+                        f"Tool {tool_name!r} expects at least "
+                        f"{required.min_candidate_items} candidate items. Provide "
+                        "multiple candidate_source edges or use an upstream merged "
+                        "candidate set."
+                    ),
+                    metadata={
+                        "consumer_node": node.get("id"),
+                        "consumer_tool": tool_name,
+                        "min_candidate_items": required.min_candidate_items,
+                        "repair_instruction": (
+                            "Repair the topology by providing enough candidate "
+                            "items, usually via multiple candidate_source edges "
+                            "that the compiler can merge."
+                        ),
+                    },
+                )
+            )
+    for upstream_index, upstream in enumerate(upstreams):
+        if not isinstance(upstream, dict):
+            continue
+        if upstream.get("relationship") != "candidate_source":
+            continue
+        upstream_id = str(upstream.get("node") or "")
+        upstream_node = node_by_id.get(upstream_id)
+        upstream_tool = (
+            "prior_round"
+            if upstream_id == "prior_round"
+            else str((upstream_node or {}).get("tool") or "")
+        )
+        produced = _planner_node_candidate_capabilities(
+            upstream_id,
+            node_by_id=node_by_id,
+            producer_tool=upstream_tool,
+            seen=set(),
+        )
+        missing = sorted(required.consumes - produced)
+        if not missing:
+            continue
+        out.append(
+            PlannerIRViolation(
+                path=f"/nodes/{node_index}/upstream/{upstream_index}",
+                issue="candidate_capability_mismatch",
+                expected=(
+                    f"Upstream node {upstream_id!r} using tool {upstream_tool!r} "
+                    f"must provide candidate capabilities {missing} before "
+                    f"{tool_name!r} can consume it. Insert or select an "
+                    "intermediate tool that produces the missing capabilities."
+                ),
+                metadata={
+                    "producer_node": upstream_id,
+                    "producer_tool": upstream_tool,
+                    "consumer_node": node.get("id"),
+                    "consumer_tool": tool_name,
+                    "missing_capabilities": missing,
+                    "repair_instruction": (
+                        "Repair the topology by inserting or selecting a tool "
+                        "that produces the missing candidate capabilities before "
+                        "the consumer node."
+                    ),
+                },
+            )
+        )
+    return out
+
+
+def _planner_node_candidate_capabilities(
+    node_id: str,
+    *,
+    node_by_id: dict[str, dict[str, Any]],
+    producer_tool: str | None = None,
+    seen: set[str],
+) -> set[str]:
+    if node_id == "prior_round":
+        return set(candidate_contract("prior_round").produces)
+    if node_id in seen:
+        return set()
+    seen.add(node_id)
+    node = node_by_id.get(node_id)
+    if node is None:
+        return set()
+    tool_name = producer_tool or str(node.get("tool") or "")
+    contract = candidate_contract_for_inputs(
+        tool_name,
+        node.get("inputs") if isinstance(node.get("inputs"), dict) else {},
+    )
+    capabilities = set(contract.produces)
+    if contract.preserves_upstream:
+        for upstream in node.get("upstream") or []:
+            if not isinstance(upstream, dict):
+                continue
+            if upstream.get("relationship") != "candidate_source":
+                continue
+            upstream_id = str(upstream.get("node") or "")
+            upstream_node = node_by_id.get(upstream_id)
+            upstream_tool = (
+                "prior_round"
+                if upstream_id == "prior_round"
+                else str((upstream_node or {}).get("tool") or "")
+            )
+            capabilities.update(
+                _planner_node_candidate_capabilities(
+                    upstream_id,
+                    node_by_id=node_by_id,
+                    producer_tool=upstream_tool,
+                    seen=seen,
+                )
+            )
+    return capabilities
+
+
+def _schema_branch_satisfied(schema: dict[str, Any], available: set[str]) -> bool:
+    for keyword in ("oneOf", "anyOf"):
+        variants = schema.get(keyword)
+        if not isinstance(variants, list):
+            continue
+        branch_requirements = [
+            {
+                str(item)
+                for item in variant.get("required", [])
+                if isinstance(item, str)
+            }
+            for variant in variants
+            if isinstance(variant, dict)
+        ]
+        branch_requirements = [req for req in branch_requirements if req]
+        if branch_requirements and any(req <= available for req in branch_requirements):
+            return True
+        if branch_requirements:
+            return False
+    required = {
+        str(item)
+        for item in schema.get("required", [])
+        if isinstance(item, str)
+    }
+    return required <= available
+
+
+_PLACEHOLDER_RE = re.compile(r"(\{\{[^{}]+\}\}|<[^<>]+>|placeholder)", re.IGNORECASE)
+
+
+def _node_has_placeholder(node: dict[str, Any]) -> bool:
+    return _contains_placeholder(node.get("inputs"))
+
+
+def _contains_placeholder(value: Any) -> bool:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if _PLACEHOLDER_RE.search(stripped):
+            return True
+        if stripped.endswith(("_go_id", "_pdb_path", "_target_pdb", "_input_json")):
+            return True
+        return False
+    if isinstance(value, dict):
+        return any(_contains_placeholder(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_placeholder(item) for item in value)
+    return False
+
+
+def _clean_known_inputs(known_inputs: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(known_inputs, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in known_inputs.items()
+        if isinstance(key, str) and value is not None
+    }
+
+
+def _planner_ir_violation_signature(exc: PlannerIRSchemaViolation) -> tuple[str, str]:
+    violations = exc.structured_error.get("violations")
+    if isinstance(violations, list) and violations:
+        first = violations[0]
+        if isinstance(first, dict):
+            return (str(first.get("path") or ""), str(first.get("issue") or ""))
+    return ("", "unknown")
+
+
+def _should_attempt_plan_verification_repair(exc: PlannerIRSchemaViolation) -> bool:
+    violations = exc.structured_error.get("violations")
+    if not isinstance(violations, list):
+        return False
+    repairable = {
+        "candidate_capability_mismatch",
+        "candidate_item_count_mismatch",
+        "executor_reference_forbidden",
+        "invalid_selected_mode",
+        "input_field_not_in_tool_schema",
+        "required_missing_input_blocks_compile",
+        "required_tool_input_missing",
+        "selected_mode_for_single_mode_tool",
+        "selected_mode_mismatch",
+        "selected_mode_missing_from_planner_ir",
+        "selected_tool_unused",
+        "tool_not_selected",
+        "unsatisfied_root_required_input",
+    }
+    return any(
+        isinstance(item, dict) and item.get("issue") in repairable
+        for item in violations
+    )
+
+
+def _repair_unsatisfied_root_with_selected_term_producer(
+    *,
+    planner_ir: dict[str, Any],
+    selected_tools: list[dict[str, Any]],
+    user_request: str,
+    known_inputs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Insert selected resolver roots before exact-ID retrieval roots when unambiguous."""
+
+    selected_by_name = {
+        str(tool.get("name")): tool
+        for tool in selected_tools
+        if isinstance(tool.get("name"), str)
+    }
+    nodes = planner_ir.get("nodes")
+    if not isinstance(nodes, list):
+        return None
+    repaired_nodes: list[dict[str, Any]] = []
+    changed = False
+    existing_ids = {
+        str(node.get("id"))
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            repaired_nodes.append(node)
+            continue
+        tool_name = node.get("tool")
+        input_field = CANONICAL_TERM_CONSUMERS.get(str(tool_name))
+        upstreams = node.get("upstream") if isinstance(node.get("upstream"), list) else []
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        if (
+            input_field is None
+            or upstreams
+            or input_field in inputs
+            or input_field in known_inputs
+        ):
+            repaired_nodes.append(node)
+            continue
+        candidates = [
+            producer_name
+            for producer_name, output_fields in CANONICAL_TERM_PRODUCERS.items()
+            if input_field in output_fields
+            and producer_name in selected_by_name
+            and _tool_can_start_from_query_or_known_inputs(
+                selected_by_name[producer_name],
+                known_inputs=known_inputs,
+            )
+        ]
+        if not candidates:
+            repaired_nodes.append(node)
+            continue
+        producer = _preferred_term_producer(candidates, input_field=input_field)
+        resolver_id = _unique_node_id(
+            f"resolve_{node.get('id') or tool_name}",
+            existing_ids,
+        )
+        existing_ids.add(resolver_id)
+        repaired_nodes.append(
+            {
+                "id": resolver_id,
+                "tool": producer,
+                "intent": (
+                    f"Resolve the identifier required by {tool_name} before "
+                    "retrieving executable sequence candidates."
+                ),
+                "inputs": {"query": _resolver_query(user_request, node)},
+                "upstream": [],
+            }
+        )
+        repaired_node = deepcopy(node)
+        repaired_node["upstream"] = [
+            {"node": resolver_id, "relationship": "term_source"}
+        ]
+        repaired_nodes.append(repaired_node)
+        changed = True
+
+    if not changed:
+        return None
+    out = deepcopy(planner_ir)
+    out["nodes"] = repaired_nodes
+    out["missing_inputs"] = _drop_resolved_term_missing_inputs(
+        out.get("missing_inputs"),
+    )
+    return out
+
+
+def _preferred_term_producer(candidates: list[str], *, input_field: str) -> str:
+    if "function_term_resolver" in candidates:
+        return "function_term_resolver"
+    preferred_by_field = {
+        "go_id": ["go_term_search", "ontology_lookup"],
+        "interpro_id": ["interpro_entry_search", "interpro_entry_lookup"],
+    }
+    for name in preferred_by_field.get(input_field, []):
+        if name in candidates:
+            return name
+    return sorted(candidates)[0]
+
+
+def _tool_can_start_from_query_or_known_inputs(
+    tool: dict[str, Any],
+    *,
+    known_inputs: dict[str, Any],
+) -> bool:
+    schema = tool.get("input_schema")
+    if not isinstance(schema, dict):
+        return False
+    required = set(_required_field_options(schema))
+    available = {"query"} | set(known_inputs)
+    return bool(required) and required <= available
+
+
+def _resolver_query(user_request: str, node: dict[str, Any]) -> str:
+    hints = [
+        str(node.get("intent") or "").strip(),
+        str(node.get("id") or "").replace("_", " ").strip(),
+    ]
+    hint_text = "; ".join(hint for hint in hints if hint)
+    if not hint_text:
+        return user_request
+    return f"{user_request}\nTarget term context: {hint_text}"
+
+
+def _unique_node_id(base: str, existing_ids: set[str]) -> str:
+    normalized = re.sub(r"[^a-z0-9_]+", "_", base.lower()).strip("_")
+    if not normalized or not re.match(r"^[a-z_]", normalized):
+        normalized = f"resolve_{normalized}" if normalized else "resolve_term"
+    if normalized not in existing_ids:
+        return normalized
+    suffix = 2
+    while f"{normalized}_{suffix}" in existing_ids:
+        suffix += 1
+    return f"{normalized}_{suffix}"
+
+
+def _drop_resolved_term_missing_inputs(missing_inputs: Any) -> list[Any]:
+    if not isinstance(missing_inputs, list):
+        return []
+    out: list[Any] = []
+    term_fields = set(CANONICAL_TERM_CONSUMERS.values())
+    suffixes = tuple(f"_{field}" for field in term_fields)
+    for item in missing_inputs:
+        if isinstance(item, dict):
+            name = item.get("name")
+            if isinstance(name, str) and (name in term_fields or name.endswith(suffixes)):
+                continue
+        out.append(item)
+    return out
+
+
+def _apply_plan_verification_patch(
+    *,
+    planner_ir: dict[str, Any],
+    selected_tools: list[dict[str, Any]],
+    available_tools: list[dict[str, Any]],
+    patch: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    available_by_name = {
+        str(tool.get("name")): tool
+        for tool in available_tools
+        if isinstance(tool.get("name"), str)
+    }
+    selected_by_name = {
+        str(tool.get("name")): tool
+        for tool in selected_tools
+        if isinstance(tool.get("name"), str)
+    }
+    selected_names = list(selected_by_name)
+
+    for name in _string_list(patch.get("drop_selected_tools")):
+        if name not in selected_by_name:
+            raise InvalidParamsError(
+                "plan verification patch tried to drop an unselected tool",
+                details={"tool": name, "selected_tools": selected_names},
+            )
+        selected_by_name.pop(name, None)
+
+    for name in _string_list(patch.get("add_selected_tools")):
+        if name not in available_by_name:
+            raise InvalidParamsError(
+                "plan verification patch tried to add an unavailable tool",
+                details={"tool": name, "available_tools": sorted(available_by_name)},
+            )
+        if name not in selected_by_name:
+            selected_by_name[name] = available_by_name[name]
+
+    selected_mode_updates = patch.get("set_selected_modes")
+    if isinstance(selected_mode_updates, list):
+        for item in selected_mode_updates:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("tool")
+            if not isinstance(name, str) or name not in selected_by_name:
+                continue
+            selected_mode = _normalize_selected_mode(item.get("selected_mode"))
+            if selected_mode is None:
+                selected_by_name[name].pop("selected_mode", None)
+            else:
+                selected_by_name[name] = {
+                    **selected_by_name[name],
+                    "selected_mode": selected_mode,
+                }
+
+    out_ir = deepcopy(planner_ir)
+    remove_ids = set(_string_list(patch.get("remove_node_ids")))
+    if remove_ids:
+        nodes = out_ir.get("nodes")
+        if not isinstance(nodes, list):
+            raise InvalidParamsError(
+                "plan verification patch cannot remove nodes from malformed Planner IR",
+                details={"remove_node_ids": sorted(remove_ids)},
+            )
+        known_ids = {
+            str(node.get("id"))
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }
+        unknown_ids = sorted(remove_ids - known_ids)
+        if unknown_ids:
+            raise InvalidParamsError(
+                "plan verification patch tried to remove unknown Planner IR nodes",
+                details={"node_ids": unknown_ids, "known_node_ids": sorted(known_ids)},
+            )
+        out_ir["nodes"] = [
+            node
+            for node in nodes
+            if not (isinstance(node, dict) and node.get("id") in remove_ids)
+        ]
+
+    nodes = out_ir.setdefault("nodes", [])
+    if not isinstance(nodes, list):
+        raise InvalidParamsError(
+            "plan verification patch cannot update malformed Planner IR nodes",
+            details={"nodes_type": type(nodes).__name__},
+        )
+
+    replace_nodes = patch.get("replace_nodes")
+    if isinstance(replace_nodes, list):
+        by_id = {
+            str(node.get("id")): index
+            for index, node in enumerate(nodes)
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }
+        for replacement in replace_nodes:
+            if not isinstance(replacement, dict) or not isinstance(replacement.get("id"), str):
+                continue
+            node_id = str(replacement["id"])
+            if node_id not in by_id:
+                raise InvalidParamsError(
+                    "plan verification patch tried to replace unknown Planner IR node",
+                    details={"node_id": node_id, "known_node_ids": sorted(by_id)},
+                )
+            nodes[by_id[node_id]] = replacement
+
+    add_nodes = patch.get("add_nodes")
+    if isinstance(add_nodes, list):
+        existing_ids = {
+            str(node.get("id"))
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }
+        for new_node in add_nodes:
+            if not isinstance(new_node, dict) or not isinstance(new_node.get("id"), str):
+                continue
+            node_id = str(new_node["id"])
+            if node_id in existing_ids:
+                raise InvalidParamsError(
+                    "plan verification patch tried to add duplicate Planner IR node",
+                    details={"node_id": node_id},
+                )
+            nodes.append(new_node)
+            existing_ids.add(node_id)
+
+    input_updates = patch.get("update_node_inputs")
+    if isinstance(input_updates, list):
+        nodes_by_id = {
+            str(node.get("id")): node
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }
+        for update in input_updates:
+            if not isinstance(update, dict):
+                continue
+            node_id = update.get("node_id") or update.get("id")
+            inputs = update.get("inputs")
+            if not isinstance(node_id, str) or not isinstance(inputs, dict):
+                continue
+            node = nodes_by_id.get(node_id)
+            if node is None:
+                raise InvalidParamsError(
+                    "plan verification patch tried to update unknown Planner IR node inputs",
+                    details={"node_id": node_id, "known_node_ids": sorted(nodes_by_id)},
+                )
+            current_inputs = node.setdefault("inputs", {})
+            if not isinstance(current_inputs, dict):
+                current_inputs = {}
+                node["inputs"] = current_inputs
+            for key, value in inputs.items():
+                if value is None:
+                    current_inputs.pop(key, None)
+                else:
+                    current_inputs[key] = value
+
+    if "set_missing_inputs" in patch:
+        missing_inputs = patch.get("set_missing_inputs")
+        if isinstance(missing_inputs, list):
+            out_ir["missing_inputs"] = missing_inputs
+
+    return out_ir, list(selected_by_name.values())
+
+
+def _tool_selection_mode_structured_error(
+    selection: dict[str, Any],
+    available_tools: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    available = {
+        str(tool.get("name")): tool
+        for tool in available_tools
+        if isinstance(tool.get("name"), str)
+    }
+    violations: list[dict[str, Any]] = []
+    for index, spec in enumerate(_candidate_tool_specs(selection)):
+        name = spec["name"]
+        selected_mode = spec.get("selected_mode")
+        if selected_mode is None:
+            continue
+        allowed_modes = EXPLICIT_MODE_TOOLS.get(name)
+        if allowed_modes is None:
+            violations.append(
+                {
+                    "path": f"/selected_tools/{index}/selected_mode",
+                    "issue": "invalid_selected_mode",
+                    "tool": name,
+                    "selected_mode": selected_mode,
+                    "allowed_modes": [],
+                    "expected": (
+                        "Remove selected_mode for this tool because the "
+                        "available tool outline does not include allowed_modes."
+                    ),
+                    "repair_instruction": (
+                        "Emit set_selected_modes with selected_mode=null for "
+                        f"{name!r}, or drop the tool if it was selected only "
+                        "because of the invalid mode."
+                    ),
+                }
+            )
+            continue
+        if selected_mode not in allowed_modes:
+            violations.append(
+                {
+                    "path": f"/selected_tools/{index}/selected_mode",
+                    "issue": "invalid_selected_mode",
+                    "tool": name,
+                    "selected_mode": selected_mode,
+                    "allowed_modes": list(allowed_modes),
+                    "expected": (
+                        "selected_mode must be one of the tool's allowed_modes."
+                    ),
+                    "repair_instruction": (
+                        f"Set selected_mode for {name!r} to one of "
+                        f"{list(allowed_modes)}, or remove selected_mode."
+                    ),
+                }
+            )
+    if not violations:
+        return None
+    return {
+        "error_kind": "tool_selection_verification_error",
+        "violations": violations,
+        "available_tools": sorted(available),
+        "fix_instruction": (
+            "Repair selected tool modes without drafting workflow inputs. "
+            "Use selected_mode only for tools whose outline includes allowed_modes."
+        ),
+    }
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 def _prior_round_context_payload(
@@ -508,7 +1650,7 @@ def _fallback_tool_selection(
         return None
     return {
         "mode": "tool_selection",
-        "candidate_tools": names,
+        "selected_tools": [{"name": name} for name in names],
         "reason": (
             "Recovered tool names from a non-JSON provider response using only "
             "the public tool inventory."
@@ -1111,6 +2253,7 @@ class WorkflowPlanner:
         user_request: str,
         *,
         available_tools: list[dict[str, Any]] | None = None,
+        known_inputs: dict[str, Any] | None = None,
         model: str | None = None,
         idempotency_key: str | None = None,
         max_schema_retries: int = 3,
@@ -1125,15 +2268,46 @@ class WorkflowPlanner:
                 "agent planning requires an LLM provider",
                 details={"mode": "agent_plan", "planner_ir": "v1"},
             )
-        tool_catalog = self._planner_ir_tool_catalog(available_tools)
+        available_tool_schemas = self._available_planner_tool_schemas(available_tools)
+        known = _clean_known_inputs(known_inputs)
+        selection_prompt = _tool_selection_prompt(
+            user_request=user_request,
+            available_tools=available_tool_schemas,
+            known_inputs=known,
+            prior_round_context=_prior_round_context_payload(prior_round_context),
+        )
+        selection = await self._select_candidate_tools(
+            selection_prompt,
+            label="planner tool selection",
+            model=model,
+            idempotency_key=_phase_idempotency_key(idempotency_key, "tool-selection"),
+        )
+        selection = await self._repair_tool_selection_modes_if_needed(
+            selection=selection,
+            available_tools=available_tool_schemas,
+            model=model,
+            idempotency_key=_phase_idempotency_key(idempotency_key, "tool-selection-mode-repair"),
+        )
+        selected_tools = self._selected_full_tool_schemas(
+            selection,
+            available_tool_schemas,
+        )
+        tool_catalog = self._planner_ir_tool_catalog(selected_tools)
         retry_context: dict[str, Any] | None = None
         last_violation: PlannerIRSchemaViolation | None = None
         total_attempts = max(1, max_schema_retries + 1)
+        llm_calls = 1
+        max_total_llm_calls = max(3, max_schema_retries + 3)
+        verification_repairs = 0
+        deterministic_repairs = 0
 
         for attempt in range(1, total_attempts + 1):
+            if llm_calls >= max_total_llm_calls:
+                break
             prompt = _planner_ir_prompt(
                 user_request=user_request,
                 tool_catalog=tool_catalog,
+                known_inputs=known,
                 retry_context=retry_context,
                 prior_round_context=_prior_round_context_payload(prior_round_context),
             )
@@ -1149,14 +2323,101 @@ class WorkflowPlanner:
                     f"planner-ir-v1-{attempt}",
                 ),
             )
+            llm_calls += 1
             try:
                 planner_ir = _load_planner_ir_json_or_raise(response.content)
                 _validate_planner_ir_v1_or_raise(planner_ir)
+                planner_ir = _prepare_planner_ir_for_verification(
+                    planner_ir,
+                    selected_tools,
+                    known_inputs=known,
+                )
+                _validate_planner_ir_against_selected_tools(
+                    planner_ir,
+                    selected_tools,
+                    known_inputs=known,
+                )
             except PlannerIRSchemaViolation as exc:
                 last_violation = exc
+                if deterministic_repairs < 1:
+                    repaired_ir = _repair_unsatisfied_root_with_selected_term_producer(
+                        planner_ir=exc.payload,
+                        selected_tools=selected_tools,
+                        user_request=user_request,
+                        known_inputs=known,
+                    )
+                    if repaired_ir is not None:
+                        deterministic_repairs += 1
+                        try:
+                            repaired_ir = _prepare_planner_ir_for_verification(
+                                repaired_ir,
+                                selected_tools,
+                                known_inputs=known,
+                            )
+                            _validate_planner_ir_v1_or_raise(repaired_ir)
+                            _validate_planner_ir_against_selected_tools(
+                                repaired_ir,
+                                selected_tools,
+                                known_inputs=known,
+                            )
+                        except PlannerIRSchemaViolation as repair_exc:
+                            last_violation = repair_exc
+                        else:
+                            if compile_with_fixup is not None:
+                                return await compile_with_fixup(repaired_ir)
+                            return compile_planner_ir(
+                                repaired_ir,
+                                prior_round_context=prior_round_context,
+                            )
+                if (
+                    verification_repairs < _MAX_PLAN_VERIFICATION_REPAIRS
+                    and llm_calls < max_total_llm_calls
+                    and _should_attempt_plan_verification_repair(exc)
+                ):
+                    patch = await self._ask_plan_verification_repair(
+                        planner_ir=exc.payload,
+                        selected_tools=selected_tools,
+                        available_tools=available_tool_schemas,
+                        structured_error=exc.structured_error,
+                        model=model,
+                        idempotency_key=_phase_idempotency_key(
+                            idempotency_key,
+                            f"plan-verification-{attempt}",
+                        ),
+                    )
+                    llm_calls += 1
+                    planner_ir, selected_tools = _apply_plan_verification_patch(
+                        planner_ir=exc.payload,
+                        selected_tools=selected_tools,
+                        available_tools=available_tool_schemas,
+                        patch=patch,
+                    )
+                    tool_catalog = self._planner_ir_tool_catalog(selected_tools)
+                    verification_repairs += 1
+                    try:
+                        planner_ir = _prepare_planner_ir_for_verification(
+                            planner_ir,
+                            selected_tools,
+                            known_inputs=known,
+                        )
+                        _validate_planner_ir_v1_or_raise(planner_ir)
+                        _validate_planner_ir_against_selected_tools(
+                            planner_ir,
+                            selected_tools,
+                            known_inputs=known,
+                        )
+                    except PlannerIRSchemaViolation as repair_exc:
+                        last_violation = repair_exc
+                    else:
+                        if compile_with_fixup is not None:
+                            return await compile_with_fixup(planner_ir)
+                        return compile_planner_ir(
+                            planner_ir,
+                            prior_round_context=prior_round_context,
+                        )
                 retry_context = {
                     "previous_output": response.content,
-                    "structured_error": exc.structured_error,
+                    "structured_error": last_violation.structured_error,
                     "instruction": (
                         "Re-emit only corrected Planner IR JSON. Preserve the "
                         "same planning goal unless the structured error says a "
@@ -1175,7 +2436,10 @@ class WorkflowPlanner:
             raise last_violation
         raise InvalidParamsError(
             "planner_ir_v1 planning exhausted without a response",
-            details={"max_schema_retries": max_schema_retries},
+            details={
+                "max_schema_retries": max_schema_retries,
+                "max_total_llm_calls": max_total_llm_calls,
+            },
         )
 
     def _planner_ir_tool_catalog(
@@ -1183,17 +2447,7 @@ class WorkflowPlanner:
         available_tools: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         if available_tools is None:
-            available_tools = [
-                {
-                    "name": descriptor.name,
-                    "description": descriptor.description,
-                }
-                for descriptor, adapter_cls in self.registry.entries()
-                if is_agent_visible_tool(descriptor)
-                and _install_readiness(descriptor.name).get("install_ready") is True
-                and _descriptor_availability(descriptor, adapter_cls).get("available")
-                is True
-            ]
+            available_tools = self._available_planner_tool_schemas(None)
         catalog: list[dict[str, Any]] = []
         seen: set[str] = set()
         for tool in available_tools:
@@ -1204,12 +2458,61 @@ class WorkflowPlanner:
             entry: dict[str, Any] = {
                 "name": name,
                 "description": str(tool.get("description") or "")[:180],
+                "role": tool_role(name),
+                "root_inputs": root_input_fields(tool.get("input_schema")),
+                "input_schema_outline": compact_input_schema_outline(
+                    tool.get("input_schema")
+                ),
+                "candidate_contract": compact_tool_outline(tool).get(
+                    "candidate_contract",
+                    {},
+                ),
             }
             allowed_modes = EXPLICIT_MODE_TOOLS.get(name)
             if allowed_modes is not None:
                 entry["allowed_modes"] = list(allowed_modes)
+                mode_input_field = explicit_mode_input_field(name)
+                if mode_input_field != "mode":
+                    entry["mode_input_field"] = mode_input_field
+            profiles = candidate_capability_profiles(name)
+            if profiles:
+                entry["candidate_capability_profiles"] = profiles
+            selected_mode = tool.get("selected_mode")
+            if isinstance(selected_mode, str) and selected_mode:
+                entry["selected_mode"] = selected_mode
             catalog.append(entry)
         return sorted(catalog, key=lambda item: item["name"])
+
+    def _available_planner_tool_schemas(
+        self,
+        available_tools: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        if available_tools is None:
+            available_tools = [
+                {
+                    "name": descriptor.name,
+                    "description": descriptor.description,
+                    "input_schema": resolve_input_schema_dict(descriptor),
+                    "sharding": (
+                        asdict(descriptor.sharding)
+                        if is_dataclass(descriptor.sharding)
+                        else (
+                            descriptor.sharding.model_dump(mode="json")
+                            if descriptor.sharding is not None
+                            else None
+                        )
+                    ),
+                }
+                for descriptor, adapter_cls in self.registry.entries()
+                if is_agent_visible_tool(descriptor)
+                and _install_readiness(descriptor.name).get("install_ready") is True
+                and _descriptor_availability(descriptor, adapter_cls).get("available")
+                is True
+            ]
+        return [
+            self._tool_with_resolved_input_schema(tool)
+            for tool in available_tools
+        ]
 
     async def draft_plan(
         self,
@@ -1217,184 +2520,18 @@ class WorkflowPlanner:
         *,
         available_tools: list[dict[str, Any]],
         workflows: list[dict[str, Any]] | None = None,
+        known_inputs: dict[str, Any] | None = None,
         model: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         del workflows
-        if self.provider is None:
-            raise InvalidParamsError(
-                "agent planning requires an LLM provider",
-                details={"mode": "agent_plan"},
-            )
-        available_tool_schemas = [
-            self._tool_with_resolved_input_schema(tool)
-            for tool in available_tools
-        ]
-        candidate_tools = _candidate_tool_inventory(request, available_tool_schemas)
-        selection = await self._select_candidate_tools(
-            {
-                "request": request,
-                "available_tools": [compact_tool_outline(t) for t in candidate_tools],
-                "output_contract": {
-                    "mode": "tool_selection",
-                    "candidate_tools": ["tool_name"],
-                    "max_candidate_tools": _MAX_SELECTED_TOOLS,
-                    "reason": "string",
-                    "missing_inputs": ["string"],
-                },
-            },
-            label="planner tool selection",
+        return await self._plan_v1(
+            request,
+            available_tools=available_tools,
+            known_inputs=known_inputs,
             model=model,
-            idempotency_key=_phase_idempotency_key(idempotency_key, "tool-selection"),
-            system_prompt=TOOL_SELECTION_SYSTEM_PROMPT,
+            idempotency_key=idempotency_key,
         )
-        selected_tools = self._selected_tool_schemas(
-            selection,
-            candidate_tools,
-        )
-        prompt = {
-            "request": request,
-            "tool_selection": selection,
-            "selected_tools": selected_tools,
-            "output_contract": {
-                "mode": "agent_plan",
-                "goal": "string",
-                "assumptions": ["string"],
-                "missing_inputs": ["string"],
-                "required_tools": ["tool_name"],
-                "params": {"param_name": "runtime value"},
-                "workflow_plan": {
-                    "name": "string",
-                    "version": "string",
-                    "params": {"param_name": {"type": "str|int|float|bool|path|list|dict"}},
-                    "nodes": [
-                        {
-                            "id": "node_id",
-                            "tool": "tool_name",
-                            "inputs": {
-                                "param": "runtime value or ${params.x}/${outputs.node.field}"
-                            },
-                        }
-                    ],
-                },
-                "success_criteria": {},
-                "warm_tools": ["tool_name"],
-                "estimated_llm_calls": 2,
-            },
-        }
-        response = await self.provider.chat(
-            [
-                ChatMessage(role="system", content=PLANNER_SYSTEM_PROMPT),
-                ChatMessage(role="user", content=json.dumps(prompt, sort_keys=True)),
-            ],
-            model=model,
-            response_format={"type": "json_object"},
-            idempotency_key=_phase_idempotency_key(idempotency_key, "workflow-plan"),
-        )
-        plan = _load_json_object_response(
-            response.content,
-            label="planner",
-            error_message="planner returned non-JSON content",
-        )
-        return self.validate_round_plan(plan)
-
-    async def draft_next_round_plan(
-        self,
-        *,
-        previous_plan: dict[str, Any],
-        summary: dict[str, Any],
-        decision: dict[str, Any],
-        available_tools: list[dict[str, Any]],
-        workflows: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        del workflows
-        if self.provider is None:
-            raise InvalidParamsError(
-                "next-round planning requires an LLM provider",
-                details={"mode": "agent_plan"},
-            )
-        available_tool_schemas = [
-            self._tool_with_resolved_input_schema(tool)
-            for tool in available_tools
-        ]
-        candidate_tools = _candidate_tool_inventory(
-            " ".join(
-                str(part)
-                for part in (
-                    previous_plan.get("goal"),
-                    decision.get("decision"),
-                    (decision.get("next_round") or {}).get("reason")
-                    if isinstance(decision.get("next_round"), dict)
-                    else None,
-                    summary.get("name") if isinstance(summary, dict) else None,
-                )
-                if part
-            ),
-            available_tool_schemas,
-        )
-        selection = await self._select_candidate_tools(
-            {
-                "previous_plan": previous_plan,
-                "compact_summary": summary,
-                "decision": decision,
-                "available_tools": [compact_tool_outline(t) for t in candidate_tools],
-                "output_contract": {
-                    "mode": "tool_selection",
-                    "candidate_tools": ["tool_name"],
-                    "max_candidate_tools": _MAX_SELECTED_TOOLS,
-                    "reason": "string",
-                    "missing_inputs": [],
-                },
-            },
-            label="next-round tool selection",
-            model=model,
-            idempotency_key=_phase_idempotency_key(idempotency_key, "tool-selection"),
-            system_prompt=TOOL_SELECTION_SYSTEM_PROMPT,
-        )
-        selected_tools = self._selected_tool_schemas(
-            selection,
-            candidate_tools,
-        )
-        prompt = {
-            "previous_plan": previous_plan,
-            "compact_summary": summary,
-            "decision": decision,
-            "tool_selection": selection,
-            "selected_tools": selected_tools,
-            "output_contract": {
-                "mode": "agent_plan",
-                "goal": "string",
-                "assumptions": ["include parameter changes and reasons"],
-                "missing_inputs": [],
-                "required_tools": ["tool_name"],
-                "params": {"param_name": "runtime value"},
-                "workflow_plan": {
-                    "name": "string",
-                    "version": "string",
-                    "nodes": [{"id": "node_id", "tool": "tool_name", "inputs": {}}],
-                },
-                "success_criteria": previous_plan.get("success_criteria", {}),
-                "warm_tools": ["tool_name"],
-                "estimated_llm_calls": 1,
-            },
-        }
-        response = await self.provider.chat(
-            [
-                ChatMessage(role="system", content=NEXT_ROUND_SYSTEM_PROMPT),
-                ChatMessage(role="user", content=json.dumps(prompt, sort_keys=True)),
-            ],
-            model=model,
-            response_format={"type": "json_object"},
-            idempotency_key=_phase_idempotency_key(idempotency_key, "workflow-plan"),
-        )
-        plan = _load_json_object_response(
-            response.content,
-            label="next-round planner",
-            error_message="next-round planner returned non-JSON content",
-        )
-        return self.validate_round_plan(plan)
 
     async def _select_candidate_tools(
         self,
@@ -1403,7 +2540,7 @@ class WorkflowPlanner:
         label: str,
         model: str | None,
         idempotency_key: str | None,
-        system_prompt: str = PLANNER_SYSTEM_PROMPT,
+        system_prompt: str = TOOL_SELECTION_SYSTEM_PROMPT,
     ) -> dict[str, Any]:
         if self.provider is None:  # pragma: no cover - guarded by callers
             raise InvalidParamsError(
@@ -1430,6 +2567,136 @@ class WorkflowPlanner:
             if selection is None:
                 raise
             return selection
+
+    async def _ask_plan_verification_repair(
+        self,
+        *,
+        planner_ir: dict[str, Any],
+        selected_tools: list[dict[str, Any]],
+        available_tools: list[dict[str, Any]],
+        structured_error: dict[str, Any],
+        model: str | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        if self.provider is None:  # pragma: no cover - guarded by callers
+            raise InvalidParamsError(
+                "agent planning requires an LLM provider",
+                details={"mode": "agent_plan"},
+            )
+        prompt = {
+            "planner_ir": planner_ir,
+            "selected_tools": [
+                {"name": tool.get("name")}
+                for tool in selected_tools
+                if isinstance(tool.get("name"), str)
+            ],
+            "available_tools": [
+                compact_tool_outline(tool)
+                for tool in available_tools
+            ],
+            "structured_error": structured_error,
+            "output_contract": {
+                "add_selected_tools": ["tool_name"],
+                "drop_selected_tools": ["tool_name"],
+                "set_selected_modes": [
+                    {"name": "tool_name", "selected_mode": "allowed_mode_or_null"}
+                ],
+                "add_nodes": [{"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}],
+                "replace_nodes": [{"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}],
+                "update_node_inputs": [{"node_id": "node_id", "inputs": {"field": "value"}}],
+                "set_missing_inputs": [],
+                "remove_node_ids": ["node_id"],
+                "reason": "short reason",
+            },
+        }
+        response = await self.provider.chat(
+            [
+                ChatMessage(role="system", content=PLAN_VERIFICATION_SYSTEM_PROMPT),
+                ChatMessage(role="user", content=json.dumps(prompt, sort_keys=True)),
+            ],
+            model=model,
+            temperature=0,
+            response_format={"type": "json_object"},
+            idempotency_key=idempotency_key,
+        )
+        return _load_json_object_response(
+            response.content,
+            label="plan verification repair",
+            error_message="plan verification repair returned non-JSON content",
+        )
+
+    async def _repair_tool_selection_modes_if_needed(
+        self,
+        *,
+        selection: dict[str, Any],
+        available_tools: list[dict[str, Any]],
+        model: str | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        structured_error = _tool_selection_mode_structured_error(
+            selection,
+            available_tools,
+        )
+        if structured_error is None:
+            return selection
+        patch = await self._ask_plan_verification_repair(
+            planner_ir={},
+            selected_tools=[
+                {"name": spec["name"], **({"selected_mode": spec["selected_mode"]} if "selected_mode" in spec else {})}
+                for spec in _candidate_tool_specs(selection)
+            ],
+            available_tools=available_tools,
+            structured_error=structured_error,
+            model=model,
+            idempotency_key=idempotency_key,
+        )
+        _empty_ir, repaired_tools = _apply_plan_verification_patch(
+            planner_ir={},
+            selected_tools=[
+                {"name": spec["name"], **({"selected_mode": spec["selected_mode"]} if "selected_mode" in spec else {})}
+                for spec in _candidate_tool_specs(selection)
+            ],
+            available_tools=available_tools,
+            patch=patch,
+        )
+        repaired = {
+            **selection,
+            "selected_tools": [
+                {
+                    "name": str(tool.get("name")),
+                    **(
+                        {"selected_mode": str(tool.get("selected_mode"))}
+                        if isinstance(tool.get("selected_mode"), str)
+                        else {}
+                    ),
+                }
+                for tool in repaired_tools
+                if isinstance(tool.get("name"), str)
+            ],
+        }
+        remaining_error = _tool_selection_mode_structured_error(
+            repaired,
+            available_tools,
+        )
+        if remaining_error is not None:
+            raise PlannerIRSchemaViolation(
+                [
+                    PlannerIRViolation(
+                        path=str(item.get("path") or "/selected_tools"),
+                        issue=str(item.get("issue") or "invalid_selected_mode"),
+                        expected=str(item.get("expected") or item.get("repair_instruction") or ""),
+                        metadata={
+                            key: value
+                            for key, value in item.items()
+                            if key not in {"path", "issue", "expected"}
+                        },
+                    )
+                    for item in remaining_error.get("violations", [])
+                    if isinstance(item, dict)
+                ],
+                payload=repaired,
+            )
+        return repaired
 
     def _selected_tool_schemas(
         self,
@@ -1459,12 +2726,25 @@ class WorkflowPlanner:
             for tool in available_tools
             if isinstance(tool.get("name"), str)
         }
-        names = _candidate_tool_names(selection)
-        if not names:
+        specs = _candidate_tool_specs(selection)
+        if not specs:
             raise InvalidParamsError(
                 "planner did not select any candidate tools",
-                details={"selection": selection},
+                details={
+                    "structured_error": {
+                        "error_kind": "empty_tool_selection",
+                        "violations": [
+                            {
+                                "path": "/selected_tools",
+                                "issue": "empty_tool_selection",
+                                "expected": "Select at least one available tool before Planner IR is called.",
+                            }
+                        ],
+                    },
+                    "selection": selection,
+                },
             )
+        names = [spec["name"] for spec in specs]
         unknown = [name for name in names if name not in by_name]
         if unknown and fallback_available_tools is not None:
             fallback_by_name = {
@@ -1481,10 +2761,37 @@ class WorkflowPlanner:
                 "planner selected unknown tools",
                 details={"tools": unknown, "available_tools": sorted(by_name)},
             )
-        return [
-            self._tool_with_resolved_input_schema(by_name[name])
-            for name in names
-        ]
+        selected: list[dict[str, Any]] = []
+        for spec in specs:
+            name = spec["name"]
+            tool = self._tool_with_resolved_input_schema(by_name[name])
+            selected_mode = spec.get("selected_mode")
+            allowed_modes = EXPLICIT_MODE_TOOLS.get(name)
+            if selected_mode is not None:
+                if allowed_modes is None:
+                    raise InvalidParamsError(
+                        "planner selected a mode for a single-mode tool",
+                        details={
+                            "tool": name,
+                            "selected_mode": selected_mode,
+                            "hint": (
+                                "Use selected_mode only when the available tool "
+                                "outline includes allowed_modes."
+                            ),
+                        },
+                    )
+                if selected_mode not in allowed_modes:
+                    raise InvalidParamsError(
+                        "planner selected an invalid tool mode",
+                        details={
+                            "tool": name,
+                            "selected_mode": selected_mode,
+                            "allowed_modes": list(allowed_modes),
+                        },
+                    )
+                tool = {**tool, "selected_mode": selected_mode}
+            selected.append(tool)
+        return selected
 
     def _tool_with_resolved_input_schema(self, tool: dict[str, Any]) -> dict[str, Any]:
         schema = tool.get("input_schema")
@@ -1564,9 +2871,9 @@ class WorkflowPlanner:
 
         workflow = self.compile_workflow(plan)
         workflow.validate_dag()
-        # Compiler-emitted Planner IR v1 plans are valid by construction; keep
-        # legacy validators demoted and off the v1 execution route.
-        if plan.get("source_kind") != "planner_ir_compiled":
+        if plan.get("source_kind") == PLANNER_COMPILED_SOURCE_KIND:
+            validate_compiled_planner_plan(plan)
+        else:
             _validate_static_output_refs(workflow, self.registry)
             _validate_static_output_ref_types(workflow, self.registry)
             _validate_static_job_refs(workflow, self.registry)

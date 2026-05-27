@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.core.errors import VPAError
@@ -435,6 +436,11 @@ def _pyrosetta_candidates(
         "structure_path": structure_path,
         "scores": {"pyrosetta": scores},
         "artifacts": {"pyrosetta": {"relaxed_pdb_path": structure_path}},
+        "capabilities": candidate_capability_flags(
+            has_backbone_structure=bool(structure_path),
+            has_full_structure=bool(structure_path),
+            has_candidate_scores=True,
+        ),
     }
     if params.candidates and _is_canonical_candidate(params.candidates[0]):
         source = params.candidates[0]
@@ -443,6 +449,10 @@ def _pyrosetta_candidates(
             candidate["scores"] = {**upstream_scores, **candidate["scores"]}
         if source.get("sequence"):
             candidate["sequence"] = source.get("sequence")
+            candidate["capabilities"]["has_sequence"] = True
+        if isinstance(source.get("capabilities"), dict):
+            candidate["capabilities"] = dict(source["capabilities"])
+            candidate["capabilities"]["has_candidate_scores"] = True
     return [candidate]
 
 

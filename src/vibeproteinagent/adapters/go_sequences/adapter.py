@@ -60,7 +60,10 @@ class GOSequencesOutput(BaseModel):
     go_label: str | None
     association_records: int
     resolved_uniprot_accessions: int
+    raw_result_count: int
     kept_sequences: int
+    kept_sequence_count: int
+    dropped_empty_sequence_count: int
     sequences: list[dict[str, Any]]
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     fasta_path: str
@@ -236,6 +239,11 @@ class GOSequencesAdapter(ToolAdapter):
                         {"accession": accession, "reason": "unresolved_identifier"}
                     )
                     continue
+                if not str(record.sequence or "").strip():
+                    dropped_rows.append(
+                        {"accession": accession, "reason": "empty_sequence"}
+                    )
+                    continue
                 keep, reason = _keep_record(record, params)
                 if keep and params.deduplicate_sequences and record.sequence in seen_sequences:
                     keep, reason = False, "duplicate_sequence"
@@ -291,6 +299,7 @@ class GOSequencesAdapter(ToolAdapter):
             for reason in sorted({str(d.get("reason")) for d in dropped_rows})
         }
         dropped["unresolved_identifier"] = dropped.get("unresolved_identifier", 0) + len(unresolved)
+        dropped_empty_sequence_count = dropped.get("empty_sequence", 0)
         lengths = [r.length or 0 for r in kept]
         summary = {
             "fallback_used": fallback_used,
@@ -326,7 +335,10 @@ class GOSequencesAdapter(ToolAdapter):
             go_label=raw_go.get("label") or raw_go.get("name"),
             association_records=len(filtered_assoc),
             resolved_uniprot_accessions=sum(1 for _a, record, _e in fetched if record is not None),
+            raw_result_count=len(fetched),
             kept_sequences=len(kept),
+            kept_sequence_count=len(kept),
+            dropped_empty_sequence_count=dropped_empty_sequence_count,
             sequences=sequences,
             candidates=candidates,
             fasta_path=str(fasta_path),

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from vibeproteinagent.agents.config import AgentConfig, resolve_planner_ir_mode
+from vibeproteinagent.agents.config import AgentConfig
 from vibeproteinagent.agents.execution import ExecutionPolicy
 from vibeproteinagent.agents.execution import controller as controller_mod
 from vibeproteinagent.agents.execution.controller import AgentController
@@ -62,11 +62,10 @@ def _run_plan_only(controller: AgentController, tmp_workspace: Workspace) -> dic
     )
 
 
-def test_controller_uses_planner_ir_v1_when_flag_unset(
+def test_controller_calls_planner_ir_v1_path(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("VPA_PLANNER_IR", raising=False)
     monkeypatch.setattr(
         controller_mod,
         "provider_from_config",
@@ -86,79 +85,14 @@ def test_controller_uses_planner_ir_v1_when_flag_unset(
 
     monkeypatch.setattr(planner_mod.WorkflowPlanner, "draft_plan", fake_draft_plan)
     monkeypatch.setattr(planner_mod.WorkflowPlanner, "_plan_v1", fake_plan_v1)
+    monkeypatch.setattr(
+        planner_mod.WorkflowPlanner,
+        "validate_invocation",
+        lambda _self, plan, *_args, **_kwargs: plan,
+    )
     controller = AgentController(tmp_workspace, config=AgentConfig(max_entries=1))
 
     report = _run_plan_only(controller, tmp_workspace)
 
     assert report["state"] == "planned"
     assert calls == {"legacy": 0, "v1": 1}
-
-
-def test_controller_uses_planner_ir_v1_when_flag_enabled(
-    tmp_workspace: Workspace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "v1")
-    monkeypatch.setattr(
-        controller_mod,
-        "provider_from_config",
-        lambda _config: _NeverUsedProvider(),
-    )
-    calls = {"legacy": 0, "v1": 0}
-
-    async def fake_draft_plan(self, *args, **kwargs):
-        del self, args, kwargs
-        calls["legacy"] += 1
-        return _plan()
-
-    async def fake_plan_v1(self, *args, **kwargs):
-        del self, args, kwargs
-        calls["v1"] += 1
-        return _plan()
-
-    monkeypatch.setattr(planner_mod.WorkflowPlanner, "draft_plan", fake_draft_plan)
-    monkeypatch.setattr(planner_mod.WorkflowPlanner, "_plan_v1", fake_plan_v1)
-    controller = AgentController(tmp_workspace, config=AgentConfig(max_entries=1))
-
-    report = _run_plan_only(controller, tmp_workspace)
-
-    assert report["state"] == "planned"
-    assert calls == {"legacy": 0, "v1": 1}
-
-
-def test_controller_uses_legacy_planner_when_flag_off(
-    tmp_workspace: Workspace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "off")
-    monkeypatch.setattr(
-        controller_mod,
-        "provider_from_config",
-        lambda _config: _NeverUsedProvider(),
-    )
-    calls = {"legacy": 0, "v1": 0}
-
-    async def fake_draft_plan(self, *args, **kwargs):
-        del self, args, kwargs
-        calls["legacy"] += 1
-        return _plan()
-
-    async def fake_plan_v1(self, *args, **kwargs):
-        del self, args, kwargs
-        calls["v1"] += 1
-        return _plan()
-
-    monkeypatch.setattr(planner_mod.WorkflowPlanner, "draft_plan", fake_draft_plan)
-    monkeypatch.setattr(planner_mod.WorkflowPlanner, "_plan_v1", fake_plan_v1)
-    controller = AgentController(tmp_workspace, config=AgentConfig(max_entries=1))
-
-    report = _run_plan_only(controller, tmp_workspace)
-
-    assert report["state"] == "planned"
-    assert calls == {"legacy": 1, "v1": 0}
-
-
-def test_invalid_planner_ir_env_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VPA_PLANNER_IR", "v2")
-    with pytest.raises(ValueError, match="Invalid VPA_PLANNER_IR"):
-        resolve_planner_ir_mode()

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/interpro_entry_lookup.output.json",
+  "type": "object",
+  "required": ["accession", "status", "matches", "warnings", "valid", "database", "go_terms", "resolved_entries", "runtime_ms"],
+  "properties": {
+    "accession": {"type": "string"},
+    "status": {"type": "string", "enum": ["resolved", "no_match", "ambiguous", "backend_error", "parse_error"]},
+    "matches": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "valid": {"type": "boolean"},
+    "database": {"type": "string"},
+    "name": {"type": ["string", "null"]},
+    "entry_type": {"type": ["string", "null"]},
+    "description": {"type": ["string", "null"]},
+    "go_terms": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "resolved_entries": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

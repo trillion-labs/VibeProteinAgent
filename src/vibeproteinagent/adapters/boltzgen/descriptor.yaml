@@ -1,7 +1,7 @@
 name: boltzgen
 version: "0.3.2"
 category: protein_design
-description: "Generative binder design with selectable protocols (protein, peptide, protein+small-molecule, antibody, nanobody, protein-redesign). `design_only=true` runs diffusion alone; `false` runs the full diffusion+inverse-folding+refolding+filtering pipeline and returns ranked designs."
+description: "Generative binder design. Default full pipeline returns sequenced, ranked candidates; `design_only=true` runs backbone-only diffusion."
 runtime: python
 backend: pytorch
 gpu_required: true
@@ -13,6 +13,7 @@ warm_load_capable: false
 pin_warm: false
 execution_isolation: subprocess
 environment_reason: "Each run launches the BoltzGen CLI in a fresh child process to isolate Hydra/Lightning global state; no model or checkpoint state remains resident across calls."
+availability_probe: "vibeproteinagent.adapters.boltzgen:availability_skip_reason"
 supported_tasks: [protein_design, peptide_design, binder_design]
 input_schema: schemas/boltzgen.input.json
 output_schema: schemas/boltzgen.output.json

@@ -7,6 +7,7 @@ from .adapter import (
     BoltzGenDesign,
     BoltzGenInput,
     BoltzGenOutput,
+    availability_skip_reason,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "BoltzGenDesign",
     "BoltzGenInput",
     "BoltzGenOutput",
+    "availability_skip_reason",
 ]

@@ -124,12 +124,3 @@ def resolve_decision_normalization_mode() -> str:
             "must be one of compat | strict | off"
         )
     return NORMALIZATION_DEFAULTS[DECISION_CONTRACT_VERSION]["decision_reasoning"]
-
-
-def resolve_planner_ir_mode() -> str:
-    val = os.environ.get("VPA_PLANNER_IR")
-    if val == "off":
-        return "off"
-    if val in (None, "", "v1"):
-        return "v1"
-    raise ValueError(f"Invalid VPA_PLANNER_IR={val!r}; must be 'v1' or 'off'")

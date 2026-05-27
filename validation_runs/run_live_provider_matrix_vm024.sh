@@ -4,10 +4,13 @@ set -Eeuo pipefail
 REPO_ROOT="${VPA_REPO_ROOT:-/mnt/vast/trillion/hyunjin/VibeProteinAgent}"
 REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
 STAMP="${VPA_VALIDATION_STAMP:-$(date '+%Y%m%d_%H%M%S')}"
+HOST_LABEL="$(hostname 2>/dev/null || printf 'unknown-host')"
+SAFE_HOST_LABEL="${HOST_LABEL//[^A-Za-z0-9_.-]/_}"
 RUN_BASE="${VPA_VALIDATION_RUN_BASE:-${REPO_ROOT}/validation_runs}"
-RUN_ROOT="${VPA_VALIDATION_RUN_DIR:-${RUN_BASE}/live_provider_matrix_vm024_${STAMP}}"
+RUN_ROOT="${VPA_VALIDATION_RUN_DIR:-${RUN_BASE}/live_provider_matrix_${SAFE_HOST_LABEL}_${STAMP}}"
 PROVIDERS_ARG="${VPA_VALIDATION_PROVIDERS:-codex,claude,qwen}"
 SMOKE="${VPA_VALIDATION_SMOKE:-0}"
+INCLUDE_PLAN_ONLY="${VPA_VALIDATION_INCLUDE_PLAN_ONLY:-0}"
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -23,6 +26,14 @@ while [[ "$#" -gt 0 ]]; do
       SMOKE=1
       shift
       ;;
+    --include-plan-only)
+      INCLUDE_PLAN_ONLY=1
+      shift
+      ;;
+    --actual-only)
+      INCLUDE_PLAN_ONLY=0
+      shift
+      ;;
     *)
       printf 'unknown argument: %s\n' "$1" >&2
       exit 2
@@ -31,10 +42,13 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 LOG_DIR="${RUN_ROOT}/logs"
-OUT_DIR="${RUN_ROOT}/outputs"
 WORKSPACE_ROOT="${RUN_ROOT}/workspaces"
 DAEMON_WORKSPACE="matrix_daemon_${STAMP}"
-mkdir -p "${LOG_DIR}" "${OUT_DIR}" "${WORKSPACE_ROOT}"
+mkdir -p "${LOG_DIR}" "${WORKSPACE_ROOT}"
+RUN_ROOT="$(cd "${RUN_ROOT}" && pwd)"
+LOG_DIR="${RUN_ROOT}/logs"
+WORKSPACE_ROOT="${RUN_ROOT}/workspaces"
+PLANNER_LABEL="two_stage_tool_mode_selection_ir"
 
 exec > >(tee -a "${RUN_ROOT}/matrix.log") 2>&1
 
@@ -80,6 +94,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export VPA_VALIDATION_WORKERS="${VPA_VALIDATION_WORKERS:-8}"
 export VPA_VALIDATION_TIMEOUT_MS="${VPA_VALIDATION_TIMEOUT_MS:-7200000}"
 export VPA_VALIDATION_MAX_WAIT_S="${VPA_VALIDATION_MAX_WAIT_S:-7200}"
+export VPA_VALIDATION_BINDER_MAX_ATTEMPTED_TRAJECTORIES="${VPA_VALIDATION_BINDER_MAX_ATTEMPTED_TRAJECTORIES:-4}"
 export VPA_AGENT_TIMEOUT_S="${VPA_AGENT_TIMEOUT_S:-300}"
 export VPA_AGENT_MAX_ENTRIES="${VPA_AGENT_MAX_ENTRIES:-3}"
 export VPA_AGENT_MAX_TOKENS="${VPA_AGENT_MAX_TOKENS:-2048}"
@@ -175,6 +190,7 @@ run_case() {
   local model="$4"
   local query="$5"
   local target_arg="${6:-}"
+  local extra_param="${7:-}"
   local workspace="matrix_${case_name}_${STAMP}"
   if [[ "${mode}" == "actual" ]]; then
     workspace="${DAEMON_WORKSPACE}"
@@ -186,26 +202,30 @@ run_case() {
   mkdir -p "${case_dir}"
   local stderr="${case_dir}/${case_name}.stderr.log"
   local start elapsed rc status
+  local extra_args=()
+  if [[ -n "${extra_param}" ]]; then
+    extra_args+=(--param "${extra_param}")
+  fi
   start="$(date +%s)"
   log "START ${case_name} (${mode}, ${provider}, ${model})"
   set +e
   if [[ "${mode}" == "plan" ]]; then
     if [[ -n "${target_arg}" ]]; then
-      run_vpa agent run "${query}" --target "${target_arg}" --provider "${provider}" --model "${model}" \
+      run_vpa agent run "${query}" --target "${target_arg}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --plan-only --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" \
         --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
     else
-      run_vpa agent run "${query}" --provider "${provider}" --model "${model}" \
+      run_vpa agent run "${query}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --plan-only --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" \
         --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
     fi
   else
     if [[ -n "${target_arg}" ]]; then
-      run_vpa agent run "${query}" --target "${target_arg}" --provider "${provider}" --model "${model}" \
+      run_vpa agent run "${query}" --target "${target_arg}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" --max-wait-s "${VPA_VALIDATION_MAX_WAIT_S}" \
         --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
     else
-      run_vpa agent run "${query}" --provider "${provider}" --model "${model}" \
+      run_vpa agent run "${query}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" --max-wait-s "${VPA_VALIDATION_MAX_WAIT_S}" \
         --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
     fi
@@ -274,13 +294,35 @@ EOF
   esac
 }
 
+runtime_preflight() {
+  local out="${LOG_DIR}/preflight_runtime.log"
+  run_py - > "${out}" 2>&1 <<'PY'
+import json
+import os
+import sys
+
+from vibeproteinagent.install.installer import install_readiness
+
+required_tools = ("boltzgen",)
+report = install_readiness(required_tools, runtime_probe=True)
+print(json.dumps(report, indent=2, sort_keys=True))
+if report.get("install_ready") is not True:
+    raise SystemExit("runtime preflight failed: required tools are not install-ready")
+
+expected_planner = "two_stage_tool_mode_selection_ir"
+observed = os.environ.get("VPA_VALIDATION_PLANNER_LABEL", expected_planner)
+if observed != expected_planner:
+    raise SystemExit(f"runtime preflight failed: planner={observed!r}")
+PY
+}
+
 run_provider_plan_cases() {
   local label="$1"
   local provider="$2"
   local model="$3"
   if provider_preflight "${label}" "${provider}" "${model}"; then
     run_case "plan_semantic_${label}" "plan" "${provider}" "${model}" "${semantic_query}"
-    run_case "plan_binder_${label}" "plan" "${provider}" "${model}" "${binder_query}" "${TARGET_PDB}"
+    run_case "plan_binder_${label}" "plan" "${provider}" "${model}" "${binder_query}" "${TARGET_PDB}" "max_attempted_trajectories=${VPA_VALIDATION_BINDER_MAX_ATTEMPTED_TRAJECTORIES}"
     run_case "plan_denovo_${label}" "plan" "${provider}" "${model}" "${denovo_query}"
   else
     local reason="provider preflight failed; see ${LOG_DIR}/preflight_${label}.log"
@@ -294,9 +336,9 @@ run_provider_actual_cases() {
   local label="$1"
   local provider="$2"
   local model="$3"
-  if [[ -s "${LOG_DIR}/preflight_${label}.log" ]] && provider_preflight "${label}" "${provider}" "${model}"; then
+  if provider_preflight "${label}" "${provider}" "${model}"; then
     run_case "actual_semantic_${label}" "actual" "${provider}" "${model}" "${semantic_query}"
-    run_case "actual_binder_${label}" "actual" "${provider}" "${model}" "${binder_query}" "${TARGET_PDB}"
+    run_case "actual_binder_${label}" "actual" "${provider}" "${model}" "${binder_query}" "${TARGET_PDB}" "max_attempted_trajectories=${VPA_VALIDATION_BINDER_MAX_ATTEMPTED_TRAJECTORIES}"
     run_case "actual_denovo_${label}" "actual" "${provider}" "${model}" "${denovo_query}"
   else
     local reason="provider preflight failed; see ${LOG_DIR}/preflight_${label}.log"
@@ -347,7 +389,7 @@ passed = sum(1 for r in rows if r["status"] == "PASS")
 blocked = sum(1 for r in rows if r["status"] == "BLOCKED")
 failed = sum(1 for r in rows if r["status"] == "FAIL")
 lines = [
-    "# Live Provider Matrix on vm-024",
+    f"# Live Provider Matrix on {os.environ.get('VPA_VALIDATION_HOST_LABEL', 'unknown-host')}",
     "",
     f"Run root: `{run_root}`",
     f"Cases: {passed} passed / {failed} failed / {blocked} blocked / {len(rows)} total",
@@ -360,7 +402,13 @@ for row in rows:
         f"| `{row['case']}` | {row['mode']} | {row['provider']} | "
         f"`{row['model']}` | **{row['status']}** | {row['seconds']} |"
     )
-lines.extend(["", "Artifacts:", f"- Status TSV: `{status_tsv}`", f"- Logs: `{run_root / 'logs'}`", f"- JSON outputs: `{run_root / 'outputs'}`"])
+lines.extend([
+    "",
+    "Artifacts:",
+    f"- Status TSV: `{status_tsv}`",
+    f"- Logs: `{run_root / 'logs'}`",
+    f"- Case outputs: `{run_root}/{{codex,claude,qwen}}/*.json`",
+])
 summary_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 def provider_label(row):
@@ -448,7 +496,6 @@ for provider, provider_rows in sorted(grouped.items()):
     providers.append(record)
 
 counts = Counter(record["status"] for record in providers)
-flag_value = os.environ.get("VPA_PLANNER_IR") or "v1"
 pr_name = run_root.name
 if not pr_name.startswith("pr"):
     pr_name = "live_provider_matrix"
@@ -457,7 +504,7 @@ summary_json.write_text(
         {
             "pr": pr_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "flag": {"VPA_PLANNER_IR": flag_value},
+            "planner": os.environ.get("VPA_VALIDATION_PLANNER_LABEL", "two_stage_ir"),
             "providers": providers,
             "counts": {
                 "PASS": counts.get("PASS", 0),
@@ -465,7 +512,7 @@ summary_json.write_text(
                 "BLOCKED": counts.get("BLOCKED", 0),
             },
             "notes": (
-                "legacy smoke cycle; escape-hatch availability check."
+                "live provider matrix smoke cycle."
                 if smoke
                 else "live provider matrix cycle with current defaults."
             ),
@@ -502,16 +549,29 @@ provider_specs() {
 }
 
 main() {
-  log "host=$(hostname)"
-  nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+  export VPA_VALIDATION_HOST_LABEL="${HOST_LABEL}"
+  export VPA_VALIDATION_PLANNER_LABEL="${PLANNER_LABEL}"
+  log "host=${HOST_LABEL}"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || \
+      log "nvidia-smi query failed; continuing because provider/plan preflight can still run."
+  else
+    log "nvidia-smi not found; continuing because provider/plan preflight can still run."
+  fi
   log "run_root=${RUN_ROOT}"
   log "repo=${REPO_ROOT}"
   log "vpa_home=${VPA_HOME}"
   log "runtime=${VPA_RUNTIME_DIR}"
   log "cuda_visible_devices=${CUDA_VISIBLE_DEVICES}"
   log "smoke=${SMOKE}"
-  log "VPA_PLANNER_IR=${VPA_PLANNER_IR:-<unset>}"
+  log "include_plan_only=${INCLUDE_PLAN_ONLY}"
+  log "binder_max_attempted_trajectories=${VPA_VALIDATION_BINDER_MAX_ATTEMPTED_TRAJECTORIES}"
+  log "planner=${PLANNER_LABEL}"
   [[ -n "${OPENROUTER_API_KEY:-}${VPA_OPENROUTER_CREDENTIAL:-}" ]] && log "OpenRouter credential: set" || log "OpenRouter credential: unset"
+  runtime_preflight || {
+    log "Runtime preflight failed; see ${LOG_DIR}/preflight_runtime.log"
+    exit 1
+  }
 
   mapfile -t providers < <(provider_specs)
 
@@ -529,10 +589,14 @@ main() {
     return
   fi
 
-  for spec in "${providers[@]}"; do
-    IFS='|' read -r label provider model <<< "${spec}"
-    run_provider_plan_cases "${label}" "${provider}" "${model}"
-  done
+  if [[ "${INCLUDE_PLAN_ONLY}" == "1" ]]; then
+    for spec in "${providers[@]}"; do
+      IFS='|' read -r label provider model <<< "${spec}"
+      run_provider_plan_cases "${label}" "${provider}" "${model}"
+    done
+  else
+    log "Skipping plan-only matrix cases; actual cases will plan and execute in one agent run."
+  fi
 
   start_daemon
   trap stop_daemon EXIT

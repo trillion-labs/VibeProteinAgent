@@ -102,6 +102,21 @@
       "description": "Optional upper bound on attempted BindCraft trajectories. Null leaves upstream behavior unbounded until `num_designs` designs are accepted; useful for capping smoke/CI runs.",
       "examples": [50, 200, null]
     },
+    "max_attempted_trajectories": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 10000,
+      "default": null,
+      "description": "VPA-level upper bound on attempted terminal trajectories, including clashing and low-confidence rejects. Defaults to `max_trajectories` when omitted.",
+      "examples": [2, 10, null]
+    },
+    "max_runtime_s": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "default": null,
+      "description": "Optional wall-clock timeout for the isolated BindCraft sidecar call. Use to bound live validation runs.",
+      "examples": [600, 1800, null]
+    },
     "filter_mode": {
       "type": "string",
       "enum": ["default", "permissive"],

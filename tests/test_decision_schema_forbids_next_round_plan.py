@@ -12,7 +12,7 @@ from vibeproteinagent.agents.planning.prompts import DECISION_SYSTEM_PROMPT
 
 def _next_round_decision() -> dict[str, Any]:
     return {
-        "decision": "next_round",
+        "decision": "next_round_with_surviving_candidate",
         "reasoning": "More local exploration is justified.",
         "next_round": {
             "reason": "Carry forward survivors and broaden the search.",
@@ -54,7 +54,6 @@ def test_next_round_reason_without_plan_passes_decision_schema() -> None:
 
 def test_decision_prompt_examples_still_validate_after_plan_removal() -> None:
     examples = _json_examples()
-    # Item 3 adds the additive answer decision example.
-    assert len(examples) == 5
+    assert len(examples) == 3
     for example in examples:
         validate_decision_v1(example)

@@ -239,7 +239,7 @@ def _base_candidate(
         candidate = {
             key: value
             for key, value in upstream.items()
-            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
         }
         candidate["scores"] = dict(upstream.get("scores") or {})
         candidate["artifacts"] = dict(upstream.get("artifacts") or {})

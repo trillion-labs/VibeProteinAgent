@@ -180,7 +180,15 @@ tools:
         path: "envs/vpa/bin/foldseek"
         source_path: "/opt/miniconda3/envs/vpa/bin/foldseek"
         required: true
+  function_term_resolver:
+    runtime: shared
+  go_term_search:
+    runtime: shared
   go_sequences:
+    runtime: shared
+  interpro_entry_lookup:
+    runtime: shared
+  interpro_entry_search:
     runtime: shared
   interpro_sequences:
     runtime: shared
@@ -215,6 +223,8 @@ tools:
   noop:
     runtime: shared
     required: false
+  ontology_lookup:
+    runtime: shared
   prodigy:
     runtime: shared
   protein_qc:

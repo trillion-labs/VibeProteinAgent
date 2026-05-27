@@ -24,6 +24,7 @@ from vibeproteinagent.adapters._error_guides import (
     _format_examples,
     _format_description,
     _format_property_suggestion,
+    _format_root_schema_hint,
     _navigate_subschema,
     enrich_error_message,
     enrich_errors,
@@ -326,6 +327,31 @@ def test_property_suggestion_no_close_match_still_lists_valid_fields() -> None:
     assert "target_pdb" in hint and "candidates" in hint
     # `max_candidates` shares substring "candidates" so candidate match should fire
     assert "maybe `candidates`" in hint
+
+
+def test_root_schema_hint_surfaces_oneof_required_fields() -> None:
+    schema = {
+        "properties": {
+            "target_pdb": {"type": "string"},
+            "target_yaml": {"type": "string"},
+            "candidates": {"type": "array"},
+        },
+        "oneOf": [
+            {"required": ["target_pdb"]},
+            {"required": ["target_yaml"]},
+            {"required": ["candidates"]},
+        ],
+    }
+    hint = _format_root_schema_hint(
+        field_path="<root>",
+        raw_message="{} is not valid under any of the given schemas",
+        subschema=schema,
+    )
+    assert hint is not None
+    assert "target_pdb" in hint
+    assert "target_yaml" in hint
+    assert "candidates" in hint
+    assert "Valid root fields" in hint
 
 
 def test_candidate_for_substring_match_first() -> None:

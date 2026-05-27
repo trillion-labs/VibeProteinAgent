@@ -21,6 +21,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     residue_refs_from_objects,
     resolve_positions,
 )
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.binary import find_binary
 
@@ -762,6 +763,15 @@ def _structure_analysis_candidates(
                 candidate["sequence"] = params.sequence
         candidate.setdefault("scores", {})["structure_analysis"] = scores
         candidate.setdefault("artifacts", {})["structure_analysis"] = dict(summary["artifacts"])
+        candidate.setdefault(
+            "capabilities",
+            candidate_capability_flags(
+                has_sequence=bool(candidate.get("sequence")),
+                has_backbone_structure=bool(candidate_structure),
+                has_full_structure=bool(candidate_structure),
+                has_candidate_scores=True,
+            ),
+        )
         candidates.append(candidate)
     return candidates
 
@@ -770,7 +780,7 @@ def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     out = {
         key: value
         for key, value in candidate.items()
-        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path"}
+        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
     }
     out["scores"] = dict(candidate.get("scores") or {})
     out["artifacts"] = dict(candidate.get("artifacts") or {})

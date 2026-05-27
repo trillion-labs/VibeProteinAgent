@@ -33,6 +33,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_position_range,
     resolve_positions,
 )
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
@@ -960,6 +961,12 @@ def _canonical_candidate_from_design(
             }
         },
         "artifacts": {},
+        "capabilities": candidate_capability_flags(
+            has_sequence=bool(sequence),
+            has_backbone_structure=bool(structure_path),
+            has_full_structure=False,
+            has_candidate_scores=True,
+        ),
     }
     if sequence:
         candidate["sequence"] = sequence

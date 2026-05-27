@@ -7,7 +7,7 @@
   "properties": {
     "decision": {
       "type": "string",
-      "enum": ["submit_candidate", "next_round", "no_acceptable_candidate", "stop", "answer"]
+      "enum": ["submit_candidate", "next_round_with_surviving_candidate", "next_round_with_no_acceptable_candidate"]
     },
     "reasoning": {
       "type": "string",
@@ -78,40 +78,6 @@
       },
       "additionalProperties": false
     },
-    "no_acceptable_candidate": {
-      "type": "object",
-      "required": ["reason"],
-      "properties": {
-        "reason": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "additionalProperties": false
-    },
-    "answer": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["text"],
-      "properties": {
-        "text": {
-          "type": "string",
-          "minLength": 1
-        },
-        "evidence": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "node_id": {"type": "string"},
-              "field": {"type": "string"},
-              "summary": {"type": "string"}
-            }
-          }
-        }
-      }
-    },
     "metrics_used": {
       "type": "array",
       "items": {
@@ -130,60 +96,31 @@
         "not": {
           "anyOf": [
             {"required": ["next_round"]},
-            {"required": ["no_acceptable_candidate"]},
             {"required": ["answer"]}
           ]
         }
       }
     },
     {
-      "if": {"properties": {"decision": {"const": "next_round"}}},
+      "if": {"properties": {"decision": {"const": "next_round_with_surviving_candidate"}}},
       "then": {
         "required": ["next_round"],
         "not": {
           "anyOf": [
             {"required": ["submit_candidate"]},
-            {"required": ["no_acceptable_candidate"]},
             {"required": ["answer"]}
           ]
         }
       }
     },
     {
-      "if": {"properties": {"decision": {"const": "no_acceptable_candidate"}}},
+      "if": {"properties": {"decision": {"const": "next_round_with_no_acceptable_candidate"}}},
       "then": {
-        "required": ["no_acceptable_candidate"],
+        "required": ["next_round"],
         "not": {
           "anyOf": [
             {"required": ["submit_candidate"]},
-            {"required": ["next_round"]},
             {"required": ["answer"]}
-          ]
-        }
-      }
-    },
-    {
-      "if": {"properties": {"decision": {"const": "stop"}}},
-      "then": {
-        "not": {
-          "anyOf": [
-            {"required": ["submit_candidate"]},
-            {"required": ["next_round"]},
-            {"required": ["no_acceptable_candidate"]},
-            {"required": ["answer"]}
-          ]
-        }
-      }
-    },
-    {
-      "if": {"properties": {"decision": {"const": "answer"}}},
-      "then": {
-        "required": ["answer"],
-        "not": {
-          "anyOf": [
-            {"required": ["submit_candidate"]},
-            {"required": ["next_round"]},
-            {"required": ["no_acceptable_candidate"]}
           ]
         }
       }

@@ -66,6 +66,16 @@
         "additionalProperties": true
       },
       "default": {}
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "has_sequence": {"type": "boolean"},
+        "has_backbone_structure": {"type": "boolean"},
+        "has_full_structure": {"type": "boolean"},
+        "has_candidate_scores": {"type": "boolean"}
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

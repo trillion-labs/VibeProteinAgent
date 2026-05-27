@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,11 +14,11 @@ from vibeproteinagent.adapters import ToolRegistry, validate_params
 from vibeproteinagent.agents.config import (
     AgentConfig,
     resolve_decision_normalization_mode,
-    resolve_planner_ir_mode,
 )
 from vibeproteinagent.agents.evaluation import DecisionEngine, DecisionSchemaViolation
 from vibeproteinagent.agents.planning import WorkflowPlanner
 from vibeproteinagent.agents.planning.compiler import (
+    PLANNER_COMPILED_SOURCE_KIND,
     apply_fixup_choice,
     compile_planner_ir,
 )
@@ -72,7 +73,6 @@ class AgentController:
         self.registry = registry or ToolRegistry()
         self.registry.discover()
         self.config = config or AgentConfig.from_env()
-        self.planner_ir_mode = resolve_planner_ir_mode()
         self.session_store = session_store or AgentSessionStore(workspace)
         self.router = ModeRouter(self.registry)
         self._round_state: PriorRoundContext | None = None
@@ -507,31 +507,24 @@ class AgentController:
             retry_context: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
             del retry_context
-            if self.planner_ir_mode == "v1":
-                async def compile_with_fixup(planner_ir: dict[str, Any]) -> dict[str, Any]:
-                    return await self._compile_with_fixup(
-                        planner_ir,
-                        provider=provider,
-                        idempotency_key_prefix=(
-                            f"{run_id}:initial-plan-fixup:{attempt}"
-                        ),
-                        prior_round_context=None,
-                    )
+            async def compile_with_fixup(planner_ir: dict[str, Any]) -> dict[str, Any]:
+                return await self._compile_with_fixup(
+                    planner_ir,
+                    provider=provider,
+                    idempotency_key_prefix=(
+                        f"{run_id}:initial-plan-fixup:{attempt}"
+                    ),
+                    prior_round_context=None,
+                )
 
-                candidate = await planner._plan_v1(
-                    request,
-                    available_tools=available_tools,
-                    model=self.config.model_for_role("planner"),
-                    idempotency_key=f"{run_id}:initial-plan:{attempt}",
-                    compile_with_fixup=compile_with_fixup,
-                )
-            else:
-                candidate = await planner.draft_plan(
-                    request,
-                    available_tools=available_tools,
-                    model=self.config.model_for_role("planner"),
-                    idempotency_key=f"{run_id}:initial-plan:{attempt}",
-                )
+            candidate = await planner._plan_v1(
+                request,
+                available_tools=available_tools,
+                known_inputs=classification.params,
+                model=self.config.model_for_role("planner"),
+                idempotency_key=f"{run_id}:initial-plan:{attempt}",
+                compile_with_fixup=compile_with_fixup,
+            )
             planner.validate_invocation(
                 candidate,
                 classification.params,
@@ -658,7 +651,32 @@ class AgentController:
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
-            if decision.get("decision") in {"submit_candidate", "no_acceptable_candidate"}:
+            if (
+                decision.get("decision") == "next_round_with_surviving_candidate"
+                and round_index >= self.config.max_rounds - 1
+            ):
+                ref = _first_submit_candidate_ref(outcome.summary)
+                if ref is not None:
+                    decision = {
+                        **decision,
+                        "decision": "submit_candidate",
+                        "submit_candidate": {
+                            "candidates": [ref],
+                        },
+                        "reasoning": (
+                            str(decision.get("reasoning") or "").strip()
+                            or "No local rounds remain; submit the best surviving candidate."
+                        ),
+                    }
+                    decision.pop("next_round", None)
+            branch = _resolve_decision_branch(
+                decision,
+                workflow_state=outcome.state,
+                round_index=round_index,
+                max_rounds=self.config.max_rounds,
+            )
+            decision["resolved_branch"] = branch
+            if branch["action"] == "submit_candidate":
                 try:
                     submission, submit_job_id = self._execute_submit_candidate_decision(
                         run_id,
@@ -711,164 +729,76 @@ class AgentController:
                     ),
                 )
                 break
-            next_round = decision.get("next_round") or {}
-            if next_round.get("recommended") and round_index + 1 >= self.config.max_rounds:
-                decision["fallback_final_selection"] = {
-                    "auto_select": True,
-                    "reason": (
-                        "max_rounds reached without an explicit submit_candidate result"
-                    ),
-                }
-                decision["next_round"] = {
-                    "recommended": False,
-                    "changes": next_round.get("changes") or [],
-                    "reason": (
-                        "max_rounds reached without an explicit submit_candidate result"
-                    ),
-                }
+            if branch["action"] == "stop":
+                if branch.get("failure"):
+                    final_state = "failed"
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
+            next_round = decision.get("next_round") or {}
             self.session_store.add_decision(run_id, decision, round_index=round_index)
             decisions.append(decision)
-            if not next_round.get("recommended"):
-                self._round_state = None
-                break
             self._round_state = PriorRoundContext(
                 round_number=round_index + 2,
                 surviving_candidates=self._collect_surviving_candidates(outcome.summary),
                 prior_decision_reason=_next_round_reason(decision),
                 summary=self._prior_round_summary(outcome.summary),
             )
-            next_plan = None
-            if self.planner_ir_mode != "v1":
-                next_plan = next_round.get("plan") or next_round.get("workflow_plan")
             try:
-                if self.planner_ir_mode == "v1":
-                    async def compile_with_fixup(planner_ir: dict[str, Any]) -> dict[str, Any]:
-                        return await self._compile_with_fixup(
-                            planner_ir,
-                            provider=provider,
-                            idempotency_key_prefix=(
-                                f"{run_id}:next-round-fixup:{round_index}"
-                            ),
-                            prior_round_context=self._round_state,
-                        )
+                async def compile_with_fixup(planner_ir: dict[str, Any]) -> dict[str, Any]:
+                    return await self._compile_with_fixup(
+                        planner_ir,
+                        provider=provider,
+                        idempotency_key_prefix=(
+                            f"{run_id}:next-round-fixup:{round_index}"
+                        ),
+                        prior_round_context=self._round_state,
+                    )
 
-                    current_plan = await self._run_llm_entry(
-                        phase=f"next_round_plan_{round_index}",
-                        failures=entry_failures,
-                        factory=lambda attempt,
-                        retry_context=None,
-                        prior_round_context=self._round_state: planner._plan_v1(
-                            request,
-                            available_tools=available_tools,
-                            model=self.config.model_for_role("planner"),
-                            idempotency_key=(
-                                f"{run_id}:next-round:{round_index}:{attempt}"
-                            ),
-                            compile_with_fixup=compile_with_fixup,
-                            prior_round_context=prior_round_context,
+                current_plan = await self._run_llm_entry(
+                    phase=f"next_round_plan_{round_index}",
+                    failures=entry_failures,
+                    factory=lambda attempt,
+                    retry_context=None,
+                    prior_round_context=self._round_state: planner._plan_v1(
+                        request,
+                        available_tools=available_tools,
+                        known_inputs=classification.params,
+                        model=self.config.model_for_role("planner"),
+                        idempotency_key=(
+                            f"{run_id}:next-round:{round_index}:{attempt}"
                         ),
-                    )
-                    planner.validate_invocation(
-                        current_plan,
-                        classification.params,
-                        allow_internal_tools=_plan_allows_internal_tools(current_plan),
-                    )
-                elif isinstance(next_plan, dict):
-                    if "workflow_plan" not in next_plan:
-                        next_plan = {
-                            "mode": "agent_plan",
-                            "workflow_plan": next_plan,
-                            "success_criteria": current_plan.get("success_criteria") or {},
-                        }
-                    current_plan = planner.validate_round_plan(next_plan)
-                    planner.validate_invocation(
-                        current_plan,
-                        classification.params,
-                        allow_internal_tools=_plan_allows_internal_tools(current_plan),
-                    )
-                else:
-                    current_plan = await self._run_llm_entry(
-                        phase=f"next_round_plan_{round_index}",
-                        failures=entry_failures,
-                        factory=lambda attempt,
-                        retry_context=None,
-                        round_index=round_index,
-                        current_plan=current_plan,
-                        outcome=outcome,
-                        decision=decision: planner.draft_next_round_plan(
-                            previous_plan=current_plan,
-                            summary=outcome.summary,
-                            decision=decision,
-                            available_tools=available_tools,
-                            model=self.config.model_for_role("planner"),
-                            idempotency_key=f"{run_id}:next-round:{round_index}:{attempt}",
-                        ),
-                    )
-                    planner.validate_invocation(
-                        current_plan,
-                        classification.params,
-                        allow_internal_tools=_plan_allows_internal_tools(current_plan),
-                    )
+                        compile_with_fixup=compile_with_fixup,
+                        prior_round_context=prior_round_context,
+                    ),
+                )
+                planner.validate_invocation(
+                    current_plan,
+                    classification.params,
+                    allow_internal_tools=_plan_allows_internal_tools(current_plan),
+                )
             except VPAError as exc:
                 reason = (
                     "A completed workflow did not produce an explicit final "
                     "submission, and the next-round planner could not produce "
                     "a valid executable plan."
                 )
-                decision["decision"] = "no_acceptable_candidate"
+                decision["decision"] = "next_round_with_no_acceptable_candidate"
                 decision["reasoning"] = reason
                 decision.pop("submit_candidate", None)
                 decision.pop("next_round", None)
-                decision["no_acceptable_candidate"] = {"reason": reason}
+                decision["resolved_branch"] = {
+                    "action": "stop",
+                    "reason": reason,
+                    "failure": True,
+                }
                 decision["notes"] = (
                     "LLM next-round planning failed after workflow completion; "
-                    "recorded an explicit no_acceptable_candidate submission."
-                )
-                try:
-                    submission, submit_job_id = self._execute_submit_candidate_decision(
-                        run_id,
-                        broker,
-                        decision,
-                        round_index=round_index,
-                        policy=policy,
-                    )
-                except VPAError as submit_exc:
-                    notes = decision.setdefault("notes", [])
-                    if isinstance(notes, list):
-                        notes.append(
-                            {
-                                "level": "error",
-                                "message": (
-                                    "no_acceptable_candidate fallback submission failed"
-                                ),
-                                "code": submit_exc.code,
-                                "details": submit_exc.details,
-                            }
-                        )
-                    final_state = "failed"
-                    self.session_store.add_decision(run_id, decision, round_index=round_index)
-                    break
-                outcome.summary["final_submission"] = submission
-                job_ids = outcome.summary.setdefault("job_ids", [])
-                if isinstance(job_ids, list) and submit_job_id not in job_ids:
-                    job_ids.append(submit_job_id)
-                decision["submission"] = submission
-                decision["submit_job_id"] = submit_job_id
-                self.session_store.add_summary(
-                    run_id,
-                    {
-                        "state": "completed",
-                        "job_id": submit_job_id,
-                        "tool": "submit_candidate",
-                        "final_submission": submission,
-                        "metrics_used": decision.get("metrics_used") or [],
-                    },
-                    job_id=submit_job_id,
+                    "recorded deterministic stop without submit_candidate."
                 )
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
+                decisions.append(decision)
+                final_state = "failed"
                 break
             self.session_store.add_plan(run_id, current_plan, status="validated_next_round")
 
@@ -971,7 +901,7 @@ class AgentController:
         result = broker.submit_job(
             "submit_candidate",
             params,
-            call_id=f"{run_id}:submit-candidate:{round_index}",
+            call_id=_safe_call_id(f"{run_id}-submit-candidate-{round_index}"),
             priority=policy.priority,
             max_retries=policy.max_retries,
         )
@@ -1050,6 +980,17 @@ class AgentController:
                 }
                 phase_failures.append(entry)
                 failures.append(entry)
+                if _is_terminal_planner_entry(entry):
+                    raise InvalidParamsError(
+                        "agent planning stopped on terminal missing executable inputs",
+                        details={
+                            "phase": phase,
+                            "max_entries": max_entries,
+                            "failure_count": len(failures),
+                            "phase_failures": phase_failures,
+                            "failures": failures,
+                        },
+                    ) from exc
                 if len(failures) >= max_entries:
                     raise InvalidParamsError(
                         "agent LLM entry budget exhausted",
@@ -1364,8 +1305,94 @@ def current_decision_normalization_mode() -> str:
     return resolve_decision_normalization_mode()
 
 
-def current_planner_ir_mode() -> str:
-    return resolve_planner_ir_mode()
+def _safe_call_id(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
+    if not safe:
+        safe = "call"
+    return safe[:128]
+
+
+def _resolve_decision_branch(
+    decision: dict[str, Any],
+    *,
+    workflow_state: str,
+    round_index: int,
+    max_rounds: int,
+) -> dict[str, Any]:
+    if workflow_state != "completed":
+        return {
+            "action": "stop",
+            "reason": f"workflow_state={workflow_state!r}",
+            "failure": True,
+        }
+    label = decision.get("decision")
+    remaining_rounds = max(0, max_rounds - round_index - 1)
+    if label == "submit_candidate":
+        submit = decision.get("submit_candidate")
+        candidates = submit.get("candidates") if isinstance(submit, dict) else None
+        if isinstance(candidates, list) and candidates:
+            return {
+                "action": "submit_candidate",
+                "reason": "submit intent has at least one candidate reference",
+                "failure": False,
+            }
+        return {
+            "action": "stop",
+            "reason": "submit intent did not include a valid candidate reference",
+            "failure": True,
+        }
+    if label in {
+        "next_round_with_surviving_candidate",
+        "next_round_with_no_acceptable_candidate",
+        "next_round",
+        "no_acceptable_candidate",
+    }:
+        if remaining_rounds > 0:
+            return {
+                "action": "next_round",
+                "reason": f"{remaining_rounds} local round(s) remain",
+                "failure": False,
+            }
+        return {
+            "action": "stop",
+            "reason": "no remaining local rounds",
+            "failure": False,
+        }
+    return {
+        "action": "stop",
+        "reason": f"unrecognized decision intent {label!r}",
+        "failure": True,
+    }
+
+
+def _first_submit_candidate_ref(summary: dict[str, Any]) -> dict[str, Any] | None:
+    for node in summary.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        job_id = node.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            continue
+        output = node.get("output")
+        if not isinstance(output, dict):
+            continue
+        candidates = output.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            continue
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            candidate_id = candidate.get("candidate_id")
+            return {
+                "job_id": job_id,
+                "candidate_id": str(candidate_id) if candidate_id else None,
+                "index": index,
+                "justification": (
+                    "Selected automatically because the decision requested another "
+                    "round with surviving candidates but no local rounds remain."
+                ),
+                "scores_to_highlight": [],
+            }
+    return None
 
 
 def _load_json_object(
@@ -1429,12 +1456,6 @@ def _strict_submit_candidate_params(decision: dict[str, Any]) -> dict[str, Any]:
         out["outcome"] = "accepted"
         out["reasoning"] = str(decision.get("reasoning") or "").strip()
         return out
-    if label == "no_acceptable_candidate":
-        return {
-            "outcome": "no_acceptable_candidate",
-            "candidates": [],
-            "reasoning": _negative_submission_reason(decision),
-        }
     raise InvalidParamsError(
         "decision is not a submit_candidate action",
         details={"decision": decision},
@@ -1481,12 +1502,6 @@ def _legacy_lift_submit_candidate_params(decision: dict[str, Any]) -> dict[str, 
             if isinstance(next_round, dict) and isinstance(next_round.get("reason"), str):
                 out["reasoning"] = next_round["reason"].strip()
         return out
-    if label == "no_acceptable_candidate":
-        return {
-            "outcome": "no_acceptable_candidate",
-            "candidates": [],
-            "reasoning": _negative_submission_reason(decision),
-        }
     raise InvalidParamsError(
         "decision is not a submit_candidate action",
         details={"decision": decision},
@@ -1657,7 +1672,7 @@ def _optional_str(value: Any) -> str | None:
 
 def _plan_allows_internal_tools(plan: dict[str, Any]) -> bool:
     return plan.get("source_kind") in {
-        "planner_ir_compiled",
+        PLANNER_COMPILED_SOURCE_KIND,
         "workflow_yaml",
         "workflow_template",
     }
@@ -1681,6 +1696,26 @@ def _planned_job(job_spec: dict[str, Any], policy: ExecutionPolicy) -> dict[str,
         "priority": str(job_spec.get("priority") or policy.priority),
         "max_retries": _optional_int(job_spec.get("max_retries"), policy.max_retries),
     }
+
+
+def _is_terminal_planner_entry(entry: dict[str, Any]) -> bool:
+    details = entry.get("details")
+    if not isinstance(details, dict):
+        return False
+    structured = details.get("structured_error")
+    if not isinstance(structured, dict):
+        return False
+    violations = structured.get("violations")
+    if not isinstance(violations, list):
+        return False
+    terminal_issues = {
+        "required_missing_input_blocks_compile",
+        "unsatisfied_root_required_input",
+    }
+    return any(
+        isinstance(item, dict) and item.get("issue") in terminal_issues
+        for item in violations
+    )
 
 
 def _aggregate_job_state(results: list[Any]) -> str:

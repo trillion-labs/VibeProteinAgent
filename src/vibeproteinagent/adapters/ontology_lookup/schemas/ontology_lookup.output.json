@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/ontology_lookup.output.json",
+  "type": "object",
+  "required": ["id", "status", "matches", "warnings", "valid", "ontology", "obsolete", "synonyms", "resolved_terms", "runtime_ms"],
+  "properties": {
+    "id": {"type": "string"},
+    "status": {"type": "string", "enum": ["resolved", "no_match", "ambiguous", "backend_error", "parse_error"]},
+    "matches": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "valid": {"type": "boolean"},
+    "ontology": {"type": "string"},
+    "obsolete": {"type": "boolean"},
+    "name": {"type": ["string", "null"]},
+    "definition": {"type": ["string", "null"]},
+    "synonyms": {"type": "array", "items": {"type": "string"}},
+    "resolved_terms": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

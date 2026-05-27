@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from vibeproteinagent.agents.planning.canonical_tools import EXPLICIT_MODE_TOOLS
+from vibeproteinagent.agents.planning.canonical_tools import (
+    CANONICAL_CONSUMERS,
+    CANONICAL_PRODUCERS,
+    CANONICAL_TERM_CONSUMERS,
+    CANONICAL_TERM_PRODUCERS,
+    EXPLICIT_MODE_TOOLS,
+    candidate_capability_profiles,
+    candidate_contract,
+    explicit_mode_input_field,
+)
 
-AGENT_TOOL_SCHEMA_VERSION = "vpa-agent-tools-v6"
+AGENT_TOOL_SCHEMA_VERSION = "vpa-agent-tools-v7"
 
 _OUTLINE_DESCRIPTION_LIMIT = 120
 _PARAMETER_DESCRIPTION_LIMIT = 80
@@ -12,10 +21,24 @@ _MAX_COMPACT_PARAMETERS = 24
 
 
 def compact_tool_outline(tool: dict[str, Any]) -> dict[str, Any]:
+    name = str(tool.get("name") or "")
     out = {
         "name": tool.get("name"),
         "description": _short_text(tool.get("description"), _OUTLINE_DESCRIPTION_LIMIT),
+        "role": tool_role(name),
+        "candidate_contract": _compact_candidate_contract(name),
+        "root_inputs": root_input_fields(tool.get("input_schema")),
+        "requires_pdb_file": requires_pdb_file(tool.get("input_schema")),
     }
+    allowed_modes = EXPLICIT_MODE_TOOLS.get(name)
+    if allowed_modes is not None:
+        out["allowed_modes"] = list(allowed_modes)
+        mode_input_field = explicit_mode_input_field(name)
+        if mode_input_field != "mode":
+            out["mode_input_field"] = mode_input_field
+    profiles = candidate_capability_profiles(name)
+    if profiles:
+        out["candidate_capability_profiles"] = profiles
     sharding = _compact_sharding(tool.get("sharding"))
     if sharding:
         out["sharding"] = sharding
@@ -23,18 +46,162 @@ def compact_tool_outline(tool: dict[str, Any]) -> dict[str, Any]:
 
 
 def compact_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    name = str(tool.get("name") or "")
     out = {
         "name": tool.get("name"),
         "description": _short_text(tool.get("description"), _OUTLINE_DESCRIPTION_LIMIT),
         "parameters": _compact_parameters(tool.get("input_schema")),
+        "role": tool_role(name),
+        "candidate_contract": _compact_candidate_contract(name),
+        "root_inputs": root_input_fields(tool.get("input_schema")),
+        "requires_pdb_file": requires_pdb_file(tool.get("input_schema")),
     }
-    allowed_modes = EXPLICIT_MODE_TOOLS.get(str(tool.get("name") or ""))
+    allowed_modes = EXPLICIT_MODE_TOOLS.get(name)
     if allowed_modes is not None:
         out["allowed_modes"] = list(allowed_modes)
+        mode_input_field = explicit_mode_input_field(name)
+        if mode_input_field != "mode":
+            out["mode_input_field"] = mode_input_field
+    profiles = candidate_capability_profiles(name)
+    if profiles:
+        out["candidate_capability_profiles"] = profiles
     sharding = _compact_sharding(tool.get("sharding"))
     if sharding:
         out["sharding"] = sharding
     return out
+
+
+def compact_input_schema_outline(schema: Any) -> dict[str, Any]:
+    """Return the planner-facing top-level input contract for one tool.
+
+    This intentionally preserves field names while trimming verbose JSON Schema
+    metadata. The Planner IR prompt needs to know which inputs exist; it does
+    not need a full recursive schema dump for every selected tool.
+    """
+
+    return _compact_parameters(schema)
+
+
+def tool_role(tool_name: str) -> str:
+    is_producer = tool_name in CANONICAL_PRODUCERS or tool_name in CANONICAL_TERM_PRODUCERS
+    is_consumer = tool_name in CANONICAL_CONSUMERS or tool_name in CANONICAL_TERM_CONSUMERS
+    if is_producer and is_consumer:
+        return "both"
+    if is_producer:
+        return "producer"
+    if is_consumer:
+        return "consumer"
+    return "tool"
+
+
+def _compact_candidate_contract(tool_name: str) -> dict[str, Any]:
+    contract = candidate_contract(tool_name)
+    out: dict[str, Any] = {}
+    if contract.consumes:
+        out["consumes"] = sorted(contract.consumes)
+    if contract.produces:
+        out["produces"] = sorted(contract.produces)
+    if contract.consumes or contract.produces:
+        out["preserves_upstream"] = contract.preserves_upstream
+    if contract.min_candidate_items > 1:
+        out["min_candidate_items"] = contract.min_candidate_items
+    return out
+
+
+_CANONICAL_CANDIDATE_FIELDS = {
+    "candidates",
+    "predictions",
+    "analyses",
+    "qc_results",
+}
+
+_NON_ROOT_INPUT_FIELDS = {"mode"}
+
+_ROOT_INPUT_FIELD_NAMES = {
+    "go_id",
+    "interpro_id",
+    "query",
+    "sequence",
+    "sequences",
+    "fasta_path",
+    "target_pdb",
+    "pdb_path",
+    "structure_path",
+    "target_yaml",
+    "input_json",
+    "target_sequence",
+    "target_fasta_path",
+    "motif_pdb",
+    "motif_sequence",
+    "motif_fasta_path",
+    "ligand_smiles",
+}
+
+_PDB_FIELD_MARKERS = ("pdb", "structure_path", "input_json")
+
+
+def root_input_fields(schema: Any) -> list[str]:
+    """Return compact external inputs that can start a workflow node.
+
+    This is intentionally schema-derived and generic: required fields are
+    included, plus well-known top-level literal inputs such as `target_pdb`,
+    `sequence`, and `go_id`. Canonical candidate arrays are excluded because
+    those are compiler-wired from upstream nodes rather than user-provided
+    root inputs.
+    """
+
+    if not isinstance(schema, dict):
+        return []
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    names: list[str] = []
+    for field in _required_field_options(schema):
+        if (
+            field in properties
+            and field not in _CANONICAL_CANDIDATE_FIELDS
+            and field not in _NON_ROOT_INPUT_FIELDS
+        ):
+            names.append(field)
+    for field in properties:
+        field_name = str(field)
+        if (
+            field_name in _ROOT_INPUT_FIELD_NAMES
+            and field_name not in _CANONICAL_CANDIDATE_FIELDS
+            and field_name not in _NON_ROOT_INPUT_FIELDS
+            and field_name not in names
+        ):
+            names.append(field_name)
+    return names[:12]
+
+
+def requires_pdb_file(schema: Any) -> bool:
+    for field in root_input_fields(schema):
+        lowered = field.lower()
+        if any(marker in lowered for marker in _PDB_FIELD_MARKERS):
+            return True
+    return False
+
+
+def _required_field_options(schema: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    required = schema.get("required")
+    if isinstance(required, list):
+        names.extend(str(item) for item in required if isinstance(item, str))
+    for keyword in ("oneOf", "anyOf"):
+        variants = schema.get(keyword)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            variant_required = variant.get("required")
+            if not isinstance(variant_required, list):
+                continue
+            names.extend(
+                str(item) for item in variant_required if isinstance(item, str)
+            )
+    return sorted(set(names))
 
 
 def _compact_sharding(sharding: Any) -> dict[str, Any]:

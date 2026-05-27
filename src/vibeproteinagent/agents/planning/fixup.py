@@ -9,6 +9,7 @@ FIXUP_KINDS = {
     "missing_canonical_input_slot",
     "prior_round_referenced_without_context",
     "upstream_does_not_produce_candidates",
+    "candidate_capability_mismatch",
 }
 
 
@@ -97,6 +98,47 @@ def upstream_does_not_produce_candidates(
     )
 
 
+def candidate_capability_mismatch(
+    *,
+    node_id: str,
+    tool: str,
+    upstream_node: str,
+    upstream_tool: str,
+    missing_capabilities: list[str],
+) -> StructuredFixup:
+    return StructuredFixup(
+        {
+            "error_kind": "candidate_capability_mismatch",
+            "node_id": node_id,
+            "tool": tool,
+            "field": "candidates",
+            "upstream_node": upstream_node,
+            "upstream_tool": upstream_tool,
+            "missing_capabilities": list(missing_capabilities),
+            "explanation": (
+                f"Upstream node {upstream_node!r} using tool {upstream_tool!r} "
+                f"does not provide capabilities required by {tool!r}: "
+                + ", ".join(missing_capabilities)
+            ),
+            "options": [
+                {
+                    "choice_id": "remove_node",
+                    "description": "Drop the incompatible consumer node.",
+                },
+                {
+                    "choice_id": "swap_tool",
+                    "description": (
+                        "Replace the consumer node with a tool compatible "
+                        "with the upstream candidate capabilities."
+                    ),
+                    "target_node_id": node_id,
+                    "allowed_tools": [],
+                },
+            ],
+        }
+    )
+
+
 def prior_round_referenced_without_context(
     *,
     consumer_node_id: str,
@@ -141,11 +183,12 @@ def missing_explicit_mode(
     tool: str,
     allowed_modes: list[str],
     received_mode: Any = None,
+    mode_field: str = "mode",
 ) -> StructuredFixup:
     if received_mode is None:
-        problem = "missing `inputs.mode`"
+        problem = f"missing `inputs.{mode_field}`"
     else:
-        problem = f"invalid `inputs.mode`={received_mode!r}"
+        problem = f"invalid `inputs.{mode_field}`={received_mode!r}"
     return StructuredFixup(
         {
             "error_kind": "missing_explicit_mode",
@@ -153,9 +196,10 @@ def missing_explicit_mode(
             "tool": tool,
             "allowed_modes": list(allowed_modes),
             "received_mode": received_mode,
+            "mode_field": mode_field,
             "explanation": (
                 f"Tool {tool!r} requires an explicit mode; {problem}. "
-                f"Set inputs.mode to one of: {', '.join(allowed_modes)}."
+                f"Set inputs.{mode_field} to one of: {', '.join(allowed_modes)}."
             ),
             "options": [
                 {
@@ -252,7 +296,10 @@ def apply_enum_fixup_choice(
         for node in updated.get("nodes", []):
             if node.get("id") == target_node_id:
                 inputs = node.setdefault("inputs", {})
-                inputs["mode"] = mode
+                mode_field = str(fixup_payload.get("mode_field") or "mode")
+                inputs[mode_field] = mode
+                if mode_field != "mode":
+                    inputs.pop("mode", None)
                 return updated
         raise ValueError(f"fixup target node {target_node_id!r} was not found")
     raise ValueError(f"invalid fixup choice_id: {choice_id!r}")

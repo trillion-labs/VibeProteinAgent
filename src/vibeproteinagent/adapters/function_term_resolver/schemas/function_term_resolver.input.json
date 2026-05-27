@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/function_term_resolver.input.json",
+  "type": "object",
+  "required": ["query"],
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Natural-language functional query to resolve into GO and/or InterPro identifiers.",
+      "examples": ["ADP-dependent NAD(P)H-hydrate dehydratase activity"]
+    },
+    "target_names": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Optional explicit protein, enzyme, family, or domain names to prioritize during resolution.",
+      "examples": [["NAD(P)H-hydrate dehydratase"]]
+    },
+    "preferred_namespaces": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["go", "interpro"]},
+      "default": ["go", "interpro"],
+      "description": "Identifier namespaces to search, ordered by preference when both GO and InterPro are acceptable.",
+      "examples": [["go", "interpro"], ["go"]]
+    },
+    "aspect": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional GO aspect hint, such as molecular_function, biological_process, cellular_component, or null.",
+      "examples": ["molecular_function", null]
+    },
+    "limit_per_target": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 25,
+      "default": 5,
+      "description": "Maximum resolver candidates to keep for each target name or inferred search target.",
+      "examples": [5]
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 60,
+      "default": 15,
+      "description": "Maximum wall-clock time in seconds for remote resolver requests.",
+      "examples": [15]
+    }
+  },
+  "additionalProperties": false
+}

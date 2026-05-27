@@ -88,3 +88,41 @@ def test_go_sequences_candidate_ids_are_deterministic(tmp_path, monkeypatch) -> 
     assert [row["candidate_id"] for row in first.candidates] == [
         row["candidate_id"] for row in second.candidates
     ]
+
+
+def test_go_sequences_drops_empty_sequence_records(tmp_path, monkeypatch) -> None:
+    _patch_remote(monkeypatch)
+
+    def fake_fetch(_client, accession):
+        if accession == "P00001":
+            return UniProtRecord(
+                accession,
+                "",
+                "2020-01-01",
+                True,
+                0,
+                {"organism": {"taxonId": 9606}},
+            )
+        return UniProtRecord(
+            accession,
+            "MGOOD",
+            "2020-01-01",
+            False,
+            5,
+            {"organism": {"taxonId": 9606}},
+        )
+
+    monkeypatch.setattr(mod, "fetch_accession", fake_fetch)
+    adapter = GOSequencesAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        GOSequencesInput(go_id="GO:0003824", max_sequences=2, max_concurrency=1),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.raw_result_count == 2
+    assert out.kept_sequence_count == out.kept_sequences == 1
+    assert out.dropped_empty_sequence_count == 1
+    assert out.dropped["empty_sequence"] == 1
+    assert out.sequences[0]["sequence"] == "MGOOD"
+    assert out.candidates[0]["sequence"] == "MGOOD"

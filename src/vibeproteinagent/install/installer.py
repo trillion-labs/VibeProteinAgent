@@ -591,7 +591,7 @@ def _ensure_shared_runtime_deps(
             "ready",
             {"version": version, "cuda_profile": cuda_stack.name},
         )
-        _ensure_selected_shared_deps(python, selection, options, state, results)
+        _ensure_selected_shared_deps(python, selection, options, state, results, paths)
         return
     if options.offline:
         raise DependencyError(
@@ -635,7 +635,7 @@ def _ensure_shared_runtime_deps(
         }
     )
     state.mark("shared-dep:torch", "ready", {"version": version, "cuda_profile": cuda_stack.name})
-    _ensure_selected_shared_deps(python, selection, options, state, results)
+    _ensure_selected_shared_deps(python, selection, options, state, results, paths)
 
 
 def _probe_torch_install(python: Path) -> dict[str, Any]:
@@ -683,11 +683,12 @@ def _ensure_selected_shared_deps(
     options: InstallOptions,
     state: InstallState,
     results: list[dict[str, Any]],
+    paths: InstallPaths,
 ) -> None:
     if "boltz2_affinity" in selection.tool_names:
         _ensure_boltz2_affinity_shared_deps(python, options, state, results)
     if "boltzgen" in selection.tool_names:
-        _ensure_boltzgen_shared_deps(python, options, state, results)
+        _ensure_boltzgen_shared_deps(python, options, state, results, paths)
     if "esm3" in selection.tool_names:
         _ensure_esm3_shared_deps(python, options, state, results)
     if "ligandmpnn" in selection.tool_names:
@@ -824,11 +825,25 @@ def _ensure_boltzgen_shared_deps(
     options: InstallOptions,
     state: InstallState,
     results: list[dict[str, Any]],
+    paths: InstallPaths,
 ) -> None:
+    boltzgen_src = paths.root / "sidecars" / "boltzgen" / "src"
+    probe_env = os.environ.copy()
+    probe_env["PYTHONNOUSERSITE"] = "1"
+    if boltzgen_src.is_dir():
+        probe_env["PYTHONPATH"] = str(boltzgen_src)
+    analyze_probe = (
+        "import boltzgen.task.analyze.analyze; "
+        "import boltzgen.task.analyze.analyze_utils; "
+        if boltzgen_src.is_dir()
+        else ""
+    )
     probe_code = (
         "import biotite, edit_distance, gemmi, huggingface_hub, hydra, hydride, "
         "logomaker, matplotlib, pandas, pdbeccdutils, pydssp, pytorch_lightning, "
         "sklearn; "
+        "from Bio import PDB, Seq, Align; "
+        f"{analyze_probe}"
         "print('ok')"
     )
     probe = subprocess.run(
@@ -836,6 +851,7 @@ def _ensure_boltzgen_shared_deps(
         text=True,
         capture_output=True,
         check=False,
+        env=probe_env,
     )
     if probe.returncode == 0 and not options.force:
         results.append({"unit": "shared-dep:boltzgen", "status": "ready"})
@@ -874,6 +890,7 @@ def _ensure_boltzgen_shared_deps(
         text=True,
         capture_output=True,
         check=False,
+        env=probe_env,
     )
     if verify.returncode != 0:
         raise DependencyError(
@@ -896,6 +913,7 @@ _BOLTZGEN_RUNTIME_DEPS = (
     "edit_distance",
     "pytorch-lightning",
     "pandas",
+    "biopython",
     "rdkit>=2024.3.2",
     "einx",
     "einops",

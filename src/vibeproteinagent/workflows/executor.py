@@ -14,6 +14,10 @@ from vibeproteinagent.core.errors import (
     TimeoutError_,
     VPAError,
 )
+from vibeproteinagent.agents.planning.canonical_tools import (
+    CANONICAL_TERM_CONSUMERS,
+    annotate_candidate_capabilities,
+)
 from vibeproteinagent.workspace import (
     JobState,
     JobStore,
@@ -29,7 +33,7 @@ from .loader import serialize_workflow
 from .planner import params_dict_from_workflow as _params_dict_from_workflow
 from .planner import resolve_iterable as _resolve_iterable
 from .planner import static_upstream as _static_upstream
-from .resolver import eval_when, resolve
+from .resolver import eval_when, iter_refs, resolve
 from .state import FOREACH_CHILD_RE as _FOREACH_CHILD_RE
 from .state import SUCCESS_NODE_STATES as _SUCCESS_NODE_STATES
 from .state import TERMINAL_NODE_STATES as _TERMINAL_NODE_STATES
@@ -50,6 +54,91 @@ def _rfdiffusion_mode_readiness(params: dict[str, Any]) -> dict[str, Any]:
             "could not validate RFdiffusion mode readiness",
             details={"error": str(exc), "exception_type": type(exc).__name__},
         ) from exc
+
+
+def _annotate_output_candidate_capabilities(output: Any) -> Any:
+    if not isinstance(output, dict):
+        return output
+    candidates = output.get("candidates")
+    if not isinstance(candidates, list):
+        return output
+    annotated = []
+    changed = False
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            annotated_candidate = annotate_candidate_capabilities(candidate)
+            annotated.append(annotated_candidate)
+            changed = changed or annotated_candidate != candidate
+        else:
+            annotated.append(candidate)
+    if not changed:
+        return output
+    return {**output, "candidates": annotated}
+
+
+def _unresolved_term_source_error(
+    rt: _NodeRuntime,
+    resolved: dict[str, Any],
+    runtime: dict[str, _NodeRuntime],
+) -> InvalidParamsError | None:
+    input_field = CANONICAL_TERM_CONSUMERS.get(rt.desc.tool)
+    if not input_field or input_field not in resolved:
+        return None
+    resolved_value = resolved.get(input_field)
+    if isinstance(resolved_value, str) and resolved_value.strip():
+        return None
+
+    producer_node: str | None = None
+    raw_value = rt.desc.inputs.get(input_field) if isinstance(rt.desc.inputs, dict) else None
+    for ref in iter_refs(raw_value):
+        parts = ref.split(".")
+        if len(parts) >= 2 and parts[0] == "outputs":
+            producer_node = parts[1]
+            break
+    if producer_node is None:
+        return None
+
+    producer_rt = runtime.get(producer_node)
+    producer_output = producer_rt.output if producer_rt is not None else None
+    resolver_status = None
+    matches: Any = None
+    if isinstance(producer_output, dict):
+        resolver_status = producer_output.get("status")
+        matches = producer_output.get("matches")
+
+    return InvalidParamsError(
+        "term_source did not resolve to an executable identifier",
+        details={
+            "error_kind": "unresolved_term_source",
+            "producer_node": producer_node,
+            "consumer_node": rt.runtime_id,
+            "consumer_tool": rt.desc.tool,
+            "input_field": input_field,
+            "resolved_value": resolved_value,
+            "resolver_status": resolver_status,
+            "matches": matches if isinstance(matches, list) else [],
+        },
+    )
+
+
+def _empty_term_source_output(
+    rt: _NodeRuntime,
+    error: InvalidParamsError,
+) -> dict[str, Any]:
+    return {
+        "status": "skipped_unresolved_term_source",
+        "skipped": True,
+        "skip_reason": error.message,
+        "error_details": error.details,
+        "sequences": [],
+        "candidates": [],
+        "kept_sequences": 0,
+        "num_sequences_returned": 0,
+        "summary": {
+            "consumer_tool": rt.desc.tool,
+            "reason": "term_source resolved to an empty identifier",
+        },
+    }
 
 
 class WorkflowExecutor:
@@ -225,7 +314,7 @@ class WorkflowExecutor:
                         continue
                     if job.state is JobState.COMPLETED:
                         rt.state = "completed"
-                        rt.output = job.output
+                        rt.output = _annotate_output_candidate_capabilities(job.output)
                         self.store.update_node_state(
                             workflow_id, rt.runtime_id, "completed",
                             job_id=rt.job_id,
@@ -327,6 +416,18 @@ class WorkflowExecutor:
                     progressed = True
                     continue
 
+                if error := _unresolved_term_source_error(rt, resolved, runtime):
+                    rt.state = "completed"
+                    rt.output = _empty_term_source_output(rt, error)
+                    self.store.update_node_state(
+                        workflow_id,
+                        rt.runtime_id,
+                        "completed",
+                        output=rt.output,
+                    )
+                    progressed = True
+                    continue
+
                 # Resolve the tool descriptor up-front so the cache key uses
                 # the concrete adapter version (not the PEP-440 spec).
                 try:
@@ -410,7 +511,7 @@ class WorkflowExecutor:
                         if hit.job_id:
                             try:
                                 cached_job = self.jobs.get(hit.job_id)
-                                cached_output = cached_job.output
+                                cached_output = _annotate_output_candidate_capabilities(cached_job.output)
                             except VPAError:
                                 cached_output = None
                         rt.state = "cached"

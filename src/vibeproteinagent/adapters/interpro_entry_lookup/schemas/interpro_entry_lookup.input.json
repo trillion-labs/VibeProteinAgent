@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/interpro_entry_lookup.input.json",
+  "type": "object",
+  "required": ["accession"],
+  "properties": {
+    "accession": {
+      "type": "string",
+      "pattern": "^(IPR[0-9]{6}|PF[0-9]{5}|PTHR[0-9]+(?::SF[0-9]+)?)$",
+      "description": "InterPro, Pfam, or PANTHER accession to look up exactly.",
+      "examples": ["IPR000001", "PF00001"]
+    },
+    "database": {
+      "type": "string",
+      "default": "interpro",
+      "description": "Lookup namespace used by the resolver backend.",
+      "examples": ["interpro"]
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 60,
+      "default": 15,
+      "description": "Maximum wall-clock time in seconds for the InterPro lookup request.",
+      "examples": [15]
+    }
+  },
+  "additionalProperties": false
+}

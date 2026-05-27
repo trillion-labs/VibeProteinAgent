@@ -45,6 +45,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_position_range,
     resolve_positions,
 )
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
 # --------------------------------------------------------------------------- paths
@@ -563,6 +564,12 @@ def _rfpeptides_candidates(
                 }
             },
             "artifacts": {"rfpeptides": {"trb_path": design.trb_path}},
+            "capabilities": candidate_capability_flags(
+                has_sequence=bool(design.sequence),
+                has_backbone_structure=bool(design.pdb_path),
+                has_full_structure=False,
+                has_candidate_scores=True,
+            ),
         }
         if design.sequence:
             candidate["sequence"] = design.sequence

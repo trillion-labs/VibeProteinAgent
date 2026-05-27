@@ -76,7 +76,7 @@
                   "pattern": "^[a-z_][a-z0-9_]{0,63}$"
                 },
                 "relationship": {
-                  "const": "candidate_source"
+                  "enum": ["candidate_source", "term_source", "identifier_source"]
                 }
               },
               "additionalProperties": false
