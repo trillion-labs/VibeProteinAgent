@@ -1,14 +1,12 @@
 """Fast unit tests for the PXDesign adapter shell.
 
 These tests do NOT load the PXDesign model — they only validate descriptor,
-pydantic I/O shapes, env-var resolution, package-level exports, and the
-``_collect_outputs`` glob path against a synthetic dump layout.
+pydantic I/O shapes, env-var resolution, and package-level exports.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -63,101 +61,6 @@ def test_descriptor_loads_and_matches_spec() -> None:
     assert d.entry_point == (
         "vibeproteinagent.adapters.pxdesign.adapter:PXDesignAdapter"
     )
-
-
-def test_multi_gpu_alias_descriptor_declares_distributed_entrypoint() -> None:
-    p = _ADAPTER_DIR.parent / "pxdesign_pipeline_multi_gpu" / "descriptor.yaml"
-    d = load_descriptor(p)
-    assert d.name == "pxdesign_pipeline_multi_gpu"
-    assert d.gpus_required == 2
-    assert d.warm_load_capable is False
-    assert d.distributed_entrypoint == (
-        "vibeproteinagent.adapters.pxdesign.adapter:run_distributed"
-    )
-    assert d.execution_isolation.value == "subprocess"
-    assert d.input_schema == "schemas/pxdesign_pipeline_multi_gpu.input.json"
-
-
-def test_multi_gpu_alias_schema_requires_pipeline_mode() -> None:
-    p = (
-        _ADAPTER_DIR.parent
-        / "pxdesign_pipeline_multi_gpu"
-        / "schemas"
-        / "pxdesign_pipeline_multi_gpu.input.json"
-    )
-    raw = json.loads(p.read_text())
-    assert "mode" in raw["required"]
-    assert raw["properties"]["mode"]["const"] == "pipeline"
-
-
-def test_run_distributed_threads_rendezvous_env(monkeypatch, tmp_path: Path) -> None:
-    target = tmp_path / "target.pdb"
-    target.write_text("HEADER target\n")
-    captured: dict[str, object] = {}
-
-    class FakeSidecar:
-        def __init__(self, *, python, env, name, startup_timeout_s):
-            del python, startup_timeout_s
-            captured["env"] = env
-            captured["name"] = name
-
-        def call(self, target, kwargs, *, timeout_s):
-            captured["target"] = target
-            captured["kwargs"] = kwargs
-            captured["timeout_s"] = timeout_s
-            return {"ok": True}
-
-        def close(self):
-            captured["closed"] = True
-
-    monkeypatch.setattr(adapter_mod, "availability_skip_reason", lambda: None)
-    monkeypatch.setattr(adapter_mod, "pipeline_python", lambda: Path("/bin/python"))
-    monkeypatch.setattr(adapter_mod, "PersistentPythonSidecar", FakeSidecar)
-    monkeypatch.setattr(
-        adapter_mod.PXDesignAdapter,
-        "_collect_pipeline_outputs",
-        staticmethod(
-            lambda *_args: [
-                adapter_mod.PXDesignDesign(
-                    pdb_path=None,
-                    cif_path="/tmp/out.cif",
-                    score=None,
-                    sequence="A" * 30,
-                    binder_length=30,
-                )
-            ]
-        ),
-    )
-
-    params = adapter_mod.PXDesignInput(
-        target_pdb=str(target),
-        target_chain="A",
-        binder_length=30,
-        mode="pipeline",
-        num_samples=2,
-        top_k_designs=1,
-    )
-    ctx = SimpleNamespace(
-        job_dir=tmp_path / "job",
-        rank=0,
-        world_size=2,
-        local_world_size=2,
-        master_addr="127.0.0.1",
-        master_port=31234,
-    )
-
-    out = adapter_mod.run_distributed(params, ctx)
-
-    assert isinstance(out, adapter_mod.PXDesignOutput)
-    env = captured["env"]
-    assert env["MASTER_ADDR"] == "127.0.0.1"
-    assert env["MASTER_PORT"] == "31234"
-    assert env["RANK"] == "0"
-    assert env["WORLD_SIZE"] == "2"
-    assert env["LOCAL_RANK"] == "0"
-    assert env["LOCAL_WORLD_SIZE"] == "2"
-    assert captured["target"].endswith(":run_sidecar")
-    assert captured["closed"] is True
 
 
 def test_descriptor_input_schema_is_valid_json() -> None:
@@ -291,76 +194,6 @@ def test_protenix_v2_reciprocal_incompatibility() -> None:
     r.discover()
     desc, _ = r.get("protenix_v2")
     assert "pxdesign" in desc.incompatible_with
-
-
-def test_collect_outputs_finds_designs(tmp_path: Path) -> None:
-    """Synthetic PXDesign dump layout — _collect_outputs returns 2 designs."""
-    task = "design_5o45_A_80aa"
-    seed = 42
-    pred_dir = tmp_path / task / f"seed_{seed}" / "predictions"
-    pred_dir.mkdir(parents=True)
-    # Minimal CIF body with entity_poly_seq rows for entity 2 (binder).
-    cif_text = (
-        "data_test\n#\n"
-        "loop_\n"
-        "_entity_poly_seq.entity_id\n"
-        "_entity_poly_seq.hetero\n"
-        "_entity_poly_seq.mon_id\n"
-        "_entity_poly_seq.num\n"
-        "1 n MET 1\n"
-        "1 n ALA 2\n"
-        "2 n GLY 1\n"
-        "2 n ALA 2\n"
-        "2 n VAL 3\n"
-        "#\n"
-    )
-    for rank in (0, 1):
-        (pred_dir / f"{task}_sample_{rank}.cif").write_text(cif_text)
-        (pred_dir / f"{task}_summary_confidence_sample_{rank}.json").write_text(
-            json.dumps({"ranking_score": 0.7 - 0.1 * rank, "plddt": 80.0})
-        )
-    (pred_dir.parent / "SUCCESS_FILE").write_text(json.dumps({"prediction": True}))
-
-    designs = PXDesignAdapter._collect_outputs(tmp_path, task, seed, 80)
-    assert len(designs) == 2
-    assert designs[0].cif_path.endswith("_sample_0.cif")
-    # Sequence comes from entity_id == 2 rows: GAV
-    assert designs[0].sequence == "GAV"
-    assert designs[0].score == pytest.approx(0.7)
-
-
-def test_collect_outputs_treats_infer_pseudo_residues_as_no_sequence(
-    tmp_path: Path,
-) -> None:
-    """PXDesign infer emits backbone pseudo-residues, not designed AAs."""
-    task = "design_5o45_A_30aa"
-    seed = 29
-    pred_dir = tmp_path / task / f"seed_{seed}" / "predictions"
-    pred_dir.mkdir(parents=True)
-    cif_text = (
-        "data_test\n#\n"
-        "loop_\n"
-        "_entity_poly_seq.entity_id\n"
-        "_entity_poly_seq.hetero\n"
-        "_entity_poly_seq.mon_id\n"
-        "_entity_poly_seq.num\n"
-        "1 n MET 1\n"
-        "2 n xpb 1\n"
-        "2 n xpb 2\n"
-        "2 n xpb 3\n"
-        "#\n"
-    )
-    (pred_dir / f"{task}_sample_0.cif").write_text(cif_text)
-
-    designs = PXDesignAdapter._collect_outputs(tmp_path, task, seed, 30)
-
-    assert len(designs) == 1
-    assert designs[0].sequence == ""
-
-
-def test_collect_outputs_empty_returns_empty(tmp_path: Path) -> None:
-    designs = PXDesignAdapter._collect_outputs(tmp_path, "no_task", 1, 50)
-    assert designs == []
 
 
 def test_module_exports() -> None:

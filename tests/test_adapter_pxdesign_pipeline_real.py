@@ -1,4 +1,4 @@
-"""Slow: real-runtime regression for PXDesign's `pipeline` mode.
+"""Slow: real-runtime regression for PXDesign's fixed generation pipeline.
 
 Auto-skips when:
 
@@ -43,7 +43,7 @@ _FIXTURE_CIF = _PROJECT_ROOT / "tests" / "fixtures" / "5o45.cif"
 
 def _skip_if_unavailable() -> None:
     if not torch.cuda.is_available():
-        pytest.skip("CUDA required for PXDesign pipeline mode")
+        pytest.skip("CUDA required for PXDesign pipeline")
     if "VPA_PXDESIGN_PIPELINE_ENV" not in os.environ:
         skip = availability_skip_reason()
         if skip is not None:
@@ -61,7 +61,7 @@ def _skip_if_unavailable() -> None:
         pytest.skip(f"fixture CIF missing: {_FIXTURE_CIF}")
 
 
-def test_pipeline_mode_emits_real_amino_acid_sequence(tmp_path: Path) -> None:
+def test_pipeline_emits_real_amino_acid_sequence(tmp_path: Path) -> None:
     _skip_if_unavailable()
 
     adapter = PXDesignAdapter(
@@ -74,18 +74,17 @@ def test_pipeline_mode_emits_real_amino_acid_sequence(tmp_path: Path) -> None:
         binder_length=50,
         num_samples=1,
         num_steps=5,
-        mode="pipeline",
         top_k_designs=1,
         seed=101,
     )
     ctx = null_context(tmp_path)
     out = adapter.run(params, ctx)
 
-    assert out.designs, "pipeline mode returned zero designs"
+    assert out.designs, "PXDesign pipeline returned zero designs"
     d = out.designs[0]
-    assert d.sequence, "pipeline mode returned an empty sequence"
+    assert d.sequence, "PXDesign pipeline returned an empty sequence"
     assert "X" not in d.sequence, (
-        f"pipeline mode returned placeholder sequence {d.sequence!r} — "
+        f"PXDesign pipeline returned placeholder sequence {d.sequence!r} — "
         f"expected real AA letters (no 'X')"
     )
     assert Path(d.cif_path).is_file(), f"missing CIF: {d.cif_path}"

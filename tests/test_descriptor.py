@@ -77,7 +77,7 @@ def test_builtin_sharding_metadata_is_typed_and_schema_backed():
             {"seeds", "diffusion_samples", "diffusion_samples_affinity"},
             1,
         ),
-        "boltzgen": ("design_budget_shards", {"num_designs", "budget", "seed"}, 1),
+        "boltzgen": ("design_seed_shards", {"num_designs", "seed"}, 1),
         "proteina_complexa": (
             "design_seed_shards",
             {"num_designs", "seed", "run_name"},

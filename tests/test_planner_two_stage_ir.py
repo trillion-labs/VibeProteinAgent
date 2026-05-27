@@ -181,7 +181,6 @@ def _boltzgen_tools() -> list[dict[str, Any]]:
                     "target_pdb": {"type": "string"},
                     "target_yaml": {"type": "string"},
                     "candidates": {"type": "array", "items": {"type": "object"}},
-                    "design_only": {"type": "boolean", "default": False},
                     "num_designs": {"type": "integer", "default": 10},
                 },
             },
@@ -359,9 +358,12 @@ def test_tool_selection_and_planner_ir_prompts_expose_capability_profiles() -> N
         if tool["name"] == "boltzgen"
     )
     profiles = boltzgen_outline["candidate_capability_profiles"]
-    full_profile = next(profile for profile in profiles if profile["name"] == "full_pipeline")
+    full_profile = next(
+        profile for profile in profiles
+        if profile["name"] == "design_inverse_fold_folding_analyze"
+    )
     assert full_profile["default"] is True
-    assert full_profile["inputs"] == {"design_only": False}
+    assert full_profile["inputs"] == {}
     assert "has_sequence" in full_profile["produces"]
 
     planner_prompt = json.loads(provider.messages[1][1].content)

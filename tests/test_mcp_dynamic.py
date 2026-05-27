@@ -43,7 +43,6 @@ def test_mcp_list_tools_hides_internal_by_default(tmp_workspace: Workspace) -> N
         "noop",
         "mpnn_to_protenix_input",
         "sequence_to_protenix_input",
-        "pxdesign_pipeline_multi_gpu",
     }
 
     assert internal_names.isdisjoint(public_names)

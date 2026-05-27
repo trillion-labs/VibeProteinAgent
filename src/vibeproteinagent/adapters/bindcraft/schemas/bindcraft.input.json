@@ -77,7 +77,7 @@
       "minimum": 1,
       "maximum": 32,
       "default": 10,
-      "description": "Number of final accepted designs to produce (`number_of_final_designs` in BindCraft settings). BindCraft loops trajectories until this many designs pass the filter cascade.",
+      "description": "Number of generated binder trajectory/design artifacts to request. VPA disables filtering thresholds and returns generated artifacts for downstream scoring.",
       "examples": [4, 10]
     },
     "num_recycles": {
@@ -99,7 +99,7 @@
       "minimum": 1,
       "maximum": 10000,
       "default": null,
-      "description": "Optional upper bound on attempted BindCraft trajectories. Null leaves upstream behavior unbounded until `num_designs` designs are accepted; useful for capping smoke/CI runs.",
+      "description": "Optional upper bound on attempted BindCraft trajectories. Null leaves upstream behavior unbounded until `num_designs` generated artifacts are available; useful for capping smoke/CI runs.",
       "examples": [50, 200, null]
     },
     "max_attempted_trajectories": {
@@ -107,7 +107,7 @@
       "minimum": 1,
       "maximum": 10000,
       "default": null,
-      "description": "VPA-level upper bound on attempted terminal trajectories, including clashing and low-confidence rejects. Defaults to `max_trajectories` when omitted.",
+      "description": "VPA-level upper bound on attempted terminal trajectories. Defaults to `max_trajectories` when omitted.",
       "examples": [2, 10, null]
     },
     "max_runtime_s": {
@@ -116,13 +116,6 @@
       "default": null,
       "description": "Optional wall-clock timeout for the isolated BindCraft sidecar call. Use to bound live validation runs.",
       "examples": [600, 1800, null]
-    },
-    "filter_mode": {
-      "type": "string",
-      "enum": ["default", "permissive"],
-      "default": "default",
-      "description": "Filter cascade strictness. `default` preserves upstream BindCraft thresholds; `permissive` disables thresholds for bounded smoke validation.",
-      "examples": ["default", "permissive"]
     }
   },
   "additionalProperties": false

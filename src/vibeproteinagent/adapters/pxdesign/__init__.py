@@ -15,7 +15,6 @@ from .adapter import (
     availability_skip_reason,
     pipeline_env,
     pipeline_python,
-    run_distributed,
 )
 
 __all__ = [
@@ -33,5 +32,4 @@ __all__ = [
     "availability_skip_reason",
     "pipeline_env",
     "pipeline_python",
-    "run_distributed",
 ]

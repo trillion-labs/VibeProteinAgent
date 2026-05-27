@@ -284,16 +284,6 @@ tools:
         env_var: VPA_PXDESIGN_CKPT_DIR
         env_value: path
         required: true
-  pxdesign_pipeline_multi_gpu:
-    runtime: sidecar
-    required: false
-    internal: true
-    depends_on:
-      - pxdesign
-    sidecar:
-      env_name: pxdesign-pipeline-vpa
-      path: "sidecars/pxdesign-pipeline"
-      install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path} --cuda-profile {cuda_profile}"
   pxmeter:
     runtime: shared
   pyrosetta:

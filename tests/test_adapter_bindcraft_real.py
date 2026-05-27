@@ -45,11 +45,10 @@ def _skip_if_unavailable() -> None:
 def test_bindcraft_runs_smallest_trajectory_against_fixture(tmp_path):
     """Generate the smallest possible BindCraft binder design.
 
-    Even with binder_length=30 / num_designs=1 BindCraft typically needs
-    many trajectories to land an accepted design. This test asserts only
-    that the subprocess returns success and that at least one accepted
-    PDB lands in ``Accepted/`` — i.e. the env, weights, and pipeline
-    plumbing all work end-to-end.
+    This test asserts only that the subprocess returns success and that at
+    least one generated PDB artifact is collected — i.e. the env, weights,
+    and pipeline plumbing all work end-to-end without relying on filter
+    acceptance.
     """
     _skip_if_unavailable()
     fixture = Path(__file__).parent / "fixtures" / "6MRR.pdb"
@@ -76,7 +75,6 @@ def test_bindcraft_runs_smallest_trajectory_against_fixture(tmp_path):
         num_recycles=1,
         seed=675122,
         max_trajectories=1,
-        filter_mode="permissive",
     )
 
     adapter = BindCraftAdapter(

@@ -79,7 +79,6 @@ EXPECTED_REQUIRED_COUNTS: dict[str, int] = {
     "proteinmpnn": 0,
     "protenix_v2": 0,
     "pxdesign": 3,
-    "pxdesign_pipeline_multi_gpu": 3,
     "pxmeter": 0,
     "pyrosetta": 1,
     "rank_designs": 0,

@@ -12,7 +12,7 @@ from vibeproteinagent.adapters.bindcraft import adapter as bindcraft_mod
 from vibeproteinagent.adapters.bindcraft.adapter import (
     BindCraftAdapter,
     BindCraftInput,
-    NoAcceptedBindCraftDesigns,
+    NoGeneratedBindCraftDesigns,
     _collect_designs,
 )
 from vibeproteinagent.adapters.context import null_context
@@ -38,7 +38,7 @@ def _configure_bindcraft_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     return fake_python
 
 
-class _NoAcceptedSidecar:
+class _GeneratedTrajectorySidecar:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.closed = False
@@ -73,16 +73,16 @@ class _NoAcceptedSidecar:
         self.closed = True
 
 
-def test_collect_designs_uses_specific_no_accepted_exception(tmp_path: Path) -> None:
-    with pytest.raises(NoAcceptedBindCraftDesigns, match="no Accepted/ directory"):
+def test_collect_designs_uses_specific_no_generated_exception(tmp_path: Path) -> None:
+    with pytest.raises(NoGeneratedBindCraftDesigns, match="no generated PDB artifacts"):
         _collect_designs(design_path=tmp_path, binder_length=30)
 
     (tmp_path / "Accepted").mkdir()
-    with pytest.raises(NoAcceptedBindCraftDesigns, match="contains no PDBs"):
+    with pytest.raises(NoGeneratedBindCraftDesigns, match="no generated PDB artifacts"):
         _collect_designs(design_path=tmp_path, binder_length=30)
 
 
-def test_bindcraft_run_returns_structured_empty_result_when_no_designs_accepted(
+def test_bindcraft_run_returns_generated_trajectories_without_accepted_filtering(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -92,7 +92,7 @@ def test_bindcraft_run_returns_structured_empty_result_when_no_designs_accepted(
         "_bindcraft_python",
         lambda *_args: (_ for _ in ()).throw(AssertionError("conda lookup skipped")),
     )
-    monkeypatch.setattr(bindcraft_mod, "PersistentPythonSidecar", _NoAcceptedSidecar)
+    monkeypatch.setattr(bindcraft_mod, "PersistentPythonSidecar", _GeneratedTrajectorySidecar)
 
     target = tmp_path / "target.pdb"
     target.write_text("HEADER target\nEND\n")
@@ -108,16 +108,16 @@ def test_bindcraft_run_returns_structured_empty_result_when_no_designs_accepted(
     )
 
     assert fake_python.is_file()
-    assert out.status == "no_acceptable_candidate"
-    assert out.designs == []
-    assert out.candidates == []
-    assert out.num_designs_returned == 0
+    assert out.status == "completed"
+    assert len(out.designs) == 3
+    assert len(out.candidates) == 3
+    assert out.num_designs_returned == 3
     assert out.failure_summary["attempted"] == 3
     assert out.failure_summary["accepted"] == 0
     assert out.failure_summary["failure_events"] == 3
-    assert out.run_metadata["status"] == "no_acceptable_candidate"
-    assert out.run_metadata["accepted_design_count"] == 0
-    assert any("accepted 0 designs" in warning for warning in out.warnings)
+    assert out.run_metadata["status"] == "completed"
+    assert out.run_metadata["generated_design_count"] == 3
+    assert out.run_metadata["filtering"] == "disabled"
 
 
 def test_bindcraft_cuda_infrastructure_error_still_raises(
@@ -136,7 +136,7 @@ def test_bindcraft_cuda_infrastructure_error_still_raises(
         )
 
 
-def test_bindcraft_output_schema_accepts_empty_result_shape() -> None:
+def test_bindcraft_output_schema_accepts_generated_result_shape() -> None:
     schema = json.loads(
         (
             REPO_ROOT
@@ -145,14 +145,21 @@ def test_bindcraft_output_schema_accepts_empty_result_shape() -> None:
     )
     Draft202012Validator(schema).validate(
         {
-            "status": "no_acceptable_candidate",
-            "designs": [],
-            "candidates": [],
+            "status": "completed",
+            "designs": [
+                {
+                    "candidate_id": "bindcraft:x",
+                    "pdb_path": "/tmp/x.pdb",
+                    "sequence": "AAAA",
+                    "binder_length": 4,
+                }
+            ],
+            "candidates": [{"schema_version": "candidate_v1"}],
             "runtime_ms": 123,
-            "num_designs_returned": 0,
+            "num_designs_returned": 1,
             "seeds_used": [],
             "position_mappings": {},
-            "warnings": ["BindCraft attempted 3 trajectories and accepted 0 designs."],
+            "warnings": [],
             "failure_summary": {
                 "attempted": 3,
                 "accepted": 0,
@@ -162,8 +169,8 @@ def test_bindcraft_output_schema_accepts_empty_result_shape() -> None:
                 "failure_events": 3,
             },
             "run_metadata": {
-                "status": "no_acceptable_candidate",
-                "accepted_design_count": 0,
+                "status": "completed",
+                "generated_design_count": 1,
             },
         }
     )

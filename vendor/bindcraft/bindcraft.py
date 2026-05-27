@@ -17,6 +17,8 @@ parser.add_argument('--filters', '-f', type=str, default='./settings_filters/def
                     help='Path to the filters.json file used to filter design. If not provided, default will be used.')
 parser.add_argument('--advanced', '-a', type=str, default='./settings_advanced/default_4stage_multimer.json',
                     help='Path to the advanced.json file with additional design settings. If not provided, default will be used.')
+parser.add_argument('--generation-only', action='store_true',
+                    help='Run VPA generation-only mode: keep generated MPNN designs and skip accepted/rejected filter gating.')
 
 args = parser.parse_args()
 
@@ -25,6 +27,16 @@ settings_path, filters_path, advanced_path = perform_input_check(args)
 
 ### load settings from JSON
 target_settings, advanced_settings, filters = load_json_settings(settings_path, filters_path, advanced_path)
+if args.generation_only:
+    for conditions in filters.values():
+        if not isinstance(conditions, dict):
+            continue
+        if "threshold" in conditions:
+            conditions["threshold"] = None
+        else:
+            for aa_conditions in conditions.values():
+                if isinstance(aa_conditions, dict) and "threshold" in aa_conditions:
+                    aa_conditions["threshold"] = None
 
 settings_file = os.path.basename(settings_path).split('.')[0]
 filters_file = os.path.basename(filters_path).split('.')[0]
@@ -39,6 +51,10 @@ advanced_settings = perform_advanced_settings_check(advanced_settings, bindcraft
 
 ### generate directories, design path names can be found within the function
 design_paths = generate_directories(target_settings["design_path"])
+if args.generation_only:
+    generated_path = os.path.join(target_settings["design_path"], "Generated")
+    os.makedirs(generated_path, exist_ok=True)
+    design_paths["Generated"] = generated_path
 
 ### generate dataframes
 trajectory_labels, design_labels, final_labels = generate_dataframe_labels()
@@ -60,7 +76,10 @@ generate_filter_pass_csv(failure_csv, args.filters)
 pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {advanced_settings["dalphaball_path"]} -corrections::beta_nov16 true -relax:default_repeats 1')
 print(f"Running binder design for target {settings_file}")
 print(f"Design settings used: {advanced_file}")
-print(f"Filtering designs based on {filters_file}")
+if args.generation_only:
+    print("Generation-only mode enabled; filter accept/reject gating is skipped")
+else:
+    print(f"Filtering designs based on {filters_file}")
 
 ####################################
 # initialise counters
@@ -71,7 +90,16 @@ accepted_designs = 0
 ### start design loop
 while True:
     ### check if we have the target number of binders
-    final_designs_reached = check_accepted_designs(design_paths, mpnn_csv, final_labels, final_csv, advanced_settings, target_settings, design_labels)
+    if args.generation_only:
+        generated_binders = [
+            f for f in os.listdir(design_paths["Generated"])
+            if f.endswith('.pdb') and not f.startswith('.')
+        ]
+        final_designs_reached = len(generated_binders) >= target_settings["number_of_final_designs"]
+        if final_designs_reached:
+            print(f"Target number {str(len(generated_binders))} of generated designs reached, stopping execution...")
+    else:
+        final_designs_reached = check_accepted_designs(design_paths, mpnn_csv, final_labels, final_csv, advanced_settings, target_settings, design_labels)
 
     if final_designs_reached:
         # stop design loop execution
@@ -378,53 +406,61 @@ while True:
                         best_model_number = highest_plddt_key - 10
                         best_model_pdb = os.path.join(design_paths["MPNN/Relaxed"], f"{mpnn_design_name}_model{best_model_number}.pdb")
 
-                        # run design data against filter thresholds
-                        filter_conditions = check_filters(mpnn_data, design_labels, filters)
-                        if filter_conditions == True:
-                            print(mpnn_design_name+" passed all filters")
+                        if args.generation_only:
+                            print(mpnn_design_name+" generated; skipping accept/reject filters")
                             accepted_mpnn += 1
                             accepted_designs += 1
-                            
-                            # copy designs to accepted folder
-                            shutil.copy(best_model_pdb, design_paths["Accepted"])
-
-                            # insert data into final csv
+                            shutil.copy(best_model_pdb, design_paths["Generated"])
                             final_data = [''] + mpnn_data
                             insert_data(final_csv, final_data)
-
-                            # copy animation from accepted trajectory
-                            if advanced_settings["save_design_animations"]:
-                                accepted_animation = os.path.join(design_paths["Accepted/Animation"], f"{design_name}.html")
-                                if not os.path.exists(accepted_animation):
-                                    shutil.copy(os.path.join(design_paths["Trajectory/Animation"], f"{design_name}.html"), accepted_animation)
-
-                            # copy plots of accepted trajectory
-                            plot_files = os.listdir(design_paths["Trajectory/Plots"])
-                            plots_to_copy = [f for f in plot_files if f.startswith(design_name) and f.endswith('.png')]
-                            for accepted_plot in plots_to_copy:
-                                source_plot = os.path.join(design_paths["Trajectory/Plots"], accepted_plot)
-                                target_plot = os.path.join(design_paths["Accepted/Plots"], accepted_plot)
-                                if not os.path.exists(target_plot):
-                                    shutil.copy(source_plot, target_plot)
-
                         else:
-                            print(f"Unmet filter conditions for {mpnn_design_name}")
-                            failure_df = pd.read_csv(failure_csv)
-                            special_prefixes = ('Average_', '1_', '2_', '3_', '4_', '5_')
-                            incremented_columns = set()
+                            # run design data against filter thresholds
+                            filter_conditions = check_filters(mpnn_data, design_labels, filters)
+                            if filter_conditions == True:
+                                print(mpnn_design_name+" passed all filters")
+                                accepted_mpnn += 1
+                                accepted_designs += 1
+                                
+                                # copy designs to accepted folder
+                                shutil.copy(best_model_pdb, design_paths["Accepted"])
 
-                            for column in filter_conditions:
-                                base_column = column
-                                for prefix in special_prefixes:
-                                    if column.startswith(prefix):
-                                        base_column = column.split('_', 1)[1]
+                                # insert data into final csv
+                                final_data = [''] + mpnn_data
+                                insert_data(final_csv, final_data)
 
-                                if base_column not in incremented_columns:
-                                    failure_df[base_column] = failure_df[base_column] + 1
-                                    incremented_columns.add(base_column)
+                                # copy animation from accepted trajectory
+                                if advanced_settings["save_design_animations"]:
+                                    accepted_animation = os.path.join(design_paths["Accepted/Animation"], f"{design_name}.html")
+                                    if not os.path.exists(accepted_animation):
+                                        shutil.copy(os.path.join(design_paths["Trajectory/Animation"], f"{design_name}.html"), accepted_animation)
 
-                            failure_df.to_csv(failure_csv, index=False)
-                            shutil.copy(best_model_pdb, design_paths["Rejected"])
+                                # copy plots of accepted trajectory
+                                plot_files = os.listdir(design_paths["Trajectory/Plots"])
+                                plots_to_copy = [f for f in plot_files if f.startswith(design_name) and f.endswith('.png')]
+                                for accepted_plot in plots_to_copy:
+                                    source_plot = os.path.join(design_paths["Trajectory/Plots"], accepted_plot)
+                                    target_plot = os.path.join(design_paths["Accepted/Plots"], accepted_plot)
+                                    if not os.path.exists(target_plot):
+                                        shutil.copy(source_plot, target_plot)
+
+                            else:
+                                print(f"Unmet filter conditions for {mpnn_design_name}")
+                                failure_df = pd.read_csv(failure_csv)
+                                special_prefixes = ('Average_', '1_', '2_', '3_', '4_', '5_')
+                                incremented_columns = set()
+
+                                for column in filter_conditions:
+                                    base_column = column
+                                    for prefix in special_prefixes:
+                                        if column.startswith(prefix):
+                                            base_column = column.split('_', 1)[1]
+
+                                    if base_column not in incremented_columns:
+                                        failure_df[base_column] = failure_df[base_column] + 1
+                                        incremented_columns.add(base_column)
+
+                                failure_df.to_csv(failure_csv, index=False)
+                                shutil.copy(best_model_pdb, design_paths["Rejected"])
                         
                         # increase MPNN design number
                         mpnn_n += 1
@@ -434,7 +470,10 @@ while True:
                             break
 
                     if accepted_mpnn >= 1:
-                        print("Found "+str(accepted_mpnn)+" MPNN designs passing filters")
+                        if args.generation_only:
+                            print("Generated "+str(accepted_mpnn)+" MPNN designs")
+                        else:
+                            print("Found "+str(accepted_mpnn)+" MPNN designs passing filters")
                         print("")
                     else:
                         print("No accepted MPNN designs found for this trajectory.")

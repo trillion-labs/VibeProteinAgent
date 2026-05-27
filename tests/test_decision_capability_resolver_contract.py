@@ -243,38 +243,36 @@ def test_compiler_treats_boltzgen_default_as_full_candidate_producer() -> None:
     ]
 
 
-def test_compiler_rejects_boltzgen_design_only_into_sequence_consumer() -> None:
-    with pytest.raises(StructuredFixup) as excinfo:
-        compile_planner_ir(
-            _ir(
-                [
-                    {
-                        "id": "boltzgen_backbones",
-                        "tool": "boltzgen",
-                        "intent": "Generate backbone-only candidates.",
-                        "inputs": {
-                            "target_pdb": "/tmp/target.pdb",
-                            "design_only": True,
-                        },
-                        "upstream": [],
-                    },
-                    {
-                        "id": "sequence_summary",
-                        "tool": "sequence_analysis",
-                        "intent": "Analyze designed sequences.",
-                        "inputs": {},
-                        "upstream": [
-                            {
-                                "node": "boltzgen_backbones",
-                                "relationship": "candidate_source",
-                            }
-                        ],
-                    },
-                ]
-            )
+def test_compiler_treats_boltzgen_as_full_sequence_structure_producer() -> None:
+    plan = compile_planner_ir(
+        _ir(
+            [
+                {
+                    "id": "boltzgen_designs",
+                    "tool": "boltzgen",
+                    "intent": "Generate sequenced full-structure candidates.",
+                    "inputs": {"target_pdb": "/tmp/target.pdb"},
+                    "upstream": [],
+                },
+                {
+                    "id": "sequence_summary",
+                    "tool": "sequence_analysis",
+                    "intent": "Analyze designed sequences.",
+                    "inputs": {},
+                    "upstream": [
+                        {
+                            "node": "boltzgen_designs",
+                            "relationship": "candidate_source",
+                        }
+                    ],
+                },
+            ]
         )
-    assert excinfo.value.payload["error_kind"] == "candidate_capability_mismatch"
-    assert excinfo.value.payload["missing_capabilities"] == ["has_sequence"]
+    )
+    assert [node["tool"] for node in plan["workflow_plan"]["nodes"]] == [
+        "boltzgen",
+        "sequence_analysis",
+    ]
 
 
 def test_tool_selection_invalid_single_mode_is_repaired_before_planner_ir() -> None:

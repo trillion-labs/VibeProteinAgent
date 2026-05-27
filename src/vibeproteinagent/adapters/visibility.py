@@ -7,7 +7,6 @@ _INTERNAL_TOOL_NAMES = frozenset(
         "mpnn_to_protenix_input",
         "merge_candidates",
         "noop",
-        "pxdesign_pipeline_multi_gpu",
         "sequence_to_protenix_input",
     }
 )

@@ -1,15 +1,14 @@
-"""Fast unit tests for the PXDesign adapter's `pipeline` mode dispatch.
+"""Fast unit tests for the PXDesign adapter's generation pipeline dispatch.
 
 These tests do NOT touch the real pipeline runtime — they validate:
 
-* the new ``mode`` / ``top_k_designs`` / ``mpnn_temperature`` / ``af2_init_guess``
-  fields parse + reject bad input,
+* the ``top_k_designs`` / ``mpnn_temperature`` fields parse + reject bad input,
 * ``availability_skip_reason()`` produces an actionable string when the
   ``pxdesign-pipeline-vpa`` env is absent,
-* ``run(mode="pipeline")`` raises :class:`DependencyError` (``E_DEPENDENCY``)
+* ``run()`` raises :class:`DependencyError` (``E_DEPENDENCY``)
   with the bootstrap pointer when the env is absent,
-* ``run(mode="pipeline")`` uses and reuses a persistent sidecar instead of a
-  cold subprocess per call,
+* ``run()`` uses the fixed generation pipeline path,
+* vendor preview filtering/ranking flags are not part of the invocation,
 * the synthetic pipeline output layout round-trips through
   ``_collect_pipeline_outputs``.
 
@@ -55,20 +54,14 @@ _DESCRIPTOR = _ADAPTER_DIR / "descriptor.yaml"
 # --------------------------------------------------------------------------- schema
 
 
-def test_input_schema_declares_mode_enum() -> None:
-    raw = json.loads(_INPUT_SCHEMA.read_text())
-    mode = raw["properties"]["mode"]
-    assert mode["type"] == "string"
-    assert sorted(mode["enum"]) == ["infer", "pipeline"]
-    assert mode["default"] == "infer"
-
-
 def test_input_schema_declares_pipeline_knobs() -> None:
     raw = json.loads(_INPUT_SCHEMA.read_text())
     props = raw["properties"]
+    assert "mode" not in props
     assert props["top_k_designs"]["default"] == 4
     assert props["mpnn_temperature"]["default"] == pytest.approx(0.1)
-    assert props["af2_init_guess"]["default"] is True
+    assert "af2_init_guess" not in props
+    assert "preset" not in props
     assert "use_msa" not in props
     assert "msa_backend" not in props
 
@@ -78,9 +71,9 @@ def test_input_schema_still_rejects_unknown_keys() -> None:
     assert raw["additionalProperties"] is False
 
 
-def test_descriptor_declares_pipeline_sidecar_isolation() -> None:
+def test_descriptor_declares_pipeline_subprocess_isolation() -> None:
     text = _DESCRIPTOR.read_text()
-    assert "execution_isolation: persistent_sidecar" in text
+    assert "execution_isolation: subprocess" in text
     assert "environment_name: pxdesign-pipeline-vpa" in text
     assert "environment_reason:" in text
 
@@ -88,36 +81,25 @@ def test_descriptor_declares_pipeline_sidecar_isolation() -> None:
 # --------------------------------------------------------------------------- pydantic
 
 
-def test_pydantic_defaults_default_to_infer_mode() -> None:
+def test_pydantic_defaults_fixed_pipeline_fields() -> None:
     p = PXDesignInput(target_pdb="/tmp/x.pdb", target_chain="A", binder_length=50)
-    assert p.mode == "infer"
     assert p.top_k_designs == 4
     assert p.mpnn_temperature == pytest.approx(0.1)
-    assert p.af2_init_guess is True
+    assert not hasattr(p, "mode")
+    assert not hasattr(p, "af2_init_guess")
     assert not hasattr(p, "use_msa")
 
 
-def test_pydantic_accepts_pipeline_mode() -> None:
+def test_pydantic_accepts_pipeline_knobs() -> None:
     p = PXDesignInput(
         target_pdb="/tmp/x.pdb",
         target_chain="A",
         binder_length=50,
-        mode="pipeline",
         top_k_designs=8,
         mpnn_temperature=0.2,
-        af2_init_guess=False,
     )
-    assert p.mode == "pipeline"
     assert p.top_k_designs == 8
     assert p.mpnn_temperature == pytest.approx(0.2)
-    assert p.af2_init_guess is False
-
-
-def test_pydantic_rejects_unknown_mode() -> None:
-    with pytest.raises(ValidationError):
-        PXDesignInput(
-            target_pdb="/tmp/x.pdb", target_chain="A", binder_length=50, mode="magic"
-        )
 
 
 def test_pydantic_rejects_negative_mpnn_temperature() -> None:
@@ -215,17 +197,12 @@ def test_availability_returns_none_when_python_and_smoke_import_work(
 
 
 def _make_adapter_without_warm() -> PXDesignAdapter:
-    """Construct a PXDesignAdapter skipping the heavy warm load.
-
-    The pipeline path doesn't use ``self.runner`` / ``self.ckpt_path``; we
-    build a bare instance that has just enough attributes to call
-    ``_run_pipeline``.
-    """
+    """Construct a bare PXDesignAdapter for pipeline dispatch tests."""
     obj = PXDesignAdapter.__new__(PXDesignAdapter)
     return obj
 
 
-def test_run_pipeline_raises_dependency_error_when_env_absent(
+def test_run_raises_dependency_error_when_env_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from vibeproteinagent.adapters import null_context
@@ -240,7 +217,6 @@ def test_run_pipeline_raises_dependency_error_when_env_absent(
         binder_length=50,
         num_samples=1,
         num_steps=5,
-        mode="pipeline",
     )
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -253,53 +229,17 @@ def test_run_pipeline_raises_dependency_error_when_env_absent(
     assert err.details.get("bootstrap") == "vendor/pxdesign/UPSTREAM.md#pipeline-mode"
     assert "env" in err.details
 
-
-def test_run_infer_mode_does_not_consult_pipeline_env(
+def test_run_dispatches_to_pipeline_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Default-mode call must not even probe the pipeline env."""
-    # Force pipeline env probe to blow up if accidentally hit.
-    def _fail(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError("infer mode must not call availability_skip_reason()")
-
-    monkeypatch.setattr(adapter_mod, "availability_skip_reason", _fail)
-    adapter = _make_adapter_without_warm()
-
-    # Provide a minimal _run_infer stub on the instance so we can verify
-    # dispatch lands there (the real _run_infer needs a fully warm runner).
-    called = {"infer": 0}
-
-    def _stub_infer(self: PXDesignAdapter, p: PXDesignInput, ctx: Any) -> Any:
-        called["infer"] += 1
-        return "INFER_RESULT"
-
-    monkeypatch.setattr(PXDesignAdapter, "_run_infer", _stub_infer)
-    target = tmp_path / "target.cif"
-    target.write_text("data_x\n#\n")
-    params = PXDesignInput(
-        target_pdb=str(target), target_chain="A", binder_length=50,
-    )
-    out = adapter.run(params, ctx=None)
-    assert out == "INFER_RESULT"
-    assert called["infer"] == 1
-
-
-def test_run_pipeline_dispatches_to_pipeline_branch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Pipeline mode must route through _run_pipeline (not _run_infer)."""
-    called = {"pipeline": 0, "infer": 0}
+    """PXDesign has one runtime path: the fixed generation pipeline."""
+    called = {"pipeline": 0}
 
     def _stub_pipeline(self: PXDesignAdapter, p: PXDesignInput, ctx: Any) -> Any:
         called["pipeline"] += 1
         return "PIPELINE_RESULT"
 
-    def _stub_infer(self: PXDesignAdapter, p: PXDesignInput, ctx: Any) -> Any:
-        called["infer"] += 1
-        return "INFER_RESULT"
-
     monkeypatch.setattr(PXDesignAdapter, "_run_pipeline", _stub_pipeline)
-    monkeypatch.setattr(PXDesignAdapter, "_run_infer", _stub_infer)
     adapter = _make_adapter_without_warm()
 
     target = tmp_path / "target.cif"
@@ -308,11 +248,10 @@ def test_run_pipeline_dispatches_to_pipeline_branch(
         target_pdb=str(target),
         target_chain="A",
         binder_length=50,
-        mode="pipeline",
     )
     out = adapter.run(params, ctx=None)
     assert out == "PIPELINE_RESULT"
-    assert called == {"pipeline": 1, "infer": 0}
+    assert called == {"pipeline": 1}
 
 
 def test_pipeline_subprocess_env_strips_pythonpath(
@@ -337,7 +276,7 @@ def test_pipeline_subprocess_env_seed_none_omits_hashseed(
     assert env.get("PYTHONHASHSEED") is None
 
 
-def test_run_pipeline_uses_and_reuses_persistent_sidecar(
+def test_run_pipeline_materializes_generated_sequence_outputs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from vibeproteinagent.adapters import null_context
@@ -350,63 +289,36 @@ def test_run_pipeline_uses_and_reuses_persistent_sidecar(
     monkeypatch.setenv("VPA_PXDESIGN_PIPELINE_ENV", str(fake_env))
     monkeypatch.setattr(adapter_mod, "_pipeline_import_skip_reason", lambda _py: None)
 
-    def _fail_subprocess_run(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("pipeline mode must use the persistent sidecar")
+    calls: list[list[str]] = []
 
-    monkeypatch.setattr(adapter_mod.subprocess, "run", _fail_subprocess_run)
+    def _fake_preview_run(
+        *,
+        argv: list[str],
+        cwd: Path,
+        job_outputs: Path,
+        task_name: str,
+        seed: int | None,
+        mpnn_temperature: float,
+        timeout_s: int,
+    ) -> None:
+        del cwd, seed, mpnn_temperature, timeout_s
+        calls.append(argv)
+        out_dir = job_outputs / "design_outputs" / task_name / "orig"
+        out_dir.mkdir(parents=True)
+        (out_dir / "rank_0.cif").write_text("data_x\n#\n")
+        with (out_dir.parent / "summary.csv").open("w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow([
+                "rank", "task_name", "sequence", "af2_iptm",
+                "chosen_struct_path",
+            ])
+            writer.writerow([
+                "0", task_name, "GAVL", "0.77", "orig/rank_0.cif",
+            ])
 
-    instances: list[Any] = []
-
-    class FakeSidecar:
-        def __init__(
-            self,
-            *,
-            python: Path,
-            env: dict[str, str],
-            name: str,
-            startup_timeout_s: float,
-        ) -> None:
-            self.python = python
-            self.env = env
-            self.name = name
-            self.startup_timeout_s = startup_timeout_s
-            self.calls: list[tuple[str, dict[str, Any], float | None]] = []
-            instances.append(self)
-
-        def call(
-            self,
-            target: str,
-            kwargs: dict[str, Any] | None = None,
-            *,
-            timeout_s: float | None = None,
-        ) -> dict[str, Any]:
-            payload = kwargs or {}
-            self.calls.append((target, payload, timeout_s))
-            argv = payload["argv"]
-            assert argv[0] == "--dump_dir"
-            assert "pxdesign.runner.pipeline" not in argv
-            dump_dir = Path(argv[argv.index("--dump_dir") + 1])
-            input_json_path = Path(argv[argv.index("--input_json_path") + 1])
-            task = json.loads(input_json_path.read_text())[0]
-            task_name = task["name"]
-            out_dir = dump_dir / "design_outputs" / task_name / "orig"
-            out_dir.mkdir(parents=True)
-            (out_dir / "rank_0.cif").write_text("data_x\n#\n")
-            with (out_dir.parent / "summary.csv").open("w", newline="") as fh:
-                writer = csv.writer(fh)
-                writer.writerow([
-                    "rank", "task_name", "sequence", "af2_iptm",
-                    "chosen_struct_path",
-                ])
-                writer.writerow([
-                    "0", task_name, "GAVL", "0.77", "orig/rank_0.cif",
-                ])
-            return {"ok": True}
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(adapter_mod, "PersistentPythonSidecar", FakeSidecar)
+    monkeypatch.setattr(
+        adapter_mod, "_run_preview_pipeline_until_artifacts", _fake_preview_run
+    )
 
     adapter = _make_adapter_without_warm()
     target = tmp_path / "target.cif"
@@ -417,20 +329,14 @@ def test_run_pipeline_uses_and_reuses_persistent_sidecar(
         binder_length=30,
         num_samples=1,
         num_steps=5,
-        mode="pipeline",
-        preset="extended",
         seed=42,
     )
 
     out1 = adapter.run(params, null_context(tmp_path / "job1"))
     out2 = adapter.run(params, null_context(tmp_path / "job2"))
 
-    assert len(instances) == 1
-    sidecar = instances[0]
-    assert sidecar.python == fake_py
-    assert sidecar.name == PXDESIGN_PIPELINE_ENV_NAME
-    assert sidecar.env["PYTHONHASHSEED"] == "42"
-    assert len(sidecar.calls) == 2
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("--preset") + 1] == "preview"
     assert [out1.designs[0].sequence, out2.designs[0].sequence] == ["GAVL", "GAVL"]
     assert out1.designs[0].score == pytest.approx(0.77)
 
@@ -537,44 +443,12 @@ def test_pipeline_helpers_exported_from_package() -> None:
 # --------------------------------------------------------------------------- phase 20
 
 
-def test_input_schema_declares_preset_enum() -> None:
-    """Pi3: schema exposes preset as preview/extended enum, default preview."""
-    raw = json.loads(_INPUT_SCHEMA.read_text())
-    preset = raw["properties"]["preset"]
-    assert sorted(preset["enum"]) == ["extended", "preview"]
-    assert preset["default"] == "preview"
-
-
-def test_pydantic_accepts_preset_extended() -> None:
-    """Pi3: pydantic round-trips the extended preset."""
-    p = PXDesignInput(
-        target_pdb="/tmp/x.pdb",
-        target_chain="A",
-        binder_length=50,
-        mode="pipeline",
-        preset="extended",
-    )
-    assert p.preset == "extended"
-
-
-def test_pydantic_rejects_unknown_preset() -> None:
-    """Pi3: bad preset value rejected at pydantic boundary."""
-    with pytest.raises(ValidationError):
-        PXDesignInput(
-            target_pdb="/tmp/x.pdb",
-            target_chain="A",
-            binder_length=50,
-            preset="ultra",
-        )
-
-
 def test_build_pipeline_cmd_threads_mpnn_temperature(tmp_path: Path) -> None:
     """Pi2: upstream argparse MPNN temperature flag is included."""
     params = PXDesignInput(
         target_pdb=str(tmp_path / "t.cif"),
         target_chain="A",
         binder_length=50,
-        mode="pipeline",
         mpnn_temperature=0.2,
     )
     cmd = PXDesignAdapter._build_pipeline_cmd(
@@ -593,7 +467,6 @@ def test_build_pipeline_cmd_default_mpnn_temperature(tmp_path: Path) -> None:
         target_pdb=str(tmp_path / "t.cif"),
         target_chain="A",
         binder_length=50,
-        mode="pipeline",
     )
     cmd = PXDesignAdapter._build_pipeline_cmd(
         params=params,
@@ -605,33 +478,12 @@ def test_build_pipeline_cmd_default_mpnn_temperature(tmp_path: Path) -> None:
     assert cmd[flag_idx + 1] == "0.1"
 
 
-def test_build_pipeline_cmd_threads_preset_extended(tmp_path: Path) -> None:
-    """Pi3: preset=extended is passed through to --preset."""
+def test_build_pipeline_cmd_always_uses_preview_preset(tmp_path: Path) -> None:
+    """The adapter fixes PXDesign to the raw-diffusion preview path."""
     params = PXDesignInput(
         target_pdb=str(tmp_path / "t.cif"),
         target_chain="A",
         binder_length=50,
-        mode="pipeline",
-        preset="extended",
-    )
-    cmd = PXDesignAdapter._build_pipeline_cmd(
-        params=params,
-        seed_val=17,
-        input_json_path=tmp_path / "in.json",
-        job_outputs=tmp_path / "out",
-    )
-    assert "--preset" in cmd
-    idx = cmd.index("--preset")
-    assert cmd[idx + 1] == "extended"
-
-
-def test_build_pipeline_cmd_preset_default_preview(tmp_path: Path) -> None:
-    """Pi3: omitted preset defaults to preview at the CLI level."""
-    params = PXDesignInput(
-        target_pdb=str(tmp_path / "t.cif"),
-        target_chain="A",
-        binder_length=50,
-        mode="pipeline",
     )
     cmd = PXDesignAdapter._build_pipeline_cmd(
         params=params,
@@ -643,34 +495,12 @@ def test_build_pipeline_cmd_preset_default_preview(tmp_path: Path) -> None:
     assert cmd[idx + 1] == "preview"
 
 
-def test_build_pipeline_cmd_legacy_af2_init_guess_false_falls_back_to_custom(
-    tmp_path: Path,
-) -> None:
-    """Pi3: callers that pre-date the preset enum can still disable AF2 init guess."""
+def test_build_pipeline_cmd_omits_vendor_filter_selection_flags(tmp_path: Path) -> None:
+    """top_k_designs is a VPA collection limit, not a vendor filter/rank knob."""
     params = PXDesignInput(
         target_pdb=str(tmp_path / "t.cif"),
         target_chain="A",
         binder_length=50,
-        mode="pipeline",
-        af2_init_guess=False,
-    )
-    cmd = PXDesignAdapter._build_pipeline_cmd(
-        params=params,
-        seed_val=17,
-        input_json_path=tmp_path / "in.json",
-        job_outputs=tmp_path / "out",
-    )
-    idx = cmd.index("--preset")
-    assert cmd[idx + 1] == "custom"
-
-
-def test_build_pipeline_cmd_carries_top_k_and_seed(tmp_path: Path) -> None:
-    """Pi4 (regression): top_k_designs threaded into --min_total_return + --max_success_return."""
-    params = PXDesignInput(
-        target_pdb=str(tmp_path / "t.cif"),
-        target_chain="A",
-        binder_length=50,
-        mode="pipeline",
         top_k_designs=12,
     )
     cmd = PXDesignAdapter._build_pipeline_cmd(
@@ -679,14 +509,63 @@ def test_build_pipeline_cmd_carries_top_k_and_seed(tmp_path: Path) -> None:
         input_json_path=tmp_path / "in.json",
         job_outputs=tmp_path / "out",
     )
-    i_min = cmd.index("--min_total_return")
-    i_max = cmd.index("--max_success_return")
-    assert cmd[i_min + 1] == "12"
-    assert cmd[i_max + 1] == "12"
+    assert "--min_total_return" not in cmd
+    assert "--max_success_return" not in cmd
     i_seed = cmd.index("--seeds")
     assert cmd[i_seed + 1] == "42"
     i_msa = cmd.index("--use_msa")
     assert cmd[i_msa + 1] == "false"
+
+
+def test_preview_pipeline_terminates_at_raw_cif_before_vendor_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    task = "design_target_A_30aa"
+    raw_dir = tmp_path / "out" / "global_run_0" / task / "seed_42" / "predictions"
+    raw_dir.mkdir(parents=True)
+    (raw_dir.parent / "SUCCESS_FILE").write_text("ok\n")
+    raw_cif = raw_dir / f"{task}_sample_0.cif"
+    raw_cif.write_text("data_x\n#\n")
+
+    events: list[str] = []
+
+    class FakeProc:
+        pid = 12345
+
+        def poll(self) -> int | None:
+            events.append("poll")
+            return None
+
+    def fake_popen(*_args: Any, **_kwargs: Any) -> FakeProc:
+        events.append("popen")
+        return FakeProc()
+
+    def fake_terminate(proc: FakeProc, *, kill: bool = False) -> None:
+        del proc, kill
+        events.append("terminate")
+
+    def fake_materialize(**kwargs: Any) -> None:
+        assert kwargs["raw_cif"] == raw_cif
+        events.append("materialize")
+
+    monkeypatch.setattr(adapter_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(adapter_mod, "_terminate_process_group", fake_terminate)
+    monkeypatch.setattr(adapter_mod, "_materialize_preview_sequence_outputs", fake_materialize)
+    monkeypatch.setattr(adapter_mod, "pipeline_python", lambda: Path("/bin/python"))
+    monkeypatch.setattr(adapter_mod, "_pipeline_subprocess_env", lambda seed: {})
+
+    adapter_mod._run_preview_pipeline_until_artifacts(
+        argv=["--preset", "preview"],
+        cwd=tmp_path,
+        job_outputs=tmp_path / "out",
+        task_name=task,
+        seed=42,
+        mpnn_temperature=0.1,
+        timeout_s=30,
+    )
+
+    assert events == ["popen", "terminate", "materialize"]
 
 
 def test_collect_pipeline_outputs_handles_renamed_columns(tmp_path: Path) -> None:

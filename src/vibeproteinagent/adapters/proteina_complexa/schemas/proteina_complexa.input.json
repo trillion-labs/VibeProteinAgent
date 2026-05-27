@@ -167,17 +167,6 @@
       "default": "default",
       "description": "Reward model policy. `default` preserves the upstream config; `none` disables reward scoring/guidance for fast compatibility smoke runs.",
       "examples": ["default", "none"]
-    },
-    "steps": {
-      "type": ["array", "null"],
-      "items": {
-        "type": "string",
-        "enum": ["generate", "filter", "evaluate", "analyze"]
-      },
-      "minItems": 1,
-      "default": null,
-      "description": "Optional Proteina-Complexa pipeline steps to run. Null preserves the adapter default for the selected mode; `[generate, filter]` is useful for fast design-only smoke runs.",
-      "examples": [["generate", "filter"], ["generate", "filter", "evaluate", "analyze"], null]
     }
   },
   "allOf": [

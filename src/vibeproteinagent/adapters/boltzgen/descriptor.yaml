@@ -1,7 +1,7 @@
 name: boltzgen
 version: "0.3.2"
 category: protein_design
-description: "Generative binder design. Default full pipeline returns sequenced, ranked candidates; `design_only=true` runs backbone-only diffusion."
+description: "Generative binder design. Runs design, inverse-folding, folding, and analysis; filtering is not part of the VPA adapter contract."
 runtime: python
 backend: pytorch
 gpu_required: true
@@ -20,8 +20,8 @@ output_schema: schemas/boltzgen.output.json
 supported_precisions: [bf16]
 supports_batching: false
 sharding:
-  strategy: design_budget_shards
-  shardable_fields: [num_designs, budget, seed]
+  strategy: design_seed_shards
+  shardable_fields: [num_designs, seed]
   recommended_shard_size: 1
   default_max_parallel: 2
 fusion:

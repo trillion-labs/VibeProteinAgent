@@ -31,7 +31,7 @@ ProteinaComplexaSearchAlgorithm = Literal[
     "mcts",
 ]
 ProteinaComplexaRewardModel = Literal["default", "none"]
-ProteinaComplexaStep = Literal["generate", "filter", "evaluate", "analyze"]
+ProteinaComplexaStep = Literal["generate", "evaluate"]
 
 _MODE_CONFIG = {
     "protein_binder": {
@@ -107,16 +107,6 @@ class ProteinaComplexaInput(BaseModel):
             "disables reward scoring/guidance for fast compatibility smoke runs."
         ),
     )
-    steps: list[ProteinaComplexaStep] | None = Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Optional Proteina-Complexa pipeline steps to run. Null preserves the "
-            "adapter default for the selected mode; use ['generate', 'filter'] "
-            "for fast design-only smoke runs that skip expensive evaluation."
-        ),
-    )
-
     @model_validator(mode="before")
     @classmethod
     def _canonical_candidates_to_structure(cls, data: Any) -> Any:
@@ -303,11 +293,8 @@ class ProteinaComplexaAdapter(ToolAdapter):
 
 
 def _resolve_steps(params: ProteinaComplexaInput) -> list[ProteinaComplexaStep] | None:
-    if params.steps is not None:
-        return list(params.steps)
-    if params.mode == "motif":
-        return ["generate", "evaluate", "analyze"]
-    return None
+    del params
+    return ["generate", "evaluate"]
 
 
 def _prepare_mode_input(params: ProteinaComplexaInput, job_dir: Path) -> tuple[Path, str]:
@@ -619,7 +606,7 @@ def _collect_designs(
     if not pdbs:
         raise RuntimeError(
             f"Proteina-Complexa {params.mode} mode produced no PDBs under {run_dir}. "
-            "Likely the search cascade rejected every candidate."
+            "The generate/evaluate pipeline did not materialize design artifacts."
         )
 
     metrics_by_stem = _load_results_csv(run_dir / "results.csv")

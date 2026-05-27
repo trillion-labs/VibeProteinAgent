@@ -368,7 +368,7 @@ def test_bindcraft_no_design_warning_includes_failure_summary() -> None:
     )
 
     assert warnings == [
-        "BindCraft attempted 5 trajectories and accepted 0 designs "
+        "BindCraft attempted 5 trajectories but produced no collectable design PDBs "
         "(clashing=4, low_confidence=1)."
     ]
 

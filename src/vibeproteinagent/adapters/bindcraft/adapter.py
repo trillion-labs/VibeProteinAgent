@@ -4,8 +4,9 @@ BindCraft (Pacesa et al., ETH Zurich, upstream MIT licence) does AF2-backprop
 binder hallucination, ProteinMPNN sequence design and PyRosetta
 relax/scoring in one pipeline. The CLI entry point is
 ``bindcraft.py --settings ... --filters ... --advanced ...`` which
-runs an infinite trajectory loop until ``number_of_final_designs``
-binders pass the filter cascade.
+runs a trajectory loop until generated binder artifacts are available.
+VPA disables filtering/rejection thresholds and returns generated trajectory
+artifacts directly; evaluation tools can score and rank them downstream.
 
 Why a *separate conda env* instead of the ``vpa`` env
 ======================================================
@@ -81,8 +82,8 @@ _RUNNER_MODULE = "vibeproteinagent.adapters.bindcraft._runner"
 _RUNNER_SIDECAR_CALL = f"{_RUNNER_MODULE}:run_sidecar"
 
 
-class NoAcceptedBindCraftDesigns(RuntimeError):
-    """BindCraft completed but produced no accepted design PDBs."""
+class NoGeneratedBindCraftDesigns(RuntimeError):
+    """BindCraft completed but produced no generated design PDBs."""
 
 
 def _check_paths() -> None:
@@ -249,7 +250,6 @@ class BindCraftInput(BaseModel):
     max_trajectories: int | None = Field(default=None, ge=1, le=10_000)
     max_attempted_trajectories: int | None = Field(default=None, ge=1, le=10_000)
     max_runtime_s: int | None = Field(default=None, ge=1)
-    filter_mode: Literal["default", "permissive"] = "default"
 
     @model_validator(mode="before")
     @classmethod
@@ -295,7 +295,7 @@ class BindCraftDesign(BaseModel):
 
 
 class BindCraftOutput(BaseModel):
-    status: Literal["completed", "no_acceptable_candidate"] = "completed"
+    status: Literal["completed"] = "completed"
     designs: list[BindCraftDesign]
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
@@ -385,7 +385,7 @@ class BindCraftAdapter(ToolAdapter):
             )
         )
         filters_json.write_text(
-            json.dumps(_build_filters(BINDCRAFT_TREE, mode=params.filter_mode), indent=2)
+            json.dumps(_build_generation_filters(BINDCRAFT_TREE), indent=2)
         )
         advanced_json.write_text(
             json.dumps(_build_advanced(params, BINDCRAFT_PARAMS), indent=2)
@@ -402,6 +402,7 @@ class BindCraftAdapter(ToolAdapter):
                     "filters_json": str(filters_json),
                     "advanced_json": str(advanced_json),
                     "seed": params.seed,
+                    "generation_only": True,
                 },
                 timeout_s=params.max_runtime_s or 4 * 3600,
             )
@@ -411,16 +412,11 @@ class BindCraftAdapter(ToolAdapter):
             raise RuntimeError(str(exc)) from exc
         ctx.emit_progress(0.92)
 
-        try:
-            designs, collect_warnings = _collect_designs(
-                design_path=job_outputs,
-                binder_length=params.binder_length,
-            )
-            status: Literal["completed", "no_acceptable_candidate"] = "completed"
-        except NoAcceptedBindCraftDesigns as exc:
-            designs = []
-            collect_warnings = [str(exc)]
-            status = "no_acceptable_candidate"
+        designs, collect_warnings = _collect_designs(
+            design_path=job_outputs,
+            binder_length=params.binder_length,
+        )
+        status = "completed"
         failure_summary = _bindcraft_failure_summary(job_outputs)
         runtime_ms = int((time.time() - t0) * 1000)
         ctx.emit_progress(1.0)
@@ -446,9 +442,9 @@ class BindCraftAdapter(ToolAdapter):
             run_metadata={
                 "status": status,
                 "target_pdb": str(target_src),
-                "accepted_design_count": len(designs),
+                "generated_design_count": len(designs),
                 "failure_summary": failure_summary,
-                "filter_mode": params.filter_mode,
+                "filtering": "disabled",
                 "max_attempted_trajectories": params.max_attempted_trajectories,
                 "max_trajectories": params.max_trajectories,
             },
@@ -553,18 +549,17 @@ def _resolve_target_hotspots(params: BindCraftInput, target_pdb: Path):
     return resolution
 
 
-def _build_filters(tree: Path, mode: Literal["default", "permissive"] = "default") -> dict:
-    """Copy BindCraft's default filter cascade verbatim.
+def _build_generation_filters(tree: Path) -> dict:
+    """Build a BindCraft filters file that cannot reject generated artifacts.
 
-    We re-emit it under the job dir so each run is self-contained and
-    no global state from ``BINDCRAFT_TREE`` is consulted at runtime.
+    Upstream BindCraft requires a filters JSON argument. VPA's adapter
+    contract is generation-only, so we keep the file shape but null thresholds
+    to prevent accepted/rejected filtering from creating an empty candidate
+    stream.
     """
     default = tree / "settings_filters" / "default_filters.json"
     if default.is_file():
-        filters = json.loads(default.read_text())
-        if mode == "permissive":
-            return _without_filter_thresholds(filters)
-        return filters
+        return _without_filter_thresholds(json.loads(default.read_text()))
     return {}
 
 
@@ -637,7 +632,7 @@ def _build_advanced(params: BindCraftInput, params_dir: Path) -> dict:
         "optimise_beta_extra_temp": 0,
         "optimise_beta_recycles_design": max(params.num_recycles, 3),
         "optimise_beta_recycles_valid": max(params.num_recycles, 3),
-        "remove_unrelaxed_trajectory": True,
+        "remove_unrelaxed_trajectory": False,
         "remove_unrelaxed_complex": True,
         "remove_binder_monomer": True,
         "zip_animations": False,
@@ -651,7 +646,7 @@ def _build_advanced(params: BindCraftInput, params_dir: Path) -> dict:
             or params.max_trajectories
             or False
         ),
-        "enable_rejection_check": True,
+        "enable_rejection_check": False,
         "acceptance_rate": 0.05,
         "start_monitoring": 1000,
     }
@@ -722,7 +717,7 @@ def _bindcraft_budget_warnings(
     return [
         (
             "BindCraft attempted "
-            f"{attempted} trajectories and accepted 0 designs "
+            f"{attempted} trajectories but produced no collectable design PDBs "
             f"(clashing={failure_summary.get('clashing', 0)}, "
             f"low_confidence={failure_summary.get('low_confidence', 0)})."
         )
@@ -758,33 +753,20 @@ def _build_env(
 def _collect_designs(
     *, design_path: Path, binder_length: int
 ) -> tuple[list[BindCraftDesign], list[str]]:
-    """Walk BindCraft's output layout.
+    """Walk BindCraft's generated-artifact layout.
 
-    BindCraft writes accepted binders to ``<design_path>/Accepted/`` and
-    summary statistics to ``<design_path>/final_design_stats.csv``.
-
-    The accepted-PDB filenames carry a trailing ``_model{N}`` AF2-model index
-    (e.g. ``..._mpnn1_model2.pdb``) that the CSV's ``Design`` column omits
-    (``..._mpnn1``). We strip that suffix before the lookup; if the row is
-    still missing we fall back to parsing the binder sequence out of the PDB
-    chain B so the report doesn't silently render placeholder X's.
-
-    Returns ``(designs, warnings)`` so the caller can surface any
-    bookkeeping warnings on ``BindCraftOutput.warnings``.
+    VPA does not use BindCraft's filter acceptance as the output contract.
+    Prefer accepted PDBs when upstream writes them, but also collect relaxed,
+    low-confidence, clashing, and raw trajectory PDBs so a bounded generation
+    run returns generated candidates instead of an empty accepted stream.
     """
-    accepted_dir = design_path / "Accepted"
-    if not accepted_dir.is_dir():
-        raise NoAcceptedBindCraftDesigns(
-            f"BindCraft produced no Accepted/ directory under {design_path}. "
-            f"Likely no trajectories passed the filter cascade in the allotted budget."
-        )
-    pdbs = sorted(accepted_dir.glob("*.pdb"))
+    pdbs = _generated_bindcraft_pdbs(design_path)
     if not pdbs:
-        raise NoAcceptedBindCraftDesigns(
-            f"BindCraft Accepted/ directory at {accepted_dir} contains no PDBs."
+        raise NoGeneratedBindCraftDesigns(
+            f"BindCraft produced no generated PDB artifacts under {design_path}."
         )
 
-    stats = _load_final_stats(design_path / "final_design_stats.csv")
+    stats = _load_bindcraft_stats(design_path)
     designs: list[BindCraftDesign] = []
     warnings: list[str] = []
     for idx, pdb in enumerate(pdbs, start=1):
@@ -834,6 +816,33 @@ def _collect_designs(
             )
         )
     return designs, warnings
+
+
+def _generated_bindcraft_pdbs(design_path: Path) -> list[Path]:
+    rel_dirs = (
+        "Generated",
+        "Accepted",
+        "Accepted/Ranked",
+        "MPNN/Relaxed",
+        "MPNN",
+        "Trajectory/Relaxed",
+        "Trajectory/LowConfidence",
+        "Trajectory/Clashing",
+        "Trajectory",
+    )
+    seen: set[Path] = set()
+    pdbs: list[Path] = []
+    for rel_dir in rel_dirs:
+        folder = design_path / rel_dir
+        if not folder.is_dir():
+            continue
+        for pdb in sorted(folder.glob("*.pdb")):
+            resolved = pdb.resolve()
+            if resolved in seen or pdb.name.startswith("."):
+                continue
+            seen.add(resolved)
+            pdbs.append(pdb)
+    return pdbs
 
 
 def _bindcraft_candidate_id(pdb_path: Path, index: int, sequence: str) -> str:
@@ -934,8 +943,19 @@ def _extract_binder_sequence_from_pdb(pdb_path: Path, *, binder_chain: str) -> s
     return "".join(seq)
 
 
-def _load_final_stats(csv_path: Path) -> dict[str, dict[str, str]]:
-    """Parse BindCraft's ``final_design_stats.csv`` into a dict by Design name."""
+def _load_bindcraft_stats(design_path: Path) -> dict[str, dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    for csv_name in (
+        "final_design_stats.csv",
+        "trajectory_stats.csv",
+        "mpnn_design_stats.csv",
+    ):
+        rows.update(_load_stats_csv(design_path / csv_name))
+    return rows
+
+
+def _load_stats_csv(csv_path: Path) -> dict[str, dict[str, str]]:
+    """Parse a BindCraft stats CSV into a dict by design/stem name."""
     if not csv_path.is_file():
         return {}
     import csv
@@ -944,9 +964,19 @@ def _load_final_stats(csv_path: Path) -> dict[str, dict[str, str]]:
     with csv_path.open() as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            name = row.get("Design") or row.get("design") or ""
+            name = (
+                row.get("Design")
+                or row.get("design")
+                or row.get("Name")
+                or row.get("name")
+                or row.get("Trajectory")
+                or row.get("trajectory")
+                or ""
+            )
             if name:
-                rows[name] = row
+                stem = Path(str(name)).stem
+                rows[stem] = row
+                rows[re.sub(r"_model\d+$", "", stem)] = row
     return rows
 
 
@@ -975,6 +1005,6 @@ __all__ = [
     "BindCraftDesign",
     "BindCraftInput",
     "BindCraftOutput",
-    "NoAcceptedBindCraftDesigns",
+    "NoGeneratedBindCraftDesigns",
     "availability_skip_reason",
 ]

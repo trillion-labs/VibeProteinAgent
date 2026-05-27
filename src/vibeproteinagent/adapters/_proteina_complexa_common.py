@@ -11,8 +11,9 @@ License) that exposes one ``complexa`` CLI with three pipeline configs:
   (motif scaffolding into monomers, possibly with ligand context)
 
 Each variant has its own NGC checkpoint pair (``complexa{,_ligand,_ame}``
-+ matching ``_ae`` autoencoder). The CLI is hydra-based and runs the
-full ``generate → filter → evaluate → analyze`` cascade in one call.
++ matching ``_ae`` autoencoder). The CLI is hydra-based; VPA constrains
+adapter runs to ``generate → evaluate`` so filtering/analyze stages cannot
+turn generated artifacts into an empty candidate stream.
 
 Why a *separate uv venv* instead of the vpa env
 ================================================

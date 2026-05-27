@@ -1725,7 +1725,7 @@ def _env_exports(
                     options,
                 ),
             )
-        elif tool.name in {"pxdesign", "pxdesign_pipeline_multi_gpu"}:
+        elif tool.name == "pxdesign":
             exports.setdefault(
                 "VPA_PXDESIGN_PIPELINE_ENV",
                 _prebuilt_export_or_default(
@@ -1889,7 +1889,6 @@ def _sidecar_env_var(tool_name: str) -> str | None:
         "bindcraft": "VPA_BINDCRAFT_ENV_PATH",
         "proteina_complexa": "VPA_PROTEINA_COMPLEXA_VENV",
         "pxdesign": "VPA_PXDESIGN_PIPELINE_ENV",
-        "pxdesign_pipeline_multi_gpu": "VPA_PXDESIGN_PIPELINE_ENV",
         "rfdiffusion3": "VPA_RFDIFFUSION3_ENV",
     }.get(tool_name)
 

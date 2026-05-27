@@ -42,7 +42,7 @@
           },
           "confidence": {
             "type": ["number", "null"],
-            "description": "Refolding confidence (ipTM blend from Boltz-2; null in design-only mode)."
+            "description": "Refolding confidence (ipTM blend from Boltz-2; null when the analyze step cannot produce a confidence score)."
           }
         },
         "additionalProperties": false

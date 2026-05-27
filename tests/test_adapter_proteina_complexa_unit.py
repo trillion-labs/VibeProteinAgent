@@ -54,23 +54,10 @@ def test_input_schema_mode_contract() -> None:
         "ligand_binder",
         "motif",
     ]
-    assert raw["properties"]["steps"]["items"]["enum"] == [
-        "generate",
-        "filter",
-        "evaluate",
-        "analyze",
-    ]
+    assert "steps" not in raw["properties"]
     descriptor = load_descriptor(_DESCRIPTOR)
     schema = resolve_input_schema(descriptor)
     validate_against(schema, {"mode": "protein_binder", "target_pdb": "/tmp/t.pdb"})
-    validate_against(
-        schema,
-        {
-            "mode": "protein_binder",
-            "target_pdb": "/tmp/t.pdb",
-            "steps": ["generate", "filter"],
-        },
-    )
     validate_against(
         schema,
         {
@@ -193,7 +180,7 @@ def test_protein_chain_input_spec_preserves_discontinuous_residue_ranges(
     assert common.protein_chain_input_spec(pdb, "A") == "A2-3/A8/A10"
 
 
-def test_proteina_complexa_step_defaults_and_overrides() -> None:
+def test_proteina_complexa_steps_are_fixed_to_generate_evaluate() -> None:
     protein = ProteinaComplexaInput(mode="protein_binder", target_pdb="/tmp/t.pdb")
     motif = ProteinaComplexaInput(
         mode="motif",
@@ -201,14 +188,8 @@ def test_proteina_complexa_step_defaults_and_overrides() -> None:
         motif_residues=[1],
         total_length=80,
     )
-    smoke = ProteinaComplexaInput(
-        mode="protein_binder",
-        target_pdb="/tmp/t.pdb",
-        steps=["generate", "filter"],
-    )
-    assert adapter_mod._resolve_steps(protein) is None
-    assert adapter_mod._resolve_steps(motif) == ["generate", "evaluate", "analyze"]
-    assert adapter_mod._resolve_steps(smoke) == ["generate", "filter"]
+    assert adapter_mod._resolve_steps(protein) == ["generate", "evaluate"]
+    assert adapter_mod._resolve_steps(motif) == ["generate", "evaluate"]
 
 
 def test_build_design_cmd_separates_steps_from_hydra_overrides(tmp_path: Path) -> None:
@@ -220,7 +201,7 @@ def test_build_design_cmd_separates_steps_from_hydra_overrides(tmp_path: Path) -
             "++run_name=coverage_proteina_complexa_seed301",
             "++generation.reward_model=null",
         ],
-        steps=["generate", "filter"],
+        steps=["generate", "evaluate"],
         venv=venv,
     )
 
@@ -229,7 +210,7 @@ def test_build_design_cmd_separates_steps_from_hydra_overrides(tmp_path: Path) -
         "design",
         "--steps",
         "generate",
-        "filter",
+        "evaluate",
         "--",
         str(config),
         "++run_name=coverage_proteina_complexa_seed301",

@@ -11,7 +11,7 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["completed", "no_acceptable_candidate"],
+      "enum": ["completed"],
       "default": "completed"
     },
     "designs": {
@@ -23,12 +23,12 @@
           "candidate_id": {
             "type": ["string", "null"],
             "minLength": 1,
-            "description": "Stable identifier for this accepted BindCraft design, emitted by the adapter when available."
+            "description": "Stable identifier for this generated BindCraft design, emitted by the adapter when available."
           },
           "pdb_path": {
             "type": "string",
             "minLength": 1,
-            "description": "Path to the accepted binder PDB (BindCraft writes these under ``<design_path>/Accepted/``)."
+            "description": "Path to a generated binder PDB collected from BindCraft output artifacts."
           },
           "sequence": {
             "type": "string",

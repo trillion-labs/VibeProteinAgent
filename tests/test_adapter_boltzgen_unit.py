@@ -65,8 +65,6 @@ def test_input_defaults():
     assert p.num_designs == 10
     assert p.num_diffusion_steps == 500
     assert p.protocol == "protein-anything"
-    assert p.design_only is False
-    assert p.budget == 10
     assert p.seed is None
 
 
@@ -176,10 +174,9 @@ def test_stage_design_spec_from_yaml_copies_referenced_files(tmp_path):
     assert written.is_file()
 
 
-def test_build_cmd_design_only_includes_steps_filter(tmp_path):
+def test_build_cmd_runs_generation_pipeline_without_filter(tmp_path):
     p = BoltzGenInput(
         target_pdb="/tmp/a.pdb",
-        design_only=True,
         num_designs=1,
         num_diffusion_steps=10,
     )
@@ -187,27 +184,22 @@ def test_build_cmd_design_only_includes_steps_filter(tmp_path):
         design_spec=tmp_path / "design.yaml",
         output_dir=tmp_path / "out",
         params=p,
-        steps=["design"],
     )
     assert "--no_subprocess" in cmd
     assert "--use_kernels" in cmd and "false" in cmd
     assert "--steps" in cmd
+    step_idx = cmd.index("--steps")
+    assert cmd[step_idx + 1: step_idx + 5] == [
+        "design",
+        "inverse_fold",
+        "folding",
+        "analyze",
+    ]
+    assert "filter" not in cmd
     assert "--protocol" in cmd
     # The diffusion sampling step count is forwarded via ``--config design sampling_steps=<n>``.
     joined = " ".join(cmd)
     assert "sampling_steps=10" in joined
-
-
-def test_build_cmd_full_pipeline_omits_steps_filter(tmp_path):
-    p = BoltzGenInput(target_pdb="/tmp/a.pdb", design_only=False)
-    cmd = _build_cmd(
-        design_spec=tmp_path / "design.yaml",
-        output_dir=tmp_path / "out",
-        params=p,
-        steps=None,
-    )
-    assert "--steps" not in cmd
-
 
 def test_build_env_hygiene():
     env = _build_env(seed=None)
@@ -259,26 +251,24 @@ def test_boltzgen_subprocess_failure_records_artifact_paths(monkeypatch, tmp_pat
     assert "hydride" in details["stderr_tail"]
 
 
-def test_collect_designs_design_only_reads_intermediate(tmp_path):
+def test_collect_designs_reads_refolded_outputs(tmp_path):
     out = tmp_path / "out"
-    inter = out / "intermediate_designs"
-    inter.mkdir(parents=True)
-    (inter / "1g13_0.cif").write_text("# fake")
-    (inter / "1g13_1.cif").write_text("# fake")
-    (inter / "1g13_native.cif").write_text("# native — should be skipped")
-    params = BoltzGenInput(target_pdb="/tmp/a.pdb", design_only=True, binder_length=42)
+    refold = out / "intermediate_designs_inverse_folded" / "refold_cif"
+    refold.mkdir(parents=True)
+    (refold / "1g13_0.cif").write_text("# fake")
+    (refold / "1g13_1.cif").write_text("# fake")
+    params = BoltzGenInput(target_pdb="/tmp/a.pdb", binder_length=42)
     designs = _collect_designs(output_dir=out, params=params)
     assert len(designs) == 2
     assert all(d.length == 42 for d in designs)
-    assert all(d.sequence is None for d in designs)
-    assert all(not d.cif_path.endswith("_native.cif") for d in designs)
 
 
-def test_collect_designs_design_only_reads_root_output_fallback(tmp_path):
+def test_collect_designs_falls_back_to_final_ranked_outputs(tmp_path):
     out = tmp_path / "out"
-    out.mkdir()
-    (out / "design.cif").write_text("# fake")
-    params = BoltzGenInput(target_pdb="/tmp/a.pdb", design_only=True, binder_length=42)
+    final = out / "final_ranked_designs" / "final_1_designs"
+    final.mkdir(parents=True)
+    (final / "design.cif").write_text("# fake")
+    params = BoltzGenInput(target_pdb="/tmp/a.pdb", binder_length=42)
     designs = _collect_designs(output_dir=out, params=params)
     assert len(designs) == 1
     assert designs[0].cif_path.endswith("design.cif")
@@ -287,9 +277,9 @@ def test_collect_designs_design_only_reads_root_output_fallback(tmp_path):
 
 def test_collect_designs_raises_when_no_designs(tmp_path):
     out = tmp_path / "out"
-    (out / "intermediate_designs").mkdir(parents=True)
-    p = BoltzGenInput(target_pdb="/tmp/a.pdb", design_only=True)
-    with pytest.raises(RuntimeError, match="no design CIFs"):
+    (out / "intermediate_designs_inverse_folded").mkdir(parents=True)
+    p = BoltzGenInput(target_pdb="/tmp/a.pdb")
+    with pytest.raises(RuntimeError, match="refolded design CIFs"):
         _collect_designs(output_dir=out, params=p)
 
 

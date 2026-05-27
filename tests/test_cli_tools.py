@@ -32,7 +32,7 @@ def test_tools_include_internal_is_explicit(
     assert "noop" in names
     assert "mpnn_to_protenix_input" in names
     assert "sequence_to_protenix_input" in names
-    assert "pxdesign_pipeline_multi_gpu" in names
+    assert "pxdesign_pipeline_multi_gpu" not in names
 
 
 def test_tools_filter_by_category_misc(runner: CliRunner, isolated_vpa_home: Path) -> None:

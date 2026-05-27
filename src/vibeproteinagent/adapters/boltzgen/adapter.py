@@ -6,7 +6,7 @@ and the HuggingFace-style model + dataset cache at ``$VPA_BOLTZGEN_CACHE``
 (default ``$VPA_HOME/cache/boltzgen``).
 
 Why subprocess: BoltzGen orchestrates a multi-step pipeline (design,
-inverse_fold, folding, analyze, filter) with non-trivial state in
+inverse_fold, folding, analyze) with non-trivial state in
 ``omegaconf`` configs and PyTorch Lightning callbacks. Driving each
 ``boltzgen run`` invocation as a subprocess gives us the strongest
 isolation (no global-state bleed between adapters, no leftover
@@ -118,8 +118,6 @@ class BoltzGenInput(BaseModel):
     num_designs: int = Field(default=10, ge=1, le=256)
     num_diffusion_steps: int = Field(default=500, ge=5, le=1000)
     protocol: str = Field(default="protein-anything")
-    design_only: bool = Field(default=False)
-    budget: int = Field(default=10, ge=1, le=256)
     seed: int | None = Field(default=None)
 
     @model_validator(mode="before")
@@ -187,8 +185,7 @@ class BoltzGenAdapter(ToolAdapter):
 
     Each ``run()`` shells out to ``python -m boltzgen.cli.boltzgen run``
     against the on-disk BoltzGen tree. Outputs are collected from
-    ``intermediate_designs/`` (design-only mode) or
-    ``final_ranked_designs/`` (full pipeline mode).
+    ``intermediate_designs_inverse_folded/refold_cif/`` after folding/analyze.
     """
 
     def __init__(self, config: dict, weights_dir: Path, device: torch.device) -> None:
@@ -214,19 +211,10 @@ class BoltzGenAdapter(ToolAdapter):
         design_spec = _stage_design_spec(params, job_inputs)
         ctx.emit_progress(0.08)
 
-        # Decide which pipeline steps to run. Design-only is the fastest path
-        # (single diffusion sampling), full pipeline adds inverse_fold +
-        # folding + analyze + filter.
-        if params.design_only:
-            steps = ["design"]
-        else:
-            steps = None  # all steps
-
         cmd = _build_cmd(
             design_spec=design_spec,
             output_dir=job_outputs,
             params=params,
-            steps=steps,
         )
         env = _build_env(params.seed)
 
@@ -410,7 +398,6 @@ def _build_cmd(
     design_spec: Path,
     output_dir: Path,
     params: BoltzGenInput,
-    steps: list[str] | None,
 ) -> list[str]:
     """Assemble the ``boltzgen run`` command line."""
     cmd: list[str] = [
@@ -427,8 +414,6 @@ def _build_cmd(
         params.protocol,
         "--num_designs",
         str(params.num_designs),
-        "--budget",
-        str(params.budget),
         "--devices",
         "1",
         "--num_workers",
@@ -439,9 +424,12 @@ def _build_cmd(
         "--config",
         "design",
         f"sampling_steps={params.num_diffusion_steps}",
+        "--steps",
+        "design",
+        "inverse_fold",
+        "folding",
+        "analyze",
     ]
-    if steps is not None:
-        cmd.extend(["--steps", *steps])
     return cmd
 
 
@@ -481,7 +469,7 @@ def _detect_failure_stage(stdout_path: Path, stderr_path: Path) -> str | None:
     text = f"{_tail(stdout_path, limit=12000)}\n{_tail(stderr_path, limit=12000)}".lower()
     positions = {
         stage: text.rfind(stage)
-        for stage in ("design", "inverse_fold", "folding", "analyze", "filter")
+        for stage in ("design", "inverse_fold", "folding", "analyze")
     }
     stage, pos = max(positions.items(), key=lambda item: item[1])
     return stage if pos >= 0 else None
@@ -494,82 +482,45 @@ def _collect_designs(
 ) -> list[BoltzGenDesign]:
     """Walk BoltzGen's output layout and return canonical BoltzGenDesign records.
 
-    Two cases:
-
-    1. ``design_only=True`` — read ``output_dir/intermediate_designs/*.cif``
-       (skipping ``*_native.cif`` reference structures). No sequences / scores
-       yet at this stage.
-    2. ``design_only=False`` — read ``output_dir/final_ranked_designs/
-       final_<budget>_designs/`` and load per-design scores from
-       ``all_designs_metrics.csv``.
+    VPA runs design -> inverse_fold -> folding -> analyze and intentionally
+    skips BoltzGen's filter step. The primary output is therefore the refolded
+    CIF set under ``intermediate_designs_inverse_folded/refold_cif``. If a
+    final-ranked directory is present from a previous/upstream-compatible run,
+    it is accepted as a fallback, but filtering is never required for success.
     """
     designs: list[BoltzGenDesign] = []
-    if params.design_only:
-        design_dir = output_dir / "intermediate_designs"
-        if design_dir.is_dir():
-            search_dir = design_dir
-        else:
-            search_dir = output_dir
-        if not search_dir.is_dir():
-            raise RuntimeError(
-                f"BoltzGen design step did not produce {design_dir} or {output_dir}. "
-                f"Inspect the worker log for the underlying failure."
-            )
-        cifs = sorted(
-            fp
-            for fp in search_dir.glob("*.cif")
-            if not fp.name.endswith("_native.cif")
-        )
-        if not cifs:
-            raise RuntimeError(
-                f"BoltzGen produced no design CIFs under {search_dir}"
-            )
-        for idx, cif in enumerate(cifs, start=1):
+    fallback = output_dir / "intermediate_designs_inverse_folded" / "refold_cif"
+    if fallback.is_dir():
+        metrics_by_id = _load_boltzgen_metrics(output_dir)
+        for idx, cif in enumerate(sorted(fallback.glob("*.cif")), start=1):
+            row = metrics_by_id.get(cif.stem, {})
+            sequence = row.get("sequence") or None
             designs.append(
                 BoltzGenDesign(
-                    candidate_id=_design_candidate_id(idx, cif),
+                    candidate_id=_design_candidate_id(idx, cif, sequence),
                     cif_path=str(cif),
-                    pdb_path=None,
-                    sequence=None,
-                    length=params.binder_length,
-                    score=None,
-                    affinity_pred_value=None,
-                    affinity_probability_binary=None,
-                    confidence=None,
+                    sequence=sequence,
+                    length=_safe_int(row.get("design_length")) or params.binder_length,
+                    score=_safe_float(row.get("score")),
+                    affinity_pred_value=_safe_float(row.get("affinity_pred_value")),
+                    affinity_probability_binary=_safe_float(
+                        row.get("affinity_probability_binary")
+                    ),
+                    confidence=_safe_float(row.get("iptm"))
+                    or _safe_float(row.get("confidence")),
                 )
             )
-        return designs
+        if designs:
+            return designs
 
-    # full pipeline path
     final_dir = output_dir / "final_ranked_designs"
-    metrics_csv = final_dir / "all_designs_metrics.csv"
     final_set_dir = next(final_dir.glob("final_*_designs"), None)
     if final_set_dir is None:
-        # No designs survived filtering — fall back to refold_cif.
-        fallback = output_dir / "intermediate_designs_inverse_folded" / "refold_cif"
-        if fallback.is_dir():
-            for idx, cif in enumerate(sorted(fallback.glob("*.cif")), start=1):
-                designs.append(
-                    BoltzGenDesign(
-                        candidate_id=_design_candidate_id(idx, cif),
-                        cif_path=str(cif),
-                        length=params.binder_length,
-                    )
-                )
-            return designs
         raise RuntimeError(
-            f"BoltzGen did not produce a final design set under {final_dir} "
-            f"and no refold_cif fallback exists at {fallback}."
+            f"BoltzGen did not produce refolded design CIFs under {fallback}."
         )
 
-    metrics_by_id: dict[str, dict[str, str]] = {}
-    if metrics_csv.is_file():
-        with metrics_csv.open("r", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                key = row.get("id") or row.get("design_id") or row.get("name") or ""
-                if key:
-                    metrics_by_id[key] = row
+    metrics_by_id = _load_boltzgen_metrics(output_dir)
 
     for idx, cif in enumerate(sorted(final_set_dir.glob("*.cif")), start=1):
         stem = cif.stem
@@ -592,6 +543,23 @@ def _collect_designs(
             )
         )
     return designs
+
+
+def _load_boltzgen_metrics(output_dir: Path) -> dict[str, dict[str, str]]:
+    metrics_by_id: dict[str, dict[str, str]] = {}
+    for metrics_csv in (
+        output_dir / "intermediate_designs_inverse_folded" / "all_designs_metrics.csv",
+        output_dir / "final_ranked_designs" / "all_designs_metrics.csv",
+    ):
+        if not metrics_csv.is_file():
+            continue
+        with metrics_csv.open("r", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                key = row.get("id") or row.get("design_id") or row.get("name") or ""
+                if key:
+                    metrics_by_id[Path(key).stem] = row
+    return metrics_by_id
 
 
 def _safe_int(s: str | None) -> int | None:
@@ -656,7 +624,7 @@ def _boltzgen_candidates(
             "capabilities": candidate_capability_flags(
                 has_sequence=bool(design.sequence),
                 has_backbone_structure=bool(structure_path),
-                has_full_structure=bool(structure_path) and not params.design_only,
+                has_full_structure=bool(structure_path),
                 has_candidate_scores=True,
             ),
         }

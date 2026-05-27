@@ -89,7 +89,6 @@ CANONICAL_PRODUCERS.update(
         "rfdiffusion3",
         "rfpeptides",
         "pxdesign",
-        "pxdesign_pipeline_multi_gpu",
         "boltzgen",
         "ligandmpnn",
         "sequence_edit",
@@ -107,7 +106,6 @@ CANONICAL_CONSUMERS.update(
         "rfdiffusion3": "candidates",
         "rfpeptides": "candidates",
         "pxdesign": "candidates",
-        "pxdesign_pipeline_multi_gpu": "candidates",
         "boltzgen": "candidates",
         "ligandmpnn": "candidates",
         "sequence_edit": "candidates",
@@ -122,7 +120,6 @@ CANONICAL_CONSUMERS.update(
 EXPLICIT_MODE_TOOLS.update(
     {
         "foldseek": ["easy-search", "easy-cluster"],
-        "pxdesign": ["infer", "pipeline"],
         "sequence_edit": ["mutate_residues", "check_wt_consistency"],
         "pyrosetta": ["score", "interface", "relax", "pack"],
         "proteina_complexa": ["protein_binder", "ligand_binder", "motif"],
@@ -202,7 +199,6 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "ligandmpnn": _contract(consumes=_BACKBONE, produces=_SEQUENCE),
     "bindcraft": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
     "pxdesign": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
-    "pxdesign_pipeline_multi_gpu": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
     "proteina_complexa": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
     "protenix_v2": _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES),
     "boltz2_affinity": _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES),
@@ -277,23 +273,13 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
     ],
     "boltzgen": [
         {
-            "name": "full_pipeline",
+            "name": "design_inverse_fold_folding_analyze",
             "default": True,
-            "inputs": {"design_only": False},
+            "inputs": {},
             "produces": sorted(_FULL_SEQUENCE_SCORES),
             "description": (
-                "Runs the full generator, inverse-folding, folding, analysis, "
-                "and filtering path; intended to emit sequenced, ranked full-structure candidates."
-            ),
-        },
-        {
-            "name": "design_only",
-            "default": False,
-            "inputs": {"design_only": True},
-            "produces": sorted(_BACKBONE),
-            "description": (
-                "Runs only diffusion backbone generation; use only when downstream "
-                "tools do not need sequence or final ranked candidate scores."
+                "Runs design, inverse-folding, folding, and analysis. Filtering is not part "
+                "of the VPA adapter contract."
             ),
         },
     ],
@@ -309,30 +295,15 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
     ],
     "pxdesign": [
         {
-            "name": "infer",
-            "default": True,
-            "inputs": {"mode": "infer", "target_pdb": "<path or canonical candidates>"},
-            "consumes": sorted(_FULL_STRUCTURE),
-            "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Requires a target structure and emits designed structure candidates with sequence and scores when extraction succeeds.",
-        },
-        {
-            "name": "pipeline",
-            "default": False,
-            "inputs": {"mode": "pipeline", "target_pdb": "<path or canonical candidates>"},
-            "consumes": sorted(_FULL_STRUCTURE),
-            "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Runs the pipeline path and emits sequenced, scored full-structure candidates.",
-        },
-    ],
-    "pxdesign_pipeline_multi_gpu": [
-        {
             "name": "pipeline",
             "default": True,
-            "inputs": {"mode": "pipeline", "target_pdb": "<path or canonical candidates>"},
+            "inputs": {"target_pdb": "<path or canonical candidates>"},
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Multi-GPU pipeline alias that emits sequenced, scored full-structure candidates.",
+            "description": (
+                "Runs target-conditioned diffusion, AF2 initial guess, and ProteinMPNN "
+                "sequence generation. Filtering is not part of the VPA adapter contract."
+            ),
         },
     ],
     "proteina_complexa": [
@@ -436,8 +407,6 @@ def candidate_contract_for_inputs(
         return _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES)
     if tool_name == "pxdesign":
         return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
-    if tool_name == "pxdesign_pipeline_multi_gpu":
-        return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
     if tool_name == "proteina_complexa":
         return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
     if tool_name == "pyrosetta":
@@ -445,14 +414,6 @@ def candidate_contract_for_inputs(
         if mode == "interface":
             return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES)
         return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES)
-    if tool_name == "boltzgen":
-        if inputs.get("design_only") is True:
-            base = candidate_contract(tool_name)
-            return _contract(
-                consumes=base.consumes,
-                produces=_BACKBONE,
-                preserves_upstream=base.preserves_upstream,
-            )
     return candidate_contract(tool_name)
 
 

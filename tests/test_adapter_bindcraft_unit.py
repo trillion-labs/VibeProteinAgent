@@ -20,12 +20,12 @@ from vibeproteinagent.adapters.bindcraft.adapter import (
     _as_float,
     _build_advanced,
     _build_env,
-    _build_filters,
+    _build_generation_filters,
     _build_target_settings,
     _collect_designs,
     _conda_env_exists,
     _find_conda_exe,
-    _load_final_stats,
+    _load_bindcraft_stats,
 )
 
 
@@ -127,14 +127,10 @@ def test_build_target_settings_shape(tmp_path):
     assert s["design_path"].endswith("/out/") or s["design_path"].endswith("\\out\\")
 
 
-def test_build_filters_uses_upstream_defaults_when_present(tmp_path):
-    # Real vendor tree has the file; verify we read a non-empty dict.
-    f = _build_filters(BINDCRAFT_TREE)
-    assert isinstance(f, dict)
-    assert any(v.get("threshold") is not None for v in f.values() if isinstance(v, dict))
-    permissive = _build_filters(BINDCRAFT_TREE, mode="permissive")
-    assert permissive
-    for conditions in permissive.values():
+def test_build_generation_filters_disables_thresholds(tmp_path):
+    filters = _build_generation_filters(BINDCRAFT_TREE)
+    assert isinstance(filters, dict)
+    for conditions in filters.values():
         if not isinstance(conditions, dict):
             continue
         if "threshold" in conditions:
@@ -143,9 +139,7 @@ def test_build_filters_uses_upstream_defaults_when_present(tmp_path):
             for aa_conditions in conditions.values():
                 if isinstance(aa_conditions, dict) and "threshold" in aa_conditions:
                     assert aa_conditions["threshold"] is None
-    # Empty when no path exists.
-    f2 = _build_filters(tmp_path / "nope")
-    assert f2 == {}
+    assert _build_generation_filters(tmp_path / "nope") == {}
 
 
 def test_build_advanced_carries_recycle_and_params(tmp_path):
@@ -160,8 +154,8 @@ def test_build_advanced_carries_recycle_and_params(tmp_path):
     assert adv["enable_mpnn"] is True
     assert adv["model_path"] == "v_48_020"
     assert adv["save_trajectory_pickle"] is False
-    assert adv["remove_unrelaxed_trajectory"] is True
-    assert adv["enable_rejection_check"] is True
+    assert adv["remove_unrelaxed_trajectory"] is False
+    assert adv["enable_rejection_check"] is False
     assert adv["optimise_beta_recycles_design"] >= 3
     assert adv["optimise_beta_recycles_valid"] >= 3
     assert adv["max_trajectories"] == 3
@@ -271,19 +265,19 @@ def test_collect_designs_falls_back_to_chain_b_sequence_when_stats_missing(tmp_p
     assert "recovered sequence from PDB chain B" in warnings[0]
 
 
-def test_collect_designs_raises_when_no_accepted_dir(tmp_path):
-    with pytest.raises(RuntimeError, match="no Accepted/ directory"):
+def test_collect_designs_raises_when_no_generated_artifacts(tmp_path):
+    with pytest.raises(RuntimeError, match="no generated PDB artifacts"):
         _collect_designs(design_path=tmp_path, binder_length=10)
 
 
-def test_collect_designs_raises_when_accepted_empty(tmp_path):
+def test_collect_designs_raises_when_output_dirs_empty(tmp_path):
     (tmp_path / "Accepted").mkdir()
-    with pytest.raises(RuntimeError, match="contains no PDBs"):
+    with pytest.raises(RuntimeError, match="no generated PDB artifacts"):
         _collect_designs(design_path=tmp_path, binder_length=10)
 
 
-def test_load_final_stats_handles_missing_csv(tmp_path):
-    assert _load_final_stats(tmp_path / "nope.csv") == {}
+def test_load_bindcraft_stats_handles_missing_csv(tmp_path):
+    assert _load_bindcraft_stats(tmp_path) == {}
 
 
 def test_as_float_handles_edge_cases():
@@ -384,8 +378,27 @@ def test_adapter_run_uses_persistent_sidecar(monkeypatch, tmp_path):
     first_call = created[0].calls[0][1]
     assert first_call["bindcraft_py"].endswith("bindcraft.py")
     assert first_call["settings_json"].endswith("target_settings.json")
+    assert first_call["generation_only"] is True
     adapter.unload()
     assert created[0].closed is True
+
+
+def test_collect_designs_prefers_generated_outputs(tmp_path):
+    generated = tmp_path / "Generated"
+    generated.mkdir()
+    (generated / "target_l30_s1_mpnn1_model1.pdb").write_text("ATOM\nEND\n")
+    (tmp_path / "final_design_stats.csv").write_text(
+        "Design,Sequence,Average_i_pTM,Average_pLDDT,Average_i_pAE,Binder_SAP_score\n"
+        "target_l30_s1_mpnn1,ACDEFGHIKL,0.81,0.92,4.2,9.4\n"
+    )
+
+    designs, warnings = _collect_designs(design_path=tmp_path, binder_length=10)
+
+    assert warnings == []
+    assert len(designs) == 1
+    assert designs[0].pdb_path.endswith("Generated/target_l30_s1_mpnn1_model1.pdb")
+    assert designs[0].sequence == "ACDEFGHIKL"
+    assert designs[0].iptm == pytest.approx(0.81)
 
 
 def test_runner_module_parses():

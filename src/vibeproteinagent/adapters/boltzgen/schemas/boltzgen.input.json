@@ -74,20 +74,6 @@
       "description": "BoltzGen protocol controlling which pipeline steps run and default model choices. Use `protein-anything` for generic mini-binders, `peptide-anything` for short peptides, `protein-small_molecule` for ligand-binding pockets, `antibody-anything`/`nanobody-anything` for antibody-domain designs.",
       "examples": ["protein-anything", "peptide-anything", "protein-small_molecule"]
     },
-    "design_only": {
-      "type": "boolean",
-      "default": false,
-      "description": "If false, run the full pipeline (design + inverse_fold + folding + analyze + filter) and emit sequenced, refolded, ranked designs. If true, run only the diffusion backbone generation step.",
-      "examples": [false, true]
-    },
-    "budget": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 256,
-      "default": 10,
-      "description": "Final ranked design set size after filtering. Only meaningful when `design_only` is false.",
-      "examples": [10, 50]
-    },
     "seed": {
       "type": ["integer", "null"],
       "default": null,

@@ -21,6 +21,7 @@ def run_sidecar(
     filters_json: str,
     advanced_json: str,
     seed: int | None = None,
+    generation_only: bool = True,
 ) -> dict[str, object]:
     """Run BindCraft's CLI entrypoint inside the persistent sidecar process."""
     script = Path(bindcraft_py)
@@ -49,6 +50,8 @@ def run_sidecar(
             "--advanced",
             str(advanced_json),
         ]
+        if generation_only:
+            sys.argv.append("--generation-only")
         try:
             runpy.run_path(str(script), run_name="__main__")
         except SystemExit as exc:

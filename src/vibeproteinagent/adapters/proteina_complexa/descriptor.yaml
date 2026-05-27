@@ -1,7 +1,7 @@
 name: proteina_complexa
 version: "1.0.0"
 category: protein_design
-description: "Atomistic design: protein_binder, ligand_binder, and motif. Motif/pocket integer residues are FASTA/sequence 1-indexed when matching sequence/fasta is provided; *_residue_ids are PDB IDs."
+description: "Atomistic design: protein_binder, ligand_binder, and motif. VPA runs generate + evaluate only; filtering and analyze stages are not part of the adapter contract."
 runtime: python
 backend: pytorch
 gpu_required: true

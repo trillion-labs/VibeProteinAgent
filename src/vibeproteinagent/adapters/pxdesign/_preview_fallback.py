@@ -1,4 +1,4 @@
-"""Artifact fallback for PXDesign preview pipeline mode.
+"""Artifact fallback for PXDesign preview pipeline.
 
 The upstream preview pipeline can write raw diffusion CIFs with an ``xpb``
 placeholder binder chain before AF2/ColabDesign post-processing finishes. On

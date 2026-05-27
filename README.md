@@ -255,10 +255,10 @@ add requested tools as time allows.
 | `proteinmpnn` | inverse folding | Fast sequence design for fixed protein backbones, often used after backbone generation. |
 | `protenix_v2` | structure prediction | AlphaFold3-like protein/complex structure prediction for refolding and candidate validation. |
 | `boltz2_affinity` | structure prediction | Boltz-2 structure prediction plus calibrated binding affinity for protein-ligand or complex assessment. |
-| `bindcraft` | protein design | AF2-backprop binder hallucination with ProteinMPNN redesign and downstream scoring. |
-| `boltzgen` | protein design | Binder generation pipeline with diffusion, inverse folding, refolding, and filtering. |
-| `proteina_complexa` | protein design | Unified Proteina-Complexa modes for protein binders, ligand binders, and motif scaffolding. |
-| `pxdesign` | protein design | Target-conditioned binder design using diffusion-style protein generation and optional pipeline scoring. |
+| `bindcraft` | protein design | AF2-backprop binder trajectory generation with ProteinMPNN redesign and emitted scores when available. |
+| `boltzgen` | protein design | Binder generation pipeline with diffusion, inverse folding, refolding, and analysis. |
+| `proteina_complexa` | protein design | Unified Proteina-Complexa modes for protein binders, ligand binders, and motif scaffolding; VPA runs generate + evaluate. |
+| `pxdesign` | protein design | Target-conditioned binder design using diffusion, AF2 initial guess, and ProteinMPNN sequence generation. |
 | `rfdiffusion3` | protein design | RFdiffusion3 binder backbone generation for modern de novo and target-conditioned design runs. |
 | `rfpeptides` | protein design | RFdiffusion-based macrocyclic peptide backbone generation for constrained peptide binders. |
 | `esm3` | embedding/design | ESM3 sequence/structure co-generation, embeddings, and functional keyword conditioning. |

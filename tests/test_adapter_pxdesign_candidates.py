@@ -5,8 +5,6 @@ from pydantic import ValidationError
 
 from vibeproteinagent.adapters.pxdesign.adapter import PXDesignDesign, PXDesignInput, PXDesignOutput, _pxdesign_candidates
 from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
-from vibeproteinagent.agents.planning.compiler import compile_planner_ir
-from vibeproteinagent.agents.planning.fixup import StructuredFixup
 
 
 def _candidate() -> dict:
@@ -24,7 +22,7 @@ def test_pxdesign_emits_canonical_candidates() -> None:
     validate_candidate_v1(candidate)
     assert candidate["source"]["tool"] == "pxdesign"
     assert candidate["source"]["native_id"] == "legacy"
-    assert candidate["scores"]["pxdesign"]["mode"] == "infer"
+    assert candidate["scores"]["pxdesign"]["pipeline"] == "diffusion_af2_initial_guess_proteinmpnn"
 
 
 def test_pxdesign_candidate_ids_are_deterministic() -> None:
@@ -43,11 +41,3 @@ def test_pxdesign_consumes_canonical_legacy_and_rejects_mixed() -> None:
     assert PXDesignInput(target_pdb="/tmp/target.pdb", target_chain="A", binder_length=60).target_pdb == "/tmp/target.pdb"
     with pytest.raises(ValidationError, match="Mixed canonical and legacy"):
         PXDesignInput(candidates=[_candidate(), {"target_pdb": "/tmp/legacy.pdb"}], target_chain="A", binder_length=60)
-
-
-def test_pxdesign_explicit_mode_enforcement() -> None:
-    with pytest.raises(StructuredFixup):
-        compile_planner_ir(_ir())
-    assert compile_planner_ir(_ir({"mode": "pipeline"}))["workflow_plan"]["nodes"][0]["inputs"]["mode"] == "pipeline"
-    with pytest.raises(StructuredFixup):
-        compile_planner_ir(_ir({"mode": "bad"}))

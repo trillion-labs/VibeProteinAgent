@@ -16,16 +16,11 @@ The Phase 5.1 hand-off (note ``9b227bfb-…``) documents:
 * A fair-esm stub injection is required before ``import pxdesign`` to satisfy
   ``protenix-pxd/protenix/data/compute_esm.py``'s top-level
   ``from esm import FastaBatchedDataset, pretrained``.
-
-The warm-load path stops after ``init_env / init_basics / init_model /
-load_checkpoint``; ``init_dumper`` and ``init_data`` are re-run per call
-because they bind the InferenceRunner to a specific input/output dir.
 """
 from __future__ import annotations
 
 import csv
 import hashlib
-import importlib
 import json
 import os
 import shutil
@@ -46,11 +41,7 @@ from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
-from vibeproteinagent.core.errors import DependencyError, InvalidParamsError, VPAError
-from vibeproteinagent.workers.sidecar import (
-    PersistentPythonSidecar,
-    SidecarRuntimeSpec,
-)
+from vibeproteinagent.core.errors import DependencyError
 
 # --------------------------------------------------------------------------- paths
 
@@ -112,16 +103,13 @@ PXDESIGN_CKPT_DIR = Path(
     os.environ.get("VPA_PXDESIGN_CKPT_DIR", str(PXDESIGN_CKPT_DIR_DEFAULT))
 ).expanduser()
 
-# Dedicated conda env for the `pipeline` mode (AF2-IG + ProteinMPNN + filters).
-# JAX + dm-haiku + optax + ColabDesign cannot share vpa's process — JAX's
-# bundled cuDNN/CUBLAS/nccl wheels would override torch's bundled CUDA libs
-# (see Phase 16b note `094ffe75-...`). Pipeline mode runs inside this
-# dedicated persistent sidecar; the `infer` mode keeps running in-process.
+# Dedicated conda env for the diffusion + AF2-IG + ProteinMPNN generation
+# pipeline. JAX + dm-haiku + optax + ColabDesign cannot share vpa's process:
+# JAX's bundled cuDNN/CUBLAS/nccl wheels would override torch's bundled CUDA
+# libs, so the adapter launches the vendor pipeline as a subprocess in this
+# env and stops it once raw diffusion artifacts are ready.
 PXDESIGN_PIPELINE_ENV_DEFAULT = Path("/opt/conda/envs/pxdesign-pipeline-vpa")
 PXDESIGN_PIPELINE_ENV_NAME = "pxdesign-pipeline-vpa"
-
-_PIPELINE_RUNNER_MODULE = "vibeproteinagent.adapters.pxdesign._pipeline_runner"
-_PIPELINE_SIDECAR_CALL = f"{_PIPELINE_RUNNER_MODULE}:run_sidecar"
 
 
 def _resolve_checkpoint() -> Path:
@@ -241,11 +229,8 @@ class PXDesignInput(BaseModel):
     temperature: float = Field(default=1.0)
     hotspots: list[int] = Field(default_factory=list)
     crop: str | None = Field(default=None)
-    mode: str = Field(default="infer", pattern=r"^(infer|pipeline)$")
     top_k_designs: int = Field(default=4, ge=1, le=64)
     mpnn_temperature: float = Field(default=0.1, gt=0.0, le=5.0)
-    af2_init_guess: bool = Field(default=True)
-    preset: str = Field(default="preview", pattern=r"^(preview|extended)$")
 
     @model_validator(mode="before")
     @classmethod
@@ -411,7 +396,7 @@ def _discover_named_conda_env(env_name: str) -> Path | None:
 def _pipeline_subprocess_env(seed: int | None) -> dict[str, str]:
     """Sanitised env for the pipeline runner — vpa's PYTHONPATH must not leak."""
     # The PXDesign vendor trees in this checkout are source-only snapshots
-    # (no setup.py / pyproject.toml), so the dedicated sidecar cannot rely on
+    # (no setup.py / pyproject.toml), so the dedicated subprocess cannot rely on
     # `pip install -e vendor/...`. Expose the same vendor roots the in-process
     # infer path uses, while still keeping the parent env's PYTHONPATH isolated.
     # JAX must not preallocate the whole GPU — pipeline shares VRAM with
@@ -430,15 +415,13 @@ def _pipeline_subprocess_env(seed: int | None) -> dict[str, str]:
 
 
 def _pipeline_import_skip_reason(python: Path, timeout_s: int = 180) -> str | None:
-    """Smoke-import the pipeline sidecar runtime before marking it available."""
+    """Smoke-import the pipeline subprocess runtime before marking it available."""
     reason = smoke_import(
-        label="PXDesign pipeline sidecar",
+        label="PXDesign pipeline subprocess",
         python=python,
         code=(
             "import sys; "
             "assert sys.version_info >= (3, 11), 'Python >=3.11 required'; "
-            "import msgpack; "
-            "import vibeproteinagent.workers.sidecar_child; "
             "from vibeproteinagent.adapters.pxdesign.adapter "
             "import _ensure_pxdesign_importable; "
             "_ensure_pxdesign_importable(); "
@@ -457,8 +440,8 @@ def _pipeline_import_skip_reason(python: Path, timeout_s: int = 180) -> str | No
         return None
     return (
         f"{reason}. "
-        "Check Python >=3.11, JAX, dm-haiku, optax, ColabDesign, msgpack, "
-        "PXDesign/PXDBench vendor imports, VPA sidecar install, and "
+        "Check Python >=3.11, JAX, dm-haiku, optax, ColabDesign, "
+        "PXDesign/PXDBench vendor imports, VPA source import, and "
         "$TOOL_WEIGHTS_ROOT AF2 tool weights."
     )
 
@@ -539,33 +522,6 @@ def _extract_binder_sequence(cif_path: Path) -> str:
     return "".join(seq)
 
 
-def _summary_score(summary: dict[str, Any]) -> float | None:
-    """Pick a single scalar score from a PXDesign summary_confidence JSON.
-
-    PXDesign writes various per-sample scalars (plddt, iptm, ptm,
-    ranking_score, ...). We prefer ``ranking_score`` and fall back to
-    ``iptm`` then ``plddt``.
-    """
-    for key in ("ranking_score", "iptm", "plddt"):
-        v = summary.get(key)
-        if v is None:
-            continue
-        if isinstance(v, list):
-            if not v:
-                continue
-            v = v[0]
-        if hasattr(v, "item"):
-            try:
-                return float(v.item())
-            except Exception:
-                continue
-        try:
-            return float(v)
-        except Exception:
-            continue
-    return None
-
-
 def _summary_score_from_row(row: dict[str, str]) -> float | None:
     """Pick a single scalar score from a pipeline summary CSV row.
 
@@ -595,180 +551,14 @@ class PXDesignAdapter(ToolAdapter):
         # weights_dir is the worker's hardcoded placeholder; we resolve via env.
         del config, weights_dir
         self.device = device
-        self._pipeline_sidecar: PersistentPythonSidecar | None = None
         self.ckpt_path = _resolve_checkpoint()
-        self.runner: Any | None = None
-
-    def _ensure_infer_runner(self) -> None:
-        """Lazy-load the heavy in-process PXDesign inference runner.
-
-        Pipeline mode runs in a dedicated sidecar and should not pay the
-        CUDA/DeepSpeed/model-load cost of the plain ``infer`` path.
-        """
-        if self.runner is not None:
-            return
-        _ensure_pxdesign_importable()
-
-        # Resolve the three pxdesign internals we need.
-        infer_mod = importlib.import_module("pxdesign.utils.infer")
-        inference_mod = importlib.import_module("pxdesign.runner.inference")
-        inputs_mod = importlib.import_module("pxdesign.utils.inputs")
-        seed_mod = importlib.import_module("protenix.utils.seed")
-
-        self._get_configs = infer_mod.get_configs
-        self._convert_to_bioassembly_dict = infer_mod.convert_to_bioassembly_dict
-        self._download_inference_cache = infer_mod.download_inference_cache
-        self._process_input_file = inputs_mod.process_input_file
-        self._seed_everything = seed_mod.seed_everything
-        self._InferenceRunner = inference_mod.InferenceRunner
-
-        # Build a configs object good enough for env / model / checkpoint init.
-        # We deliberately do NOT bind input_json_path or dump_dir — init_data is
-        # deferred to run() so we can rebind per call.
-        argv = [
-            "--dump_dir", str(_warm_load_placeholder_dir()),
-            "--load_checkpoint_dir", str(PXDESIGN_CKPT_DIR),
-            "--N_sample", "1",
-            "--N_step", "5",
-            "--eta_type", "const",
-            "--eta_min", "2.5",
-            "--eta_max", "2.5",
-            "--dtype", "bf16",
-            "--seeds", "101",
-        ]
-        self._warm_configs = self._get_configs(argv)
-
-        # Construct InferenceRunner skipping init_data — we'll re-run
-        # init_dumper + init_data per call.
-        runner = self._InferenceRunner.__new__(self._InferenceRunner)
-        runner.configs = self._warm_configs
-        runner.init_env()
-        runner.init_basics()
-        runner.init_model()
-        runner.load_checkpoint()
-        # init_dumper and init_data are deferred.
-        self.runner = runner
 
     @torch.no_grad()
     def run(self, params: PXDesignInput, ctx: AdapterRunContext) -> PXDesignOutput:
-        if params.mode == "pipeline":
-            return self._run_pipeline(params, ctx)
-        return self._run_infer(params, ctx)
-
-    @torch.no_grad()
-    def _run_infer(self, params: PXDesignInput, ctx: AdapterRunContext) -> PXDesignOutput:
-        t0 = time.time()
-        ctx.emit_progress(0.05)
-        self._ensure_infer_runner()
-        assert self.runner is not None
-
-        target = Path(params.target_pdb).expanduser().resolve()
-        if not target.is_file():
-            raise FileNotFoundError(f"target_pdb not found: {target}")
-
-        job_inputs = ctx.job_dir / "inputs"
-        job_outputs = ctx.job_dir / "outputs"
-        job_inputs.mkdir(parents=True, exist_ok=True)
-        job_outputs.mkdir(parents=True, exist_ok=True)
-
-        task_name = f"design_{target.stem}_{params.target_chain}_{params.binder_length}aa"
-        seed_val = int(params.seed) if params.seed is not None else 101
-
-        # Build a single-task PXDesign input JSON inline (skips the YAML route).
-        chain_filter: dict[str, Any] = {"chain_id": [params.target_chain]}
-        if params.crop:
-            chain_filter["crop"] = {params.target_chain: params.crop}
-        else:
-            chain_filter["crop"] = {}
-        hotspot: dict[str, list[int]] = {}
-        if params.hotspots:
-            hotspot[params.target_chain] = list(params.hotspots)
-        task = {
-            "name": task_name,
-            "condition": {
-                "structure_file": str(target),
-                "filter": chain_filter,
-                "msa": {},
-            },
-            "hotspot": hotspot,
-            "generation": [
-                {
-                    "type": "protein",
-                    "length": int(params.binder_length),
-                    "count": 1,
-                }
-            ],
-        }
-        input_json_path = job_inputs / f"{task_name}.json"
-        input_json_path.write_text(json.dumps([task], indent=2))
-        ctx.emit_progress(0.10)
-
-        # Rebind the warm runner to this call's I/O + diffusion knobs.
-        cfg = self.runner.configs
-        cfg["input_json_path"] = str(input_json_path)
-        cfg["dump_dir"] = str(job_outputs)
-        cfg["seeds"] = [seed_val]
-        cfg["use_msa"] = False
-        # num_workers > 0 spawns DataLoader workers that try to pickle
-        # PXDesign's collate-fn lambda; force single-process loading.
-        cfg["num_workers"] = 0
-        # diffusion knobs
-        cfg.sample_diffusion.N_sample = int(params.num_samples)
-        cfg.sample_diffusion.N_step = int(params.num_steps)
-
-        # Update the runner's mirror of dump_dir / error_dir (init_basics set
-        # them on the warm placeholder). DataDumper is constructor-bound so
-        # we re-create it via init_dumper.
-        self.runner.dump_dir = str(job_outputs)
-        self.runner.error_dir = str(job_outputs / "ERR")
-        Path(self.runner.error_dir).mkdir(parents=True, exist_ok=True)
-
-        # Make sure checkpoints + CCD cache exist (no-op if everything is in
-        # place; downloads heavy files otherwise — Phase 5.1 already placed
-        # them under ``$PXDESIGN_CKPT_DIR``).
-        self._download_inference_cache(cfg)
-
-        # Pre-convert the target structure to a bioassembly pkl.gz (mirrors
-        # PXDesign's `main()`); the dataloader expects the pre-converted file.
-        bio_inputs: list[dict[str, Any]] = [task]
-        for x in bio_inputs:
-            self._convert_to_bioassembly_dict(x, str(job_outputs))
-        bio_input_path = job_outputs / "input_tasks.json"
-        bio_input_path.write_text(json.dumps(bio_inputs))
-        cfg["input_json_path"] = str(bio_input_path)
-        ctx.emit_progress(0.20)
-
-        # Re-bind dataset + dumper for this call.
-        self.runner.init_dumper()
-        self.runner.init_data()
-        ctx.emit_progress(0.30)
-
-        # The heavy lift: diffusion sampling.
-        self._seed_everything(seed=seed_val, deterministic=False)
-        self.runner._inference(seed_val)
-        ctx.emit_progress(0.95)
-
-        designs = self._collect_outputs(job_outputs, task_name, seed_val,
-                                        params.binder_length)
-        if not designs:
-            raise RuntimeError(
-                f"PXDesign produced no designs under {job_outputs}. "
-                f"Check {self.runner.error_dir} for per-sample errors."
-            )
-
-        ctx.emit_progress(1.0)
-        runtime_ms = int((time.time() - t0) * 1000)
-        return PXDesignOutput(
-            designs=designs,
-            candidates=_pxdesign_candidates(params, designs),
-            runtime_ms=runtime_ms,
-            num_samples=len(designs),
-            task_name=task_name,
-            seed=seed_val,
-        )
+        return self._run_pipeline(params, ctx)
 
     def _run_pipeline(self, params: PXDesignInput, ctx: AdapterRunContext) -> PXDesignOutput:
-        """Persistent-sidecar path for real-sequence design.
+        """Subprocess path for real-sequence design.
 
         The dedicated env owns JAX + ColabDesign + AF2 params; vpa stays clean.
         If the env isn't present, raise
@@ -796,41 +586,28 @@ class PXDesignAdapter(ToolAdapter):
         ctx.emit_progress(0.08)
 
         ctx.emit_progress(0.12)
-        if params.preset == "preview":
-            _run_preview_pipeline_until_artifacts(
-                argv=argv,
-                cwd=ctx.job_dir,
-                job_outputs=job_outputs,
-                task_name=task_name,
-                seed=params.seed,
-                mpnn_temperature=params.mpnn_temperature,
-                timeout_s=8 * 3600,
-            )
-        else:
-            try:
-                self._pipeline_sidecar_for(params.seed).call(
-                    _PIPELINE_SIDECAR_CALL,
-                    {"argv": argv, "cwd": str(ctx.job_dir)},
-                    timeout_s=8 * 3600,
-                )
-            except VPAError as exc:
-                raise RuntimeError(
-                    f"PXDesign pipeline runner failed. "
-                    f"See {job_outputs} for partial outputs and logs."
-                ) from exc
+        _run_preview_pipeline_until_artifacts(
+            argv=argv,
+            cwd=ctx.job_dir,
+            job_outputs=job_outputs,
+            task_name=task_name,
+            seed=params.seed,
+            mpnn_temperature=params.mpnn_temperature,
+            timeout_s=8 * 3600,
+        )
 
         top_k = int(params.top_k_designs)
         designs = self._collect_pipeline_outputs(
             job_outputs, task_name, params.binder_length, top_k,
         )
-        if not designs and params.preset == "preview":
+        if not designs:
             designs = _collect_preview_pipeline_outputs(
                 job_outputs, task_name, params.binder_length, top_k,
             )
         if not designs:
             raise RuntimeError(
-                f"PXDesign pipeline produced no designs under {job_outputs}. "
-                f"Check the per-run logs for filter rejections."
+                f"PXDesign pipeline produced no generated designs under {job_outputs}. "
+                f"Check the per-run logs for generation or sequence-design errors."
             )
 
         ctx.emit_progress(1.0)
@@ -844,20 +621,6 @@ class PXDesignAdapter(ToolAdapter):
             seed=seed_val,
         )
 
-    def _pipeline_sidecar_for(self, seed: int | None) -> PersistentPythonSidecar:
-        sidecar = getattr(self, "_pipeline_sidecar", None)
-        if sidecar is None:
-            spec = SidecarRuntimeSpec(
-                python=pipeline_python(),
-                env=_pipeline_subprocess_env(seed),
-                name=PXDESIGN_PIPELINE_ENV_NAME,
-                run_target=_PIPELINE_SIDECAR_CALL,
-                timeout_s=60.0,
-            )
-            sidecar = spec.spawn(PersistentPythonSidecar)
-            self._pipeline_sidecar = sidecar
-        return sidecar
-
     @staticmethod
     def _build_pipeline_argv(
         *,
@@ -868,16 +631,12 @@ class PXDesignAdapter(ToolAdapter):
     ) -> list[str]:
         """Construct the argv for ``pxdesign.runner.pipeline``.
 
-        Phase 20 (Pi2 + Pi3): threads ``mpnn_temperature`` and ``preset``
-        through to the upstream CLI. ``preset`` wins over ``af2_init_guess``
-        when both are set; when ``preset`` is at its default ("preview")
-        ``af2_init_guess=False`` falls back to the legacy "custom" preset
-        for callers that pre-date the preset enum.
+        VPA fixes PXDesign to the generation pipeline: diffusion, AF2 initial
+        guess, and ProteinMPNN sequence generation. Optional downstream
+        filtering/ranking stages are disabled by using the lightweight preview
+        preset and by collecting generated sequence artifacts directly.
         """
-        top_k = int(params.top_k_designs)
-        preset = params.preset
-        if preset == "preview" and not params.af2_init_guess:
-            preset = "custom"
+        preset = "preview"
         cmd = [
             "--dump_dir", str(job_outputs),
             "--load_checkpoint_dir", str(PXDESIGN_CKPT_DIR),
@@ -891,19 +650,16 @@ class PXDesignAdapter(ToolAdapter):
             "--seeds", str(seed_val),
             "--preset", preset,
             "--N_max_runs", "1",
-            "--min_total_return", str(top_k),
-            "--max_success_return", str(top_k),
             "--use_msa", "false",
             "--eval.binder.eval_protenix", "false",
             "--eval.binder.eval_protenix_mini", "false",
         ]
-        if preset == "preview":
-            cmd.extend(
-                [
-                    "--eval.binder.eval_complex", "false",
-                    "--eval.binder.eval_binder_monomer", "false",
-                ]
-            )
+        cmd.extend(
+            [
+                "--eval.binder.eval_complex", "false",
+                "--eval.binder.eval_binder_monomer", "false",
+            ]
+        )
         cmd.extend(
             [
                 "--eval.binder.tools.mpnn.temperature",
@@ -979,56 +735,6 @@ class PXDesignAdapter(ToolAdapter):
             )
         return designs
 
-    @staticmethod
-    def _collect_outputs(
-        dump_dir: Path, task_name: str, seed: int, binder_length: int,
-    ) -> list[PXDesignDesign]:
-        """Walk the PXDesign DataDumper layout and assemble PXDesignDesign records.
-
-        Layout: ``<dump_dir>/<task_name>/seed_<seed>/predictions/<task_name>_sample_<i>.cif``
-        plus optional summary JSONs.
-        """
-        seed_dir = dump_dir / task_name / f"seed_{seed}"
-        success_file = seed_dir / "SUCCESS_FILE"
-        predictions_dir = seed_dir / "predictions"
-        if not predictions_dir.is_dir():
-            return []
-        results: list[PXDesignDesign] = []
-        cifs = sorted(predictions_dir.glob(f"{task_name}_sample_*.cif"))
-        for idx, cif in enumerate(cifs, start=1):
-            try:
-                rank_str = cif.stem.rsplit("_", 1)[-1]
-                rank = int(rank_str)
-            except ValueError:
-                continue
-            summary_path = predictions_dir / (
-                f"{task_name}_summary_confidence_sample_{rank}.json"
-            )
-            score: float | None = None
-            if summary_path.is_file():
-                try:
-                    summary = json.loads(summary_path.read_text())
-                    if isinstance(summary, dict):
-                        score = _summary_score(summary)
-                except Exception:
-                    score = None
-            seq = _extract_binder_sequence(cif)
-            results.append(
-                PXDesignDesign(
-                    candidate_id=_design_candidate_id(task_name, idx, seq, cif),
-                    pdb_path=None,
-                    cif_path=str(cif),
-                    score=score,
-                    sequence=seq,
-                    binder_length=binder_length,
-                )
-            )
-        # Best-effort success flag: don't fail collection if missing — _inference
-        # writes per-sample CIFs even when SUCCESS_FILE is delayed.
-        if not results and success_file.is_file():
-            return []
-        return results
-
     def estimate_vram(self, params: PXDesignInput) -> int:
         return 24 * 1024
 
@@ -1036,152 +742,15 @@ class PXDesignAdapter(ToolAdapter):
         """Warm-readiness includes the PARTIAL pipeline availability probe.
 
         The worker only emits warm warnings when ``healthcheck()`` is false.
-        Include ``mode=pipeline`` availability here so a warm call can surface
-        the actionable sidecar-env bootstrap reason instead of silently
-        reporting healthy just because ``mode=infer`` is available.
+        Include pipeline availability here so a warm call can surface the
+        actionable subprocess-env bootstrap reason.
         """
         base_ok = self.ckpt_path.is_file() and PXDESIGN_VENDOR.is_dir()
         return base_ok and availability_skip_reason() is None
 
     def unload(self) -> None:
-        sidecar = getattr(self, "_pipeline_sidecar", None)
-        if sidecar is not None:
-            sidecar.close()
-            self._pipeline_sidecar = None
-        if hasattr(self, "runner"):
-            try:
-                del self.runner.model
-            except Exception:
-                pass
-            try:
-                del self.runner
-            except Exception:
-                pass
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-
-def _distributed_pipeline_env(params: PXDesignInput, ctx: Any) -> dict[str, str]:
-    env = _pipeline_subprocess_env(params.seed)
-    env.update(
-        {
-            "MASTER_ADDR": str(ctx.master_addr),
-            "MASTER_PORT": str(ctx.master_port),
-            "RANK": str(ctx.rank),
-            "WORLD_SIZE": str(ctx.world_size),
-            "LOCAL_RANK": "0",
-            "LOCAL_WORLD_SIZE": str(ctx.local_world_size),
-        }
-    )
-    return env
-
-
-def run_distributed(params: PXDesignInput, ctx: Any) -> PXDesignOutput | dict[str, Any]:
-    """Distributed PXDesign pipeline entrypoint used by multi-worker dispatch."""
-    if params.mode != "pipeline":
-        raise InvalidParamsError(
-            "pxdesign multi-GPU dispatch requires mode='pipeline'",
-            details={"mode": params.mode},
-        )
-    if int(params.num_samples) < int(ctx.world_size):
-        raise InvalidParamsError(
-            "pxdesign multi-GPU pipeline requires num_samples >= world_size",
-            details={"num_samples": params.num_samples, "world_size": ctx.world_size},
-        )
-    if int(params.num_samples) % int(ctx.world_size) != 0:
-        raise InvalidParamsError(
-            "pxdesign multi-GPU pipeline requires num_samples divisible by world_size",
-            details={"num_samples": params.num_samples, "world_size": ctx.world_size},
-        )
-    skip = availability_skip_reason()
-    if skip is not None:
-        raise DependencyError(
-            skip,
-            details={
-                "env": str(pipeline_env()),
-                "bootstrap": "vendor/pxdesign/UPSTREAM.md#pipeline-mode",
-            },
-        )
-
-    started = time.time()
-    invocation = _prepare_pipeline_invocation(params, ctx.job_dir)
-    sidecar = PersistentPythonSidecar(
-        python=pipeline_python(),
-        env=_distributed_pipeline_env(params, ctx),
-        name=f"{PXDESIGN_PIPELINE_ENV_NAME}[rank{ctx.rank}]",
-        startup_timeout_s=60.0,
-    )
-    try:
-        sidecar.call(
-            _PIPELINE_SIDECAR_CALL,
-            {"argv": invocation.argv, "cwd": str(ctx.job_dir)},
-            timeout_s=8 * 3600,
-        )
-    finally:
-        sidecar.close()
-
-    if int(ctx.rank) != 0:
-        return {"rank_completed": True}
-
-    top_k = int(params.top_k_designs)
-    designs = PXDesignAdapter._collect_pipeline_outputs(
-        invocation.job_outputs,
-        invocation.task_name,
-        params.binder_length,
-        top_k,
-    )
-    if not designs and params.preset == "preview":
-        designs = _collect_preview_pipeline_outputs(
-            invocation.job_outputs,
-            invocation.task_name,
-            params.binder_length,
-            top_k,
-        )
-    if not designs:
-        raise RuntimeError(
-            f"PXDesign distributed pipeline produced no designs under "
-            f"{invocation.job_outputs}."
-        )
-    return PXDesignOutput(
-        designs=designs,
-        candidates=_pxdesign_candidates(params, designs),
-        runtime_ms=int((time.time() - started) * 1000),
-        num_samples=len(designs),
-        task_name=invocation.task_name,
-        seed=invocation.seed_val,
-    )
-
-
-def _warm_load_placeholder_dir() -> Path:
-    """Return a stable scratch dir for init_basics during warm load.
-
-    init_basics creates the dump_dir; we hand it a tmpdir under the adapter's
-    workspace ("$VPA_HOME/pxdesign_warm/") so that it doesn't collide with
-    a per-job ctx.job_dir before the first run() arrives.
-    """
-    home = os.environ.get("VPA_HOME") or os.path.expanduser("~/.vibeproteinagent")
-    p = Path(home).expanduser() / "pxdesign_warm"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _preview_artifacts_ready(job_outputs: Path, task_name: str) -> bool:
-    """Return true once preview mode has emitted final sequence-design artifacts."""
-    task_dir = job_outputs / "design_outputs" / task_name
-    summary_csv = task_dir / "summary.csv"
-    if not summary_csv.is_file():
-        return False
-    try:
-        with summary_csv.open() as fh:
-            rows = list(csv.DictReader(fh))
-    except Exception:
-        return False
-    for row in rows:
-        seq = (row.get("sequence") or "").strip()
-        chosen_rel = (row.get("chosen_struct_path") or "").strip()
-        if seq and "X" not in seq and chosen_rel and (task_dir / chosen_rel).is_file():
-            return True
-    return False
 
 
 def _raw_preview_cif(job_outputs: Path, task_name: str) -> Path | None:
@@ -1205,20 +774,17 @@ def _run_preview_pipeline_until_artifacts(
     mpnn_temperature: float,
     timeout_s: int,
 ) -> None:
-    """Run preview pipeline and return as soon as successful artifacts exist.
+    """Run vendor diffusion only, then materialize sequence outputs via VPA.
 
-    PXDesign's preview path can finish the real generation work and write
-    SUCCESS_FILE/CIF artifacts while optional post-run bookkeeping keeps the
-    process alive. For the local-first VPA contract, the adapter should return
-    the generated designs once the product artifact contract is satisfied.
+    The adapter contract is fixed to diffusion + AF2 initial-guess +
+    ProteinMPNN sequence generation. Vendor preview code performs extra
+    pre-filter/ranking once raw CIFs exist; VPA terminates the process at the
+    first raw diffusion CIF and runs its own ProteinMPNN materialization so
+    filter/selection stages cannot produce an empty accepted stream.
     """
     log_path = job_outputs / "pipeline_preview.log"
     cmd = [str(pipeline_python()), "-m", "pxdesign.runner.pipeline", *argv]
     env = _pipeline_subprocess_env(seed=seed)
-    raw_ready_since: float | None = None
-    sequence_grace_s = float(
-        os.environ.get("VPA_PXDESIGN_PREVIEW_SEQUENCE_GRACE_S", "30")
-    )
     with log_path.open("w") as log_fh:
         proc = subprocess.Popen(
             cmd,
@@ -1231,28 +797,20 @@ def _run_preview_pipeline_until_artifacts(
         deadline = time.monotonic() + timeout_s
         try:
             while True:
-                if _preview_artifacts_ready(job_outputs, task_name):
-                    _terminate_process_group(proc)
-                    return
                 raw_cif = _raw_preview_cif(job_outputs, task_name)
                 if raw_cif is not None:
-                    if raw_ready_since is None:
-                        raw_ready_since = time.monotonic()
-                    elif time.monotonic() - raw_ready_since >= sequence_grace_s:
-                        _terminate_process_group(proc)
-                        _materialize_preview_sequence_outputs(
-                            raw_cif=raw_cif,
-                            job_outputs=job_outputs,
-                            task_name=task_name,
-                            seed=seed,
-                            mpnn_temperature=mpnn_temperature,
-                        )
-                        return
+                    _terminate_process_group(proc)
+                    _materialize_preview_sequence_outputs(
+                        raw_cif=raw_cif,
+                        job_outputs=job_outputs,
+                        task_name=task_name,
+                        seed=seed,
+                        mpnn_temperature=mpnn_temperature,
+                    )
+                    return
                 rc = proc.poll()
                 if rc is not None:
                     if rc == 0:
-                        if _preview_artifacts_ready(job_outputs, task_name):
-                            return
                         raw_cif = _raw_preview_cif(job_outputs, task_name)
                         if raw_cif is not None:
                             _materialize_preview_sequence_outputs(
@@ -1266,7 +824,7 @@ def _run_preview_pipeline_until_artifacts(
                         raise RuntimeError(
                             f"PXDesign preview pipeline exited successfully, but "
                             f"no final ProteinMPNN sequence-design outputs "
-                            f"are required. See {log_path}."
+                            f"were produced. See {log_path}."
                         )
                     raise RuntimeError(
                         f"PXDesign preview pipeline exited with status {rc} "
@@ -1416,7 +974,7 @@ def _pxdesign_candidates(
                 "pxdesign": {
                     "score": design.score,
                     "binder_length": design.binder_length,
-                    "mode": params.mode,
+                    "pipeline": "diffusion_af2_initial_guess_proteinmpnn",
                 }
             },
             "artifacts": {"pxdesign": {"cif_path": design.cif_path, "pdb_path": design.pdb_path}},
@@ -1450,5 +1008,4 @@ __all__ = [
     "availability_skip_reason",
     "pipeline_env",
     "pipeline_python",
-    "run_distributed",
 ]

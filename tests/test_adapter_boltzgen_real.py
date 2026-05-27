@@ -34,7 +34,7 @@ def _skip_if_unavailable() -> None:
 
 
 @pytest.mark.slow
-def test_boltzgen_design_only_produces_at_least_one_cif(tmp_path):
+def test_boltzgen_generation_pipeline_produces_at_least_one_cif(tmp_path):
     _skip_if_unavailable()
 
     target_pdb = _FIXTURE_DIR / "6MRR.pdb"
@@ -60,7 +60,6 @@ def test_boltzgen_design_only_produces_at_least_one_cif(tmp_path):
         binder_length=30,
         num_designs=1,
         num_diffusion_steps=10,
-        design_only=True,
         seed=7,
     )
 
