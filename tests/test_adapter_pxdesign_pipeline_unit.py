@@ -341,6 +341,42 @@ def test_run_pipeline_materializes_generated_sequence_outputs(
     assert out1.designs[0].score == pytest.approx(0.77)
 
 
+def test_prepare_pipeline_invocation_normalizes_pdb_target_to_cif(tmp_path: Path) -> None:
+    target = tmp_path / "target.pdb"
+    target.write_text(
+        "\n".join(
+            [
+                "ATOM      1  N   ALA A   1      11.104  13.207   9.291  1.00 20.00           N",
+                "ATOM      2  CA  ALA A   1      12.560  13.207   9.291  1.00 20.00           C",
+                "ATOM      3  C   ALA A   1      13.000  14.600   9.700  1.00 20.00           C",
+                "ATOM      4  O   ALA A   1      12.300  15.500   9.600  1.00 20.00           O",
+                "ATOM      5  N   GLY B   1      16.104  13.207   9.291  1.00 20.00           N",
+                "ATOM      6  CA  GLY B   1      17.560  13.207   9.291  1.00 20.00           C",
+                "TER",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    params = PXDesignInput(
+        target_pdb=str(target),
+        target_chain="A",
+        binder_length=30,
+        num_samples=1,
+        num_steps=5,
+    )
+
+    invocation = adapter_mod._prepare_pipeline_invocation(params, tmp_path / "job")
+    input_json = next((tmp_path / "job" / "inputs").glob("*.json"))
+    task = json.loads(input_json.read_text())[0]
+    structure_file = Path(task["condition"]["structure_file"])
+
+    assert structure_file.suffix == ".cif"
+    assert structure_file.is_file()
+    assert invocation.input_structure_state["converted_to_cif"] is True
+    assert invocation.input_structure_state["pipeline_structure_file"] == str(structure_file)
+
+
 # --------------------------------------------------------------------------- output parsing
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -41,7 +42,7 @@ from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
-from vibeproteinagent.core.errors import DependencyError
+from vibeproteinagent.core.errors import DependencyError, VPAError
 
 # --------------------------------------------------------------------------- paths
 
@@ -292,6 +293,7 @@ class _PipelineInvocation:
     task_name: str
     seed_val: int
     argv: list[str]
+    input_structure_state: dict[str, Any]
 
 
 def _prepare_pipeline_invocation(params: PXDesignInput, job_dir: Path) -> _PipelineInvocation:
@@ -307,6 +309,10 @@ def _prepare_pipeline_invocation(params: PXDesignInput, job_dir: Path) -> _Pipel
     staged_target = job_inputs / target.name
     if staged_target.resolve() != target:
         shutil.copyfile(target, staged_target)
+    structure_file, input_structure_state = _prepare_pxdesign_structure_file(
+        staged_target,
+        target_chain=params.target_chain,
+    )
 
     task_name = f"design_{target.stem}_{params.target_chain}_{params.binder_length}aa"
     seed_val = int(params.seed) if params.seed is not None else 101
@@ -322,7 +328,7 @@ def _prepare_pipeline_invocation(params: PXDesignInput, job_dir: Path) -> _Pipel
     task = {
         "name": task_name,
         "condition": {
-            "structure_file": str(staged_target),
+            "structure_file": str(structure_file),
             "filter": chain_filter,
             "msa": {},
         },
@@ -349,7 +355,78 @@ def _prepare_pipeline_invocation(params: PXDesignInput, job_dir: Path) -> _Pipel
         task_name=task_name,
         seed_val=seed_val,
         argv=argv,
+        input_structure_state=input_structure_state,
     )
+
+
+def _prepare_pxdesign_structure_file(
+    staged_target: Path,
+    *,
+    target_chain: str,
+) -> tuple[Path, dict[str, Any]]:
+    """Return the structure path passed to PXDesign's JSON condition."""
+
+    state: dict[str, Any] = {
+        "original_structure_file": str(staged_target),
+        "target_chain": target_chain,
+        "converted_to_cif": False,
+        "pipeline_structure_file": str(staged_target),
+    }
+    if staged_target.suffix.lower() not in {".pdb", ".ent"}:
+        return staged_target, state
+
+    cif_path = staged_target.with_suffix(".cif")
+    _convert_pdb_to_mmcif(staged_target, cif_path, target_chain=target_chain)
+    state.update(
+        {
+            "converted_to_cif": True,
+            "pipeline_structure_file": str(cif_path),
+            "conversion": "biopython_pdb_to_mmcif",
+        }
+    )
+    return cif_path, state
+
+
+def _convert_pdb_to_mmcif(
+    pdb_path: Path,
+    cif_path: Path,
+    *,
+    target_chain: str,
+) -> None:
+    try:
+        from Bio.PDB import MMCIFIO, PDBParser
+    except Exception as exc:  # pragma: no cover - dependency is present in vpa env
+        raise VPAError(
+            "PXDesign requires Bio.PDB to normalize PDB targets to mmCIF",
+            details={
+                "target_pdb": str(pdb_path),
+                "target_chain": target_chain,
+                "exception_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        ) from exc
+
+    try:
+        structure = PDBParser(QUIET=True).get_structure("target", str(pdb_path))
+        chain_ids = sorted({chain.id for model in structure for chain in model})
+        if target_chain not in chain_ids:
+            raise ValueError(
+                f"target_chain {target_chain!r} not present in PDB chains {chain_ids!r}"
+            )
+        io = MMCIFIO()
+        io.set_structure(structure)
+        io.save(str(cif_path))
+    except Exception as exc:
+        raise VPAError(
+            "PXDesign could not normalize target PDB to mmCIF before pipeline execution",
+            details={
+                "target_pdb": str(pdb_path),
+                "target_chain": target_chain,
+                "output_cif": str(cif_path),
+                "exception_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        ) from exc
 
 
 # --------------------------------------------------------------------------- pipeline env
@@ -583,18 +660,29 @@ class PXDesignAdapter(ToolAdapter):
         task_name = invocation.task_name
         seed_val = invocation.seed_val
         argv = invocation.argv
+        input_structure_state = invocation.input_structure_state
+        ckpt_path = getattr(
+            self,
+            "ckpt_path",
+            PXDESIGN_CKPT_DIR / f"{PXDESIGN_MODEL_NAME}.pt",
+        )
         ctx.emit_progress(0.08)
 
         ctx.emit_progress(0.12)
-        _run_preview_pipeline_until_artifacts(
-            argv=argv,
-            cwd=ctx.job_dir,
-            job_outputs=job_outputs,
-            task_name=task_name,
-            seed=params.seed,
-            mpnn_temperature=params.mpnn_temperature,
-            timeout_s=8 * 3600,
-        )
+        preview_kwargs: dict[str, Any] = {
+            "argv": argv,
+            "cwd": ctx.job_dir,
+            "job_outputs": job_outputs,
+            "task_name": task_name,
+            "seed": params.seed,
+            "mpnn_temperature": params.mpnn_temperature,
+            "timeout_s": 8 * 3600,
+        }
+        if "ckpt_path" in inspect.signature(_run_preview_pipeline_until_artifacts).parameters:
+            preview_kwargs["ckpt_path"] = ckpt_path
+        if "input_structure_state" in inspect.signature(_run_preview_pipeline_until_artifacts).parameters:
+            preview_kwargs["input_structure_state"] = input_structure_state
+        _run_preview_pipeline_until_artifacts(**preview_kwargs)
 
         top_k = int(params.top_k_designs)
         designs = self._collect_pipeline_outputs(
@@ -605,9 +693,28 @@ class PXDesignAdapter(ToolAdapter):
                 job_outputs, task_name, params.binder_length, top_k,
             )
         if not designs:
-            raise RuntimeError(
+            debug_path = job_outputs / "pxdesign_failure_debug.json"
+            stdout_path = job_outputs / "pipeline_preview.stdout.log"
+            stderr_path = job_outputs / "pipeline_preview.stderr.log"
+            command = [str(pipeline_python()), "-m", "pxdesign.runner.pipeline", *argv]
+            details = _write_pxdesign_failure_debug(
+                debug_path=debug_path,
+                command=command,
+                cwd=ctx.job_dir,
+                returncode=0,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                env=_pipeline_subprocess_env(seed=params.seed),
+                ckpt_path=ckpt_path,
+                job_outputs=job_outputs,
+                task_name=task_name,
+                preflight_result={"availability_skip_reason": availability_skip_reason()},
+                input_structure_state=input_structure_state,
+            )
+            raise VPAError(
                 f"PXDesign pipeline produced no generated designs under {job_outputs}. "
-                f"Check the per-run logs for generation or sequence-design errors."
+                f"See {debug_path} for the debug artifact contract.",
+                details=details,
             )
 
         ctx.emit_progress(1.0)
@@ -772,7 +879,9 @@ def _run_preview_pipeline_until_artifacts(
     task_name: str,
     seed: int | None,
     mpnn_temperature: float,
+    ckpt_path: Path | None = None,
     timeout_s: int,
+    input_structure_state: dict[str, Any] | None = None,
 ) -> None:
     """Run vendor diffusion only, then materialize sequence outputs via VPA.
 
@@ -782,16 +891,19 @@ def _run_preview_pipeline_until_artifacts(
     first raw diffusion CIF and runs its own ProteinMPNN materialization so
     filter/selection stages cannot produce an empty accepted stream.
     """
-    log_path = job_outputs / "pipeline_preview.log"
+    stdout_path = job_outputs / "pipeline_preview.stdout.log"
+    stderr_path = job_outputs / "pipeline_preview.stderr.log"
+    debug_path = job_outputs / "pxdesign_failure_debug.json"
     cmd = [str(pipeline_python()), "-m", "pxdesign.runner.pipeline", *argv]
     env = _pipeline_subprocess_env(seed=seed)
-    with log_path.open("w") as log_fh:
+    resolved_ckpt_path = ckpt_path or (PXDESIGN_CKPT_DIR / f"{PXDESIGN_MODEL_NAME}.pt")
+    with stdout_path.open("w") as stdout_fh, stderr_path.open("w") as stderr_fh:
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
             env=env,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
+            stdout=stdout_fh,
+            stderr=stderr_fh,
             start_new_session=True,
         )
         deadline = time.monotonic() + timeout_s
@@ -806,6 +918,8 @@ def _run_preview_pipeline_until_artifacts(
                         task_name=task_name,
                         seed=seed,
                         mpnn_temperature=mpnn_temperature,
+                        debug_path=debug_path,
+                        ckpt_path=resolved_ckpt_path,
                     )
                     return
                 rc = proc.poll()
@@ -819,28 +933,132 @@ def _run_preview_pipeline_until_artifacts(
                                 task_name=task_name,
                                 seed=seed,
                                 mpnn_temperature=mpnn_temperature,
+                                debug_path=debug_path,
+                                ckpt_path=resolved_ckpt_path,
                             )
                             return
-                        raise RuntimeError(
+                        details = _write_pxdesign_failure_debug(
+                            debug_path=debug_path,
+                            command=cmd,
+                            cwd=cwd,
+                            returncode=rc,
+                            stdout_path=stdout_path,
+                            stderr_path=stderr_path,
+                            env=env,
+                            ckpt_path=resolved_ckpt_path,
+                            job_outputs=job_outputs,
+                            task_name=task_name,
+                            preflight_result={
+                                "availability_skip_reason": availability_skip_reason()
+                            },
+                            input_structure_state=input_structure_state,
+                        )
+                        raise VPAError(
                             f"PXDesign preview pipeline exited successfully, but "
                             f"no final ProteinMPNN sequence-design outputs "
-                            f"were produced. See {log_path}."
+                            f"were produced. See {debug_path}.",
+                            details=details,
                         )
-                    raise RuntimeError(
+                    details = _write_pxdesign_failure_debug(
+                        debug_path=debug_path,
+                        command=cmd,
+                        cwd=cwd,
+                        returncode=rc,
+                        stdout_path=stdout_path,
+                        stderr_path=stderr_path,
+                        env=env,
+                        ckpt_path=resolved_ckpt_path,
+                        job_outputs=job_outputs,
+                            task_name=task_name,
+                            preflight_result={"availability_skip_reason": availability_skip_reason()},
+                            input_structure_state=input_structure_state,
+                        )
+                    raise VPAError(
                         f"PXDesign preview pipeline exited with status {rc} "
-                        f"before emitting design artifacts. See {log_path}."
+                        f"before emitting design artifacts. See {debug_path}.",
+                        details=details,
                     )
                 if time.monotonic() > deadline:
                     _terminate_process_group(proc, kill=True)
-                    raise TimeoutError(
+                    details = _write_pxdesign_failure_debug(
+                        debug_path=debug_path,
+                        command=cmd,
+                        cwd=cwd,
+                        returncode=proc.poll(),
+                        stdout_path=stdout_path,
+                        stderr_path=stderr_path,
+                        env=env,
+                        ckpt_path=resolved_ckpt_path,
+                        job_outputs=job_outputs,
+                            task_name=task_name,
+                            preflight_result={"availability_skip_reason": availability_skip_reason()},
+                            input_structure_state=input_structure_state,
+                        )
+                    raise VPAError(
                         f"PXDesign preview pipeline timed out before emitting "
-                        f"design artifacts. See {log_path}."
+                        f"design artifacts. See {debug_path}.",
+                        details=details,
                     )
                 time.sleep(2.0)
         except BaseException:
             if proc.poll() is None:
                 _terminate_process_group(proc, kill=True)
             raise
+
+
+def _write_pxdesign_failure_debug(
+    *,
+    debug_path: Path,
+    command: list[str],
+    cwd: Path,
+    returncode: int | None,
+    stdout_path: Path,
+    stderr_path: Path,
+    env: dict[str, str],
+    ckpt_path: Path,
+    job_outputs: Path,
+    task_name: str,
+    preflight_result: dict[str, Any],
+    input_structure_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw_cif = _raw_preview_cif(job_outputs, task_name)
+    env_keys = (
+        "CONDA_PREFIX",
+        "CUDA_VISIBLE_DEVICES",
+        "JAX_PLATFORMS",
+        "PROTENIX_DATA_ROOT_DIR",
+        "PYTHONPATH",
+        "TOOL_WEIGHTS_ROOT",
+        "VPA_PXDESIGN_PIPELINE_ENV",
+        "VPA_PXDESIGN_CKPT_DIR",
+        "XLA_PYTHON_CLIENT_PREALLOCATE",
+    )
+    payload = {
+        "command": command,
+        "cwd": str(cwd),
+        "returncode": returncode,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "env_summary": {key: env.get(key) for key in env_keys if key in env},
+        "checkpoint_state": {
+            "pxdesign_checkpoint": str(ckpt_path),
+            "pxdesign_checkpoint_exists": ckpt_path.is_file(),
+            "pxdesign_checkpoint_dir": str(PXDESIGN_CKPT_DIR),
+            "pxdesign_checkpoint_dir_exists": PXDESIGN_CKPT_DIR.is_dir(),
+            "protenix_data_root": PROTENIX_DATA_ROOT_DEFAULT,
+        },
+        "preflight_result": preflight_result,
+        "input_structure_state": input_structure_state or {},
+        "raw_artifact_state": {
+            "raw_cif_exists": raw_cif is not None,
+            "raw_cif_path": str(raw_cif) if raw_cif is not None else None,
+            "summary_csv_exists": (
+                job_outputs / "design_outputs" / task_name / "summary.csv"
+            ).is_file(),
+        },
+    }
+    debug_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    return payload
 
 
 def _materialize_preview_sequence_outputs(
@@ -850,10 +1068,13 @@ def _materialize_preview_sequence_outputs(
     task_name: str,
     seed: int | None,
     mpnn_temperature: float,
+    debug_path: Path,
+    ckpt_path: Path,
 ) -> None:
     env = _pipeline_subprocess_env(seed=seed)
     env["JAX_PLATFORMS"] = "cpu"
-    log_path = job_outputs / "pipeline_preview_fallback.log"
+    stdout_path = job_outputs / "pipeline_preview_fallback.stdout.log"
+    stderr_path = job_outputs / "pipeline_preview_fallback.stderr.log"
     cmd = [
         str(pipeline_python()),
         "-m",
@@ -869,21 +1090,57 @@ def _materialize_preview_sequence_outputs(
     ]
     if seed is not None:
         cmd.extend(["--seed", str(seed)])
-    with log_path.open("w") as log_fh:
-        out = subprocess.run(
-            cmd,
-            check=False,
-            cwd=str(job_outputs),
+    try:
+        with stdout_path.open("w") as stdout_fh, stderr_path.open("w") as stderr_fh:
+            out = subprocess.run(
+                cmd,
+                check=False,
+                cwd=str(job_outputs),
+                env=env,
+                stdout=stdout_fh,
+                stderr=stderr_fh,
+                text=True,
+                timeout=600,
+            )
+    except subprocess.TimeoutExpired as exc:
+        details = _write_pxdesign_failure_debug(
+            debug_path=debug_path,
+            command=cmd,
+            cwd=job_outputs,
+            returncode=None,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
             env=env,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=600,
+            ckpt_path=ckpt_path,
+            job_outputs=job_outputs,
+            task_name=task_name,
+            preflight_result={
+                "availability_skip_reason": availability_skip_reason(),
+                "fallback_timeout_s": exc.timeout,
+            },
         )
+        raise VPAError(
+            f"PXDesign preview ProteinMPNN fallback timed out. See {debug_path}.",
+            details=details,
+        ) from exc
     if out.returncode != 0:
-        raise RuntimeError(
+        details = _write_pxdesign_failure_debug(
+            debug_path=debug_path,
+            command=cmd,
+            cwd=job_outputs,
+            returncode=out.returncode,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            env=env,
+            ckpt_path=ckpt_path,
+            job_outputs=job_outputs,
+            task_name=task_name,
+            preflight_result={"availability_skip_reason": availability_skip_reason()},
+        )
+        raise VPAError(
             f"PXDesign preview ProteinMPNN fallback failed with status "
-            f"{out.returncode}. See {log_path}."
+            f"{out.returncode}. See {debug_path}.",
+            details=details,
         )
 
 

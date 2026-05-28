@@ -826,7 +826,11 @@ def test_agent_plan_controller_executes_and_logs_provider_messages(
     assert data["workflow_ids"]
     run = AgentSessionStore(tmp_workspace).get_run(data["run_id"])
     assert run.provider_snapshot is not None
-    assert run.final_report["decision"]["decision"] == "next_round_with_no_acceptable_candidate"
+    assert run.final_report["decision"]["decision"] == "no_acceptable_candidate"
+    assert (
+        run.final_report["summary"]["latest"]["final_submission"]["outcome"]
+        == "no_acceptable_candidate"
+    )
 
 
 def test_agent_plan_stops_after_explicit_submit_candidate(
@@ -1066,7 +1070,7 @@ def test_agent_plan_executes_post_round_submit_candidate_decision(
     assert "job_submit" in data["job_ids"]
 
 
-def test_agent_plan_stops_no_acceptable_intent_without_submit(
+def test_agent_plan_records_no_acceptable_terminal_submission(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1138,6 +1142,19 @@ def test_agent_plan_stops_no_acceptable_intent_without_submit(
         del self, run_id, broker, decision, round_index, policy
         raise AssertionError("no acceptable intent must not execute submit_candidate")
 
+    def _no_acceptable_submit(self, run_id, broker, decision, *, round_index, policy):
+        del self, run_id, broker, decision, round_index, policy
+        return (
+            {
+                "submission_id": "sub_no_acceptable",
+                "outcome": "no_acceptable_candidate",
+                "terminal": True,
+                "candidates_resolved": [],
+                "reasoning": "candidate score is below threshold",
+            },
+            "job_no_acceptable",
+        )
+
     monkeypatch.setattr(WorkflowPlanner, "_plan_v1", _draft_plan)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
@@ -1145,6 +1162,11 @@ def test_agent_plan_stops_no_acceptable_intent_without_submit(
     )
     monkeypatch.setattr(AgentController, "_execute_validated_plan", _execute)
     monkeypatch.setattr(AgentController, "_execute_submit_candidate_decision", _submit)
+    monkeypatch.setattr(
+        AgentController,
+        "_execute_no_acceptable_candidate_submission",
+        _no_acceptable_submit,
+    )
 
     controller = AgentController(
         tmp_workspace,
@@ -1152,9 +1174,10 @@ def test_agent_plan_stops_no_acceptable_intent_without_submit(
     )
     data = controller.run_sync("rank and reject")
 
-    assert data["decision"]["decision"] == "next_round_with_no_acceptable_candidate"
+    assert data["decision"]["decision"] == "no_acceptable_candidate"
+    assert data["decision"]["source_decision"] == "next_round_with_no_acceptable_candidate"
     assert data["decision"]["resolved_branch"]["action"] == "stop"
-    assert "final_submission" not in data["summary"]["latest"]
+    assert data["summary"]["latest"]["final_submission"]["outcome"] == "no_acceptable_candidate"
 
 
 def test_agent_plan_retries_bad_llm_entries_within_budget(

@@ -108,9 +108,13 @@ export VPA_VALIDATION_OPENROUTER_MODEL="${VPA_VALIDATION_OPENROUTER_MODEL:-qwen/
 mkdir -p "${VPA_HOME}" "${VPA_RUNTIME_DIR}" "${VPA_MODEL_CACHE}" "${HF_HOME}" "${TORCH_HOME}"
 
 STATUS_TSV="${RUN_ROOT}/status.tsv"
+CASE_EVENTS_TSV="${RUN_ROOT}/case_events.tsv"
+EXPECTED_CASES_TSV="${RUN_ROOT}/expected_cases.tsv"
 SUMMARY_MD="${RUN_ROOT}/RUN_SUMMARY.md"
 SUMMARY_JSON="${RUN_ROOT}/summary.json"
 printf 'case\tmode\tprovider\tmodel\tstatus\texit_code\tseconds\toutput\n' > "${STATUS_TSV}"
+printf 'timestamp\tcase\tmode\tprovider\tmodel\tevent\tseconds\tpath\n' > "${CASE_EVENTS_TSV}"
+printf 'case\tmode\tprovider\tmodel\n' > "${EXPECTED_CASES_TSV}"
 
 TARGET_PDB="${REPO_ROOT}/tests/fixtures/6MRR.pdb"
 
@@ -160,6 +164,15 @@ summary = data.get("summary") or {}
 latest = summary.get("latest") if isinstance(summary, dict) else None
 if not isinstance(latest, dict):
     latest = summary if isinstance(summary, dict) else {}
+decision = data.get("decision") or {}
+result = data.get("result") or {}
+if (
+    decision.get("decision") == "no_available_candidate"
+    or result.get("status") == "no_available_candidate"
+):
+    if result.get("technical_failure") is not False:
+        raise SystemExit("no_available_candidate did not report technical_failure=false")
+    raise SystemExit(0)
 final_submission = latest.get("final_submission")
 if not isinstance(final_submission, dict):
     raise SystemExit("actual run completed without explicit final_submission")
@@ -167,7 +180,6 @@ if final_submission.get("terminal") is not True:
     raise SystemExit("final_submission is not terminal")
 if final_submission.get("outcome") not in {"accepted", "no_acceptable_candidate"}:
     raise SystemExit(f"unexpected final_submission outcome: {final_submission.get('outcome')}")
-decision = data.get("decision") or {}
 if decision.get("decision") not in {"submit_candidate", "no_acceptable_candidate", "submitted_final_candidate"}:
     raise SystemExit(f"unexpected final decision: {decision.get('decision')}")
 submit_job_id = decision.get("submit_job_id")
@@ -197,10 +209,12 @@ run_case() {
   fi
   local output
   output="$(case_output_path "${case_name}")"
+  local output_tmp="${output}.tmp"
   local label="${case_name##*_}"
   local case_dir="${RUN_ROOT}/${label}"
   mkdir -p "${case_dir}"
   local stderr="${case_dir}/${case_name}.stderr.log"
+  local stderr_tmp="${stderr}.tmp"
   local start elapsed rc status
   local extra_args=()
   if [[ -n "${extra_param}" ]]; then
@@ -208,31 +222,36 @@ run_case() {
   fi
   start="$(date +%s)"
   log "START ${case_name} (${mode}, ${provider}, ${model})"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -Is)" "${case_name}" "${mode}" "${provider}" "${model}" "STARTED" "0" "${output}" >> "${CASE_EVENTS_TSV}"
+  rm -f "${output_tmp}" "${stderr_tmp}"
   set +e
   if [[ "${mode}" == "plan" ]]; then
     if [[ -n "${target_arg}" ]]; then
       run_vpa agent run "${query}" --target "${target_arg}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --plan-only --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" \
-        --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
+        --workspace "${workspace}" --json > "${output_tmp}" 2> "${stderr_tmp}"
     else
       run_vpa agent run "${query}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --plan-only --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" \
-        --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
+        --workspace "${workspace}" --json > "${output_tmp}" 2> "${stderr_tmp}"
     fi
   else
     if [[ -n "${target_arg}" ]]; then
       run_vpa agent run "${query}" --target "${target_arg}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" --max-wait-s "${VPA_VALIDATION_MAX_WAIT_S}" \
-        --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
+        --workspace "${workspace}" --json > "${output_tmp}" 2> "${stderr_tmp}"
     else
       run_vpa agent run "${query}" "${extra_args[@]}" --provider "${provider}" --model "${model}" \
         --max-rounds 2 --max-entries "${VPA_AGENT_MAX_ENTRIES}" --max-wait-s "${VPA_VALIDATION_MAX_WAIT_S}" \
-        --workspace "${workspace}" --json > "${output}" 2> "${stderr}"
+        --workspace "${workspace}" --json > "${output_tmp}" 2> "${stderr_tmp}"
     fi
   fi
   rc=$?
   set -e
   elapsed=$(( $(date +%s) - start ))
+  mv -f "${output_tmp}" "${output}" 2>/dev/null || true
+  mv -f "${stderr_tmp}" "${stderr}" 2>/dev/null || true
   if [[ "${rc}" -eq 0 ]] && validate_case "${mode}" "${output}" >> "${case_dir}/${case_name}.validate.log" 2>&1; then
     status="PASS"
   else
@@ -240,6 +259,8 @@ run_case() {
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${case_name}" "${mode}" "${provider}" "${model}" "${status}" "${rc}" "${elapsed}" "${output}" >> "${STATUS_TSV}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -Is)" "${case_name}" "${mode}" "${provider}" "${model}" "${status}" "${elapsed}" "${output}" >> "${CASE_EVENTS_TSV}"
   log "END ${case_name}: ${status} (exit=${rc}, ${elapsed}s)"
 }
 
@@ -360,6 +381,26 @@ run_provider_smoke_cases() {
   fi
 }
 
+write_expected_cases() {
+  : > "${EXPECTED_CASES_TSV}"
+  printf 'case\tmode\tprovider\tmodel\n' >> "${EXPECTED_CASES_TSV}"
+  for spec in "$@"; do
+    IFS='|' read -r label provider model <<< "${spec}"
+    if [[ "${SMOKE}" == "1" ]]; then
+      printf 'actual_semantic_%s\tactual\t%s\t%s\n' "${label}" "${provider}" "${model}" >> "${EXPECTED_CASES_TSV}"
+      continue
+    fi
+    if [[ "${INCLUDE_PLAN_ONLY}" == "1" ]]; then
+      printf 'plan_semantic_%s\tplan\t%s\t%s\n' "${label}" "${provider}" "${model}" >> "${EXPECTED_CASES_TSV}"
+      printf 'plan_binder_%s\tplan\t%s\t%s\n' "${label}" "${provider}" "${model}" >> "${EXPECTED_CASES_TSV}"
+      printf 'plan_denovo_%s\tplan\t%s\t%s\n' "${label}" "${provider}" "${model}" >> "${EXPECTED_CASES_TSV}"
+    fi
+    printf 'actual_semantic_%s\tactual\t%s\t%s\n' "${label}" "${provider}" "${model}" >> "${EXPECTED_CASES_TSV}"
+    printf 'actual_binder_%s\tactual\t%s\t%s\n' "${label}" "${provider}" "${model}" >> "${EXPECTED_CASES_TSV}"
+    printf 'actual_denovo_%s\tactual\t%s\t%s\n' "${label}" "${provider}" "${model}" >> "${EXPECTED_CASES_TSV}"
+  done
+}
+
 start_daemon() {
   log "Stopping any daemon in this validation runtime, then starting ${VPA_VALIDATION_WORKERS} workers."
   run_vpa daemon stop --json > "${LOG_DIR}/daemon_stop_before.json" 2>&1 || true
@@ -370,6 +411,15 @@ start_daemon() {
 stop_daemon() {
   log "Stopping validation daemon."
   run_vpa daemon stop --json > "${LOG_DIR}/daemon_stop_after.json" 2>&1 || true
+}
+
+finalize_incomplete_run() {
+  local rc=$?
+  set +e
+  stop_daemon
+  write_summary
+  log "summary=${SUMMARY_MD} (incomplete, exit=${rc})"
+  exit "${rc}"
 }
 
 write_summary() {
@@ -385,6 +435,14 @@ from pathlib import Path
 status_tsv, summary_md, summary_json, run_root = map(Path, sys.argv[1:5])
 smoke = sys.argv[5] == "1"
 rows = list(csv.DictReader(status_tsv.open(encoding="utf-8"), delimiter="\t"))
+expected_path = run_root / "expected_cases.tsv"
+expected_rows = (
+    list(csv.DictReader(expected_path.open(encoding="utf-8"), delimiter="\t"))
+    if expected_path.is_file()
+    else []
+)
+observed_cases = {row["case"] for row in rows}
+missing_cases = [row for row in expected_rows if row["case"] not in observed_cases]
 passed = sum(1 for r in rows if r["status"] == "PASS")
 blocked = sum(1 for r in rows if r["status"] == "BLOCKED")
 failed = sum(1 for r in rows if r["status"] == "FAIL")
@@ -392,7 +450,10 @@ lines = [
     f"# Live Provider Matrix on {os.environ.get('VPA_VALIDATION_HOST_LABEL', 'unknown-host')}",
     "",
     f"Run root: `{run_root}`",
-    f"Cases: {passed} passed / {failed} failed / {blocked} blocked / {len(rows)} total",
+    (
+        f"Cases: {passed} passed / {failed} failed / {blocked} blocked / "
+        f"{len(missing_cases)} missing / {len(rows)} recorded"
+    ),
     "",
     "| Case | Mode | Provider | Model | Status | Seconds |",
     "| --- | --- | --- | --- | --- | ---: |",
@@ -402,10 +463,17 @@ for row in rows:
         f"| `{row['case']}` | {row['mode']} | {row['provider']} | "
         f"`{row['model']}` | **{row['status']}** | {row['seconds']} |"
     )
+for row in missing_cases:
+    lines.append(
+        f"| `{row['case']}` | {row['mode']} | {row['provider']} | "
+        f"`{row['model']}` | **MISSING** | 0 |"
+    )
 lines.extend([
     "",
     "Artifacts:",
     f"- Status TSV: `{status_tsv}`",
+    f"- Case events TSV: `{run_root / 'case_events.tsv'}`",
+    f"- Expected cases TSV: `{expected_path}`",
     f"- Logs: `{run_root / 'logs'}`",
     f"- Case outputs: `{run_root}/{{codex,claude,qwen}}/*.json`",
 ])
@@ -510,7 +578,11 @@ summary_json.write_text(
                 "PASS": counts.get("PASS", 0),
                 "FAIL": counts.get("FAIL", 0),
                 "BLOCKED": counts.get("BLOCKED", 0),
+                "MISSING": len(missing_cases),
             },
+            "expected_case_count": len(expected_rows),
+            "recorded_case_count": len(rows),
+            "missing_cases": missing_cases,
             "notes": (
                 "live provider matrix smoke cycle."
                 if smoke
@@ -574,10 +646,11 @@ main() {
   }
 
   mapfile -t providers < <(provider_specs)
+  write_expected_cases "${providers[@]}"
 
   if [[ "${SMOKE}" == "1" ]]; then
     start_daemon
-    trap stop_daemon EXIT
+    trap finalize_incomplete_run EXIT
     for spec in "${providers[@]}"; do
       IFS='|' read -r label provider model <<< "${spec}"
       run_provider_smoke_cases "${label}" "${provider}" "${model}"
@@ -599,7 +672,7 @@ main() {
   fi
 
   start_daemon
-  trap stop_daemon EXIT
+  trap finalize_incomplete_run EXIT
   for spec in "${providers[@]}"; do
     IFS='|' read -r label provider model <<< "${spec}"
     run_provider_actual_cases "${label}" "${provider}" "${model}"

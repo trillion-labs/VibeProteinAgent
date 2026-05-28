@@ -81,6 +81,8 @@ class ResultSummarizer:
 def _compact(value: Any, *, depth: int = 0) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, dict) and value.get("schema_version") == "candidate_v1":
+        return dict(value)
     if depth >= 3:
         return f"<{type(value).__name__}>"
     if isinstance(value, list):

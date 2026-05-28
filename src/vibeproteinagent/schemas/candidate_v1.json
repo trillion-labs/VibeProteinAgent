@@ -51,6 +51,14 @@
       "type": "string",
       "minLength": 1
     },
+    "backbone_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "full_structure_path": {
+      "type": "string",
+      "minLength": 1
+    },
     "scores": {
       "type": "object",
       "additionalProperties": {

@@ -13,6 +13,7 @@ from vibeproteinagent.adapters.mpnn_to_protenix_input.adapter import (
     Mpnn2ProtenixInput,
     _parse_mpnn_fasta,
 )
+from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
 
 _SAMPLE_FASTA = """>foo|input, num_residues=8
 MKAILVAA
@@ -90,6 +91,13 @@ def test_adapter_emits_top_k_multiple(tmp_path: Path) -> None:
     ]
     assert got_seqs == expected_seqs
     assert out.names == ["d_1", "d_2", "d_3"]
+    for candidate, expected_seq in zip(out.candidates, expected_seqs, strict=True):
+        validate_candidate_v1(candidate)
+        assert candidate["schema_version"] == "candidate_v1"
+        assert candidate["sequence"] == expected_seq
+        assert candidate["source"]["tool"] == "mpnn_to_protenix_input"
+        assert candidate["capabilities"]["has_sequence"] is True
+        assert "protenix_input_json" in candidate["artifacts"]
 
 
 def test_adapter_missing_fasta_raises(tmp_path: Path) -> None:

@@ -125,7 +125,7 @@ def _no_acceptable_intent() -> dict[str, Any]:
     }
 
 
-def test_no_acceptable_intent_stops_without_submission_when_no_rounds_remain(
+def test_no_acceptable_intent_records_terminal_submission_when_no_rounds_remain(
     tmp_workspace: Workspace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -145,6 +145,19 @@ def test_no_acceptable_intent_stops_without_submission_when_no_rounds_remain(
         del self, args, kwargs
         raise AssertionError("non-submit decision must not call submit_candidate")
 
+    def no_acceptable_submit(self, run_id, broker, decision, *, round_index, policy):
+        del self, run_id, broker, decision, round_index, policy
+        return (
+            {
+                "submission_id": "sub_no_acceptable",
+                "outcome": "no_acceptable_candidate",
+                "terminal": True,
+                "candidates_resolved": [],
+                "reasoning": "No acceptable candidate is available.",
+            },
+            "job_no_acceptable",
+        )
+
     monkeypatch.setattr(WorkflowPlanner, "_plan_v1", plan_v1)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
@@ -152,6 +165,11 @@ def test_no_acceptable_intent_stops_without_submission_when_no_rounds_remain(
     )
     monkeypatch.setattr(AgentController, "_execute_validated_plan", execute)
     monkeypatch.setattr(AgentController, "_execute_submit_candidate_decision", fail_submit)
+    monkeypatch.setattr(
+        AgentController,
+        "_execute_no_acceptable_candidate_submission",
+        no_acceptable_submit,
+    )
 
     controller = AgentController(
         tmp_workspace,
@@ -161,9 +179,10 @@ def test_no_acceptable_intent_stops_without_submission_when_no_rounds_remain(
 
     assert execute_calls["count"] == 1
     assert report["state"] == "completed"
-    assert report["decision"]["decision"] == "next_round_with_no_acceptable_candidate"
+    assert report["decision"]["decision"] == "no_acceptable_candidate"
+    assert report["decision"]["source_decision"] == "next_round_with_no_acceptable_candidate"
     assert report["decision"]["resolved_branch"]["action"] == "stop"
-    assert "final_submission" not in report["summary"]["latest"]
+    assert report["summary"]["latest"]["final_submission"]["outcome"] == "no_acceptable_candidate"
 
 
 def test_submit_candidate_decision_behavior_is_unchanged(
@@ -263,12 +282,30 @@ def test_next_round_decision_behavior_is_unchanged(
         executed.append(f"wf_round{index}")
         return _outcome(f"wf_round{index}", f"job_round{index}")
 
+    def no_acceptable_submit(self, run_id, broker, decision, *, round_index, policy):
+        del self, run_id, broker, decision, round_index, policy
+        return (
+            {
+                "submission_id": "sub_no_acceptable",
+                "outcome": "no_acceptable_candidate",
+                "terminal": True,
+                "candidates_resolved": [],
+                "reasoning": "Second round completed.",
+            },
+            "job_no_acceptable",
+        )
+
     monkeypatch.setattr(WorkflowPlanner, "_plan_v1", plan_v1)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
         lambda _config: provider,
     )
     monkeypatch.setattr(AgentController, "_execute_validated_plan", execute)
+    monkeypatch.setattr(
+        AgentController,
+        "_execute_no_acceptable_candidate_submission",
+        no_acceptable_submit,
+    )
 
     report = _run_controller(
         AgentController(tmp_workspace, config=AgentConfig(max_rounds=2, max_entries=3)),
@@ -278,12 +315,10 @@ def test_next_round_decision_behavior_is_unchanged(
     assert executed == ["wf_round1", "wf_round2"]
     assert [item["decision"] for item in report["decisions"]] == [
         "next_round_with_surviving_candidate",
-        "next_round_with_no_acceptable_candidate",
+        "no_acceptable_candidate",
     ]
-    assert report["result"] == {
-        "workflow_ids": ["wf_round1", "wf_round2"],
-        "state": "completed",
-    }
+    assert report["result"]["status"] == "no_acceptable_candidate"
+    assert report["result"]["technical_failure"] is False
 
 
 def test_multi_round_agent_can_end_with_non_submit_stop(
@@ -315,6 +350,19 @@ def test_multi_round_agent_can_end_with_non_submit_stop(
         del self, args, kwargs
         raise AssertionError("non-submit stop must not call submit_candidate")
 
+    def no_acceptable_submit(self, run_id, broker, decision, *, round_index, policy):
+        del self, run_id, broker, decision, round_index, policy
+        return (
+            {
+                "submission_id": "sub_no_acceptable",
+                "outcome": "no_acceptable_candidate",
+                "terminal": True,
+                "candidates_resolved": [],
+                "reasoning": "No acceptable candidate is available.",
+            },
+            "job_no_acceptable",
+        )
+
     monkeypatch.setattr(WorkflowPlanner, "_plan_v1", plan_v1)
     monkeypatch.setattr(
         "vibeproteinagent.agents.execution.controller.provider_from_config",
@@ -322,6 +370,11 @@ def test_multi_round_agent_can_end_with_non_submit_stop(
     )
     monkeypatch.setattr(AgentController, "_execute_validated_plan", execute)
     monkeypatch.setattr(AgentController, "_execute_submit_candidate_decision", fail_submit)
+    monkeypatch.setattr(
+        AgentController,
+        "_execute_no_acceptable_candidate_submission",
+        no_acceptable_submit,
+    )
 
     report = _run_controller(
         AgentController(tmp_workspace, config=AgentConfig(max_rounds=2, max_entries=3)),
@@ -330,7 +383,7 @@ def test_multi_round_agent_can_end_with_non_submit_stop(
 
     assert [item["decision"] for item in report["decisions"]] == [
         "next_round_with_surviving_candidate",
-        "next_round_with_no_acceptable_candidate",
+        "no_acceptable_candidate",
     ]
     assert report["decision"]["resolved_branch"]["action"] == "stop"
 

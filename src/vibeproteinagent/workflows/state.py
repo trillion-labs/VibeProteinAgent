@@ -38,7 +38,7 @@ class WorkflowStateMachine:
     def upstream_ok(rt: NodeRuntime, runtime: dict[str, NodeRuntime]) -> bool:
         for up in rt.upstream:
             other = runtime.get(up)
-            if other is None or other.state not in SUCCESS_NODE_STATES:
+            if other is None or not _output_available(other):
                 return False
         return True
 
@@ -54,7 +54,7 @@ class WorkflowStateMachine:
         parent_outputs: set[str] = set()
         foreach_children: list[NodeRuntime] = []
         for rt in runtime.values():
-            if rt.state not in SUCCESS_NODE_STATES or rt.output is None:
+            if not _output_available(rt):
                 continue
             outputs[rt.runtime_id] = rt.output
             if rt.job_id:
@@ -84,6 +84,16 @@ class WorkflowStateMachine:
 logical_id = WorkflowStateMachine.logical_id
 upstream_ok = WorkflowStateMachine.upstream_ok
 build_scope = WorkflowStateMachine.build_scope
+
+
+def _output_available(rt: NodeRuntime) -> bool:
+    if rt.state in SUCCESS_NODE_STATES and rt.output is not None:
+        return True
+    return (
+        rt.state == "skipped"
+        and isinstance(rt.output, dict)
+        and rt.output.get("technical_failure") is False
+    )
 
 
 __all__ = [

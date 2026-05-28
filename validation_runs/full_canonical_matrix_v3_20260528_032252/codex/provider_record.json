@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260528_032252/codex",
+  "duration_seconds": 1608.0,
+  "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INTERNAL\", \"message\": \"internal error: Circular reference detected\", \"details\": {\"traceback\": \"Traceback (most recent call last):\\n  File \\\"/mnt/vast/trillion/hyunjin/VibeProteinAgent/src/vibeproteinagent/agents/execution/controller.py\\\", line 774, in _run_agent_plan_impl\\n    submission, submit_job_id = self._execute_submit_candidate_decision(\\n                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/mnt/vast/trillion/hyunjin/VibePro",
+  "provider": "codex",
+  "reason": "decision_or_submission_failed",
+  "status": "FAIL"
+}

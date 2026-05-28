@@ -15,8 +15,11 @@ from vibeproteinagent.core.errors import (
     VPAError,
 )
 from vibeproteinagent.agents.planning.canonical_tools import (
+    CANONICAL_CONSUMERS,
     CANONICAL_TERM_CONSUMERS,
     annotate_candidate_capabilities,
+    candidate_capabilities_from_record,
+    candidate_contract_for_inputs,
 )
 from vibeproteinagent.workspace import (
     JobState,
@@ -74,6 +77,164 @@ def _annotate_output_candidate_capabilities(output: Any) -> Any:
     if not changed:
         return output
     return {**output, "candidates": annotated}
+
+
+def _candidate_list(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    candidates: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        candidates.append(item)
+    return candidates
+
+
+def _output_candidates(output: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(output, dict):
+        return None
+    return _candidate_list(output.get("candidates"))
+
+
+def _candidate_stream_ref_nodes(value: Any) -> set[str]:
+    refs: set[str] = set()
+    for ref in iter_refs(value):
+        parts = ref.split(".")
+        if len(parts) >= 3 and parts[0] == "outputs" and parts[-1] == "candidates":
+            refs.add(parts[1])
+    return refs
+
+
+def _first_candidate_input_source(rt: _NodeRuntime) -> str | None:
+    refs = sorted(_candidate_stream_ref_nodes(rt.desc.inputs))
+    return refs[0] if refs else None
+
+
+def _node_consumes_candidate_stream(rt: _NodeRuntime) -> bool:
+    slot = CANONICAL_CONSUMERS.get(rt.desc.tool)
+    if not slot:
+        return False
+    inputs = rt.desc.inputs if isinstance(rt.desc.inputs, dict) else {}
+    return slot in inputs
+
+
+def _candidate_runtime_gate(
+    rt: _NodeRuntime,
+    resolved: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    slot = CANONICAL_CONSUMERS.get(rt.desc.tool)
+    if not slot or slot not in resolved:
+        return None, None
+    candidates = _candidate_list(resolved.get(slot))
+    if candidates is None:
+        return None, None
+    if not candidates:
+        return {
+            "status": "skipped_no_candidates",
+            "reason": "required candidate stream is empty",
+            "input_field": slot,
+            "candidate_count": 0,
+        }, None
+    contract = candidate_contract_for_inputs(rt.desc.tool, resolved)
+    if len(candidates) < contract.min_candidate_items:
+        return {
+            "status": "skipped_missing_candidate_capability",
+            "reason": "candidate stream has fewer items than this tool requires",
+            "input_field": slot,
+            "candidate_count": len(candidates),
+            "missing_capabilities": [
+                f"at_least_{contract.min_candidate_items}_candidate_items"
+            ],
+        }, None
+    missing_by_candidate: list[dict[str, Any]] = []
+    compatible_candidates: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        capabilities = candidate_capabilities_from_record(candidate)
+        missing = sorted(contract.consumes - capabilities)
+        if missing:
+            missing_by_candidate.append(
+                {
+                    "index": index,
+                    "candidate_id": candidate.get("candidate_id"),
+                    "missing_capabilities": missing,
+                    "capabilities": sorted(capabilities),
+                }
+            )
+        else:
+            compatible_candidates.append(candidate)
+    if missing_by_candidate:
+        if len(compatible_candidates) >= contract.min_candidate_items:
+            resolved[slot] = compatible_candidates
+            return None, {
+                "status": "filtered_missing_candidate_capability",
+                "reason": (
+                    "candidate stream contained incompatible candidates; "
+                    "executing tool with compatible candidate subset"
+                ),
+                "input_field": slot,
+                "candidate_count": len(candidates),
+                "compatible_candidate_count": len(compatible_candidates),
+                "required_capabilities": sorted(contract.consumes),
+                "filtered_candidates": missing_by_candidate,
+                "technical_failure": False,
+            }
+        missing_all = sorted(
+            {
+                capability
+                for item in missing_by_candidate
+                for capability in item["missing_capabilities"]
+            }
+        )
+        return {
+            "status": "skipped_missing_candidate_capability",
+            "reason": "candidate stream lacks capabilities required by this tool",
+            "input_field": slot,
+            "candidate_count": len(candidates),
+            "compatible_candidate_count": len(compatible_candidates),
+            "missing_capabilities": missing_all,
+            "missing_by_candidate": missing_by_candidate,
+        }, None
+    return None, None
+
+
+def _skip_output(
+    rt: _NodeRuntime,
+    gate: dict[str, Any],
+    *,
+    upstream_empty_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = str(gate.get("status") or "skipped_no_candidates")
+    output = {
+        "status": status,
+        "skipped": True,
+        "skip_reason": gate.get("reason") or status,
+        "skip_kind": status,
+        "consumer_node": rt.runtime_id,
+        "consumer_tool": rt.desc.tool,
+        "input_field": gate.get("input_field"),
+        "candidates": [],
+        "technical_failure": False,
+        "runtime_gate_event": dict(gate),
+    }
+    if upstream_empty_event is not None:
+        output["upstream_empty_candidate_event"] = upstream_empty_event
+    return output
+
+
+def _empty_candidate_event(
+    rt: _NodeRuntime,
+    *,
+    upstream_node: str | None = None,
+    reason: str = "node produced an empty candidate stream",
+) -> dict[str, Any]:
+    return {
+        "event_type": "empty_candidate_event",
+        "node_id": rt.runtime_id,
+        "tool": rt.desc.tool,
+        "upstream_node": upstream_node,
+        "reason": reason,
+        "technical_failure": False,
+    }
 
 
 def _unresolved_term_source_error(
@@ -290,6 +451,7 @@ class WorkflowExecutor:
         env = env_fingerprint()
         deadline = time.time() + float(max_wait_s)
         failed = False
+        capability_filter_events: dict[str, dict[str, Any]] = {}
 
         while time.time() < deadline:
             progressed = False
@@ -315,11 +477,33 @@ class WorkflowExecutor:
                     if job.state is JobState.COMPLETED:
                         rt.state = "completed"
                         rt.output = _annotate_output_candidate_capabilities(job.output)
+                        filter_event = capability_filter_events.pop(rt.runtime_id, None)
+                        if filter_event is not None and isinstance(rt.output, dict):
+                            rt.output = {
+                                **rt.output,
+                                "candidate_capability_filter_event": filter_event,
+                            }
+                        if _output_candidates(rt.output) == []:
+                            event = _empty_candidate_event(rt)
+                            rt.output = {
+                                **rt.output,
+                                "empty_candidate_event": event,
+                                "technical_failure": False,
+                            }
                         self.store.update_node_state(
                             workflow_id, rt.runtime_id, "completed",
                             job_id=rt.job_id,
                             output=rt.output,
                         )
+                        if _output_candidates(rt.output) == []:
+                            self._cascade_empty_candidate_skip(
+                                workflow_id,
+                                rt,
+                                runtime,
+                                upstream_empty_event=rt.output.get("empty_candidate_event")
+                                if isinstance(rt.output, dict)
+                                else None,
+                            )
                         progressed = True
                     elif job.state in (JobState.FAILED, JobState.CANCELLED):
                         self._fail_node(
@@ -419,14 +603,52 @@ class WorkflowExecutor:
                 if error := _unresolved_term_source_error(rt, resolved, runtime):
                     rt.state = "completed"
                     rt.output = _empty_term_source_output(rt, error)
+                    rt.output["empty_candidate_event"] = _empty_candidate_event(
+                        rt,
+                        reason="term resolver produced no executable candidate query",
+                    )
+                    rt.output["technical_failure"] = False
                     self.store.update_node_state(
                         workflow_id,
                         rt.runtime_id,
                         "completed",
                         output=rt.output,
                     )
+                    self._cascade_empty_candidate_skip(
+                        workflow_id,
+                        rt,
+                        runtime,
+                        upstream_empty_event=rt.output["empty_candidate_event"],
+                    )
                     progressed = True
                     continue
+
+                runtime_gate, capability_filter_event = _candidate_runtime_gate(rt, resolved)
+                if runtime_gate is not None:
+                    event = _empty_candidate_event(
+                        rt,
+                        upstream_node=_first_candidate_input_source(rt),
+                        reason=str(runtime_gate.get("reason") or "candidate runtime gate skipped node"),
+                    )
+                    rt.state = "skipped"
+                    rt.output = _skip_output(rt, runtime_gate, upstream_empty_event=event)
+                    rt.output["empty_candidate_event"] = event
+                    self.store.update_node_state(
+                        workflow_id,
+                        rt.runtime_id,
+                        "skipped",
+                        output=rt.output,
+                    )
+                    self._cascade_empty_candidate_skip(
+                        workflow_id,
+                        rt,
+                        runtime,
+                        upstream_empty_event=event,
+                    )
+                    progressed = True
+                    continue
+                if capability_filter_event is not None:
+                    capability_filter_events[rt.runtime_id] = capability_filter_event
 
                 # Resolve the tool descriptor up-front so the cache key uses
                 # the concrete adapter version (not the PEP-440 spec).
@@ -516,6 +738,13 @@ class WorkflowExecutor:
                                 cached_output = None
                         rt.state = "cached"
                         rt.output = cached_output
+                        if _output_candidates(rt.output) == []:
+                            event = _empty_candidate_event(rt)
+                            rt.output = {
+                                **rt.output,
+                                "empty_candidate_event": event,
+                                "technical_failure": False,
+                            }
                         rt.job_id = hit.job_id
                         self.store.update_node_state(
                             workflow_id, rt.runtime_id, "cached",
@@ -524,6 +753,15 @@ class WorkflowExecutor:
                             input_hash=cache_key,
                             output=rt.output,
                         )
+                        if _output_candidates(rt.output) == []:
+                            self._cascade_empty_candidate_skip(
+                                workflow_id,
+                                rt,
+                                runtime,
+                                upstream_empty_event=rt.output.get("empty_candidate_event")
+                                if isinstance(rt.output, dict)
+                                else None,
+                            )
                         progressed = True
                         continue
 
@@ -730,6 +968,65 @@ class WorkflowExecutor:
                 self.store.update_node_state(
                     workflow_id, rt.runtime_id, "skipped",
                 )
+
+    def _cascade_empty_candidate_skip(
+        self,
+        workflow_id: str,
+        empty_rt: _NodeRuntime,
+        runtime: dict[str, _NodeRuntime],
+        *,
+        upstream_empty_event: dict[str, Any] | None,
+    ) -> None:
+        """Skip only candidate consumers that require an empty candidate stream."""
+        queue = [empty_rt.runtime_id]
+        seen: set[str] = set()
+        skipped_nodes: list[dict[str, Any]] = []
+        while queue:
+            source_id = queue.pop(0)
+            if source_id in seen:
+                continue
+            seen.add(source_id)
+            for rt in runtime.values():
+                if rt.runtime_id == source_id or rt.state in _TERMINAL_NODE_STATES:
+                    continue
+                candidate_ref_nodes = _candidate_stream_ref_nodes(rt.desc.inputs)
+                consumes_source_candidate_stream = source_id in candidate_ref_nodes
+                if not consumes_source_candidate_stream:
+                    continue
+                if consumes_source_candidate_stream and not _node_consumes_candidate_stream(rt):
+                    continue
+                gate = {
+                    "status": "skipped_no_candidates",
+                    "reason": "upstream candidate stream is empty",
+                    "input_field": CANONICAL_CONSUMERS.get(rt.desc.tool),
+                    "upstream_node": source_id,
+                    "candidate_count": 0,
+                }
+                rt.state = "skipped"
+                rt.output = _skip_output(
+                    rt,
+                    gate,
+                    upstream_empty_event=upstream_empty_event,
+                )
+                self.store.update_node_state(
+                    workflow_id,
+                    rt.runtime_id,
+                    "skipped",
+                    output=rt.output,
+                )
+                skipped_nodes.append({"node_id": rt.runtime_id, "tool": rt.desc.tool})
+                queue.append(rt.runtime_id)
+        if skipped_nodes and isinstance(empty_rt.output, dict):
+            empty_rt.output = {
+                **empty_rt.output,
+                "skipped_no_candidates": skipped_nodes,
+            }
+            self.store.update_node_state(
+                workflow_id,
+                empty_rt.runtime_id,
+                empty_rt.state,
+                output=empty_rt.output,
+            )
 
     def _complete_foreach_base_if_ready(
         self,

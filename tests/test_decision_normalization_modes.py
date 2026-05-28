@@ -7,7 +7,13 @@ import pytest
 from vibeproteinagent.agents.config import resolve_decision_normalization_mode
 from vibeproteinagent.agents.evaluation import DecisionSchemaViolation
 from vibeproteinagent.agents.execution import controller as controller_mod
-from vibeproteinagent.agents.execution.controller import _submit_candidate_params_from_decision
+from vibeproteinagent.agents.execution.controller import (
+    AgentController,
+    _json_safe_decision_details,
+    _submit_candidate_params_from_decision,
+)
+from vibeproteinagent.agents.execution.policies import ExecutionPolicy
+from vibeproteinagent.workspace import Workspace
 
 
 def _misnested_decision() -> dict:
@@ -117,3 +123,67 @@ def test_invalid_normalization_env_value_raises(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("VPA_NORMALIZE_DECISION_REASONING", "maybe")
     with pytest.raises(ValueError, match="Invalid VPA_NORMALIZE_DECISION_REASONING"):
         resolve_decision_normalization_mode()
+
+
+class _SubmitBroker:
+    def __init__(self) -> None:
+        self.params = None
+
+    def submit_job(self, tool_name, params, **kwargs):
+        del kwargs
+        assert tool_name == "submit_candidate"
+        self.params = params
+        return {"ok": True, "job_id": "job_submit"}
+
+    def wait_job(self, job_id, **kwargs):
+        del kwargs
+        assert job_id == "job_submit"
+        return {
+            "state": "completed",
+            "output": {
+                "terminal": True,
+                "outcome": "accepted",
+                "submission_id": "sub_1",
+            },
+        }
+
+
+def test_submit_execution_validates_public_decision_payload_only(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VPA_NORMALIZE_DECISION_REASONING", "strict")
+    controller = AgentController(tmp_workspace)
+    broker = _SubmitBroker()
+    decision = {
+        **_valid_decision(),
+        "resolved_branch": {
+            "action": "submit_candidate",
+            "failure": False,
+            "reason": "internal controller branch",
+        },
+        "notes": [{"level": "debug", "message": "internal note"}],
+    }
+
+    submission, job_id = controller._execute_submit_candidate_decision(
+        "run_1",
+        broker,
+        decision,
+        round_index=0,
+        policy=ExecutionPolicy(submit=True),
+    )
+
+    assert job_id == "job_submit"
+    assert submission["terminal"] is True
+    assert broker.params["reasoning"] == "The candidate satisfies the criteria."
+
+
+def test_decision_error_details_are_json_safe_without_payload_cycle() -> None:
+    decision = _valid_decision()
+    details = {"payload": decision}
+    decision["notes"] = [{"details": details}]
+
+    safe = _json_safe_decision_details(details)
+
+    assert safe["payload"]["decision"] == "submit_candidate"
+    assert safe["payload"]["candidate_ref_count"] == 1

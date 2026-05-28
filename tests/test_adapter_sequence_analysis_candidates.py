@@ -49,3 +49,35 @@ def test_sequence_analysis_candidate_ids_are_deterministic(tmp_path) -> None:
     assert [row["candidate_id"] for row in first.candidates] == [
         row["candidate_id"] for row in second.candidates
     ]
+
+
+def test_sequence_analysis_preserves_canonical_structure_fields(tmp_path) -> None:
+    adapter = SequenceAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    upstream = {
+        "schema_version": "candidate_v1",
+        "candidate_id": "cand_struct",
+        "source": {"tool": "upstream", "local_id": "struct_0000"},
+        "sequence": "MKKLLVV",
+        "structure_path": "/tmp/struct.pdb",
+        "backbone_path": "/tmp/backbone.pdb",
+        "full_structure_path": "/tmp/full.pdb",
+        "capabilities": {
+            "has_sequence": True,
+            "has_backbone_structure": True,
+            "has_full_structure": True,
+        },
+        "scores": {},
+        "artifacts": {},
+    }
+
+    out = adapter.run(
+        SequenceAnalysisInput(candidates=[upstream], max_annotations=3),
+        null_context(tmp_path / "preserve"),
+    )
+
+    candidate = out.candidates[0]
+    validate_candidate_v1(candidate)
+    assert candidate["structure_path"] == upstream["structure_path"]
+    assert candidate["backbone_path"] == upstream["backbone_path"]
+    assert candidate["full_structure_path"] == upstream["full_structure_path"]
+    assert candidate["capabilities"] == upstream["capabilities"]

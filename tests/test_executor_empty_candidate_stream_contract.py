@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+from pathlib import Path
+import threading
+import time
+
+import pytest
+
+from vibeproteinagent.adapters import ToolRegistry
+from vibeproteinagent.adapters.context import null_context
+from vibeproteinagent.workflows import Workflow, WorkflowExecutor, load_workflow
+from vibeproteinagent.workspace import JobState, JobStore, Workspace
+
+
+def _run_pending_jobs(store: JobStore, registry: ToolRegistry, stop: threading.Event) -> None:
+    import typing
+    import torch
+
+    device = torch.device("cpu")
+    weights_dir = Path("/tmp/vpa_test_weights")
+    weights_dir.mkdir(exist_ok=True)
+    while not stop.is_set():
+        recs = store.list(state=JobState.QUEUED, limit=8)
+        if not recs:
+            time.sleep(0.02)
+            continue
+        for rec in recs:
+            claimed = store.claim_next_queued(worker_id=0, gpu_ids=[], job_id=rec.job_id)
+            if claimed is None:
+                continue
+            _descriptor, cls = registry.get(rec.tool_name, "*")
+            adapter = cls(config={}, weights_dir=weights_dir, device=device)
+            hints = typing.get_type_hints(adapter.run)
+            input_model = hints.get("params")
+            params = input_model(**rec.params) if input_model is not None else rec.params
+            out = adapter.run(params, null_context(rec.job_id))
+            payload = out.model_dump() if hasattr(out, "model_dump") else dict(out)
+            store.transition(rec.job_id, JobState.COMPLETED, output=payload)
+
+
+@pytest.fixture
+def inline_supervisor(tmp_workspace: Workspace):
+    store = JobStore(tmp_workspace)
+    registry = ToolRegistry()
+    registry.discover()
+    stop = threading.Event()
+    thread = threading.Thread(target=_run_pending_jobs, args=(store, registry, stop), daemon=True)
+    thread.start()
+    try:
+        yield object()
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+
+
+def _run_without_worker(
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    wf: Workflow,
+    *,
+    virtual_outputs: dict[str, object],
+    supervisor: object | None = None,
+) -> tuple[dict[str, str], dict[str, object], str]:
+    p = tmp_path / f"{wf.name}.yaml"
+    wf.save(p)
+    registry = ToolRegistry()
+    registry.discover()
+    executor = WorkflowExecutor(
+        tmp_workspace,
+        registry,
+        supervisor=supervisor,
+        virtual_outputs=virtual_outputs,
+    )
+    wf_id = executor.submit(load_workflow(p), {})
+    rec = executor.run_sync(wf_id, max_wait_s=2, poll_s=0.01)
+    rows = executor.store.list_nodes(wf_id)
+    states = {row.node_id: row.state for row in rows}
+    outputs = {row.node_id: row.output for row in rows}
+    return states, outputs, rec.state
+
+
+def test_empty_candidate_stream_skips_only_candidate_consumers(
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    inline_supervisor: object,
+) -> None:
+    wf = Workflow(name="empty_candidate_contract", version="1.0.0")
+    wf.node(
+        "sequence_metrics",
+        tool="sequence_analysis",
+        inputs={"candidates": "${outputs.prior_round.candidates}"},
+    )
+    wf.node(
+        "literature",
+        tool="noop",
+        inputs={"payload": "still-runs"},
+    )
+
+    states, outputs, workflow_state = _run_without_worker(
+        tmp_workspace,
+        tmp_path,
+        wf,
+        virtual_outputs={"prior_round": {"candidates": []}},
+        supervisor=inline_supervisor,
+    )
+
+    assert workflow_state == "completed"
+    assert states["sequence_metrics"] == "skipped"
+    assert outputs["sequence_metrics"]["status"] == "skipped_no_candidates"
+    assert outputs["sequence_metrics"]["technical_failure"] is False
+    assert states["literature"] == "completed"
+
+
+def test_runtime_capability_gate_skips_before_adapter_execution(
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+) -> None:
+    wf = Workflow(name="capability_gate_contract", version="1.0.0")
+    wf.node(
+        "struct_metrics",
+        tool="structure_analysis",
+        inputs={"candidates": "${outputs.prior_round.candidates}"},
+    )
+
+    states, outputs, workflow_state = _run_without_worker(
+        tmp_workspace,
+        tmp_path,
+        wf,
+        virtual_outputs={
+            "prior_round": {
+                "candidates": [
+                    {
+                        "schema_version": "candidate_v1",
+                        "candidate_id": "cand_seq",
+                        "source": {"tool": "go_sequences", "local_id": "0"},
+                        "sequence": "ACDE",
+                        "capabilities": {
+                            "has_sequence": True,
+                            "has_backbone_structure": False,
+                            "has_full_structure": False,
+                            "has_candidate_scores": False,
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    assert workflow_state == "completed"
+    assert states["struct_metrics"] == "skipped"
+    assert outputs["struct_metrics"]["status"] == "skipped_missing_candidate_capability"
+    assert outputs["struct_metrics"]["runtime_gate_event"]["missing_capabilities"] == [
+        "has_backbone_structure",
+        "has_full_structure",
+    ]
+
+
+def test_runtime_capability_gate_filters_mixed_candidate_stream(
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    inline_supervisor: object,
+) -> None:
+    wf = Workflow(name="mixed_capability_filter_contract", version="1.0.0")
+    wf.node(
+        "sequence_metrics",
+        tool="sequence_analysis",
+        inputs={"candidates": "${outputs.prior_round.candidates}"},
+    )
+
+    states, outputs, workflow_state = _run_without_worker(
+        tmp_workspace,
+        tmp_path,
+        wf,
+        virtual_outputs={
+            "prior_round": {
+                "candidates": [
+                    {
+                        "schema_version": "candidate_v1",
+                        "candidate_id": "cand_seq",
+                        "source": {"tool": "mpnn", "local_id": "0"},
+                        "sequence": "ACDEFGHIK",
+                        "capabilities": {
+                            "has_sequence": True,
+                            "has_backbone_structure": False,
+                            "has_full_structure": False,
+                            "has_candidate_scores": False,
+                        },
+                    },
+                    {
+                        "schema_version": "candidate_v1",
+                        "candidate_id": "cand_backbone",
+                        "source": {"tool": "rfdiffusion", "local_id": "0"},
+                        "structure_path": "/tmp/backbone_only.pdb",
+                        "capabilities": {
+                            "has_sequence": False,
+                            "has_backbone_structure": True,
+                            "has_full_structure": False,
+                            "has_candidate_scores": False,
+                        },
+                    },
+                ]
+            }
+        },
+        supervisor=inline_supervisor,
+    )
+
+    assert workflow_state == "completed"
+    assert states["sequence_metrics"] == "completed"
+    event = outputs["sequence_metrics"]["candidate_capability_filter_event"]
+    assert event["status"] == "filtered_missing_candidate_capability"
+    assert event["compatible_candidate_count"] == 1
+    assert event["filtered_candidates"][0]["candidate_id"] == "cand_backbone"
+    assert outputs["sequence_metrics"]["representative_sequences"][0]["sequence"] == "ACDEFGHIK"
+
+
+def test_empty_candidate_cascade_allows_non_candidate_dependents_to_consume_skip_status(
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    inline_supervisor: object,
+) -> None:
+    wf = Workflow(name="empty_candidate_dependent_cleanup", version="1.0.0")
+    wf.node(
+        "sequence_metrics",
+        tool="sequence_analysis",
+        inputs={"candidates": "${outputs.prior_round.candidates}"},
+    )
+    wf.node(
+        "dependent_status",
+        tool="noop",
+        inputs={"payload": "${outputs.sequence_metrics.status}"},
+    )
+
+    states, outputs, workflow_state = _run_without_worker(
+        tmp_workspace,
+        tmp_path,
+        wf,
+        virtual_outputs={"prior_round": {"candidates": []}},
+        supervisor=inline_supervisor,
+    )
+
+    assert workflow_state == "completed"
+    assert states["sequence_metrics"] == "skipped"
+    assert states["dependent_status"] == "completed"
+    assert outputs["dependent_status"]["payload"] == "skipped_no_candidates"

@@ -1,0 +1,37 @@
+{
+  "counts": {
+    "BLOCKED": 0,
+    "FAIL": 3,
+    "PASS": 0
+  },
+  "notes": "live provider matrix cycle with current defaults.",
+  "planner": "two_stage_tool_mode_selection_ir",
+  "pr": "live_provider_matrix",
+  "providers": [
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260528_032252/claude",
+      "duration_seconds": 1173.0,
+      "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INTERNAL\", \"message\": \"internal error: Circular reference detected\", \"details\": {\"traceback\": \"Traceback (most recent call last):\\n  File \\\"/mnt/vast/trillion/hyunjin/VibeProteinAgent/src/vibeproteinagent/agents/execution/controller.py\\\", line 774, in _run_agent_plan_impl\\n    )\\n      \\n  File \\\"/mnt/vast/trillion/hyunjin/VibeProteinAgent/src/vibeproteinagent/agents/execution/controller.py\\\", line 997, in _execute_submit_candidate_decision\\n    decision: dict[",
+      "provider": "claude",
+      "reason": "decision_or_submission_failed",
+      "status": "FAIL"
+    },
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260528_032252/codex",
+      "duration_seconds": 1608.0,
+      "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INTERNAL\", \"message\": \"internal error: Circular reference detected\", \"details\": {\"traceback\": \"Traceback (most recent call last):\\n  File \\\"/mnt/vast/trillion/hyunjin/VibeProteinAgent/src/vibeproteinagent/agents/execution/controller.py\\\", line 774, in _run_agent_plan_impl\\n    submission, submit_job_id = self._execute_submit_candidate_decision(\\n                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/mnt/vast/trillion/hyunjin/VibePro",
+      "provider": "codex",
+      "reason": "decision_or_submission_failed",
+      "status": "FAIL"
+    },
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260528_032252/qwen",
+      "duration_seconds": 762.0,
+      "first_error": "{\"ok\": true, \"data\": {\"run_id\": \"arun_60f80d56e544453480d0027c2dbd5faa\", \"mode\": \"agent_plan\", \"classification\": {\"mode\": \"agent_plan\", \"reason\": \"Request is a scientific goal or asks for planning without a concrete workflow.\", \"requires_llm_planning\": true, \"requested_tools\": [], \"workflow_ref\": null, \"job_refs\": [], \"missing_inputs\": [], \"params\": {\"max_attempted_trajectories\": 4, \"target_pdb\": \"/mnt/vast/trillion/hyunjin/VibeProteinAgent/tests/fixtures/6MRR.pdb\", \"pdb_path\": \"/mnt/vast/trilli",
+      "provider": "qwen",
+      "reason": "workflow_failed",
+      "status": "FAIL"
+    }
+  ],
+  "timestamp": "2026-05-27T19:23:17.380345+00:00"
+}

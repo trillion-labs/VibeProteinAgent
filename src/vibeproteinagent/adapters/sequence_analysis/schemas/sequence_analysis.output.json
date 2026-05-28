@@ -58,6 +58,8 @@
           },
           "sequence": {"type": "string", "minLength": 1},
           "structure_path": {"type": "string", "minLength": 1},
+          "backbone_path": {"type": "string", "minLength": 1},
+          "full_structure_path": {"type": "string", "minLength": 1},
           "scores": {
             "type": "object",
             "additionalProperties": {"type": "object", "additionalProperties": true}
@@ -65,6 +67,16 @@
           "artifacts": {
             "type": "object",
             "additionalProperties": {"type": "object", "additionalProperties": true}
+          },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "has_sequence": {"type": "boolean"},
+              "has_backbone_structure": {"type": "boolean"},
+              "has_full_structure": {"type": "boolean"},
+              "has_candidate_scores": {"type": "boolean"}
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false

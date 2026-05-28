@@ -1613,14 +1613,26 @@ def _prior_round_context_payload(
     if prior_round_context is None:
         return None
     if is_dataclass(prior_round_context):
-        return asdict(prior_round_context)
+        prompt_digest = getattr(prior_round_context, "prompt_digest", None)
+        if isinstance(prompt_digest, dict):
+            return {
+                "round_number": getattr(prior_round_context, "round_number", None),
+                "prior_decision_reason": getattr(
+                    prior_round_context,
+                    "prior_decision_reason",
+                    "",
+                ),
+                "digest": prompt_digest,
+            }
+        payload = asdict(prior_round_context)
+        payload.pop("surviving_candidates", None)
+        return payload
     if isinstance(prior_round_context, dict):
-        return dict(prior_round_context)
+        payload = dict(prior_round_context)
+        payload.pop("surviving_candidates", None)
+        return payload
     return {
         "round_number": getattr(prior_round_context, "round_number"),
-        "surviving_candidates": list(
-            getattr(prior_round_context, "surviving_candidates")
-        ),
         "prior_decision_reason": getattr(
             prior_round_context,
             "prior_decision_reason",

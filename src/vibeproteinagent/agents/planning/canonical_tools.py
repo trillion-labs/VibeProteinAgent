@@ -436,12 +436,21 @@ def candidate_capabilities_from_record(candidate: dict[str, object]) -> set[Cand
         and sequence.strip()
     ):
         capabilities.add("has_sequence")
-    if candidate.get("structure_path") or candidate.get("pdb_path") or candidate.get("cif_path"):
+    if (
+        candidate.get("structure_path")
+        or candidate.get("backbone_path")
+        or candidate.get("full_structure_path")
+        or candidate.get("pdb_path")
+        or candidate.get("cif_path")
+    ):
         if "has_backbone_structure" not in explicitly_false:
             capabilities.add("has_backbone_structure")
         if (
             "has_full_structure" not in explicit_values
-            and candidate.get("full_structure") is not False
+            and (
+                candidate.get("full_structure") is not False
+                or candidate.get("full_structure_path")
+            )
         ):
             capabilities.add("has_full_structure")
     scores = candidate.get("scores")

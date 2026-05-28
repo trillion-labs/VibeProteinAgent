@@ -43,6 +43,8 @@ from vibeproteinagent.workflows import WorkflowExecutor, load_workflow
 from vibeproteinagent.workspace import Workspace
 
 from .policies import ExecutionPolicy
+from .memory_bank import MemoryBank
+from .memory_summarizer import MemorySummarizer
 from .round_state import PriorRoundContext
 from .run_result import AgentRunResult
 
@@ -561,6 +563,9 @@ class AgentController:
         final_state = "submitted"
         final_result: AgentRunResult | None = None
         self._round_state = None
+        memory_bank = MemoryBank()
+        prompt_digest: dict[str, Any] | None = None
+        survivor_pool: list[dict[str, Any]] = []
 
         for round_index in range(max(1, self.config.max_rounds)):
             prior_round_context = self._round_state
@@ -591,6 +596,76 @@ class AgentController:
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
+            current_round_candidates = self._collect_current_round_candidates(outcome.summary)
+            survivor_pool = _merge_candidate_pool(survivor_pool, current_round_candidates)
+            max_round_reached = round_index >= self.config.max_rounds - 1
+            round_record = memory_bank.record_round(
+                round_index=round_index,
+                workflow_summary=outcome.summary,
+                current_round_candidates=current_round_candidates,
+                survivor_pool=survivor_pool,
+                max_round_reached=max_round_reached,
+            )
+            prior_prompt_digest = prompt_digest
+            prompt_digest = MemorySummarizer().summarize(
+                previous_digest=prior_prompt_digest,
+                latest_round_record=round_record,
+                memory_bank=memory_bank,
+            )
+            outcome.summary["current_round_candidate_summary"] = round_record[
+                "current_round_candidate_summary"
+            ]
+            outcome.summary["survivor_pool_summary"] = round_record["survivor_pool_summary"]
+            outcome.summary["empty_candidate_events"] = round_record["empty_candidate_events"]
+            outcome.summary["skipped_nodes"] = round_record["skipped_nodes"]
+            outcome.summary["memory_digest"] = prompt_digest
+            if (
+                max_round_reached
+                and not survivor_pool
+                and not outcome.summary.get("final_submission")
+                and (
+                    _has_empty_candidate_outcome(round_record)
+                    or _summary_declares_no_available_candidates(outcome.summary)
+                )
+            ):
+                decision = {
+                    "decision": "no_available_candidate",
+                    "reasoning": "Max rounds reached with no current candidates and no survivor pool.",
+                    "technical_failure": False,
+                    "next_round": {
+                        "recommended": False,
+                        "changes": [],
+                        "reason": "No viable candidates are available.",
+                    },
+                    "resolved_branch": {
+                        "action": "stop",
+                        "reason": "no_available_candidate",
+                        "failure": False,
+                    },
+                    "metrics_used": [],
+                    "notes": [],
+                }
+                memory_bank.record_branch(round_index, decision["resolved_branch"])
+                memory_bank.record_decision(round_index, decision)
+                latest_round_record = memory_bank.latest_round_record()
+                if latest_round_record is not None:
+                    prompt_digest = MemorySummarizer().summarize(
+                        previous_digest=prior_prompt_digest,
+                        latest_round_record=latest_round_record,
+                        memory_bank=memory_bank,
+                    )
+                    outcome.summary["memory_digest"] = prompt_digest
+                outcome.summary["branch_decision"] = decision["resolved_branch"]
+                self.session_store.add_decision(run_id, decision, round_index=round_index)
+                decisions.append(decision)
+                final_state = "completed"
+                final_result = AgentRunResult(
+                    kind="no_available_candidate",
+                    reasoning="No available candidate was produced before max rounds.",
+                )
+                break
+            if survivor_pool and not current_round_candidates:
+                outcome.summary["survivor_pool"] = survivor_pool[:20]
             final_submission = outcome.summary.get("final_submission")
             if isinstance(final_submission, dict):
                 decision = {
@@ -604,46 +679,59 @@ class AgentController:
                     "notes": [],
                     "submission": final_submission,
                 }
+                memory_bank.record_decision(round_index, decision)
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
-            try:
-                decision = await self._run_llm_entry(
-                    phase=f"decision_round_{round_index}",
-                    failures=entry_failures,
-                    factory=lambda attempt,
-                    retry_context=None,
-                    round_index=round_index,
-                    outcome=outcome,
-                    current_plan=current_plan: DecisionEngine(provider).decide(
-                        outcome.summary,
-                        success_criteria=current_plan.get("success_criteria")
-                        or {},
-                        model=self.config.model_for_role("analyst"),
-                        idempotency_key=f"{run_id}:decision:{round_index}:{attempt}",
-                        retry_error=retry_context,
-                    ),
+            round_empty = not current_round_candidates
+            if (
+                _has_empty_candidate_outcome(round_record)
+                and round_empty
+                and not max_round_reached
+            ):
+                decision = _deterministic_empty_next_round_decision(
+                    survivor_pool=survivor_pool,
+                    current_round_candidates=current_round_candidates,
                 )
-            except DecisionSchemaViolation:
-                raise
-            except VPAError as exc:
-                decision = DecisionEngine(None).local_decision(
-                    outcome.summary,
-                    success_criteria=current_plan.get("success_criteria") or {},
-                )
-                notes = decision.setdefault("notes", [])
-                if isinstance(notes, list):
-                    notes.append(
-                        {
-                            "level": "warning",
-                            "message": (
-                                "LLM decision step failed after workflow completion; "
-                                "used deterministic local decision instead."
-                            ),
-                            "code": exc.code,
-                            "details": exc.details,
-                        }
+            else:
+                try:
+                    decision = await self._run_llm_entry(
+                        phase=f"decision_round_{round_index}",
+                        failures=entry_failures,
+                        factory=lambda attempt,
+                        retry_context=None,
+                        round_index=round_index,
+                        outcome=outcome,
+                        current_plan=current_plan: DecisionEngine(provider).decide(
+                            outcome.summary,
+                            success_criteria=current_plan.get("success_criteria")
+                            or {},
+                            model=self.config.model_for_role("analyst"),
+                            idempotency_key=f"{run_id}:decision:{round_index}:{attempt}",
+                            retry_error=retry_context,
+                        ),
                     )
+                except DecisionSchemaViolation:
+                    raise
+                except VPAError as exc:
+                    decision = DecisionEngine(None).local_decision(
+                        outcome.summary,
+                        success_criteria=current_plan.get("success_criteria") or {},
+                    )
+                    notes = decision.setdefault("notes", [])
+                    if isinstance(notes, list):
+                        notes.append(
+                            {
+                                "level": "warning",
+                                "message": (
+                                    "LLM decision step failed after workflow completion; "
+                                    "used deterministic local decision instead."
+                                ),
+                                "code": exc.code,
+                                "details": _json_safe_decision_details(exc.details),
+                            }
+                        )
+            memory_bank.record_decision(round_index, decision)
             if decision.get("decision") == "answer":
                 final_result = AgentRunResult.from_answer_decision(decision)
                 outcome.summary["answer"] = final_result.to_dict()
@@ -676,6 +764,16 @@ class AgentController:
                 max_rounds=self.config.max_rounds,
             )
             decision["resolved_branch"] = branch
+            memory_bank.record_branch(round_index, branch)
+            latest_round_record = memory_bank.latest_round_record()
+            if latest_round_record is not None:
+                prompt_digest = MemorySummarizer().summarize(
+                    previous_digest=prior_prompt_digest,
+                    latest_round_record=latest_round_record,
+                    memory_bank=memory_bank,
+                )
+                outcome.summary["memory_digest"] = prompt_digest
+            outcome.summary["branch_decision"] = branch
             if branch["action"] == "submit_candidate":
                 try:
                     submission, submit_job_id = self._execute_submit_candidate_decision(
@@ -693,7 +791,7 @@ class AgentController:
                                 "level": "error",
                                 "message": "submit_candidate decision failed during execution",
                                 "code": exc.code,
-                                "details": exc.details,
+                                "details": _json_safe_decision_details(exc.details),
                             }
                         )
                     final_state = "failed"
@@ -730,7 +828,67 @@ class AgentController:
                 )
                 break
             if branch["action"] == "stop":
-                if branch.get("failure"):
+                if (
+                    not branch.get("failure")
+                    and decision.get("decision")
+                    in {
+                        "next_round_with_no_acceptable_candidate",
+                        "no_acceptable_candidate",
+                        "next_round_with_surviving_candidate",
+                    }
+                ):
+                    try:
+                        submission, submit_job_id = self._execute_no_acceptable_candidate_submission(
+                            run_id,
+                            broker,
+                            decision,
+                            round_index=round_index,
+                            policy=policy,
+                        )
+                    except VPAError as exc:
+                        notes = decision.setdefault("notes", [])
+                        if isinstance(notes, list):
+                            notes.append(
+                                {
+                                    "level": "error",
+                                    "message": (
+                                        "no_acceptable_candidate terminal submission "
+                                        "failed during execution"
+                                    ),
+                                    "code": exc.code,
+                                    "details": _json_safe_decision_details(exc.details),
+                                }
+                            )
+                        final_state = "failed"
+                        self.session_store.add_decision(run_id, decision, round_index=round_index)
+                        decisions.append(decision)
+                        break
+                    outcome.summary["final_submission"] = submission
+                    job_ids = outcome.summary.setdefault("job_ids", [])
+                    if isinstance(job_ids, list) and submit_job_id not in job_ids:
+                        job_ids.append(submit_job_id)
+                    source_decision = str(decision.get("decision") or "")
+                    decision["source_decision"] = source_decision
+                    decision["decision"] = "no_acceptable_candidate"
+                    decision["submission"] = submission
+                    decision["submit_job_id"] = submit_job_id
+                    self.session_store.add_summary(
+                        run_id,
+                        {
+                            "state": "completed",
+                            "job_id": submit_job_id,
+                            "tool": "submit_candidate",
+                            "final_submission": submission,
+                            "metrics_used": decision.get("metrics_used") or [],
+                        },
+                        job_id=submit_job_id,
+                    )
+                    final_state = "completed"
+                    final_result = AgentRunResult(
+                        kind="no_acceptable",
+                        reasoning=_negative_submission_reason(decision),
+                    )
+                elif branch.get("failure"):
                     final_state = "failed"
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
@@ -740,9 +898,10 @@ class AgentController:
             decisions.append(decision)
             self._round_state = PriorRoundContext(
                 round_number=round_index + 2,
-                surviving_candidates=self._collect_surviving_candidates(outcome.summary),
+                surviving_candidates=survivor_pool,
                 prior_decision_reason=_next_round_reason(decision),
                 summary=self._prior_round_summary(outcome.summary),
+                prompt_digest=prompt_digest,
             )
             try:
                 async def compile_with_fixup(planner_ir: dict[str, Any]) -> dict[str, Any]:
@@ -822,6 +981,9 @@ class AgentController:
         )
 
     def _collect_surviving_candidates(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._collect_current_round_candidates(summary)
+
+    def _collect_current_round_candidates(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
         for node in summary.get("nodes") or []:
@@ -897,7 +1059,7 @@ class AgentController:
         round_index: int,
         policy: ExecutionPolicy,
     ) -> tuple[dict[str, Any], str]:
-        params = _submit_candidate_params_from_decision(decision)
+        params = _submit_candidate_params_from_decision(_decision_v1_payload(decision))
         result = broker.submit_job(
             "submit_candidate",
             params,
@@ -926,6 +1088,56 @@ class AgentController:
         if not isinstance(output, dict) or output.get("terminal") is not True:
             raise InvalidParamsError(
                 "submit_candidate completed without a terminal output",
+                details={"job_id": job_id, "output": output},
+            )
+        return output, job_id
+
+    def _execute_no_acceptable_candidate_submission(
+        self,
+        run_id: str,
+        broker: AgentToolBroker,
+        decision: dict[str, Any],
+        *,
+        round_index: int,
+        policy: ExecutionPolicy,
+    ) -> tuple[dict[str, Any], str]:
+        params = {
+            "outcome": "no_acceptable_candidate",
+            "candidates": [],
+            "reasoning": _negative_submission_reason(decision),
+        }
+        result = broker.submit_job(
+            "submit_candidate",
+            params,
+            call_id=_safe_call_id(f"{run_id}-no-acceptable-candidate-{round_index}"),
+            priority=policy.priority,
+            max_retries=policy.max_retries,
+        )
+        if result.get("ok") is False:
+            raise InvalidParamsError(
+                "no_acceptable_candidate terminal submission could not be submitted",
+                details={"submit_result": result},
+            )
+        job_id = str(result.get("job_id") or "")
+        if not job_id:
+            raise InvalidParamsError(
+                "no_acceptable_candidate submission did not return a job_id",
+                details={"submit_result": result},
+            )
+        final = broker.wait_job(job_id, timeout_ms=policy.wait_job_timeout_ms)
+        if final.get("state") != "completed":
+            raise InvalidParamsError(
+                "no_acceptable_candidate terminal submission did not complete",
+                details={"job_id": job_id, "job": final},
+            )
+        output = final.get("output")
+        if (
+            not isinstance(output, dict)
+            or output.get("terminal") is not True
+            or output.get("outcome") != "no_acceptable_candidate"
+        ):
+            raise InvalidParamsError(
+                "no_acceptable_candidate submission completed without terminal output",
                 details={"job_id": job_id, "output": output},
             )
         return output, job_id
@@ -1420,6 +1632,71 @@ def _load_json_object(
     return obj
 
 
+_DECISION_V1_FIELDS = {
+    "decision",
+    "reasoning",
+    "submit_candidate",
+    "next_round",
+    "metrics_used",
+    "notes",
+}
+
+
+def _decision_v1_payload(decision: dict[str, Any]) -> dict[str, Any]:
+    """Return only the public decision_v1 fields from a controller decision record."""
+
+    payload: dict[str, Any] = {}
+    for key in _DECISION_V1_FIELDS:
+        if key not in decision:
+            continue
+        if key == "notes" and not isinstance(decision.get(key), str):
+            continue
+        payload[key] = decision[key]
+    return payload
+
+
+def _json_safe_decision_details(details: Any) -> Any:
+    return _json_safe_value(details, seen=set(), depth=0)
+
+
+def _json_safe_value(value: Any, *, seen: set[int], depth: int) -> Any:
+    if depth > 8:
+        return "<truncated>"
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    value_id = id(value)
+    if value_id in seen:
+        return "<circular_reference>"
+    if isinstance(value, dict):
+        seen.add(value_id)
+        out: dict[str, Any] = {}
+        for key, item in list(value.items())[:50]:
+            if key == "payload":
+                out[str(key)] = _json_safe_payload_summary(item)
+            else:
+                out[str(key)] = _json_safe_value(item, seen=seen, depth=depth + 1)
+        seen.remove(value_id)
+        return out
+    if isinstance(value, list | tuple):
+        seen.add(value_id)
+        out = [_json_safe_value(item, seen=seen, depth=depth + 1) for item in value[:50]]
+        seen.remove(value_id)
+        return out
+    return repr(value)
+
+
+def _json_safe_payload_summary(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return _json_safe_value(payload, seen=set(), depth=0)
+    submit = payload.get("submit_candidate")
+    refs = submit.get("candidates") if isinstance(submit, dict) else None
+    return {
+        "decision": payload.get("decision"),
+        "keys": sorted(str(key) for key in payload.keys())[:30],
+        "candidate_ref_count": len(refs) if isinstance(refs, list) else 0,
+    }
+
+
 def _submit_candidate_params_from_decision(decision: dict[str, Any]) -> dict[str, Any]:
     mode = current_decision_normalization_mode()
     if mode in {"strict", "off"}:
@@ -1570,6 +1847,98 @@ def _next_round_reason(decision: dict[str, Any]) -> str:
     if isinstance(reasoning, str) and reasoning.strip():
         return reasoning.strip()
     return "Decision requested another local workflow round."
+
+
+def _merge_candidate_pool(
+    survivor_pool: list[dict[str, Any]],
+    current_round_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in [*survivor_pool, *current_round_candidates]:
+        if not _is_candidate_v1(candidate):
+            continue
+        key = str(candidate.get("candidate_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(candidate))
+    return merged
+
+
+def _has_empty_candidate_outcome(round_record: dict[str, Any]) -> bool:
+    if round_record.get("empty_candidate_events"):
+        return True
+    for node in round_record.get("skipped_nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        if node.get("skip_kind") in {
+            "skipped_no_candidates",
+            "skipped_missing_candidate_capability",
+        }:
+            return True
+    return False
+
+
+def _summary_declares_no_available_candidates(summary: dict[str, Any]) -> bool:
+    no_candidate_statuses = {
+        "no_hits",
+        "no_candidates",
+        "no_available_candidate",
+        "filtered_out",
+    }
+    for node in summary.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        output = node.get("output")
+        if not isinstance(output, dict):
+            continue
+        status = output.get("status")
+        if status not in no_candidate_statuses:
+            continue
+        for key in ("candidates", "records", "sequences", "representative_sequences"):
+            value = output.get(key)
+            if isinstance(value, list) and value:
+                return False
+        return True
+    return False
+
+
+def _deterministic_empty_next_round_decision(
+    *,
+    survivor_pool: list[dict[str, Any]],
+    current_round_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    del current_round_candidates
+    if survivor_pool:
+        return {
+            "decision": "next_round_with_surviving_candidate",
+            "reasoning": (
+                "Current round produced no usable candidates; continue deterministically "
+                "with the preserved survivor pool."
+            ),
+            "next_round": {
+                "recommended": True,
+                "changes": [],
+                "reason": "Empty current candidate stream with survivor pool preserved.",
+            },
+            "metrics_used": [],
+            "notes": [],
+        }
+    return {
+        "decision": "next_round_with_no_acceptable_candidate",
+        "reasoning": (
+            "Current round produced no usable candidates and the survivor pool is empty; "
+            "start the next round with explicit empty-pool state."
+        ),
+        "next_round": {
+            "recommended": True,
+            "changes": [],
+            "reason": "Empty current candidate stream and empty survivor pool.",
+        },
+        "metrics_used": [],
+        "notes": [],
+    }
 
 
 def _accepts_prior_round_context(callable_obj: Callable[..., Any]) -> bool:

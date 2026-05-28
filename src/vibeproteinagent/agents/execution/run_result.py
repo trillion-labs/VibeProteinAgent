@@ -6,7 +6,14 @@ from typing import Any, Literal
 
 @dataclass
 class AgentRunResult:
-    kind: Literal["candidate", "answer", "no_acceptable", "stopped", "failed"]
+    kind: Literal[
+        "candidate",
+        "answer",
+        "no_acceptable",
+        "no_available_candidate",
+        "stopped",
+        "failed",
+    ]
     submitted_candidate: dict[str, Any] | None = None
     text: str | None = None
     evidence: list[dict[str, Any]] = field(default_factory=list)
@@ -36,6 +43,12 @@ class AgentRunResult:
             "kind": self.kind,
             "reasoning": self.reasoning,
         }
+        if self.kind == "no_available_candidate":
+            payload["status"] = "no_available_candidate"
+            payload["technical_failure"] = False
+        if self.kind == "no_acceptable":
+            payload["status"] = "no_acceptable_candidate"
+            payload["technical_failure"] = False
         if self.submitted_candidate is not None:
             payload["submitted_candidate"] = self.submitted_candidate
         if self.text is not None:

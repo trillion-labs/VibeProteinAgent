@@ -10,4 +10,4 @@ class PriorRoundContext:
     surviving_candidates: list[dict[str, Any]]
     prior_decision_reason: str
     summary: dict[str, Any] | None = None
-
+    prompt_digest: dict[str, Any] | None = None

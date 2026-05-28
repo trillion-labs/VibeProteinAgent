@@ -142,12 +142,32 @@ class Mpnn2ProtenixAdapter(ToolAdapter):
             names.append(name)
             candidates.append(
                 {
+                    "schema_version": "candidate_v1",
                     "candidate_id": record["candidate_id"],
                     "sequence": seq,
-                    "score": record.get("score"),
-                    "source_header": record.get("header"),
-                    "protenix_input_json": str(target),
-                    "protenix_name": name,
+                    "scores": {
+                        "proteinmpnn": {
+                            "score": record.get("score"),
+                        }
+                    },
+                    "artifacts": {
+                        "protenix_input_json": {
+                            "path": str(target),
+                            "kind": "protenix_input_json",
+                        }
+                    },
+                    "capabilities": {
+                        "has_sequence": True,
+                        "has_candidate_scores": record.get("score") is not None,
+                    },
+                    "source": {
+                        "tool": "mpnn_to_protenix_input",
+                        "node_id": None,
+                        "job_id": None,
+                        "local_id": str(record["candidate_id"]),
+                        "native_id": record.get("header"),
+                        "index": i - 1,
+                    },
                 }
             )
 

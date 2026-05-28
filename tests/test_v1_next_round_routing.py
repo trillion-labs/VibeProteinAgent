@@ -256,9 +256,13 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
     ]
     round2_user_message = json.loads(provider.messages[3][1].content)
     assert "prior_round_context" in round2_user_message
-    assert round2_user_message["prior_round_context"]["surviving_candidates"] == [
-        _candidate()
-    ]
+    assert "surviving_candidates" not in round2_user_message["prior_round_context"]
+    assert (
+        round2_user_message["prior_round_context"]["digest"]["latest_round"][
+            "survivor_pool_summary"
+        ]["count"]
+        == 1
+    )
     round2_execute = captured["execute_calls"][1]
     assert round2_execute["plan"]["workflow_plan"]["nodes"][0]["inputs"]["candidates"] == (
         "${outputs.prior_round.candidates}"
