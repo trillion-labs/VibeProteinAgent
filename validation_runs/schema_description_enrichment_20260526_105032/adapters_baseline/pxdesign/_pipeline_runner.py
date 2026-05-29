@@ -2,7 +2,7 @@
 
 This module is imported inside the dedicated ``pxdesign-pipeline-vpa`` env by
 ``vibeproteinagent.workers.sidecar_child``. It deliberately keeps the adapter's
-main process free of the AF2/JAX/ColabDesign stack while avoiding one Python
+main process free of the AF2/JAX/ stack while avoiding one Python
 process startup per pipeline call.
 """
 from __future__ import annotations

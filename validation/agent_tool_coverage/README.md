@@ -9,8 +9,8 @@ Run from the repository root so the relative fixture paths in
 
 ## Covered Tools
 
-- Run 01: `colabdesign_utils`, `dssp`, `foldseek`, `go_sequences`,
-  `interpro_sequences`, `ipsae`, `literature_search`, `mmseqs2_gpu`, `prodigy`,
+- Run 01: `dssp`, `foldseek`, `go_sequences`, `interpro_sequences`,
+  `ipsae`, `literature_search`, `mmseqs2_gpu`, `prodigy`,
   `protein_qc`, `pxmeter`, `rank_designs`, `sequence_analysis`,
   `sequence_edit`, `structure_analysis`, `template_select`, `tmalign`, `vina`
 - Run 02: `bindcraft`, `esm2`, `esm3`, `ligandmpnn`, `proteinmpnn`,

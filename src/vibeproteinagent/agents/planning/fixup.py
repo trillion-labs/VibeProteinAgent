@@ -7,6 +7,8 @@ FIXUP_KINDS = {
     "malformed_fixup_response",
     "missing_explicit_mode",
     "missing_canonical_input_slot",
+    "node_reference_used_as_literal_path",
+    "prior_round_used_as_tool",
     "prior_round_referenced_without_context",
     "upstream_does_not_produce_candidates",
     "candidate_capability_mismatch",
@@ -177,6 +179,73 @@ def prior_round_referenced_without_context(
     )
 
 
+def prior_round_used_as_tool(
+    *,
+    node_id: str,
+) -> StructuredFixup:
+    return StructuredFixup(
+        {
+            "error_kind": "prior_round_used_as_tool",
+            "node_id": node_id,
+            "tool": "prior_round",
+            "explanation": (
+                "prior_round is an internal bounded context source. It may be "
+                "referenced only as a candidate_source upstream in continuation "
+                "rounds, never as a Planner IR tool node."
+            ),
+            "options": [
+                {
+                    "choice_id": "remove_node",
+                    "description": "Drop the invalid prior_round tool node.",
+                    "target_node_id": node_id,
+                }
+            ],
+        }
+    )
+
+
+def node_reference_used_as_literal_path(
+    *,
+    node_id: str,
+    tool: str,
+    field: str,
+    literal_value: str,
+    upstream_node: str,
+) -> StructuredFixup:
+    return StructuredFixup(
+        {
+            "error_kind": "node_reference_used_as_literal_path",
+            "node_id": node_id,
+            "tool": tool,
+            "field": field,
+            "literal_value": literal_value,
+            "upstream_node": upstream_node,
+            "explanation": (
+                f"Input {field!r} on node {node_id!r} contains planner node id "
+                f"{literal_value!r} as if it were a filesystem path. Planner IR "
+                "must express topology through upstream entries; the compiler "
+                "will generate canonical candidate wiring."
+            ),
+            "options": [
+                {
+                    "choice_id": "remove_input",
+                    "description": (
+                        "Remove the literal path input and keep the upstream "
+                        "candidate_source relationship."
+                    ),
+                    "target_node_id": node_id,
+                    "field": field,
+                },
+                {
+                    "choice_id": "remove_node",
+                    "description": "Drop this node if it cannot be wired canonically.",
+                    "target_node_id": node_id,
+                },
+            ],
+        }
+    )
+
+
 def missing_explicit_mode(
     *,
     node_id: str,
@@ -270,6 +339,19 @@ def apply_enum_fixup_choice(
                 ]
                 return updated
         raise ValueError(f"fixup target node {target_node_id!r} was not found")
+    if choice_id == "remove_input":
+        target_node_id = choice.get("target_node_id") or fixup_payload["node_id"]
+        field = choice.get("field") or fixup_payload.get("field")
+        if not isinstance(field, str) or not field:
+            raise ValueError("remove_input fixup choice requires a field")
+        updated = deepcopy(llm_ir)
+        for node in updated.get("nodes", []):
+            if node.get("id") == target_node_id:
+                inputs = node.get("inputs")
+                if isinstance(inputs, dict):
+                    _remove_dotted_input(inputs, field)
+                return updated
+        raise ValueError(f"fixup target node {target_node_id!r} was not found")
     if choice_id == "swap_tool":
         tool = choice.get("tool")
         if not isinstance(tool, str) or not tool:
@@ -312,3 +394,66 @@ def _allowed_tools(fixup_payload: dict[str, Any]) -> list[str]:
             if isinstance(tools, list):
                 return [str(tool) for tool in tools]
     return []
+
+
+def _remove_dotted_input(inputs: dict[str, Any], field: str) -> None:
+    parts = _parse_input_path(field)
+    if not parts:
+        return
+    current: Any = inputs
+    for part in parts[:-1]:
+        current = _path_child(current, part)
+        if current is None:
+            return
+    _remove_path_child(current, parts[-1])
+
+
+def _parse_input_path(field: str) -> list[str | int]:
+    parts: list[str | int] = []
+    token = ""
+    idx = 0
+    while idx < len(field):
+        char = field[idx]
+        if char == ".":
+            if token:
+                parts.append(token)
+                token = ""
+            idx += 1
+            continue
+        if char == "[":
+            if token:
+                parts.append(token)
+                token = ""
+            end = field.find("]", idx)
+            if end == -1:
+                return [part for part in field.split(".") if part]
+            raw_index = field[idx + 1:end]
+            if not raw_index.isdigit():
+                return [part for part in field.split(".") if part]
+            parts.append(int(raw_index))
+            idx = end + 1
+            continue
+        token += char
+        idx += 1
+    if token:
+        parts.append(token)
+    return parts
+
+
+def _path_child(current: Any, part: str | int) -> Any:
+    if isinstance(part, int):
+        if isinstance(current, list) and 0 <= part < len(current):
+            return current[part]
+        return None
+    if isinstance(current, dict):
+        return current.get(part)
+    return None
+
+
+def _remove_path_child(current: Any, part: str | int) -> None:
+    if isinstance(part, int):
+        if isinstance(current, list) and 0 <= part < len(current):
+            current.pop(part)
+        return
+    if isinstance(current, dict):
+        current.pop(part, None)

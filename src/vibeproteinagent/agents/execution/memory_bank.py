@@ -35,8 +35,35 @@ def _empty_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(node, dict):
             continue
         output = node.get("output")
-        if isinstance(output, dict) and isinstance(output.get("empty_candidate_event"), dict):
+        if not isinstance(output, dict):
+            continue
+        if isinstance(output.get("empty_candidate_event"), dict):
             events.append(dict(output["empty_candidate_event"]))
+        empty_facets = output.get("empty_facets")
+        if isinstance(empty_facets, list):
+            for facet in empty_facets:
+                if isinstance(facet, dict):
+                    events.append(dict(facet))
+    return events
+
+
+def _capability_filter_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for node in summary.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        output = node.get("output")
+        if not isinstance(output, dict):
+            continue
+        event = output.get("candidate_capability_filter_event")
+        if isinstance(event, dict):
+            events.append(
+                {
+                    "node_id": node.get("node_id"),
+                    "tool": node.get("tool"),
+                    **dict(event),
+                }
+            )
     return events
 
 
@@ -82,6 +109,9 @@ class MemoryBank:
             "workflow_id": workflow_summary.get("workflow_id"),
             "state": workflow_summary.get("state"),
             "empty_candidate_events": _empty_events(workflow_summary),
+            "candidate_capability_filter_events": _capability_filter_events(
+                workflow_summary
+            ),
             "skipped_nodes": _skipped_nodes(workflow_summary),
             "current_round_candidates": [dict(candidate) for candidate in current_round_candidates],
             "current_round_candidate_summary": _candidate_summary(current_round_candidates),
@@ -121,6 +151,9 @@ class MemoryBank:
                     "workflow_id": record.get("workflow_id"),
                     "state": record.get("state"),
                     "empty_candidate_events": record.get("empty_candidate_events", [])[:5],
+                    "candidate_capability_filter_events": record.get(
+                        "candidate_capability_filter_events", []
+                    )[:10],
                     "skipped_nodes": record.get("skipped_nodes", [])[:10],
                     "current_round_candidate_summary": record.get(
                         "current_round_candidate_summary", {}

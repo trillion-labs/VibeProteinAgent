@@ -116,18 +116,20 @@ def test_backbone_only_generator_can_feed_proteinmpnn_but_not_target_structure_b
     assert "has_full_structure" in payload["missing_capabilities"]
 
 
-def test_pairwise_structure_tools_require_two_candidate_items_when_wired_from_nodes() -> None:
-    with pytest.raises(StructuredFixup) as exc_info:
-        compile_planner_ir(
-            _ir(
-                [
-                    _node("a", "rfdiffusion", {"mode": "unconditional"}),
-                    _node("align", "tmalign", {}, [_candidate_source("a")]),
-                ]
-            )
+def test_pairwise_structure_tools_accept_single_stream_and_check_item_count_at_runtime() -> None:
+    single_stream = compile_planner_ir(
+        _ir(
+            [
+                _node("a", "rfdiffusion", {"mode": "unconditional"}),
+                _node("align", "tmalign", {}, [_candidate_source("a")]),
+            ]
         )
+    )
 
-    assert "at_least_2_candidate_items" in exc_info.value.payload["missing_capabilities"]
+    assert (
+        single_stream["workflow_plan"]["nodes"][-1]["inputs"]["candidates"]
+        == "${outputs.a.candidates}"
+    )
 
     plan = compile_planner_ir(
         _ir(

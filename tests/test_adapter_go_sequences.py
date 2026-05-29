@@ -78,3 +78,20 @@ def test_go_sequences_mocked_go_first_then_uniprot_filter(tmp_path, monkeypatch)
     assert out.resolved_uniprot_accessions == 2
     assert Path(out.fasta_path).exists()
     assert Path(out.artifacts["uniprot_raw_records_jsonl"]).exists()
+
+
+def test_go_sequences_empty_resolver_terms_are_structured_empty_output(tmp_path):
+    adapter = GOSequencesAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        GOSequencesInput(go_id=None, go_terms=[], max_sequences=10),
+        null_context(tmp_path),
+    )
+
+    assert out.candidates == []
+    assert out.sequences == []
+    assert out.summary["retrieval_status"] == "no_terms"
+    assert out.empty_facets[0]["event_type"] == "empty_candidate_event"
+    assert out.empty_facets[0]["retrieval_status"] == "no_terms"
+    assert Path(out.fasta_path).exists()
+    assert Path(out.artifacts["summary_json"]).exists()

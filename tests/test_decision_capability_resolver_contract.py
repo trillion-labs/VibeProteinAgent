@@ -14,6 +14,7 @@ from vibeproteinagent.adapters.go_term_search.adapter import GOTermSearchAdapter
 from vibeproteinagent.agents.evaluation import DecisionEngine, validate_decision_v1
 from vibeproteinagent.agents.execution.controller import (
     _first_submit_candidate_ref,
+    _missing_submission_deliverable_capabilities,
     _resolve_decision_branch,
     _safe_call_id,
 )
@@ -144,6 +145,11 @@ def test_first_submit_candidate_ref_uses_real_candidate_job_not_target_fallback(
                             {
                                 "schema_version": "candidate_v1",
                                 "candidate_id": "cand_a",
+                                "source": {
+                                    "tool": "rank_designs",
+                                    "local_id": "cand_a",
+                                },
+                                "capabilities": {"has_sequence": True},
                                 "sequence": "ACDE",
                             }
                         ]
@@ -156,6 +162,71 @@ def test_first_submit_candidate_ref_uses_real_candidate_job_not_target_fallback(
     assert ref is not None
     assert ref["job_id"] == "job_ranked"
     assert ref["candidate_id"] == "cand_a"
+
+
+def test_metric_only_representative_sequence_is_not_sequence_capable() -> None:
+    ref = _first_submit_candidate_ref(
+        {
+            "nodes": [
+                {
+                    "node_id": "metrics",
+                    "tool": "sequence_analysis",
+                    "job_id": "job_metrics",
+                    "output": {"representative_sequences": [{"pI": 6.74}]},
+                }
+            ]
+        },
+        deliverable_contract={
+            "terminal_submission_allowed": True,
+            "required_candidate_capabilities": ["has_sequence"],
+        },
+    )
+
+    assert ref is None
+
+
+def test_submit_candidate_terminal_output_checked_against_deliverable_contract() -> None:
+    missing = _missing_submission_deliverable_capabilities(
+        {
+            "outcome": "accepted",
+            "candidates_resolved": [
+                {
+                    "candidate_id": "seq_only",
+                    "sequence": "ACDE",
+                    "capabilities": {"has_sequence": True},
+                }
+            ],
+        },
+        {
+            "required_candidate_capabilities": [
+                "has_sequence",
+                "has_full_structure",
+            ]
+        },
+    )
+
+    assert missing == ["has_full_structure"]
+    assert (
+        _missing_submission_deliverable_capabilities(
+            {
+                "outcome": "accepted",
+                "candidates_resolved": [
+                    {
+                        "candidate_id": "full",
+                        "sequence": "ACDE",
+                        "full_structure_path": "/tmp/full.cif",
+                    }
+                ],
+            },
+            {
+                "required_candidate_capabilities": [
+                    "has_sequence",
+                    "has_full_structure",
+                ]
+            },
+        )
+        == []
+    )
 
 
 def test_compiler_rejects_backbone_only_candidate_into_sequence_consumer() -> None:

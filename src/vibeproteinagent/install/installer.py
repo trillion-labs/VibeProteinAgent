@@ -539,7 +539,6 @@ _TORCH_TOOLS = frozenset(
         "bindcraft",
         "boltz2_affinity",
         "boltzgen",
-        "colabdesign_utils",
         "esm2",
         "esm3",
         "go_sequences",
@@ -557,6 +556,7 @@ _TORCH_TOOLS = frozenset(
         "rfdiffusion",
         "rfdiffusion3",
         "rfpeptides",
+        "search_sequence",
         "tmalign",
         "vina",
     }

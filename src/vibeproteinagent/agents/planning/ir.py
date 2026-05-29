@@ -9,9 +9,10 @@ from jsonschema import (
     ValidationError,
 )
 
+from vibeproteinagent.agents.planning.terminal_tools import TERMINAL_CONTROLLER_TOOLS
+
 _EXECUTOR_REF_PREFIXES = ("${outputs.", "${jobs.", "${item.")
 _FORBIDDEN_TOKENS = ("workflow_ref", "submit_final")
-_SUBMIT_CANDIDATE = "submit_candidate"
 _VIRTUAL_UPSTREAM_NODES = frozenset({"prior_round"})
 
 
@@ -43,10 +44,14 @@ def _validate_nodes(ir: dict[str, Any]) -> None:
         tool = node["tool"]
         if node_id in seen:
             raise ValidationError(f"duplicate node id: {node_id}")
-        if node_id == _SUBMIT_CANDIDATE:
-            raise ValidationError("submit_candidate is not a valid Planner IR node id")
-        if tool == _SUBMIT_CANDIDATE:
-            raise ValidationError("submit_candidate is a decision action, not a Planner IR node")
+        if node_id in TERMINAL_CONTROLLER_TOOLS:
+            raise ValidationError(f"{node_id} is not a valid Planner IR node id")
+        if tool in TERMINAL_CONTROLLER_TOOLS:
+            raise ValidationError(f"{tool} is a decision action, not a Planner IR node")
+        if node_id in _VIRTUAL_UPSTREAM_NODES:
+            raise ValidationError(f"{node_id} is an internal upstream source, not a Planner IR node id")
+        if tool in _VIRTUAL_UPSTREAM_NODES:
+            raise ValidationError(f"{tool} is an internal upstream source, not a Planner IR tool")
 
         for upstream in node.get("upstream", []):
             upstream_id = upstream["node"]

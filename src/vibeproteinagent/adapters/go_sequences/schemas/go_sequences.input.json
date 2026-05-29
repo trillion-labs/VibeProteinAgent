@@ -5,11 +5,22 @@
   "required": ["go_id"],
   "properties": {
     "go_id": {
-      "type": "string",
+      "type": ["string", "null"],
       "pattern": "^GO:[0-9]{7}$",
       "description": "Gene Ontology identifier in GO:NNNNNNN format. Specifies the biological function, process, or component used to retrieve associated UniProt sequences. Use literature_search or interpro_sequences to discover the right GO ID before calling this tool.",
       "examples": ["GO:0070204", "GO:0006066", "GO:0008152"]
     },
+    "go_terms": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Bounded GO term records from function_term_resolver. Each term is retrieved independently and merged using intent-quota top-K.",
+      "examples": [[{"intent_id": "facet_a", "term_id": "GO:0000001", "term_relevance_score": 0.8}]]
+    },
+    "intent_id": {"type": ["string", "null"], "default": null, "description": "Semantic intent id associated with go_id when a resolver provided one."},
+    "intent_label": {"type": ["string", "null"], "default": null, "description": "Semantic intent label associated with go_id when a resolver provided one."},
+    "term_relevance_score": {"type": ["number", "null"], "default": null, "description": "Resolver term relevance score propagated into sequence scoring."},
+    "term_score_breakdown": {"type": "object", "additionalProperties": true, "default": {}, "description": "Resolver term relevance score components."},
     "aspect": {
       "type": ["string", "null"],
       "enum": [
@@ -35,6 +46,14 @@
       "default": 1000,
       "description": "Maximum number of UniProt sequences to return for the GO term. Typical values: 50-200 for narrow design, 500+ for broad family analysis.",
       "examples": [100, 500, 2000]
+    },
+    "max_downstream_candidates": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 25,
+      "description": "Maximum scored sequence candidates emitted to downstream candidate-consuming tools. Retrieval artifacts can contain more kept sequences; candidate output is bounded to top-K by semantic relevance.",
+      "examples": [10, 25, 100]
     },
     "reviewed": {
       "type": ["boolean", "null"],

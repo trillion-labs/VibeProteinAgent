@@ -29,6 +29,9 @@ class MemorySummarizer:
                     "empty_candidate_events": latest_round_record.get(
                         "empty_candidate_events", []
                     )[:5],
+                    "candidate_capability_filter_events": latest_round_record.get(
+                        "candidate_capability_filter_events", []
+                    )[:10],
                     "skipped_nodes": latest_round_record.get("skipped_nodes", [])[:10],
                     "current_round_candidate_summary": latest_round_record.get(
                         "current_round_candidate_summary", {}

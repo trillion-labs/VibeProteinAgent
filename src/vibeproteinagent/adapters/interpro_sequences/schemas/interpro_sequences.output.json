@@ -14,6 +14,11 @@
       "items": {"type": "object", "additionalProperties": true},
       "default": []
     },
+    "empty_facets": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "fasta_path": {"type": "string"},
     "metadata_jsonl": {"type": "string"},
     "summary": {"type": "object", "additionalProperties": true},

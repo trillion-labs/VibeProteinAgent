@@ -342,7 +342,12 @@ def test_first_round_prior_round_fixup_retries_to_compiled_plan(
         "prior_round_referenced_without_context"
     )
     assert plan["workflow_plan"]["nodes"] == [
-        {"id": "rank_prior", "tool": "rank_designs", "inputs": {"top_k": 1}}
+        {
+            "id": "rank_prior",
+            "tool": "rank_designs",
+            "inputs": {"top_k": 1},
+            "input_provenance": {"top_k": "planner_literal"},
+        }
     ]
 
 
@@ -351,6 +356,8 @@ def test_fixup_kinds_exact_set() -> None:
         "malformed_fixup_response",
         "missing_explicit_mode",
         "missing_canonical_input_slot",
+        "node_reference_used_as_literal_path",
+        "prior_round_used_as_tool",
         "upstream_does_not_produce_candidates",
         "candidate_capability_mismatch",
         "prior_round_referenced_without_context",

@@ -1,7 +1,7 @@
 name: boltzgen
 version: "0.3.2"
 category: protein_design
-description: "Generative binder design. Runs design, inverse-folding, folding, and analysis; filtering is not part of the VPA adapter contract."
+description: "Generative end-to-end binder design framework. Runs design, inverse folding, structure prediction, and analysis from a target PDB, BoltzGen YAML specification, or upstream structure candidate."
 runtime: python
 backend: pytorch
 gpu_required: true

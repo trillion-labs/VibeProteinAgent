@@ -19,15 +19,32 @@ from vibeproteinagent.agents.planning.fixup import (
     candidate_capability_mismatch,
     missing_explicit_mode,
     missing_canonical_input_slot,
+    node_reference_used_as_literal_path,
+    prior_round_used_as_tool,
     prior_round_referenced_without_context,
     upstream_does_not_produce_candidates,
 )
 from vibeproteinagent.agents.planning.ir import validate_planner_ir_v1
+from vibeproteinagent.agents.planning.terminal_tools import TERMINAL_CONTROLLER_TOOLS
 from vibeproteinagent.core.errors import InvalidParamsError
 from vibeproteinagent.workflows.descriptor import Workflow
 
 VIRTUAL_CANONICAL_PRODUCERS = {"prior_round"}
 PLANNER_COMPILED_SOURCE_KIND = "planner_compiled"
+_PATH_FIELD_NAMES = frozenset(
+    {
+        "pdb_path",
+        "target_pdb",
+        "template_pdb",
+        "structure_path",
+        "cif_path",
+        "predicted_cif",
+        "reference_cif",
+        "target_structure",
+        "input_pdb",
+        "input_cif",
+    }
+)
 
 
 def compile_planner_ir(
@@ -42,6 +59,7 @@ def compile_planner_ir(
     consumers. Planner prompts and default runtime behavior remain unchanged.
     """
 
+    _reject_virtual_tool_nodes(llm_ir)
     validate_planner_ir_v1(llm_ir)
     _reject_prior_round_without_context(
         llm_ir,
@@ -49,6 +67,7 @@ def compile_planner_ir(
     )
     ir_nodes = llm_ir.get("nodes") or []
     node_by_id = {node["id"]: node for node in ir_nodes}
+    _reject_node_ids_used_as_literal_paths(llm_ir, node_by_id=node_by_id)
     prior_round_capabilities = _prior_round_candidate_capabilities(prior_round_context)
     compiled_nodes: list[dict[str, Any]] = []
 
@@ -115,7 +134,7 @@ def validate_compiled_planner_plan(plan: dict[str, Any]) -> None:
     forbidden = [
         node.tool
         for node in workflow.nodes
-        if node.tool == "submit_candidate"
+        if node.tool in TERMINAL_CONTROLLER_TOOLS
     ]
     if forbidden:
         raise InvalidParamsError(
@@ -150,6 +169,73 @@ def _reject_prior_round_without_context(
                 )
 
 
+def _reject_virtual_tool_nodes(llm_ir: dict[str, Any]) -> None:
+    for node in llm_ir.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "")
+        tool = str(node.get("tool") or "")
+        if node_id in VIRTUAL_CANONICAL_PRODUCERS or tool in VIRTUAL_CANONICAL_PRODUCERS:
+            raise prior_round_used_as_tool(node_id=node_id or tool)
+
+
+def _reject_node_ids_used_as_literal_paths(
+    llm_ir: dict[str, Any],
+    *,
+    node_by_id: dict[str, dict[str, Any]],
+) -> None:
+    reference_ids = set(node_by_id) | set(VIRTUAL_CANONICAL_PRODUCERS)
+    if not reference_ids:
+        return
+    for node in llm_ir.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        upstream_ids = {
+            str(upstream.get("node") or "")
+            for upstream in node.get("upstream") or []
+            if isinstance(upstream, dict)
+        }
+        for path, value in _iter_path_like_literals(inputs):
+            if value not in reference_ids:
+                continue
+            raise node_reference_used_as_literal_path(
+                node_id=str(node.get("id") or ""),
+                tool=str(node.get("tool") or ""),
+                field=path,
+                literal_value=value,
+                upstream_node=value if value in upstream_ids else value,
+            )
+
+
+def _iter_path_like_literals(value: Any, prefix: str = "") -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    if not isinstance(value, dict):
+        return out
+    for key, child in value.items():
+        field = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(child, dict):
+            out.extend(_iter_path_like_literals(child, field))
+            continue
+        if isinstance(child, list):
+            for index, item in enumerate(child):
+                if isinstance(item, dict):
+                    out.extend(_iter_path_like_literals(item, f"{field}[{index}]"))
+                elif isinstance(item, str) and _is_path_like_field(str(key)):
+                    out.append((f"{field}[{index}]", item))
+            continue
+        if isinstance(child, str) and _is_path_like_field(str(key)):
+            out.append((field, child))
+    return out
+
+
+def _is_path_like_field(field: str) -> bool:
+    lowered = field.lower()
+    return lowered in _PATH_FIELD_NAMES or lowered.endswith("_path") or lowered.endswith("_file")
+
+
 def _compile_node(
     node: dict[str, Any],
     node_by_id: dict[str, dict[str, Any]],
@@ -159,12 +245,14 @@ def _compile_node(
     node_id = node["id"]
     tool = node["tool"]
     inputs = deepcopy(node.get("inputs") or {})
+    provenance = _planner_input_provenance(node, inputs)
     upstreams = list(node.get("upstream") or [])
 
     _validate_explicit_mode(node_id=node_id, tool=tool, inputs=inputs)
+    _sync_provenance_fields(provenance, inputs, default_source="planner_literal")
 
     if not upstreams:
-        return [_executor_node(node_id, tool, inputs)]
+        return [_executor_node(node_id, tool, inputs, provenance)]
 
     term_upstreams = [
         upstream for upstream in upstreams
@@ -182,9 +270,14 @@ def _compile_node(
             upstreams=term_upstreams,
             node_by_id=node_by_id,
         )
+        for field in inputs:
+            if _contains_executor_ref(inputs[field]):
+                provenance[field] = "compiled_wiring"
+            else:
+                provenance.setdefault(field, "planner_literal")
         upstreams = candidate_upstreams
         if not upstreams:
-            return [_executor_node(node_id, tool, inputs)]
+            return [_executor_node(node_id, tool, inputs, provenance)]
 
     scalar_slots = CANONICAL_SCALAR_CONSUMERS.get(tool)
     if scalar_slots:
@@ -199,7 +292,8 @@ def _compile_node(
         source_ref, merge_node = _candidate_source_ref(node_id=node_id, upstreams=upstreams)
         for input_field, candidate_field in scalar_slots.items():
             inputs[input_field] = f"${{item.{candidate_field}}}"
-        consumer = _executor_node(node_id, tool, inputs)
+            provenance[input_field] = "compiled_wiring"
+        consumer = _executor_node(node_id, tool, inputs, provenance)
         consumer["foreach"] = source_ref
         return ([merge_node] if merge_node is not None else []) + [consumer]
 
@@ -221,8 +315,9 @@ def _compile_node(
     )
     source_ref, merge_node = _candidate_source_ref(node_id=node_id, upstreams=upstreams)
     inputs[slot] = source_ref
+    provenance[slot] = "compiled_wiring"
     return ([merge_node] if merge_node is not None else []) + [
-        _executor_node(node_id, tool, inputs)
+        _executor_node(node_id, tool, inputs, provenance)
     ]
 
 
@@ -258,14 +353,6 @@ def _validate_canonical_upstreams(
     node_by_id: dict[str, dict[str, Any]],
     prior_round_capabilities: set[str] | None,
 ) -> None:
-    _validate_candidate_item_requirement(
-        node_id=node_id,
-        tool=tool,
-        inputs=inputs,
-        upstreams=upstreams,
-        node_by_id=node_by_id,
-        prior_round_capabilities=prior_round_capabilities,
-    )
     for upstream in upstreams:
         upstream_id = upstream["node"]
         if upstream_id in VIRTUAL_CANONICAL_PRODUCERS:
@@ -295,35 +382,6 @@ def _validate_canonical_upstreams(
                 upstream_tool=upstream_tool,
                 missing_capabilities=missing,
             )
-
-
-def _validate_candidate_item_requirement(
-    *,
-    node_id: str,
-    tool: str,
-    inputs: dict[str, Any],
-    upstreams: list[dict[str, Any]],
-    node_by_id: dict[str, dict[str, Any]],
-    prior_round_capabilities: set[str] | None,
-) -> None:
-    required_items = candidate_contract_for_inputs(tool, inputs).min_candidate_items
-    if required_items <= 1 or len(upstreams) >= required_items:
-        return
-    upstream_id = upstreams[0]["node"] if upstreams else ""
-    upstream_tool = (
-        upstream_id
-        if upstream_id in VIRTUAL_CANONICAL_PRODUCERS
-        else str((node_by_id.get(upstream_id) or {}).get("tool") or "")
-    )
-    if upstream_tool == "merge_candidates":
-        return
-    raise candidate_capability_mismatch(
-        node_id=node_id,
-        tool=tool,
-        upstream_node=upstream_id,
-        upstream_tool=upstream_tool,
-        missing_capabilities=[f"at_least_{required_items}_candidate_items"],
-    )
 
 
 def _missing_candidate_capabilities_for_node(
@@ -464,6 +522,15 @@ def _wire_term_upstreams(
             upstream_tool=upstream_tool,
         )
     output_path = output_paths.get(input_field)
+    if upstream_tool == "function_term_resolver":
+        list_field = {
+            "go_sequences": "go_terms",
+            "interpro_sequences": "interpro_terms",
+        }.get(tool)
+        if list_field is not None and output_paths.get(list_field) is not None:
+            inputs[input_field] = None
+            input_field = list_field
+            output_path = output_paths[list_field]
     if output_path is None:
         raise InvalidParamsError(
             "resolver output cannot satisfy requested term input",
@@ -477,6 +544,43 @@ def _wire_term_upstreams(
             },
         )
     inputs[input_field] = f"${{outputs.{upstream_id}.{output_path}}}"
+
+
+def _planner_input_provenance(
+    node: dict[str, Any],
+    inputs: dict[str, Any],
+) -> dict[str, str]:
+    raw = node.get("input_provenance")
+    provenance = {
+        str(field): str(source)
+        for field, source in (raw.items() if isinstance(raw, dict) else [])
+        if isinstance(field, str) and isinstance(source, str)
+    }
+    _sync_provenance_fields(provenance, inputs, default_source="planner_literal")
+    return provenance
+
+
+def _sync_provenance_fields(
+    provenance: dict[str, str],
+    inputs: dict[str, Any],
+    *,
+    default_source: str,
+) -> None:
+    for field in inputs:
+        provenance.setdefault(str(field), default_source)
+    for field in list(provenance):
+        if field not in inputs:
+            provenance.pop(field, None)
+
+
+def _contains_executor_ref(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.startswith("${") and value.endswith("}")
+    if isinstance(value, list):
+        return any(_contains_executor_ref(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_executor_ref(item) for item in value.values())
+    return False
 
 
 def _candidate_source_ref(
@@ -498,12 +602,29 @@ def _candidate_source_ref(
             ],
             "dedup_policy": "keep_all",
         },
+        {
+            "candidate_sets": "compiled_wiring",
+            "dedup_policy": "runtime_derived",
+        },
     )
     return f"${{outputs.{merge_node_id}.candidates}}", merge_node
 
 
-def _executor_node(node_id: str, tool: str, inputs: dict[str, Any]) -> dict[str, Any]:
-    return {"id": node_id, "tool": tool, "inputs": inputs}
+def _executor_node(
+    node_id: str,
+    tool: str,
+    inputs: dict[str, Any],
+    input_provenance: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    node = {"id": node_id, "tool": tool, "inputs": inputs}
+    provenance = {
+        field: source
+        for field, source in (input_provenance or {}).items()
+        if field in inputs
+    }
+    if provenance:
+        node["input_provenance"] = provenance
+    return node
 
 
 def _required_tools(nodes: list[dict[str, Any]]) -> list[str]:

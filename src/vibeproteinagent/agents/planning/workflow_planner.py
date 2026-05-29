@@ -31,6 +31,7 @@ from vibeproteinagent.agents.planning.canonical_tools import (
     candidate_contract_for_inputs,
     explicit_mode_input_field,
 )
+from vibeproteinagent.agents.planning.parameter_ownership import planner_ownership_hints
 from vibeproteinagent.agents.planning.compiler import (
     PLANNER_COMPILED_SOURCE_KIND,
     compile_planner_ir,
@@ -40,6 +41,7 @@ from vibeproteinagent.agents.planning.ir import (
     planner_ir_schema,
     validate_planner_ir_v1,
 )
+from vibeproteinagent.agents.planning.terminal_tools import TERMINAL_CONTROLLER_TOOLS
 from vibeproteinagent.agents.provider import ChatMessage
 from vibeproteinagent.agents.provider.types import ChatProvider
 from vibeproteinagent.agents.tools.schemas import (
@@ -185,6 +187,8 @@ def _candidate_tool_specs(selection: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             continue
         if not isinstance(name, str) or name in seen:
+            continue
+        if name in TERMINAL_CONTROLLER_TOOLS:
             continue
         seen.add(name)
         spec: dict[str, Any] = {"name": name}
@@ -539,6 +543,7 @@ def _tool_selection_prompt(
     available_tools: list[dict[str, Any]],
     known_inputs: dict[str, Any] | None = None,
     prior_round_context: dict[str, Any] | None = None,
+    deliverable_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prompt: dict[str, Any] = {
         "request": user_request,
@@ -564,6 +569,8 @@ def _tool_selection_prompt(
     }
     if prior_round_context is not None:
         prompt["prior_round_context"] = prior_round_context
+    if deliverable_contract:
+        prompt["deliverable_contract"] = deliverable_contract
     return prompt
 
 
@@ -577,6 +584,7 @@ def _validate_planner_ir_against_selected_tools(
         str(tool.get("name")): tool
         for tool in selected_tools
         if isinstance(tool.get("name"), str)
+        and str(tool.get("name")) not in TERMINAL_CONTROLLER_TOOLS
     }
     violations: list[PlannerIRViolation] = []
     used_tools: set[str] = set()
@@ -603,6 +611,18 @@ def _validate_planner_ir_against_selected_tools(
         if not isinstance(node, dict):
             continue
         tool_name = node.get("tool")
+        if isinstance(tool_name, str) and tool_name in TERMINAL_CONTROLLER_TOOLS:
+            violations.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{index}/tool",
+                    issue="terminal_tool_in_planner_ir",
+                    expected=(
+                        f"Tool {tool_name!r} is controller-owned terminal action; "
+                        "do not include it in Planner IR."
+                    ),
+                )
+            )
+            continue
         if not isinstance(tool_name, str) or tool_name not in by_name:
             violations.append(
                 PlannerIRViolation(
@@ -785,6 +805,7 @@ def _prepare_planner_ir_for_verification(
     selected_tools: list[dict[str, Any]],
     *,
     known_inputs: dict[str, Any] | None,
+    defaulted_inputs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     prepared = deepcopy(planner_ir)
     known_inputs = known_inputs or {}
@@ -808,31 +829,126 @@ def _prepare_planner_ir_for_verification(
         if not isinstance(inputs, dict):
             inputs = {}
             node["inputs"] = inputs
+        provenance = node.get("input_provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+            node["input_provenance"] = provenance
+        for field in inputs:
+            provenance.setdefault(str(field), "planner_literal")
         if isinstance(tool_name, str):
             mode_field = explicit_mode_input_field(tool_name)
             if mode_field != "mode" and "mode" in inputs and mode_field not in inputs:
                 inputs[mode_field] = inputs.pop("mode")
+                provenance[mode_field] = provenance.pop("mode", "planner_literal")
             selected_mode = selected_modes.get(tool_name)
             if selected_mode is not None and mode_field not in inputs and "mode" in inputs:
                 inputs[mode_field] = inputs.pop("mode")
+                provenance[mode_field] = provenance.pop("mode", "planner_literal")
         satisfied_fields.update(str(field) for field in inputs)
         schema = schema_by_name.get(tool_name)
-        if not isinstance(schema, dict):
-            continue
-        properties = schema.get("properties")
-        if not isinstance(properties, dict):
-            continue
-        for field in _required_field_options(schema):
-            if field in inputs or field not in properties:
-                continue
-            if field in known_inputs:
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        if isinstance(properties, dict):
+            for field in sorted(set(known_inputs) & set(properties)):
+                if field in inputs:
+                    continue
                 inputs[field] = known_inputs[field]
+                provenance[field] = "known_input"
                 satisfied_fields.add(field)
+        if isinstance(tool_name, str):
+            _apply_planner_default_inputs(
+                tool_name,
+                inputs,
+                node_id=str(node.get("id") or ""),
+                known_inputs=known_inputs,
+                defaulted_inputs=defaulted_inputs,
+            )
+            satisfied_fields.update(str(field) for field in inputs)
+            for field in inputs:
+                provenance.setdefault(str(field), "planner_literal")
+        for field in list(provenance):
+            if field not in inputs:
+                provenance.pop(field, None)
     prepared["missing_inputs"] = _remaining_missing_inputs(
         prepared.get("missing_inputs"),
         satisfied_fields,
     )
     return prepared
+
+
+def _apply_planner_default_inputs(
+    tool_name: str,
+    inputs: dict[str, Any],
+    *,
+    node_id: str,
+    known_inputs: dict[str, Any] | None = None,
+    defaulted_inputs: list[dict[str, Any]] | None = None,
+) -> None:
+    if tool_name != "pxdesign":
+        return
+    known_inputs = known_inputs or {}
+    defaults = {
+        "target_chain": {
+            "value": "A",
+            "reason": "user did not specify chain; conventional default",
+        },
+        "binder_length": {
+            "value": 60,
+            "reason": "user did not specify binder length; bounded compact-binder default",
+        },
+    }
+    for field, payload in defaults.items():
+        if field in inputs:
+            continue
+        if field in known_inputs:
+            inputs[field] = known_inputs[field]
+            continue
+        inputs[field] = payload["value"]
+        if defaulted_inputs is not None:
+            defaulted_inputs.append(
+                {
+                    "node_id": node_id,
+                    "tool": tool_name,
+                    "field": field,
+                    **payload,
+                }
+            )
+
+
+def _attach_planner_metadata(
+    plan: dict[str, Any],
+    *,
+    audit_warnings: list[dict[str, Any]],
+    defaulted_inputs: list[dict[str, Any]],
+    deliverable_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if audit_warnings:
+        existing = plan.setdefault("planner_audit_warnings", [])
+        if isinstance(existing, list):
+            existing.extend(deepcopy(audit_warnings))
+    if defaulted_inputs:
+        plan["defaulted_inputs"] = _dedupe_defaulted_inputs(defaulted_inputs)
+    if deliverable_contract:
+        metadata = plan.setdefault("metadata", {})
+        if isinstance(metadata, dict):
+            metadata["deliverable_contract"] = deepcopy(deliverable_contract)
+        plan.setdefault("deliverable_contract", deepcopy(deliverable_contract))
+    return plan
+
+
+def _dedupe_defaulted_inputs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("node_id") or ""),
+            str(item.get("tool") or ""),
+            str(item.get("field") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(item))
+    return out
 
 
 def _remaining_missing_inputs(
@@ -981,6 +1097,39 @@ def _term_source_violations(
     return out
 
 
+def _terminal_tool_selection_warnings(selection: dict[str, Any]) -> list[dict[str, Any]]:
+    selected = selection.get("selected_tools")
+    raw_items = selected if isinstance(selected, list) else selection.get("candidate_tools")
+    if not isinstance(raw_items, list):
+        raw_items = tool_names_from_plan(selection)
+    warnings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, dict):
+            raw_name = item.get("name") or item.get("tool")
+            if not isinstance(raw_name, str):
+                continue
+            name = raw_name
+        else:
+            continue
+        if name in TERMINAL_CONTROLLER_TOOLS and name not in seen:
+            seen.add(name)
+            warnings.append(
+                {
+                    "level": "warning",
+                    "event_type": "terminal_controller_tool_selected",
+                    "tool": name,
+                    "message": (
+                        f"{name} is a controller terminal action and was removed "
+                        "from planner scientific tool selection."
+                    ),
+                }
+            )
+    return warnings
+
+
 def _candidate_capability_violations(
     *,
     node: dict[str, Any],
@@ -993,48 +1142,9 @@ def _candidate_capability_violations(
         tool_name,
         node.get("inputs") if isinstance(node.get("inputs"), dict) else {},
     )
-    if not required.consumes and required.min_candidate_items <= 1:
+    if not required.consumes:
         return []
     out: list[PlannerIRViolation] = []
-    candidate_upstreams = [
-        upstream
-        for upstream in upstreams
-        if isinstance(upstream, dict) and upstream.get("relationship") == "candidate_source"
-    ]
-    if (
-        required.min_candidate_items > 1
-        and 0 < len(candidate_upstreams) < required.min_candidate_items
-    ):
-        upstream_id = str(candidate_upstreams[0].get("node") or "")
-        upstream_node = node_by_id.get(upstream_id)
-        upstream_tool = (
-            "prior_round"
-            if upstream_id == "prior_round"
-            else str((upstream_node or {}).get("tool") or "")
-        )
-        if upstream_tool != "merge_candidates":
-            out.append(
-                PlannerIRViolation(
-                    path=f"/nodes/{node_index}/upstream",
-                    issue="candidate_item_count_mismatch",
-                    expected=(
-                        f"Tool {tool_name!r} expects at least "
-                        f"{required.min_candidate_items} candidate items. Provide "
-                        "multiple candidate_source edges or use an upstream merged "
-                        "candidate set."
-                    ),
-                    metadata={
-                        "consumer_node": node.get("id"),
-                        "consumer_tool": tool_name,
-                        "min_candidate_items": required.min_candidate_items,
-                        "repair_instruction": (
-                            "Repair the topology by providing enough candidate "
-                            "items, usually via multiple candidate_source edges "
-                            "that the compiler can merge."
-                        ),
-                    },
-                )
-            )
     for upstream_index, upstream in enumerate(upstreams):
         if not isinstance(upstream, dict):
             continue
@@ -1202,7 +1312,6 @@ def _should_attempt_plan_verification_repair(exc: PlannerIRSchemaViolation) -> b
         return False
     repairable = {
         "candidate_capability_mismatch",
-        "candidate_item_count_mismatch",
         "executor_reference_forbidden",
         "invalid_selected_mode",
         "input_field_not_in_tool_schema",
@@ -1234,6 +1343,7 @@ def _repair_unsatisfied_root_with_selected_term_producer(
         str(tool.get("name")): tool
         for tool in selected_tools
         if isinstance(tool.get("name"), str)
+        and str(tool.get("name")) not in TERMINAL_CONTROLLER_TOOLS
     }
     nodes = planner_ir.get("nodes")
     if not isinstance(nodes, list):
@@ -1402,6 +1512,8 @@ def _apply_plan_verification_patch(
         selected_by_name.pop(name, None)
 
     for name in _string_list(patch.get("add_selected_tools")):
+        if name in TERMINAL_CONTROLLER_TOOLS:
+            continue
         if name not in available_by_name:
             raise InvalidParamsError(
                 "plan verification patch tried to add an unavailable tool",
@@ -1470,6 +1582,8 @@ def _apply_plan_verification_patch(
         for replacement in replace_nodes:
             if not isinstance(replacement, dict) or not isinstance(replacement.get("id"), str):
                 continue
+            if replacement.get("tool") in TERMINAL_CONTROLLER_TOOLS:
+                continue
             node_id = str(replacement["id"])
             if node_id not in by_id:
                 raise InvalidParamsError(
@@ -1487,6 +1601,8 @@ def _apply_plan_verification_patch(
         }
         for new_node in add_nodes:
             if not isinstance(new_node, dict) or not isinstance(new_node.get("id"), str):
+                continue
+            if new_node.get("tool") in TERMINAL_CONTROLLER_TOOLS:
                 continue
             node_id = str(new_node["id"])
             if node_id in existing_ids:
@@ -2271,6 +2387,7 @@ class WorkflowPlanner:
         max_schema_retries: int = 3,
         compile_with_fixup: PlannerIRCompiler | None = None,
         prior_round_context: "PriorRoundContext | None" = None,
+        deliverable_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Flag-on Planner IR path. Returns executor IR ready for validation/execution.
@@ -2287,6 +2404,7 @@ class WorkflowPlanner:
             available_tools=available_tool_schemas,
             known_inputs=known,
             prior_round_context=_prior_round_context_payload(prior_round_context),
+            deliverable_contract=deliverable_contract,
         )
         selection = await self._select_candidate_tools(
             selection_prompt,
@@ -2300,6 +2418,7 @@ class WorkflowPlanner:
             model=model,
             idempotency_key=_phase_idempotency_key(idempotency_key, "tool-selection-mode-repair"),
         )
+        planner_audit_warnings = _terminal_tool_selection_warnings(selection)
         selected_tools = self._selected_full_tool_schemas(
             selection,
             available_tool_schemas,
@@ -2339,10 +2458,12 @@ class WorkflowPlanner:
             try:
                 planner_ir = _load_planner_ir_json_or_raise(response.content)
                 _validate_planner_ir_v1_or_raise(planner_ir)
+                defaulted_inputs: list[dict[str, Any]] = []
                 planner_ir = _prepare_planner_ir_for_verification(
                     planner_ir,
                     selected_tools,
                     known_inputs=known,
+                    defaulted_inputs=defaulted_inputs,
                 )
                 _validate_planner_ir_against_selected_tools(
                     planner_ir,
@@ -2361,10 +2482,12 @@ class WorkflowPlanner:
                     if repaired_ir is not None:
                         deterministic_repairs += 1
                         try:
+                            repair_defaulted_inputs: list[dict[str, Any]] = []
                             repaired_ir = _prepare_planner_ir_for_verification(
                                 repaired_ir,
                                 selected_tools,
                                 known_inputs=known,
+                                defaulted_inputs=repair_defaulted_inputs,
                             )
                             _validate_planner_ir_v1_or_raise(repaired_ir)
                             _validate_planner_ir_against_selected_tools(
@@ -2376,10 +2499,17 @@ class WorkflowPlanner:
                             last_violation = repair_exc
                         else:
                             if compile_with_fixup is not None:
-                                return await compile_with_fixup(repaired_ir)
-                            return compile_planner_ir(
-                                repaired_ir,
-                                prior_round_context=prior_round_context,
+                                plan = await compile_with_fixup(repaired_ir)
+                            else:
+                                plan = compile_planner_ir(
+                                    repaired_ir,
+                                    prior_round_context=prior_round_context,
+                                )
+                            return _attach_planner_metadata(
+                                plan,
+                                audit_warnings=planner_audit_warnings,
+                                defaulted_inputs=repair_defaulted_inputs,
+                                deliverable_contract=deliverable_contract,
                             )
                 if (
                     verification_repairs < _MAX_PLAN_VERIFICATION_REPAIRS
@@ -2411,6 +2541,7 @@ class WorkflowPlanner:
                             planner_ir,
                             selected_tools,
                             known_inputs=known,
+                            defaulted_inputs=defaulted_inputs,
                         )
                         _validate_planner_ir_v1_or_raise(planner_ir)
                         _validate_planner_ir_against_selected_tools(
@@ -2422,10 +2553,17 @@ class WorkflowPlanner:
                         last_violation = repair_exc
                     else:
                         if compile_with_fixup is not None:
-                            return await compile_with_fixup(planner_ir)
-                        return compile_planner_ir(
-                            planner_ir,
-                            prior_round_context=prior_round_context,
+                            plan = await compile_with_fixup(planner_ir)
+                        else:
+                            plan = compile_planner_ir(
+                                planner_ir,
+                                prior_round_context=prior_round_context,
+                            )
+                        return _attach_planner_metadata(
+                            plan,
+                            audit_warnings=planner_audit_warnings,
+                            defaulted_inputs=defaulted_inputs,
+                            deliverable_contract=deliverable_contract,
                         )
                 retry_context = {
                     "previous_output": response.content,
@@ -2438,10 +2576,17 @@ class WorkflowPlanner:
                 }
                 continue
             if compile_with_fixup is not None:
-                return await compile_with_fixup(planner_ir)
-            return compile_planner_ir(
-                planner_ir,
-                prior_round_context=prior_round_context,
+                plan = await compile_with_fixup(planner_ir)
+            else:
+                plan = compile_planner_ir(
+                    planner_ir,
+                    prior_round_context=prior_round_context,
+                )
+            return _attach_planner_metadata(
+                plan,
+                audit_warnings=planner_audit_warnings,
+                defaulted_inputs=defaulted_inputs,
+                deliverable_contract=deliverable_contract,
             )
 
         if last_violation is not None:
@@ -2480,6 +2625,16 @@ class WorkflowPlanner:
                     {},
                 ),
             }
+            properties = (
+                entry["input_schema_outline"].get("properties")
+                if isinstance(entry.get("input_schema_outline"), dict)
+                else None
+            )
+            if isinstance(properties, dict):
+                entry["field_ownership"] = planner_ownership_hints(
+                    name,
+                    sorted(str(field) for field in properties),
+                )
             allowed_modes = EXPLICIT_MODE_TOOLS.get(name)
             if allowed_modes is not None:
                 entry["allowed_modes"] = list(allowed_modes)

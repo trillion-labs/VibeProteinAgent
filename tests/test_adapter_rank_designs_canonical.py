@@ -55,6 +55,34 @@ def test_rank_designs_accepts_all_canonical_candidates(tmp_path) -> None:
     assert out.ranked_candidates[0]["candidate_score"] == 0.9
 
 
+def test_rank_designs_preserves_canonical_score_namespaces(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    candidate = _canonical_candidate(
+        "cand_qc",
+        local_id="seq_0000",
+        sequence="AAAA",
+        score=0.5,
+    )
+    candidate["source"]["tool"] = "protenix_v2"
+    candidate["scores"] = {
+        "protenix_v2": {"ranking_score": 0.8, "plddt": 91.0},
+        "protein_qc": {"flags": ["high_instability_index"], "plddt": 88.0},
+        "sequence_analysis": {"hydrophobic_fraction": 0.2},
+    }
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[candidate], top_k=1),
+        null_context(tmp_path / "job"),
+    )
+
+    row = out.ranked_candidates[0]
+    assert row["ranking_score"] == 0.8
+    assert row["qc_flags"] == ["high_instability_index"]
+    assert row["qc_flag_count"] == 1
+    assert row["scores"]["protein_qc"]["flags"] == ["high_instability_index"]
+    assert row["scores"]["sequence_analysis"]["hydrophobic_fraction"] == 0.2
+
+
 def test_rank_designs_legacy_candidate_path_still_works(tmp_path) -> None:
     adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
     out = adapter.run(

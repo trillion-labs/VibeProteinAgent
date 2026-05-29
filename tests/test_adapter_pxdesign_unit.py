@@ -66,12 +66,48 @@ def test_descriptor_loads_and_matches_spec() -> None:
 def test_descriptor_input_schema_is_valid_json() -> None:
     raw = json.loads(_INPUT_SCHEMA.read_text())
     assert raw["$id"].endswith("pxdesign.input.json")
-    for required in ("target_pdb", "target_chain", "binder_length"):
-        assert required in raw["required"]
+    assert {"required": ["target_pdb"]} in raw["anyOf"]
+    assert {"required": ["candidates"]} in raw["anyOf"]
+    assert "target_chain" not in raw.get("required", [])
+    assert "binder_length" not in raw.get("required", [])
     props = raw["properties"]
     assert props["num_samples"]["default"] == 5
     assert props["num_steps"]["default"] == 400
     assert raw["additionalProperties"] is False
+
+
+def test_input_schema_accepts_canonical_candidate_source() -> None:
+    from jsonschema import Draft202012Validator
+
+    raw = json.loads(_INPUT_SCHEMA.read_text())
+    Draft202012Validator.check_schema(raw)
+    errors = list(
+        Draft202012Validator(raw).iter_errors(
+            {
+                "candidates": [
+                    {
+                        "schema_version": "candidate_v1",
+                        "candidate_id": "c0",
+                        "source": {"tool": "producer", "local_id": "0"},
+                        "structure_path": "/tmp/upstream.cif",
+                    }
+                ]
+            }
+        )
+    )
+
+    assert errors == []
+    params = PXDesignInput(
+        candidates=[
+            {
+                "schema_version": "candidate_v1",
+                "candidate_id": "c0",
+                "source": {"tool": "producer", "local_id": "0"},
+                "structure_path": "/tmp/upstream.cif",
+            }
+        ]
+    )
+    assert params.target_pdb == "/tmp/upstream.cif"
 
 
 def test_descriptor_output_schema_is_valid_json() -> None:
@@ -170,6 +206,22 @@ def test_resolve_checkpoint_raises_when_missing(
     monkeypatch.setattr(adapter_mod, "PXDESIGN_CKPT_DIR", tmp_path / "nope")
     with pytest.raises(FileNotFoundError, match="checkpoint not found"):
         adapter_mod._resolve_checkpoint()
+
+
+def test_pxdesign_preflights_target_chain_for_existing_mmcif(tmp_path: Path) -> None:
+    pdb = tmp_path / "target.pdb"
+    pdb.write_text(
+        "ATOM      1  N   ALA A   1      11.104  13.207   9.100  1.00 20.00           N\n"
+        "ATOM      2  CA  ALA A   1      12.560  13.300   9.100  1.00 20.00           C\n"
+        "ATOM      3  C   ALA A   1      13.000  14.700   9.100  1.00 20.00           C\n"
+        "TER\n"
+        "END\n"
+    )
+    cif = tmp_path / "target.cif"
+    adapter_mod._convert_pdb_to_mmcif(pdb, cif, target_chain="A")
+
+    with pytest.raises(Exception, match="chain preflight"):
+        adapter_mod._prepare_pxdesign_structure_file(cif, target_chain="B")
 
 
 def test_registry_finds_pxdesign() -> None:

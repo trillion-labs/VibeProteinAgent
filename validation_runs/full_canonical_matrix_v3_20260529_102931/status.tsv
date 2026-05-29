@@ -1,0 +1,3 @@
+case	mode	provider	model	status	case_status	process_exit_code	api_ok	run_state	validation_status	seconds	output
+actual_semantic_codex	actual	codex	gpt-5.4	FAIL	FAIL	0	true	failed	FAIL	173	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_102931/codex/actual_semantic_codex.json
+actual_binder_codex	actual	codex	gpt-5.4	FAIL	FAIL	143	unknown	unknown	FAIL	160	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_102931/codex/actual_binder_codex.json

@@ -1,0 +1,62 @@
+{
+  "case_counts": {
+    "BLOCKED": 9,
+    "FAIL": 0,
+    "MISSING": 0,
+    "PASS": 0
+  },
+  "counts": {
+    "BLOCKED": 9,
+    "FAIL": 0,
+    "MISSING": 0,
+    "PASS": 0
+  },
+  "expected_case_count": 9,
+  "missing_cases": [],
+  "notes": "live provider matrix cycle with current defaults.",
+  "planner": "two_stage_tool_mode_selection_ir",
+  "pr": "live_provider_matrix",
+  "provider_counts": {
+    "BLOCKED": 3,
+    "FAIL": 0,
+    "MISSING": 0,
+    "PASS": 0
+  },
+  "providers": [
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_105828/claude",
+      "duration_seconds": 0.0,
+      "first_error": "claude command not found",
+      "provider": "claude",
+      "reason": "preflight_failed",
+      "status": "BLOCKED"
+    },
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_105828/codex",
+      "duration_seconds": 0.0,
+      "first_error": "codex command not found",
+      "provider": "codex",
+      "reason": "preflight_failed",
+      "status": "BLOCKED"
+    },
+    {
+      "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_105828/qwen",
+      "duration_seconds": 0.0,
+      "first_error": "OpenRouter credential is unset",
+      "provider": "qwen",
+      "reason": "preflight_failed",
+      "status": "BLOCKED"
+    }
+  ],
+  "recorded_case_count": 9,
+  "release_evidence": {
+    "clean_run_directory_required": true,
+    "log_guardrail_violations": [],
+    "release_evidence_valid": true,
+    "script_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/run_live_provider_matrix_vm024.sh",
+    "script_sha_end": "8171613ee93317ce98d0808857dd53d1be043b26ac3edc0245bb632da447a5ae",
+    "script_sha_start": "8171613ee93317ce98d0808857dd53d1be043b26ac3edc0245bb632da447a5ae",
+    "script_unchanged_during_run": true
+  },
+  "timestamp": "2026-05-29T01:59:20.220969+00:00"
+}

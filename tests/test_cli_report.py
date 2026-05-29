@@ -173,6 +173,187 @@ def test_report_workflow_uses_ranked_candidates_qc_and_msa(
     assert "Reproducibility" in html
 
 
+def test_report_surfaces_bounded_candidate_availability_events(
+    tmp_workspace: Workspace,
+) -> None:
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="availability_demo",
+        version="1.0",
+        descriptor_yaml="name: availability_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    wf_store.add_node(
+        workflow_id=wf_id,
+        node_id="resolver",
+        tool_name="function_term_resolver",
+        tool_version="1.0.0",
+        upstream=[],
+        params_hash="abc",
+        input_hash="def",
+        cache_key="ghi",
+    )
+    wf_store.update_node_state(
+        wf_id,
+        "resolver",
+        "completed",
+        output={
+            "empty_facets": [
+                {
+                    "event_type": "empty_candidate_event",
+                    "intent_id": "facet_epimerase",
+                    "label": "epimerase intent",
+                    "query": "epimerase",
+                    "selected_term": "GO:0047736",
+                    "selected_reason": "best evidence term produced no candidates",
+                    "candidate_count": 0,
+                }
+            ]
+        },
+    )
+    wf_store.add_node(
+        workflow_id=wf_id,
+        node_id="sequence_metrics",
+        tool_name="sequence_analysis",
+        tool_version="1.0.0",
+        upstream=["resolver"],
+        params_hash="jkl",
+        input_hash="mno",
+        cache_key="pqr",
+    )
+    wf_store.update_node_state(
+        wf_id,
+        "sequence_metrics",
+        "completed",
+        output={
+            "candidate_capability_filter_event": {
+                "status": "partitioned",
+                "candidate_count": 8,
+                "compatible_candidate_count": 3,
+                "skipped_candidate_count": 5,
+                "filtered_candidates": [
+                    {
+                        "candidate_id": f"cand_{idx}",
+                        "source": {"tool": "go_sequences", "local_id": f"seq_{idx}"},
+                        "capabilities": ["has_candidate_scores"],
+                        "missing_capabilities": ["has_sequence"],
+                    }
+                    for idx in range(8)
+                ],
+            },
+            "parameter_resolution_events": [
+                {
+                    "field": "pdb_path",
+                    "source_before": "planner_literal",
+                    "source_after": "upstream_candidate",
+                    "reason": "protein_qc.pdb_path derived from upstream canonical candidate",
+                    "value_summary": "/tmp/design.pdb",
+                },
+                {
+                    "field": "temperature",
+                    "source_before": "adapter_default",
+                    "source_after": "adapter_default",
+                    "reason": "adapter schema default will be used",
+                    "value_summary": 0.1,
+                },
+            ],
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": "seq_hit_1",
+                    "sequence": "ACDE",
+                    "scores": {
+                        "semantic_relevance": {
+                            "sequence_relevance_score": 0.91,
+                            "term_relevance_score": 0.87,
+                            "intent_id": "facet_dehydratase",
+                            "intent": {
+                                "intent_id": "facet_dehydratase",
+                                "label": "dehydratase intent",
+                                "query": "dehydratase",
+                                "selected_term": "GO:0052855",
+                            },
+                            "selected_reason": "top relevant sequence for facet",
+                        }
+                    },
+                }
+            ],
+        },
+    )
+    wf_store.update_state(wf_id, "completed", finished=True)
+
+    model = collect_report_model(tmp_workspace, wf_id)
+    html = render_report_html(model)
+
+    assert model.empty_candidate_events[0]["label"] == "epimerase intent"
+    assert model.candidate_capability_filter_events[0]["status"] == "partitioned"
+    assert len(model.candidate_capability_filter_events[0]["filtered_candidates"]) == 5
+    assert "Candidate Availability" in html
+    assert model.satisfied_semantic_facets[0]["label"] == "dehydratase intent"
+    assert model.satisfied_semantic_facets[0]["candidate_count"] == 1
+    assert "Satisfied facets" in html
+    assert "dehydratase intent" in html
+    assert "seq_hit_1" in html
+    assert "epimerase intent" in html
+    assert "partitioned" in html
+    assert "cand_4" in html
+    assert "source go_sequences:seq_0" in html
+    assert "caps has_candidate_scores" in html
+    assert model.parameter_resolution_events[0]["field"] == "pdb_path"
+    assert model.graph.nodes[1].parameter_resolution_summary["derived_count"] == 1
+    assert model.graph.nodes[1].parameter_resolution_summary["adapter_default_count"] == 1
+    assert "Parameter resolution" in html
+    assert "planner_literal -&gt; upstream_candidate" in html
+    assert "adapter schema default will be used" in html
+
+
+def test_report_surfaces_parameter_conflict_events(
+    tmp_workspace: Workspace,
+) -> None:
+    wf_store = WorkflowStore(tmp_workspace)
+    wf_id = wf_store.create(
+        name="parameter_conflict_demo",
+        version="1.0",
+        descriptor_yaml="name: parameter_conflict_demo\nversion: '1.0'\nnodes: []\n",
+        params={},
+    )
+    wf_store.add_node(
+        workflow_id=wf_id,
+        node_id="rank",
+        tool_name="rank_designs",
+        tool_version="1.0.0",
+        upstream=[],
+        params_hash="abc",
+        input_hash="def",
+        cache_key="ghi",
+    )
+    wf_store.update_node_state(
+        wf_id,
+        "rank",
+        "failed",
+        error_code="invalid_params",
+        error_message="rank_designs.candidates violates parameter ownership policy",
+        error_details={
+            "parameter_conflict_event": {
+                "field": "candidates",
+                "source": "planner_literal",
+                "ownership": "candidate_stream",
+                "status": "failed_planner_literal_not_allowed",
+                "technical_failure": False,
+            }
+        },
+    )
+    wf_store.update_state(wf_id, "failed", finished=True)
+
+    model = collect_report_model(tmp_workspace, wf_id)
+    html = render_report_html(model)
+
+    assert model.parameter_resolution_events[0]["field"] == "candidates"
+    assert model.graph.nodes[0].parameter_resolution_summary["conflict_count"] == 1
+    assert "Parameter resolution" in html
+    assert "failed_planner_literal_not_allowed" in html
+
+
 def test_report_does_not_auto_select_without_agent_budget_marker(
     tmp_workspace: Workspace,
 ) -> None:

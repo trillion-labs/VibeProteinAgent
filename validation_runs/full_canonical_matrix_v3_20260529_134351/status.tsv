@@ -1,0 +1,10 @@
+case	mode	provider	model	status	case_status	process_exit_code	api_ok	run_state	validation_status	seconds	output
+actual_semantic_codex	actual	codex	gpt-5.4	PASS	PASS	0	true	completed	PASS	386	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/codex/actual_semantic_codex.json
+actual_binder_codex	actual	codex	gpt-5.4	FAIL	FAIL	0	true	failed	FAIL	469	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/codex/actual_binder_codex.json
+actual_denovo_codex	actual	codex	gpt-5.4	FAIL	FAIL	0	true	failed	FAIL	368	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/codex/actual_denovo_codex.json
+actual_semantic_claude	actual	claude-code	sonnet	FAIL	FAIL	0	true	failed	FAIL	282	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/claude/actual_semantic_claude.json
+actual_binder_claude	actual	claude-code	sonnet	FAIL	FAIL	0	true	failed	FAIL	297	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/claude/actual_binder_claude.json
+actual_denovo_claude	actual	claude-code	sonnet	FAIL	FAIL	0	true	failed	FAIL	312	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/claude/actual_denovo_claude.json
+actual_semantic_qwen	actual	openrouter	qwen/qwen3.5-9b	PASS	PASS	0	true	completed	PASS	1085	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/qwen/actual_semantic_qwen.json
+actual_binder_qwen	actual	openrouter	qwen/qwen3.5-9b	FAIL	FAIL	0	true	failed	FAIL	508	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/qwen/actual_binder_qwen.json
+actual_denovo_qwen	actual	openrouter	qwen/qwen3.5-9b	PASS	PASS	0	true	completed	PASS	873	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/qwen/actual_denovo_qwen.json

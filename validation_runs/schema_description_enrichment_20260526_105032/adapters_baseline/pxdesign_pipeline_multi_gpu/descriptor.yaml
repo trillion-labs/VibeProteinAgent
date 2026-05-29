@@ -13,7 +13,7 @@ warm_load_capable: false
 pin_warm: false
 execution_isolation: subprocess
 environment_name: pxdesign-pipeline-vpa
-environment_reason: "Distributed pipeline mode launches a local PXDesign/JAX/ColabDesign rank sidecar for each claimed worker rank. It is verified as local multi-GPU execution but does not claim warm sidecar reuse."
+environment_reason: "Distributed pipeline mode launches a local PXDesign/JAX/ rank sidecar for each claimed worker rank. It is verified as local multi-GPU execution but does not claim warm sidecar reuse."
 support_status: verified
 support_status_reason: null
 availability_probe: "vibeproteinagent.adapters.pxdesign:availability_skip_reason"

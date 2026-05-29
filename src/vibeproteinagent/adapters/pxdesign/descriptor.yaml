@@ -1,7 +1,7 @@
 name: pxdesign
 version: "1.0.0"
 category: protein_design
-description: "Target-conditioned binder generation against a protein target. Runs diffusion, AF2 initial guess, and ProteinMPNN sequence generation; filtering is not part of the VPA adapter contract."
+description: "Target-conditioned binder generation. Defaults to chain A and 60 aa when the request omits chain or length; override for multimer chains, regions, or size constraints."
 runtime: python
 backend: pytorch
 gpu_required: true

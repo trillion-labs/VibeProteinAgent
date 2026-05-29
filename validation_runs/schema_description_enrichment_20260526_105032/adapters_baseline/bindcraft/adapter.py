@@ -163,7 +163,7 @@ def _bindcraft_import_skip_reason(python: Path, timeout_s: int = 240) -> str | N
     if reason is None:
         return None
     return (
-        f"{reason}. Check pydantic, torch, JAX/CUDA, ColabDesign, "
+        f"{reason}. Check pydantic, torch, JAX/CUDA, , "
         "PyRosetta, msgpack, and VPA sidecar install."
     )
 

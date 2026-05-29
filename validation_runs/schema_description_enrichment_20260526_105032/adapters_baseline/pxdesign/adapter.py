@@ -112,7 +112,7 @@ PXDESIGN_CKPT_DIR = Path(
 ).expanduser()
 
 # Dedicated conda env for the `pipeline` mode (AF2-IG + ProteinMPNN + filters).
-# JAX + dm-haiku + optax + ColabDesign cannot share vpa's process — JAX's
+# JAX + dm-haiku + optax +  cannot share vpa's process — JAX's
 # bundled cuDNN/CUBLAS/nccl wheels would override torch's bundled CUDA libs
 # (see Phase 16b note `094ffe75-...`). Pipeline mode runs inside this
 # dedicated persistent sidecar; the `infer` mode keeps running in-process.
@@ -456,7 +456,7 @@ def _pipeline_import_skip_reason(python: Path, timeout_s: int = 180) -> str | No
         return None
     return (
         f"{reason}. "
-        "Check Python >=3.11, JAX, dm-haiku, optax, ColabDesign, msgpack, "
+        "Check Python >=3.11, JAX, dm-haiku, optax, , msgpack, "
         "PXDesign/PXDBench vendor imports, VPA sidecar install, and "
         "$TOOL_WEIGHTS_ROOT AF2 tool weights."
     )
@@ -470,7 +470,7 @@ def availability_skip_reason() -> str | None:
         return (
             f"PXDesign pipeline env not present at {env} (no python at {py}). "
             f"Provision per vendor/pxdesign/UPSTREAM.md#pipeline-mode "
-            f"(needs JAX + dm-haiku + optax + ColabDesign + AF2 params). "
+            f"(needs JAX + dm-haiku + optax +  + AF2 params). "
             f"Set $VPA_PXDESIGN_PIPELINE_ENV to override the default path."
         )
     return _pipeline_import_skip_reason(py)
@@ -769,7 +769,7 @@ class PXDesignAdapter(ToolAdapter):
     def _run_pipeline(self, params: PXDesignInput, ctx: AdapterRunContext) -> PXDesignOutput:
         """Persistent-sidecar path for real-sequence design.
 
-        The dedicated env owns JAX + ColabDesign + AF2 params; vpa stays clean.
+        The dedicated env owns JAX +  + AF2 params; vpa stays clean.
         If the env isn't present, raise
         ``DependencyError`` with an actionable provision message — same shape
         the daemon/CLI surfaces as ``E_DEPENDENCY``.

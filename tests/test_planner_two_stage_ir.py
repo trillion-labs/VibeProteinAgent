@@ -120,6 +120,37 @@ def _tools() -> list[dict[str, str]]:
     ]
 
 
+def _tools_with_submit_candidate() -> list[dict[str, str]]:
+    return [
+        {"name": "go_sequences", "description": "Retrieve GO sequences."},
+        {"name": "rank_designs", "description": "Rank candidates."},
+        {"name": "submit_candidate", "description": "Controller terminal submission."},
+    ]
+
+
+def _pxdesign_tools() -> list[dict[str, str]]:
+    return [{"name": "pxdesign", "description": "Design compact binders."}]
+
+
+def _pxdesign_ir() -> dict[str, Any]:
+    return {
+        "version": "planner_ir_v1",
+        "goal": "Design compact binders.",
+        "assumptions": [],
+        "missing_inputs": [],
+        "nodes": [
+            {
+                "id": "binders",
+                "tool": "pxdesign",
+                "intent": "Generate binder candidates against the target.",
+                "inputs": {"target_pdb": "/tmp/target.pdb"},
+                "upstream": [],
+            }
+        ],
+        "finalization": {"success_criteria": {"binders": True}},
+    }
+
+
 def _many_tools() -> list[dict[str, str]]:
     return [
         {"name": name, "description": f"{name} available for planning."}
@@ -140,6 +171,41 @@ def _many_tools() -> list[dict[str, str]]:
 
 def _rfdiffusion_tools() -> list[dict[str, str]]:
     return [{"name": "rfdiffusion", "description": "Generate protein backbones."}]
+
+
+def _pairwise_structure_tools() -> list[dict[str, str]]:
+    return [
+        {"name": "rfdiffusion", "description": "Generate protein backbones."},
+        {"name": "tmalign", "description": "Compare candidate structures."},
+    ]
+
+
+def _rfdiffusion_tmalign_ir() -> dict[str, Any]:
+    return {
+        "version": "planner_ir_v1",
+        "goal": "Generate a candidate stream and compare structures when enough candidates exist.",
+        "assumptions": [],
+        "missing_inputs": [],
+        "nodes": [
+            {
+                "id": "backbones",
+                "tool": "rfdiffusion",
+                "intent": "Generate backbone candidates.",
+                "inputs": {"mode": "unconditional"},
+                "upstream": [],
+            },
+            {
+                "id": "align",
+                "tool": "tmalign",
+                "intent": "Compare generated structures if the stream has enough items.",
+                "inputs": {},
+                "upstream": [
+                    {"node": "backbones", "relationship": "candidate_source"}
+                ],
+            },
+        ],
+        "finalization": {"success_criteria": {"alignment_attempted": True}},
+    }
 
 
 def _sequence_edit_tools() -> list[dict[str, Any]]:
@@ -270,6 +336,130 @@ def test_initial_planner_runs_tool_selection_then_planner_ir() -> None:
     assert plan["source_kind"] == "planner_compiled"
 
 
+def test_submit_candidate_selected_tool_is_ignored_for_planner_ir_usage() -> None:
+    provider = _Provider(
+        [
+            _selection("go_sequences", "rank_designs", "submit_candidate"),
+            _go_rank_ir(),
+        ]
+    )
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Find GO candidates, rank them, and submit the final choice.",
+            available_tools=_tools_with_submit_candidate(),
+        )
+    )
+
+    assert plan["source_kind"] == "planner_compiled"
+    assert "submit_candidate" not in plan["required_tools"]
+    planner_prompt = json.loads(provider.messages[1][1].content)
+    assert "submit_candidate" not in {tool["name"] for tool in planner_prompt["tool_catalog"]}
+    assert plan["planner_audit_warnings"][0]["event_type"] == "terminal_controller_tool_selected"
+
+
+def test_pxdesign_defaulted_inputs_are_recorded_in_plan_metadata() -> None:
+    provider = _Provider([_selection("pxdesign"), _pxdesign_ir()])
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Design a compact binder against target_pdb=/tmp/target.pdb.",
+            available_tools=_pxdesign_tools(),
+            known_inputs={"target_pdb": "/tmp/target.pdb"},
+            deliverable_contract={
+                "version": "deliverable_contract_v1",
+                "answer_type": "candidate_submission",
+                "required_candidate_capabilities": ["has_sequence", "has_full_structure"],
+                "terminal_submission_allowed": True,
+            },
+        )
+    )
+
+    node = plan["workflow_plan"]["nodes"][0]
+    assert node["inputs"]["target_chain"] == "A"
+    assert node["inputs"]["binder_length"] == 60
+    assert plan["defaulted_inputs"] == [
+        {
+            "node_id": "binders",
+            "tool": "pxdesign",
+            "field": "target_chain",
+            "value": "A",
+            "reason": "user did not specify chain; conventional default",
+        },
+        {
+            "node_id": "binders",
+            "tool": "pxdesign",
+            "field": "binder_length",
+            "value": 60,
+            "reason": "user did not specify binder length; bounded compact-binder default",
+        },
+    ]
+    assert plan["metadata"]["deliverable_contract"]["answer_type"] == "candidate_submission"
+
+
+def test_pxdesign_known_inputs_take_precedence_over_defaults() -> None:
+    provider = _Provider([_selection("pxdesign"), _pxdesign_ir()])
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Design binders against target_pdb=/tmp/target.pdb using chain B.",
+            available_tools=_pxdesign_tools(),
+            known_inputs={
+                "target_pdb": "/tmp/target.pdb",
+                "target_chain": "B",
+                "binder_length": 85,
+            },
+        )
+    )
+
+    node = plan["workflow_plan"]["nodes"][0]
+    assert node["inputs"]["target_chain"] == "B"
+    assert node["inputs"]["binder_length"] == 85
+    assert "defaulted_inputs" not in plan
+
+
+def test_pairwise_structure_tool_single_upstream_stream_is_planner_valid() -> None:
+    provider = _Provider(
+        [
+            {
+                "mode": "tool_selection",
+                "selected_tools": [
+                    {
+                        "name": "rfdiffusion",
+                        "selected_mode": "unconditional",
+                        "reason": "Generate candidate structures.",
+                    },
+                    {
+                        "name": "tmalign",
+                        "reason": "Compare candidate structures at runtime.",
+                    },
+                ],
+                "missing_inputs": [],
+            },
+            _rfdiffusion_tmalign_ir(),
+        ]
+    )
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Generate structures, then compare them if the stream has enough candidates.",
+            available_tools=_pairwise_structure_tools(),
+        )
+    )
+
+    align = plan["workflow_plan"]["nodes"][-1]
+    assert align["tool"] == "tmalign"
+    assert align["inputs"]["candidates"] == "${outputs.backbones.candidates}"
+    assert not any(
+        warning.get("issue") == "candidate_item_count_mismatch"
+        for warning in plan.get("planner_audit_warnings", [])
+    )
+
+
 def test_tool_selection_prompt_uses_full_catalog_not_lexical_inventory() -> None:
     provider = _Provider([_selection("go_sequences", "rank_designs"), _go_rank_ir()])
     planner = WorkflowPlanner(ToolRegistry(), provider)
@@ -360,10 +550,11 @@ def test_tool_selection_and_planner_ir_prompts_expose_capability_profiles() -> N
     profiles = boltzgen_outline["candidate_capability_profiles"]
     full_profile = next(
         profile for profile in profiles
-        if profile["name"] == "design_inverse_fold_folding_analyze"
+        if profile["name"] == "target_conditioned_design_inverse_fold_folding_analyze"
     )
-    assert full_profile["default"] is True
-    assert full_profile["inputs"] == {}
+    assert full_profile["default"] is False
+    assert full_profile["inputs"] == {"target_pdb": "<path or canonical candidates>"}
+    assert "has_full_structure" in full_profile["consumes"]
     assert "has_sequence" in full_profile["produces"]
 
     planner_prompt = json.loads(provider.messages[1][1].content)
@@ -606,6 +797,10 @@ def test_known_inputs_are_prompted_and_injected_before_compile() -> None:
     assert (
         plan["workflow_plan"]["nodes"][0]["inputs"]["target_pdb"]
         == "/tmp/target.pdb"
+    )
+    assert (
+        plan["workflow_plan"]["nodes"][0]["input_provenance"]["target_pdb"]
+        == "known_input"
     )
 
 

@@ -137,12 +137,28 @@ class HttpClient:
             )
             sep = "&" if urllib.parse.urlparse(url).query else "?"
             url = f"{url}{sep}{query}"
-        return self.get(
-            url,
-            extra_cache_key=extra_cache_key,
-            cache_namespace=cache_namespace,
-            use_cache=use_cache,
-        ).json()
+        last_exc: json.JSONDecodeError | None = None
+        for attempt in range(self.retries + 1):
+            response = self.get(
+                url,
+                extra_cache_key=extra_cache_key,
+                cache_namespace=cache_namespace,
+                use_cache=use_cache and attempt == 0,
+            )
+            try:
+                return response.json()
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+                if attempt >= self.retries:
+                    raise HttpError(
+                        f"GET {response.url} returned invalid JSON: {exc}",
+                        status=response.status,
+                        url=response.url,
+                    ) from exc
+                sleep_s = self.backoff_s * (2 ** attempt)
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+        raise HttpError(f"GET {url} returned invalid JSON: {last_exc}", url=url)
 
     def get(
         self,

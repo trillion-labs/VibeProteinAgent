@@ -1,7 +1,7 @@
 name: proteina_complexa
 version: "1.0.0"
 category: protein_design
-description: "Atomistic design: protein_binder, ligand_binder, and motif. VPA runs generate + evaluate only; filtering and analyze stages are not part of the adapter contract."
+description: "Full-atomistic protein design framework that generates protein sequences and full structures. Supports protein binder design from a target PDB, ligand-pocket binder design, and motif scaffolding."
 runtime: python
 backend: pytorch
 gpu_required: true

@@ -13,7 +13,6 @@ import pytest
 # Adapters whose runtime readiness depends on optional local sidecar assets/envs.
 SIDECAR_PROBED_ADAPTERS = [
     "bindcraft",
-    "colabdesign_utils",
 ]
 
 

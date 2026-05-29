@@ -1,7 +1,7 @@
 name: function_term_resolver
 version: "1.0.0"
 category: retrieval
-description: "Lightweight resolver that searches GO and InterPro metadata for natural-language protein function terms and returns ranked executable identifier candidates. Use before go_sequences or interpro_sequences when exact accessions are absent."
+description: "Legacy/internal resolver used by search_sequence to find GO and InterPro identifiers from semantic protein function text. Directly callable for debug workflows."
 runtime: python
 backend: numpy
 gpu_required: false
@@ -9,6 +9,7 @@ startup_cost: low
 estimated_runtime_s: 10
 warm_load_capable: false
 pin_warm: false
+planner_visible: false
 supported_tasks: [function_term_resolver]
 input_schema: schemas/function_term_resolver.input.json
 output_schema: schemas/function_term_resolver.output.json

@@ -75,6 +75,11 @@
         "additionalProperties": false
       }
     },
+    "empty_facets": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
     "fasta_path": {"type": "string"},
     "metadata_jsonl": {"type": "string"},
     "dropped": {"type": "object", "additionalProperties": {"type": "integer"}},

@@ -25,12 +25,6 @@ _DISCRIMINATING_TOKENS = {
     "ump",
     "dna",
     "rna",
-    "nad",
-    "nadh",
-    "nadp",
-    "nadph",
-    "nadhx",
-    "nadphx",
 }
 
 
@@ -328,14 +322,20 @@ def _rank_terms(
     source: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    return [
-        {**row, "score": _text_score(query, row.get("name"), row.get("definition")), "source": source}
-        for row in sorted(
-            rows,
-            key=lambda row: _text_score(query, row.get("name"), row.get("definition")),
-            reverse=True,
-        )[:limit]
+    scored = [
+        {
+            **row,
+            **term_relevance_payload(
+                query=query,
+                label=row.get("name"),
+                definition=row.get("definition"),
+                source=source,
+            ),
+            "source": source,
+        }
+        for row in rows
     ]
+    return sorted(scored, key=lambda row: float(row.get("score") or 0.0), reverse=True)[:limit]
 
 
 def _rank_entries(
@@ -346,14 +346,65 @@ def _rank_entries(
     limit: int,
 ) -> list[dict[str, Any]]:
     rows = [row for row in rows if row.get("accession")]
-    return [
-        {**row, "score": _text_score(query, row.get("name"), row.get("description")), "source": source}
-        for row in sorted(
-            rows,
-            key=lambda row: _text_score(query, row.get("name"), row.get("description")),
-            reverse=True,
-        )[:limit]
+    scored = [
+        {
+            **row,
+            **term_relevance_payload(
+                query=query,
+                label=row.get("name"),
+                definition=row.get("description"),
+                source=source,
+            ),
+            "source": source,
+        }
+        for row in rows
     ]
+    return sorted(scored, key=lambda row: float(row.get("score") or 0.0), reverse=True)[:limit]
+
+
+def term_relevance_payload(
+    *,
+    query: str,
+    label: Any,
+    definition: Any,
+    source: str = "",
+) -> dict[str, Any]:
+    label_similarity = _text_score(query, label)
+    definition_similarity = _text_score(query, definition)
+    query_tokens = _tokens(query)
+    label_tokens = _tokens(str(label or ""))
+    definition_tokens = _tokens(str(definition or ""))
+    exact_keyword_bonus = round(
+        min(0.15, 0.03 * len(query_tokens & (label_tokens | definition_tokens))),
+        4,
+    )
+    evidence_source_bonus = 0.1 if source in {"quickgo", "ols4", "interpro_api"} else 0.0
+    broad_terms = {"protein", "binding", "activity", "domain", "process", "family"}
+    ambiguity_penalty = -0.05 if (label_tokens & broad_terms and len(label_tokens) <= 3) else 0.0
+    score = max(
+        0.0,
+        min(
+            1.0,
+            0.4 * label_similarity
+            + 0.25 * definition_similarity
+            + exact_keyword_bonus
+            + evidence_source_bonus
+            + ambiguity_penalty,
+        ),
+    )
+    score = round(score, 4)
+    breakdown = {
+        "label_similarity": round(label_similarity, 4),
+        "definition_similarity": round(definition_similarity, 4),
+        "exact_keyword_bonus": exact_keyword_bonus,
+        "evidence_source_bonus": evidence_source_bonus,
+        "ambiguity_penalty": ambiguity_penalty,
+    }
+    return {
+        "score": score,
+        "term_relevance_score": score,
+        "score_breakdown": breakdown,
+    }
 
 
 def _text_score(query: str, *fields: Any) -> float:

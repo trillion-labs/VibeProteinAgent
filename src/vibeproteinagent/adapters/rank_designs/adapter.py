@@ -78,7 +78,8 @@ def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(producer_scores, dict):
         row.update(producer_scores)
-        row["scores"] = dict(producer_scores)
+    if scores:
+        row["scores"] = dict(scores)
     return {key: value for key, value in row.items() if value is not None}
 
 
@@ -140,6 +141,14 @@ def _first_metric(*values: float | None) -> float | None:
     return None
 
 
+def _score_namespace(row: dict[str, Any], namespace: str) -> dict[str, Any]:
+    scores = row.get("scores")
+    if not isinstance(scores, dict):
+        return {}
+    payload = scores.get(namespace)
+    return payload if isinstance(payload, dict) else {}
+
+
 def _score(
     prediction: dict[str, Any],
     analysis: dict[str, Any],
@@ -155,22 +164,30 @@ def _score(
     plddt = _metric(prediction, "plddt")
     iptm = _metric(prediction, "iptm")
     ptm = _metric(prediction, "ptm")
+    candidate_qc = _score_namespace(candidate, "protein_qc")
     qc_metrics = qc.get("metrics") if isinstance(qc.get("metrics"), dict) else {}
     qc_plddt = _metric(qc_metrics, "plddt") if isinstance(qc_metrics, dict) else None
+    candidate_qc_plddt = _metric(candidate_qc, "plddt")
     liabilities = (
         analysis.get("liabilities")
         if isinstance(analysis.get("liabilities"), list)
         else []
     )
-    qc_flags = qc.get("flags") if isinstance(qc.get("flags"), list) else []
+    qc_flags = qc.get("flags") if isinstance(qc.get("flags"), list) else None
+    if qc_flags is None:
+        qc_flags = (
+            candidate_qc.get("flags") if isinstance(candidate_qc.get("flags"), list) else []
+        )
 
     score = 0.0
     if ranking_score is not None:
         score += ranking_score
     if plddt is not None:
         score += plddt / 100.0
-    elif qc_plddt is not None:
-        score += qc_plddt / 100.0
+    else:
+        fallback_plddt = _first_metric(qc_plddt, candidate_qc_plddt)
+        if fallback_plddt is not None:
+            score += fallback_plddt / 100.0
     if iptm is not None:
         score += 0.5 * iptm
     if ptm is not None:
@@ -178,7 +195,7 @@ def _score(
     score -= 0.05 * len(liabilities)
     score -= 0.10 * len(qc_flags)
 
-    reported_plddt = plddt if plddt is not None else qc_plddt
+    reported_plddt = _first_metric(plddt, qc_plddt, candidate_qc_plddt)
     details = {
         "candidate_score": candidate_score,
         "ranking_score": ranking_score,
@@ -191,6 +208,8 @@ def _score(
         "structure_path": _path(prediction) or _path(candidate),
         "sequence": _sequence(candidate, prediction),
     }
+    if isinstance(candidate.get("scores"), dict):
+        details["scores"] = dict(candidate["scores"])
     return score, details
 
 

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/search_sequence.output.json",
+  "type": "object",
+  "required": [
+    "query",
+    "retrieval_status",
+    "retrieval_sources",
+    "resolved_terms",
+    "source_summaries",
+    "sequences",
+    "candidates",
+    "empty_facets",
+    "summary",
+    "artifacts",
+    "runtime_ms"
+  ],
+  "properties": {
+    "query": {"type": "string"},
+    "retrieval_status": {
+      "type": "string",
+      "enum": ["completed", "partial", "empty", "no_terms", "no_hits"]
+    },
+    "retrieval_sources": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["go", "interpro"]}
+    },
+    "resolved_terms": {
+      "type": "object",
+      "required": ["go_terms", "interpro_terms"],
+      "properties": {
+        "go_terms": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "interpro_terms": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+      },
+      "additionalProperties": false
+    },
+    "source_summaries": {
+      "type": "object",
+      "additionalProperties": {"type": "object", "additionalProperties": true}
+    },
+    "sequences": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items; see src/vibeproteinagent/schemas/candidate_v1.json.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "empty_facets": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "summary": {"type": "object", "additionalProperties": true},
+    "artifacts": {"type": "object", "additionalProperties": true},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

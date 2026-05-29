@@ -20,8 +20,7 @@ profiles:
     extends: base
     tools:
       - literature_search
-      - interpro_sequences
-      - go_sequences
+      - search_sequence
       - template_select
   full:
     description: "Every supported first-class in-tree tool, sidecar, and required model weight."
@@ -29,7 +28,6 @@ profiles:
       - bindcraft
       - boltz2_affinity
       - boltzgen
-      - colabdesign_utils
       - dssp
       - esm2
       - esm3
@@ -52,6 +50,7 @@ profiles:
       - rfdiffusion
       - rfdiffusion3
       - rfpeptides
+      - search_sequence
       - sequence_analysis
       - sequence_edit
       - structure_analysis
@@ -138,11 +137,6 @@ tools:
         source_path: "/opt/vpa-data/boltzgen_cache"
         required: false
     disk_bytes: 50000000000
-  colabdesign_utils:
-    runtime: shared
-    required: false
-    depends_on:
-      - bindcraft
   dssp:
     runtime: external_binary
     required: false
@@ -205,6 +199,8 @@ tools:
         required: true
     disk_bytes: 1000000000
   literature_search:
+    runtime: shared
+  search_sequence:
     runtime: shared
   merge_candidates:
     runtime: shared

@@ -7,7 +7,6 @@
   ],
   "missing_inputs": [],
   "required_tools": [
-    "colabdesign_utils",
     "dssp",
     "foldseek",
     "go_sequences",
@@ -238,15 +237,6 @@
         "on_failure": "continue"
       },
       {
-        "id": "colabdesign_utils",
-        "tool": "colabdesign_utils",
-        "inputs": {
-          "action": "capabilities",
-          "check_import": true
-        },
-        "on_failure": "continue"
-      },
-      {
         "id": "rank_designs",
         "tool": "rank_designs",
         "inputs": {
@@ -284,7 +274,6 @@
     "all_independent_nodes_attempted": true
   },
   "warm_tools": [
-    "colabdesign_utils",
     "dssp",
     "foldseek",
     "go_sequences",

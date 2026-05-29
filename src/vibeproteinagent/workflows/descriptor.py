@@ -30,6 +30,7 @@ class WorkflowNode(BaseModel):
     tool: str = Field(min_length=1)
     version: str = "*"
     inputs: dict[str, Any] = Field(default_factory=dict)
+    input_provenance: dict[str, str] = Field(default_factory=dict)
     cache: bool = True
     foreach: str | None = None
     max_parallel: int | None = Field(default=None, ge=1)
@@ -67,6 +68,7 @@ class Workflow(BaseModel):
         tool: str,
         version: str = "*",
         inputs: dict[str, Any] | None = None,
+        input_provenance: dict[str, str] | None = None,
         cache: bool = True,
         when: str | None = None,
         on_failure: OnFailure = "stop",
@@ -80,6 +82,7 @@ class Workflow(BaseModel):
             tool=tool,
             version=version,
             inputs=inputs or {},
+            input_provenance=input_provenance or {},
             cache=cache,
             max_parallel=max_parallel,
             when=when,
@@ -97,6 +100,7 @@ class Workflow(BaseModel):
         tool: str,
         over: str,
         inputs: dict[str, Any] | None = None,
+        input_provenance: dict[str, str] | None = None,
         version: str = "*",
         cache: bool = True,
         on_failure: OnFailure = "stop",
@@ -108,6 +112,7 @@ class Workflow(BaseModel):
             tool=tool,
             version=version,
             inputs=inputs or {},
+            input_provenance=input_provenance or {},
             cache=cache,
             foreach=over,
             max_parallel=max_parallel,

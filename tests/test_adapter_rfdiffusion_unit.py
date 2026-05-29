@@ -253,6 +253,26 @@ def test_build_contigs_unconditional():
     assert _build_contigs(p, target_pdb=None) == ["80-120"]
 
 
+def test_build_contigs_unconditional_total_length_is_fixed():
+    p = RFdiffusionInput(total_length=60)
+    assert _build_contigs(p, target_pdb=None) == ["60-60"]
+
+
+def test_build_contigs_unconditional_reorders_reversed_range():
+    p = RFdiffusionInput(length_min=90, length_max=60)
+    assert _build_contigs(p, target_pdb=None) == ["60-90"]
+
+
+def test_build_contigs_symmetric_uses_median_explicit_range():
+    p = RFdiffusionInput(
+        mode="symmetric_oligomer",
+        symmetry="C3",
+        length_min=60,
+        length_max=100,
+    )
+    assert _build_contigs(p, target_pdb=None) == ["80-80"]
+
+
 def test_build_contigs_binder_uses_target_span(tmp_path):
     target = _target_pdb(tmp_path)
     p = RFdiffusionInput(

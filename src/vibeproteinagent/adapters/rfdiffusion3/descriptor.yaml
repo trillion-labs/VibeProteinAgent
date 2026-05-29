@@ -1,7 +1,7 @@
 name: rfdiffusion3
 version: "0.1.0+foundry"
 category: protein_design
-description: "RFdiffusion3 target-conditioned binder backbones. Integer hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; target_hotspot_residue_ids are PDB IDs."
+description: "Target-conditioned binder backbone generation. Integer hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; target_hotspot_residue_ids are PDB IDs."
 runtime: python
 backend: pytorch
 gpu_required: true

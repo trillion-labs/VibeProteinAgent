@@ -311,10 +311,18 @@ def render_report_html(
     show_msa = bool(model.msa_blocks)
     show_candidates = bool(model.final_submission or model.final_candidates or model.candidates)
     show_conversation = model.agent_transcript is not None
+    show_availability = bool(
+        model.satisfied_semantic_facets
+        or model.empty_candidate_events
+        or model.candidate_capability_filter_events
+        or model.parameter_resolution_events
+    )
 
     nav_items: list[tuple[str, str, str]] = [("summary", "Summary", "◎")]
     if show_conversation:
         nav_items.append(("conversation", "Conversation", "❝"))
+    if show_availability:
+        nav_items.append(("availability", "Availability", "◌"))
     if show_candidates:
         nav_items.append(("candidates", "Candidates", "★"))
     if show_workflow:
@@ -382,6 +390,9 @@ def render_report_html(
         _agent_transcript_section(model.agent_transcript)
         if show_conversation
         else ""
+    )
+    availability_section = (
+        _candidate_availability_section(model) if show_availability else ""
     )
 
     # ----- Candidates section -----
@@ -500,6 +511,7 @@ def render_report_html(
   <main class="content">
     {summary_card}
     {conversation_section}
+    {availability_section}
     {candidates_section}
     {workflow_section}
     {plots_section}
@@ -528,6 +540,233 @@ def render_report_html(
 
 
 # ----------------------------------------------------------------- hero / summary
+
+
+def _candidate_availability_section(model: ReportModel) -> str:
+    satisfied_items = "".join(
+        _satisfied_semantic_facet_html(facet)
+        for facet in model.satisfied_semantic_facets[:12]
+    )
+    empty_items = "".join(
+        _empty_candidate_event_html(event)
+        for event in model.empty_candidate_events[:12]
+    )
+    filter_items = "".join(
+        _candidate_capability_filter_event_html(event)
+        for event in model.candidate_capability_filter_events[:12]
+    )
+    parameter_items = "".join(
+        _parameter_resolution_event_html(event)
+        for event in model.parameter_resolution_events[:12]
+    )
+    empty_block = (
+        f"""
+  <div class="candidate-group">
+    <div class="candidate-group-head">
+      <p class="card-eyebrow">Empty facets</p>
+      <span class="card-meta">{len(model.empty_candidate_events)} event(s)</span>
+    </div>
+    <div class="artifact-list">{empty_items}</div>
+  </div>"""
+        if empty_items
+        else ""
+    )
+    satisfied_block = (
+        f"""
+  <div class="candidate-group">
+    <div class="candidate-group-head">
+      <p class="card-eyebrow">Satisfied facets</p>
+      <span class="card-meta">{len(model.satisfied_semantic_facets)} facet(s)</span>
+    </div>
+    <div class="artifact-list">{satisfied_items}</div>
+  </div>"""
+        if satisfied_items
+        else ""
+    )
+    filter_block = (
+        f"""
+  <div class="candidate-group">
+    <div class="candidate-group-head">
+      <p class="card-eyebrow">Capability partitions</p>
+      <span class="card-meta">{len(model.candidate_capability_filter_events)} event(s)</span>
+    </div>
+    <div class="artifact-list">{filter_items}</div>
+  </div>"""
+        if filter_items
+        else ""
+    )
+    parameter_block = (
+        f"""
+  <div class="candidate-group">
+    <div class="candidate-group-head">
+      <p class="card-eyebrow">Parameter resolution</p>
+      <span class="card-meta">{len(model.parameter_resolution_events)} event(s)</span>
+    </div>
+    <div class="artifact-list">{parameter_items}</div>
+  </div>"""
+        if parameter_items
+        else ""
+    )
+    return f"""<section id="availability" class="card">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Candidate Availability</p>
+      <h2 class="card-title">Empty and Filtered Candidate Streams</h2>
+    </div>
+  </header>
+  <p class="widget-explainer">Bounded runtime events showing which retrieval facets returned no candidates and which candidate streams were partitioned before tool execution.</p>
+  {satisfied_block}
+  {empty_block}
+  {filter_block}
+  {parameter_block}
+</section>"""
+
+
+def _satisfied_semantic_facet_html(facet: dict[str, Any]) -> str:
+    label = facet.get("label") or facet.get("intent_id") or facet.get("query") or "satisfied facet"
+    facts = [
+        ("intent", facet.get("intent_id")),
+        ("query", facet.get("query")),
+        ("selected", ", ".join(_bounded_str_list(facet.get("selected_terms"), limit=3))),
+        ("candidates", facet.get("candidate_count")),
+        ("best score", _fmt(facet.get("best_sequence_relevance_score")) if facet.get("best_sequence_relevance_score") is not None else None),
+        ("examples", ", ".join(_bounded_str_list(facet.get("candidate_ids"), limit=3))),
+    ]
+    facts_html = "".join(
+        f'<span class="artifact-pill"><strong>{_h(name)}</strong> {_h(str(value))}</span>'
+        for name, value in facts
+        if value not in (None, "")
+    )
+    tools = ", ".join(_bounded_str_list(facet.get("tools"), limit=3))
+    return f"""
+      <div class="artifact-row">
+        <div>
+          <strong>{_h(str(label))}</strong>
+          <div class="artifact-meta">{facts_html}</div>
+        </div>
+        <code>{_h(tools)}</code>
+      </div>"""
+
+
+def _empty_candidate_event_html(event: dict[str, Any]) -> str:
+    label = event.get("label") or event.get("intent_id") or event.get("query") or "empty facet"
+    selected = event.get("selected_term")
+    facts = [
+        ("intent", event.get("intent_id")),
+        ("query", event.get("query")),
+        ("selected", selected),
+        ("reason", event.get("selected_reason")),
+        ("candidates", event.get("candidate_count")),
+    ]
+    facts_html = "".join(
+        f'<span class="artifact-pill"><strong>{_h(name)}</strong> {_h(str(value))}</span>'
+        for name, value in facts
+        if value not in (None, "")
+    )
+    return f"""
+      <div class="artifact-row">
+        <div>
+          <strong>{_h(str(label))}</strong>
+          <div class="artifact-meta">{facts_html}</div>
+        </div>
+        <code>{_h(str(event.get("tool") or ""))}</code>
+      </div>"""
+
+
+def _candidate_capability_filter_event_html(event: dict[str, Any]) -> str:
+    filtered = event.get("filtered_candidates") if isinstance(event.get("filtered_candidates"), list) else []
+    filtered_html = "".join(
+        _filtered_candidate_pill_html(item)
+        for item in filtered[:5]
+        if isinstance(item, dict)
+    )
+    counts = (
+        f'{event.get("compatible_candidate_count") or 0} compatible / '
+        f'{event.get("skipped_candidate_count") or 0} skipped'
+    )
+    return f"""
+      <div class="artifact-row">
+        <div>
+          <strong>{_h(str(event.get("node_id") or "candidate consumer"))}</strong>
+          <div class="artifact-meta">
+            <span class="artifact-pill"><strong>status</strong> {_h(str(event.get("status") or ""))}</span>
+            <span class="artifact-pill"><strong>counts</strong> {_h(counts)}</span>
+            {filtered_html}
+          </div>
+        </div>
+        <code>{_h(str(event.get("tool") or ""))}</code>
+      </div>"""
+
+
+def _parameter_resolution_event_html(event: dict[str, Any]) -> str:
+    node = str(event.get("node_id") or "?")
+    tool = str(event.get("tool") or "?")
+    field = str(event.get("field") or "?")
+    before = str(event.get("source_before") or event.get("source") or "?")
+    after = str(event.get("source_after") or "?")
+    reason = str(event.get("reason") or event.get("status") or "")
+    value = event.get("value_summary")
+    facts = [
+        ("field", field),
+        ("source", f"{before} -> {after}"),
+        ("reason", reason),
+    ]
+    if value not in (None, ""):
+        facts.append(("value", _short(str(value), 80)))
+    facts_html = "".join(
+        f'<span class="artifact-pill"><strong>{_h(name)}</strong> {_h(str(val))}</span>'
+        for name, val in facts
+        if val not in (None, "")
+    )
+    return f"""
+      <div class="artifact-row">
+        <div>
+          <strong>{_h(node)}</strong>
+          <div class="artifact-meta">{facts_html}</div>
+        </div>
+        <code>{_h(tool)}</code>
+      </div>"""
+
+
+def _filtered_candidate_pill_html(item: dict[str, Any]) -> str:
+    label = str(item.get("candidate_id") or "candidate")
+    parts: list[str] = []
+    source = _source_label(item.get("source"))
+    if source:
+        parts.append(f"source {source}")
+    missing = _bounded_str_list(item.get("missing_capabilities"), limit=3)
+    if missing:
+        parts.append(f"missing {', '.join(missing)}")
+    capabilities = _bounded_str_list(item.get("capabilities"), limit=3)
+    if capabilities:
+        parts.append(f"caps {', '.join(capabilities)}")
+    details = "; ".join(parts) if parts else "filtered"
+    return f'<span class="artifact-pill">{_h(label)}: {_h(details)}</span>'
+
+
+def _source_label(source: Any) -> str:
+    if isinstance(source, dict):
+        tool = source.get("tool")
+        local_id = source.get("local_id") or source.get("native_id") or source.get("node_id")
+        if tool and local_id:
+            return f"{tool}:{local_id}"
+        if tool:
+            return str(tool)
+        if local_id:
+            return str(local_id)
+        return ""
+    if isinstance(source, str):
+        return source
+    return ""
+
+
+def _bounded_str_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out = [str(item) for item in value[:limit] if item not in (None, "")]
+    if len(value) > limit:
+        out.append(f"+{len(value) - limit} more")
+    return out
 
 
 def _executive_dashboard(model: ReportModel) -> str:
@@ -2116,8 +2355,6 @@ def _wf_node_inputs_from_output(node: WorkflowNodeSummary) -> list[tuple[str, st
     elif tool == "template_select":
         add("engine", out.get("engine"))
         add("query kind", out.get("query_kind"))
-    elif tool == "colabdesign_utils":
-        add("action", out.get("action"))
     elif tool == "sequence_analysis":
         m = out.get("metrics")
         if isinstance(m, dict):
@@ -2649,6 +2886,7 @@ def _per_tool_widget(node: WorkflowNodeSummary) -> str:
         "vina": _vina_widget,
         "template_select": _template_select_widget,
         "pxmeter": _pxmeter_widget,
+        "search_sequence": _search_sequence_widget,
         "go_sequences": _sequence_retrieval_widget,
         "interpro_sequences": _sequence_retrieval_widget,
         "literature_search": _literature_search_widget,
@@ -3007,6 +3245,94 @@ def _sequence_retrieval_widget(output: dict[str, Any]) -> str:
         '<h4 class="widget-title">Retrieved sequences</h4>'
         f"{explainer}{summary_html}{list_html}{note}"
         "</div>"
+    )
+
+
+def _search_sequence_widget(output: dict[str, Any]) -> str:
+    if not output:
+        return ""
+    summary = output.get("summary") if isinstance(output.get("summary"), dict) else {}
+    source_summaries = output.get("source_summaries")
+    if not isinstance(source_summaries, dict):
+        source_summaries = summary.get("source_summaries") if isinstance(summary.get("source_summaries"), dict) else {}
+    retrieval_sources = output.get("retrieval_sources")
+    if not isinstance(retrieval_sources, list):
+        retrieval_sources = summary.get("retrieval_sources") if isinstance(summary.get("retrieval_sources"), list) else []
+    empty_facets = output.get("empty_facets")
+    if not isinstance(empty_facets, list):
+        empty_facets = summary.get("empty_facets") if isinstance(summary.get("empty_facets"), list) else []
+
+    status = str(output.get("retrieval_status") or summary.get("retrieval_status") or "unknown")
+    query = str(output.get("query") or "")
+    source_candidate_count = _num(summary.get("source_candidate_count"))
+    downstream_count = _num(summary.get("downstream_candidate_count"))
+    max_downstream = _num(summary.get("max_downstream_candidates"))
+    runtime = _num(output.get("runtime_ms"))
+
+    stats = [
+        f'<span class="seqret-stat"><b>{_h(status)}</b> status</span>',
+    ]
+    if source_candidate_count is not None:
+        stats.append(f'<span class="seqret-stat"><b>{int(source_candidate_count)}</b> source candidates</span>')
+    if downstream_count is not None:
+        cap = f" / {int(max_downstream)}" if max_downstream is not None else ""
+        stats.append(f'<span class="seqret-stat"><b>{int(downstream_count)}{cap}</b> downstream candidates</span>')
+    if runtime is not None:
+        stats.append(f'<span class="seqret-stat"><b>{int(runtime)}</b> ms</span>')
+
+    source_rows = []
+    for source in ("go", "interpro"):
+        row = source_summaries.get(source) if isinstance(source_summaries, dict) else None
+        if not isinstance(row, dict):
+            continue
+        source_rows.append(
+            '<span class="seqret-stat">'
+            f'{_h(source.upper())} <b>{_h(str(row.get("status") or "unknown"))}</b>'
+            f' · {int(_num(row.get("candidate_count")) or 0)} candidates'
+            f' · {int(_num(row.get("term_count")) or 0)} terms'
+            '</span>'
+        )
+    sources_html = (
+        f'<div class="seqret-stats">{"".join(source_rows)}</div>'
+        if source_rows else ""
+    )
+
+    facet_rows = []
+    for facet in empty_facets[:6]:
+        if not isinstance(facet, dict):
+            continue
+        label = facet.get("label") or facet.get("intent_id") or facet.get("query") or "unresolved facet"
+        facet_rows.append(
+            '<li>'
+            f'<b>{_h(str(facet.get("retrieval_status") or "empty"))}</b> '
+            f'{_h(str(label))}'
+            f' <span class="muted">{_h(str(facet.get("stage") or ""))}</span>'
+            '</li>'
+        )
+    facets_html = (
+        '<div class="seqret-align-head">Unresolved or empty facets</div>'
+        f'<ul class="compact-list">{"".join(facet_rows)}</ul>'
+        if facet_rows else ""
+    )
+
+    query_html = (
+        f'<div class="seqret-query"><span class="seqret-query-id">{_h(query)}</span></div>'
+        if query else ""
+    )
+    used = ", ".join(str(item) for item in retrieval_sources if item) or "none"
+    explainer = (
+        '<p class="widget-explainer">'
+        "Resolves semantic sequence intent into GO and InterPro terms, retrieves available "
+        "source candidates, then deduplicates and bounds the downstream Candidate[] stream."
+        "</p>"
+    )
+    return (
+        '<div class="widget widget-seqret">'
+        '<h4 class="widget-title">Search sequence retrieval</h4>'
+        f'{explainer}<div class="seqret-summary">{query_html}'
+        f'<div class="seqret-stats">{"".join(stats)}'
+        f'<span class="seqret-stat">sources <b>{_h(used)}</b></span></div>'
+        f'{sources_html}</div>{facets_html}</div>'
     )
 
 

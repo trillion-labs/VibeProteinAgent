@@ -1,7 +1,7 @@
 name: go_sequences
 version: "1.0.0"
 category: retrieval
-description: "Retrieves UniProt FASTA sequences annotated with a Gene Ontology term (e.g., GO:0003674). Filters by GO aspect (MF/BP/CC), organism, evidence codes, length, review status, and date cutoff. Use to gather function-driven sequence sets for training, MSAs, or templates."
+description: "Legacy/internal GO-specific UniProt sequence retrieval used by search_sequence. Directly callable for exact GO debug workflows, but normal agent planning should use search_sequence."
 runtime: python
 backend: numpy
 gpu_required: false

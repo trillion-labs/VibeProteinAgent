@@ -117,6 +117,7 @@ def test_valid_mode_compiles_cleanly() -> None:
             "id": "design",
             "tool": "rfdiffusion",
             "inputs": {"mode": "unconditional"},
+            "input_provenance": {"mode": "planner_literal"},
         }
     ]
 
@@ -276,5 +277,10 @@ def test_single_mode_tool_unaffected() -> None:
     plan = compile_planner_ir(_ir("rank_designs", {"top_k": 1}))
 
     assert plan["workflow_plan"]["nodes"] == [
-        {"id": "design", "tool": "rank_designs", "inputs": {"top_k": 1}}
+        {
+            "id": "design",
+            "tool": "rank_designs",
+            "inputs": {"top_k": 1},
+            "input_provenance": {"top_k": "planner_literal"},
+        }
     ]

@@ -28,6 +28,7 @@ class ModeClassification(BaseModel):
     action: str = "submit"
     execution: dict[str, Any] = Field(default_factory=dict)
     direct_jobs: list[dict[str, Any]] = Field(default_factory=list)
+    deliverable_contract: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentRunRecord(BaseModel):

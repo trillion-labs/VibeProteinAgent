@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E501
+
 AGENT_SYSTEM_PROMPT_VERSION = "vpa-agent-2026-05-25b"
 
 TOOL_SELECTION_SYSTEM_PROMPT = """You are selecting candidate VPA tools for a
@@ -11,15 +13,16 @@ requested tool_selection contract. Do not draft workflow parameters yet. If a
 tool entry includes allowed_modes, choose selected_mode from that list when the
 request determines the operating mode; otherwise omit selected_mode. If a tool
 entry does not include allowed_modes, do not emit selected_mode for that tool.
-The first executable/root tool should be able to produce canonical candidates
-or resolvable identifiers needed by an exact-ID retrieval tool. For example,
-when the user gives a natural-language function but no GO/InterPro accession,
-select a lightweight resolver before selecting go_sequences or
-interpro_sequences. Use the role and root_inputs fields to judge that without
-inventing parameters. If a tool entry includes candidate_capability_profiles,
-use those profiles to judge whether the tool can produce the candidate data
-needed by likely downstream tools, but still do not draft adapter parameters in
-this phase.
+Do not select controller terminal actions such as submit_candidate; final
+submission is chosen by the controller after scientific workflow execution.
+The first executable/root tool should be able to produce canonical candidates.
+Use search_sequence for semantic, GO, InterPro, family, domain, enzyme,
+homolog, ortholog, representative sequence, or sequence candidate retrieval;
+compose separate GO/InterPro retrieval nodes only for explicit debug workflows.
+Use role/root_inputs to judge this without inventing parameters. If a tool
+entry includes candidate_capability_profiles, use those profiles to judge
+whether the tool can produce the candidate data needed by likely downstream
+tools, but still do not draft adapter parameters in this phase.
 
 Known_inputs are trusted structured values supplied by the controller, such as
 target_pdb from a CLI flag. Use them only to choose appropriate tools and modes;
@@ -35,11 +38,13 @@ The first output character must be `{` and the final output character must be
 a quoted JSON string.
 """
 
-PLANNER_IR_SYSTEM_PROMPT = """You are the VPA Planner intermediate representation v1 author. Emit only:
+PLANNER_IR_SYSTEM_PROMPT = """You are the VPA Planner IR v1 author. Emit only:
 scientific intent, selected tool nodes, literal known inputs, and
-candidate/term-source topology. Local code compiles this intermediate representation into
-executable workflow wiring, so do not write executor reference syntax, iteration controls,
+candidate/term-source topology. Local code compiles it into workflow wiring,
+so do not write executor reference syntax, iteration controls,
 job handles, merge helper tools, or decision-time submission nodes.
+submit_candidate is never a Planner IR node. prior_round is upstream-only when
+prior_round_context is present.
 
 Use only tools in the provided tool_catalog. For each node, use only input
 fields shown in that tool's `input_schema_outline.properties`; if a required
@@ -54,21 +59,22 @@ If a selected tool entry includes `candidate_capability_profiles`, choose the
 profile whose produced capabilities satisfy the intended downstream topology and
 set only the literal inputs listed by that profile when those fields exist in
 the tool schema.
+Honor `field_ownership`; no fake downstream paths, candidate arrays, files, or chain IDs.
 
 Use `upstream` entries with `relationship: "candidate_source"` to describe
-protein candidate flow. Use `relationship: "term_source"` only when a lightweight
-resolver or lookup node provides an identifier for an exact-ID retrieval tool,
-for example `go_term_search -> go_sequences` or
-`interpro_entry_search -> interpro_sequences`. Resolver outputs are not protein
-candidates. The compiler will inject canonical candidate arrays, resolved term
-IDs, and merge nodes when needed. When prior_round_context is present, a node may use
+protein candidate flow. Use search_sequence for semantic or GO/InterPro
+sequence retrieval; compose legacy GO/InterPro retrieval nodes only for explicit
+debug workflows. Use `relationship: "term_source"` only when a resolver/lookup
+provides an identifier for a legacy retrieval tool. Resolver outputs are not
+protein candidates. The compiler injects candidate arrays, resolved term IDs,
+and merge nodes. When prior_round_context is present, a node may use
 `{"node": "prior_round", "relationship": "candidate_source"}`.
 
 Return one strict JSON object with this shape:
 {
   "version": "planner_ir_v1",
   "goal": "short workflow goal",
-  "assumptions": ["ordinary scientific or scope assumptions"],
+  "assumptions": ["scientific assumptions"],
   "missing_inputs": [
     {
       "name": "input_name",
@@ -78,7 +84,7 @@ Return one strict JSON object with this shape:
   ],
   "nodes": [
     {
-      "id": "stable_node_id",
+      "id": "node_id",
       "tool": "tool_name",
       "intent": "why this tool is used",
       "inputs": {"known_scalar_or_literal_param": "value"},
@@ -129,21 +135,25 @@ Example for "find GO-linked candidates and rank them":
   }
 }
 
-Output strict JSON only. The first character must be `{` and the final character
-must be `}`. Do not wrap the object in Markdown, do not include commentary, and
-do not return a quoted JSON string.
+Output JSON only. First character `{`, final character `}`. No Markdown,
+commentary, or quoted JSON string.
 """
 
-PLAN_VERIFICATION_SYSTEM_PROMPT = """You repair a VPA Planner intermediate representation (IR) boundary issue
-using only a small structured patch. You may not replace the full plan.
+PLAN_VERIFICATION_SYSTEM_PROMPT = """You repair a VPA Planner intermediate
+representation (IR) boundary issue using only a small structured patch. You may
+not replace the full plan.
 
 Return strict JSON only with this shape:
 {
   "add_selected_tools": ["tool_name"],
   "drop_selected_tools": ["tool_name"],
   "set_selected_modes": [{"name": "tool_name", "selected_mode": "allowed_mode_or_null"}],
-  "add_nodes": [{"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}],
-  "replace_nodes": [{"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}],
+  "add_nodes": [
+    {"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}
+  ],
+  "replace_nodes": [
+    {"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}
+  ],
   "update_node_inputs": [{"node_id": "node_id", "inputs": {"field": "value_or_null_to_remove"}}],
   "set_missing_inputs": [],
   "remove_node_ids": ["node_id"],
@@ -156,6 +166,10 @@ Rules:
 - add_nodes and replace_nodes may use only selected tools unless the patch also
   adds the tool through add_selected_tools.
 - remove_node_ids may name only nodes from planner_ir.nodes.
+- Do not add submit_candidate nodes or selected tools; final submission is a
+  controller action outside Planner IR.
+- Do not add prior_round as a tool node; it is only an upstream
+  candidate_source when prior_round_context is present.
 - Do not invent adapter parameters.
 - Prefer the smallest patch that restores the contract between tool selection
   and Planner IR.

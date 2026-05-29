@@ -2,7 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vibeproteinagent.dev/schemas/pxdesign.input.json",
   "type": "object",
-  "required": ["target_pdb", "target_chain", "binder_length"],
+  "anyOf": [
+    {"required": ["target_pdb"]},
+    {"required": ["candidates"]}
+  ],
   "properties": {
     "target_pdb": {
       "type": "string",
@@ -15,20 +18,22 @@
       "type": "array",
       "items": {"type": "object", "additionalProperties": true},
       "default": [],
-      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path into `target_pdb` when omitted.",
-      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/target.pdb"}]]
+      "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's structure_path, full_structure_path, or backbone_path into `target_pdb` when omitted.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "full_structure_path": "/abs/target.cif"}]]
     },
     "target_chain": {
       "type": "string",
       "minLength": 1,
-      "description": "Chain id of the target on `target_pdb`.",
+      "default": "A",
+      "description": "Chain id of the target on `target_pdb`. Defaults to A when the user did not specify a chain, which is conventional for monomer targets and a bounded starting point for multimer targets. Override when the requested binding region is on a different chain.",
       "examples": ["A", "B"]
     },
     "binder_length": {
       "type": "integer",
       "minimum": 30,
       "maximum": 200,
-      "description": "Desired binder residue count.",
+      "default": 60,
+      "description": "Desired binder residue count. Defaults to 60 aa when the user did not request a length; override when the task states a size or interface geometry constraint.",
       "examples": [60, 80, 120]
     },
     "num_samples": {

@@ -64,7 +64,7 @@ class ProteinMPNNInput(BaseModel):
                 "Pass either all canonical Candidate[] or all legacy items."
             )
         if all(canonical):
-            structure_path = candidates[0].get("structure_path")
+            structure_path = _mpnn_structure_path_from_candidate(candidates[0])
             if not structure_path:
                 raise ValueError("proteinmpnn canonical Candidate[] input requires structure_path")
             out = dict(data)
@@ -76,6 +76,10 @@ class ProteinMPNNInput(BaseModel):
     def _require_pdb_path(self) -> ProteinMPNNInput:
         if not self.pdb_path:
             raise ValueError("proteinmpnn requires pdb_path")
+        if self.chains is None:
+            chains = _infer_protein_chain_ids(Path(self.pdb_path).expanduser())
+            if chains:
+                self.chains = chains
         return self
 
 
@@ -347,6 +351,97 @@ __all__ = [
 
 def _is_canonical_candidate(item: Any) -> bool:
     return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
+
+
+def _mpnn_structure_path_from_candidate(candidate: dict[str, Any]) -> str | None:
+    direct = candidate.get("structure_path")
+    if isinstance(direct, str) and direct.lower().endswith(".pdb"):
+        return direct
+    artifacts = candidate.get("artifacts") if isinstance(candidate.get("artifacts"), dict) else {}
+    source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+    source_tool = str(source.get("tool") or "")
+    preferred_namespaces = [source_tool] if source_tool else []
+    preferred_namespaces.extend(
+        name
+        for name in (
+            "proteinmpnn",
+            "bindcraft",
+            "pxdesign",
+            "boltzgen",
+            "proteina_complexa",
+        )
+        if name not in preferred_namespaces
+    )
+    for namespace in preferred_namespaces:
+        payload = artifacts.get(namespace)
+        if isinstance(payload, dict):
+            value = payload.get("pdb_path")
+            if isinstance(value, str) and value:
+                return value
+    if isinstance(direct, str) and direct:
+        return direct
+    for key in ("pdb_path", "full_structure_path", "backbone_path"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _infer_protein_chain_ids(path: Path) -> list[str]:
+    suffix = path.suffix.lower()
+    if suffix in {".cif", ".mmcif"}:
+        return _infer_cif_protein_chain_ids(path)
+    return _infer_pdb_protein_chain_ids(path)
+
+
+def _infer_pdb_protein_chain_ids(path: Path) -> list[str]:
+    chains: set[str] = set()
+    try:
+        lines = path.read_text(errors="ignore").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        if not line.startswith("ATOM"):
+            continue
+        chain = line[21:22].strip()
+        if chain:
+            chains.add(chain)
+    return sorted(chains)
+
+
+def _infer_cif_protein_chain_ids(path: Path) -> list[str]:
+    try:
+        lines = path.read_text(errors="ignore").splitlines()
+    except OSError:
+        return []
+    cols: list[str] = []
+    chains: set[str] = set()
+    in_atom_loop = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "loop_":
+            cols = []
+            in_atom_loop = False
+            continue
+        if stripped.startswith("_atom_site."):
+            in_atom_loop = True
+            cols.append(stripped.removeprefix("_atom_site."))
+            continue
+        if not in_atom_loop:
+            continue
+        parts = stripped.split()
+        if not parts or parts[0].startswith("#"):
+            in_atom_loop = False
+            continue
+        if len(parts) < len(cols):
+            continue
+        row = {col: parts[idx] for idx, col in enumerate(cols)}
+        if row.get("group_PDB") != "ATOM":
+            continue
+        chain = row.get("auth_asym_id") or row.get("label_asym_id")
+        if chain and chain not in {".", "?"}:
+            chains.add(str(chain))
+    return sorted(chains)
 
 
 def _canonical_candidate_from_design(

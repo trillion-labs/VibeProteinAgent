@@ -1,7 +1,7 @@
 name: esm3
 version: "1.0.0"
 category: embedding
-description: "Multimodal protein language model that jointly generates and embeds across sequence, structure, and embedding tracks from a starting sequence. Use when a co-generated backbone+sequence is needed in one call; for sequence-only embeddings or completion use `esm2`."
+description: "Multimodal protein language model that generates and embeds across sequence, structure, and embedding tracks. Use when co-generated backbone and sequence outputs are needed in one call; for sequence-only embeddings or completion use `esm2`."
 runtime: python
 backend: pytorch
 gpu_required: true

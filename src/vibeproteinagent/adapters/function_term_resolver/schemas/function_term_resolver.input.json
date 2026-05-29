@@ -8,14 +8,21 @@
       "type": "string",
       "minLength": 1,
       "description": "Natural-language functional query to resolve into GO and/or InterPro identifiers.",
-      "examples": ["ADP-dependent NAD(P)H-hydrate dehydratase activity"]
+      "examples": ["alpha kinase activity and beta transporter domain"]
     },
     "target_names": {
       "type": "array",
       "items": {"type": "string"},
       "default": [],
       "description": "Optional explicit protein, enzyme, family, or domain names to prioritize during resolution.",
-      "examples": [["NAD(P)H-hydrate dehydratase"]]
+      "examples": [["alpha kinase", "beta transporter"]]
+    },
+    "semantic_intents": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Optional bounded semantic facets to resolve independently. Each item may include intent_id, label, query, and required; unresolved required facets are reported without poisoning resolved facets.",
+      "examples": [[{"intent_id": "facet_a", "label": "activity A", "query": "activity A", "required": true}]]
     },
     "preferred_namespaces": {
       "type": "array",

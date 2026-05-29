@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_105828/qwen",
+  "duration_seconds": 0.0,
+  "first_error": "OpenRouter credential is unset",
+  "provider": "qwen",
+  "reason": "preflight_failed",
+  "status": "BLOCKED"
+}

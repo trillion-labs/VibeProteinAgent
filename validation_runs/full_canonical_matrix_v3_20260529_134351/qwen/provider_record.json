@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_134351/qwen",
+  "duration_seconds": 2466.0,
+  "first_error": "{\"ok\": true, \"data\": {\"run_id\": \"arun_37d36c0012084d18b06ec2499d774605\", \"mode\": \"agent_plan\", \"classification\": {\"mode\": \"agent_plan\", \"reason\": \"Request is a scientific goal or asks for planning without a concrete workflow.\", \"requires_llm_planning\": true, \"requested_tools\": [], \"workflow_ref\": null, \"job_refs\": [], \"missing_inputs\": [], \"params\": {\"max_attempted_trajectories\": 4, \"target_pdb\": \"/mnt/vast/trillion/hyunjin/VibeProteinAgent/tests/fixtures/6MRR.pdb\", \"pdb_path\": \"/mnt/vast/trilli",
+  "provider": "qwen",
+  "reason": "workflow_failed",
+  "status": "FAIL"
+}

@@ -283,7 +283,6 @@ add requested tools as time allows.
 | `interpro_sequences` | retrieval | UniProt sequence retrieval for InterPro accessions or domain-family driven searches. |
 | `go_sequences` | retrieval | UniProt sequence retrieval for GO terms, useful for function-guided sequence collection. |
 | `sequence_edit` | sequence engineering | Deterministic residue substitutions, sequence edits, and wild-type consistency checks. |
-| `colabdesign_utils` | utility | ColabDesign capability and readiness accounting for workflows that depend on that ecosystem. |
 
 ## Three Ways To Use VPA
 

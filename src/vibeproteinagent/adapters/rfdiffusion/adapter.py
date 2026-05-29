@@ -161,13 +161,6 @@ class RFdiffusionInput(BaseModel):
     @model_validator(mode="after")
     def validate_mode_contract(self) -> RFdiffusionInput:
         self.mode = _canonical_mode(self.mode)
-        if self.length_max is not None and self.length_max < self.length_min:
-            raise ValueError("length_max must be >= length_min")
-        if (
-            self.binder_length_max is not None
-            and self.binder_length_max < self.binder_length_min
-        ):
-            raise ValueError("binder_length_max must be >= binder_length_min")
         if self.partial_T is not None and self.partial_T > self.num_diffusion_steps:
             raise ValueError("partial_T must be <= num_diffusion_steps")
 
@@ -543,16 +536,16 @@ def _build_contigs_with_mappings(
         return params.contigs, mappings, warnings, resolved_hotspots, resolved_selectors
     if mode == "unconditional":
         return (
-            [_range(params.length_min, params.length_max)],
+            [_range(*_requested_length_range(params))],
             mappings,
             warnings,
             resolved_hotspots,
             resolved_selectors,
         )
     if mode == "symmetric_oligomer":
-        length = params.total_length or params.length_min
+        length = _requested_symmetric_length(params)
         return (
-            [_range(length, params.length_max or length)],
+            [_range(length, length)],
             mappings,
             warnings,
             resolved_hotspots,
@@ -574,7 +567,7 @@ def _build_contigs_with_mappings(
         if range_mapping:
             mappings["target_residues"] = range_mapping
         warnings.extend(range_warnings)
-        binder = _range(params.binder_length_min, params.binder_length_max)
+        binder = _range(*_ordered_range(params.binder_length_min, params.binder_length_max))
         return (
             [f"{target_span}/0 {binder}"],
             mappings,
@@ -590,6 +583,33 @@ def _build_contigs_with_mappings(
 def _range(start: int, end: int | None) -> str:
     stop = start if end is None else end
     return f"{start}-{stop}"
+
+
+def _ordered_range(start: int, end: int | None) -> tuple[int, int]:
+    stop = start if end is None else end
+    return (start, stop) if start <= stop else (stop, start)
+
+
+def _requested_length_range(params: RFdiffusionInput) -> tuple[int, int]:
+    explicit = params.model_fields_set
+    if "total_length" in explicit and params.total_length is not None:
+        return int(params.total_length), int(params.total_length)
+    if (
+        "length_min" in explicit
+        and "length_max" in explicit
+        and params.length_max is not None
+    ):
+        return _ordered_range(params.length_min, params.length_max)
+    if "length_min" in explicit:
+        return int(params.length_min), int(params.length_min)
+    if "length_max" in explicit and params.length_max is not None:
+        return int(params.length_max), int(params.length_max)
+    return _ordered_range(params.length_min, params.length_max)
+
+
+def _requested_symmetric_length(params: RFdiffusionInput) -> int:
+    low, high = _requested_length_range(params)
+    return int(round((low + high) / 2))
 
 
 def _target_span(params: RFdiffusionInput, target_pdb: Path) -> tuple[str, dict[str, object] | None, list[str]]:

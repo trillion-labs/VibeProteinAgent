@@ -526,6 +526,7 @@ class AgentController:
                 model=self.config.model_for_role("planner"),
                 idempotency_key=f"{run_id}:initial-plan:{attempt}",
                 compile_with_fixup=compile_with_fixup,
+                deliverable_contract=classification.deliverable_contract,
             )
             planner.validate_invocation(
                 candidate,
@@ -617,16 +618,16 @@ class AgentController:
             ]
             outcome.summary["survivor_pool_summary"] = round_record["survivor_pool_summary"]
             outcome.summary["empty_candidate_events"] = round_record["empty_candidate_events"]
+            outcome.summary["candidate_capability_filter_events"] = round_record[
+                "candidate_capability_filter_events"
+            ]
             outcome.summary["skipped_nodes"] = round_record["skipped_nodes"]
             outcome.summary["memory_digest"] = prompt_digest
             if (
                 max_round_reached
                 and not survivor_pool
+                and not current_round_candidates
                 and not outcome.summary.get("final_submission")
-                and (
-                    _has_empty_candidate_outcome(round_record)
-                    or _summary_declares_no_available_candidates(outcome.summary)
-                )
             ):
                 decision = {
                     "decision": "no_available_candidate",
@@ -743,7 +744,10 @@ class AgentController:
                 decision.get("decision") == "next_round_with_surviving_candidate"
                 and round_index >= self.config.max_rounds - 1
             ):
-                ref = _first_submit_candidate_ref(outcome.summary)
+                ref = _first_submit_candidate_ref(
+                    outcome.summary,
+                    deliverable_contract=classification.deliverable_contract,
+                )
                 if ref is not None:
                     decision = {
                         **decision,
@@ -756,6 +760,12 @@ class AgentController:
                             or "No local rounds remain; submit the best surviving candidate."
                         ),
                     }
+                    submission_policy = ref.pop("_submission_policy", None)
+                    if isinstance(submission_policy, dict):
+                        decision["submission_policy"] = {
+                            **submission_policy,
+                            "deliverable_contract": classification.deliverable_contract,
+                        }
                     decision.pop("next_round", None)
             branch = _resolve_decision_branch(
                 decision,
@@ -776,6 +786,13 @@ class AgentController:
             outcome.summary["branch_decision"] = branch
             if branch["action"] == "submit_candidate":
                 try:
+                    if classification.deliverable_contract:
+                        policy_record = decision.setdefault("submission_policy", {})
+                        if isinstance(policy_record, dict):
+                            policy_record.setdefault(
+                                "deliverable_contract",
+                                classification.deliverable_contract,
+                            )
                     submission, submit_job_id = self._execute_submit_candidate_decision(
                         run_id,
                         broker,
@@ -837,6 +854,27 @@ class AgentController:
                         "next_round_with_surviving_candidate",
                     }
                 ):
+                    if not current_round_candidates and not survivor_pool:
+                        source_decision = str(decision.get("decision") or "")
+                        decision["source_decision"] = source_decision
+                        decision["decision"] = "no_available_candidate"
+                        decision["technical_failure"] = False
+                        decision["resolved_branch"] = {
+                            "action": "stop",
+                            "reason": "no_available_candidate",
+                            "failure": False,
+                        }
+                        final_state = "completed"
+                        final_result = AgentRunResult(
+                            kind="no_available_candidate",
+                            reasoning=(
+                                str(decision.get("reasoning") or "").strip()
+                                or "No available candidate was produced before termination."
+                            ),
+                        )
+                        self.session_store.add_decision(run_id, decision, round_index=round_index)
+                        decisions.append(decision)
+                        break
                     try:
                         submission, submit_job_id = self._execute_no_acceptable_candidate_submission(
                             run_id,
@@ -929,6 +967,7 @@ class AgentController:
                         ),
                         compile_with_fixup=compile_with_fixup,
                         prior_round_context=prior_round_context,
+                        deliverable_contract=classification.deliverable_contract,
                     ),
                 )
                 planner.validate_invocation(
@@ -937,27 +976,95 @@ class AgentController:
                     allow_internal_tools=_plan_allows_internal_tools(current_plan),
                 )
             except VPAError as exc:
+                has_candidates = _summary_has_candidate_pool(outcome.summary) or bool(survivor_pool)
                 reason = (
-                    "A completed workflow did not produce an explicit final "
-                    "submission, and the next-round planner could not produce "
-                    "a valid executable plan."
+                    "A completed workflow finished, but the next-round planner "
+                    "could not produce a valid executable continuation plan."
                 )
-                decision["decision"] = "next_round_with_no_acceptable_candidate"
-                decision["reasoning"] = reason
+                decision["source_decision"] = str(decision.get("decision") or "")
+                decision["decision"] = (
+                    "no_acceptable_candidate"
+                    if has_candidates
+                    else "no_available_candidate"
+                )
+                decision["reasoning"] = (
+                    str(decision.get("reasoning") or "").strip()
+                    or reason
+                )
                 decision.pop("submit_candidate", None)
                 decision.pop("next_round", None)
                 decision["resolved_branch"] = {
                     "action": "stop",
                     "reason": reason,
-                    "failure": True,
+                    "failure": False,
                 }
-                decision["notes"] = (
-                    "LLM next-round planning failed after workflow completion; "
-                    "recorded deterministic stop without submit_candidate."
-                )
+                notes = decision.setdefault("notes", [])
+                if isinstance(notes, list):
+                    notes.append(
+                        {
+                            "level": "warning",
+                            "message": (
+                                "LLM next-round planning failed after workflow completion; "
+                                "closed with deterministic terminal outcome."
+                            ),
+                            "code": exc.code,
+                            "details": _json_safe_decision_details(exc.details),
+                        }
+                    )
+                if has_candidates:
+                    try:
+                        submission, submit_job_id = self._execute_no_acceptable_candidate_submission(
+                            run_id,
+                            broker,
+                            decision,
+                            round_index=round_index,
+                            policy=policy,
+                        )
+                    except VPAError as submit_exc:
+                        notes = decision.setdefault("notes", [])
+                        if isinstance(notes, list):
+                            notes.append(
+                                {
+                                    "level": "error",
+                                    "message": (
+                                        "no_acceptable_candidate terminal submission "
+                                        "failed during deterministic closure"
+                                    ),
+                                    "code": submit_exc.code,
+                                    "details": _json_safe_decision_details(submit_exc.details),
+                                }
+                            )
+                        self.session_store.add_decision(run_id, decision, round_index=round_index)
+                        final_state = "failed"
+                        break
+                    outcome.summary["final_submission"] = submission
+                    job_ids = outcome.summary.setdefault("job_ids", [])
+                    if isinstance(job_ids, list) and submit_job_id not in job_ids:
+                        job_ids.append(submit_job_id)
+                    decision["submission"] = submission
+                    decision["submit_job_id"] = submit_job_id
+                    self.session_store.add_summary(
+                        run_id,
+                        {
+                            "state": "completed",
+                            "job_id": submit_job_id,
+                            "tool": "submit_candidate",
+                            "final_submission": submission,
+                            "metrics_used": decision.get("metrics_used") or [],
+                        },
+                        job_id=submit_job_id,
+                    )
+                    final_result = AgentRunResult(
+                        kind="no_acceptable",
+                        reasoning=_negative_submission_reason(decision),
+                    )
+                else:
+                    final_result = AgentRunResult(
+                        kind="no_available_candidate",
+                        reasoning=decision["reasoning"],
+                    )
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
-                decisions.append(decision)
-                final_state = "failed"
+                final_state = "completed"
                 break
             self.session_store.add_plan(run_id, current_plan, status="validated_next_round")
 
@@ -984,23 +1091,7 @@ class AgentController:
         return self._collect_current_round_candidates(summary)
 
     def _collect_current_round_candidates(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
-        candidates: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for node in summary.get("nodes") or []:
-            if not isinstance(node, dict):
-                continue
-            output = node.get("output")
-            if not isinstance(output, dict):
-                continue
-            for candidate in output.get("candidates") or []:
-                if not _is_candidate_v1(candidate):
-                    continue
-                key = str(candidate.get("candidate_id"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                candidates.append(dict(candidate))
-        return candidates
+        return _candidate_pool_from_summary(summary)
 
     def _prior_round_summary(self, summary: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -1058,6 +1149,7 @@ class AgentController:
         *,
         round_index: int,
         policy: ExecutionPolicy,
+        deliverable_contract: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str]:
         params = _submit_candidate_params_from_decision(_decision_v1_payload(decision))
         result = broker.submit_job(
@@ -1089,6 +1181,21 @@ class AgentController:
             raise InvalidParamsError(
                 "submit_candidate completed without a terminal output",
                 details={"job_id": job_id, "output": output},
+            )
+        missing = _missing_submission_deliverable_capabilities(
+            output,
+            deliverable_contract
+            or _decision_deliverable_contract(decision)
+            or {},
+        )
+        if missing:
+            raise InvalidParamsError(
+                "submit_candidate output does not satisfy deliverable capability contract",
+                details={
+                    "job_id": job_id,
+                    "missing_capabilities": missing,
+                    "deliverable_contract": deliverable_contract or {},
+                },
             )
         return output, job_id
 
@@ -1577,34 +1684,142 @@ def _resolve_decision_branch(
     }
 
 
-def _first_submit_candidate_ref(summary: dict[str, Any]) -> dict[str, Any] | None:
-    for node in summary.get("nodes") or []:
-        if not isinstance(node, dict):
+def _first_submit_candidate_ref(
+    summary: dict[str, Any],
+    *,
+    deliverable_contract: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    contract = deliverable_contract or {}
+    if contract and contract.get("terminal_submission_allowed") is False:
+        return None
+    for item in _candidate_pool_items_from_summary(summary):
+        candidate = item["candidate"]
+        capabilities = _candidate_capability_names(candidate, key=str(item["container_key"]))
+        missing = _missing_deliverable_capabilities(capabilities, contract)
+        if missing:
             continue
-        job_id = node.get("job_id")
-        if not isinstance(job_id, str) or not job_id:
-            continue
-        output = node.get("output")
-        if not isinstance(output, dict):
-            continue
-        candidates = output.get("candidates")
-        if not isinstance(candidates, list) or not candidates:
-            continue
-        for index, candidate in enumerate(candidates):
-            if not isinstance(candidate, dict):
-                continue
-            candidate_id = candidate.get("candidate_id")
-            return {
-                "job_id": job_id,
-                "candidate_id": str(candidate_id) if candidate_id else None,
-                "index": index,
-                "justification": (
-                    "Selected automatically because the decision requested another "
-                    "round with surviving candidates but no local rounds remain."
-                ),
-                "scores_to_highlight": [],
-            }
+        candidate_id = candidate.get("candidate_id")
+        ref = {
+            "job_id": item["job_id"],
+            "candidate_id": str(candidate_id) if candidate_id else None,
+            "index": item["index"],
+            "justification": (
+                "Selected automatically because the decision requested another "
+                "round with surviving candidates but no local rounds remain."
+            ),
+            "scores_to_highlight": [],
+        }
+        ref["_submission_policy"] = {
+            "version": "terminal_submission_policy_v1",
+            "deliverable_contract_id": _deliverable_contract_id(contract),
+            "matched_candidate_capabilities": sorted(capabilities),
+            "terminal_candidate_capabilities": sorted(capabilities),
+            "required_candidate_capabilities": sorted(
+                str(cap)
+                for cap in (contract.get("required_candidate_capabilities") or [])
+            ),
+            "terminal_submission_allowed": contract.get(
+                "terminal_submission_allowed", True
+            ),
+        }
+        return ref
     return None
+
+
+def _summary_has_candidate_pool(summary: dict[str, Any]) -> bool:
+    if _candidate_pool_from_summary(summary):
+        return True
+    pool = summary.get("survivor_pool")
+    if isinstance(pool, list) and pool:
+        return True
+    return False
+
+
+def _candidate_capability_names(candidate: dict[str, Any], *, key: str) -> set[str]:
+    del key
+    capabilities: set[str] = set()
+    raw = candidate.get("capabilities")
+    if isinstance(raw, dict):
+        capabilities.update(
+            str(name)
+            for name, value in raw.items()
+            if name.startswith("has_") and value is True
+        )
+    elif isinstance(raw, list):
+        capabilities.update(str(item) for item in raw if isinstance(item, str))
+    if isinstance(candidate.get("sequence"), str) and candidate.get("sequence").strip():
+        capabilities.add("has_sequence")
+    if candidate.get("structure_path") or candidate.get("backbone_path"):
+        capabilities.add("has_backbone_structure")
+    if candidate.get("full_structure_path") or candidate.get("structure_path"):
+        capabilities.add("has_full_structure")
+    scores = candidate.get("scores")
+    if isinstance(scores, dict) and scores:
+        capabilities.add("has_candidate_scores")
+    return capabilities
+
+
+def _missing_deliverable_capabilities(
+    capabilities: set[str],
+    contract: dict[str, Any],
+) -> list[str]:
+    required = contract.get("required_candidate_capabilities") if isinstance(contract, dict) else []
+    if not isinstance(required, list):
+        return []
+    return sorted(str(cap) for cap in required if str(cap) not in capabilities)
+
+
+def _deliverable_contract_id(contract: dict[str, Any]) -> str:
+    if not isinstance(contract, dict) or not contract:
+        return "deliverable_contract_v1:unspecified"
+    version = str(contract.get("version") or "deliverable_contract_v1")
+    source = str(contract.get("source") or "unknown")
+    answer_type = str(
+        contract.get("answer_type")
+        or contract.get("deliverable_kind")
+        or "unknown"
+    )
+    required = ",".join(
+        sorted(str(cap) for cap in contract.get("required_candidate_capabilities") or [])
+    )
+    return f"{version}:{source}:{answer_type}:{required}"
+
+
+def _missing_submission_deliverable_capabilities(
+    submission: dict[str, Any],
+    contract: dict[str, Any],
+) -> list[str]:
+    required = contract.get("required_candidate_capabilities") if isinstance(contract, dict) else []
+    if not isinstance(required, list) or not required:
+        return []
+    if submission.get("outcome") != "accepted":
+        return []
+    resolved = submission.get("candidates_resolved")
+    if not isinstance(resolved, list) or not resolved:
+        return sorted(str(cap) for cap in required)
+    missing_by_candidate = [
+        _missing_deliverable_capabilities(
+            _candidate_capability_names(candidate, key="candidates"),
+            contract,
+        )
+        for candidate in resolved
+        if isinstance(candidate, dict)
+    ]
+    if not missing_by_candidate:
+        return sorted(str(cap) for cap in required)
+    if any(not missing for missing in missing_by_candidate):
+        return []
+    return sorted({cap for missing in missing_by_candidate for cap in missing})
+
+
+def _decision_deliverable_contract(decision: dict[str, Any]) -> dict[str, Any]:
+    policy = decision.get("submission_policy")
+    if isinstance(policy, dict) and isinstance(policy.get("deliverable_contract"), dict):
+        return dict(policy["deliverable_contract"])
+    contract = decision.get("deliverable_contract")
+    if isinstance(contract, dict):
+        return dict(contract)
+    return {}
 
 
 def _load_json_object(
@@ -1835,6 +2050,109 @@ def _is_candidate_v1(candidate: Any) -> bool:
         and isinstance(candidate["source"].get("tool"), str)
         and isinstance(candidate["source"].get("local_id"), str)
     )
+
+
+def _canonicalize_candidate_pool_item(
+    item: Any,
+    *,
+    container_key: str,
+    tool: str,
+    job_id: str,
+    index: int,
+) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    if _is_candidate_v1(item):
+        if not _material_candidate_capabilities(
+            _candidate_capability_names(item, key=container_key)
+        ):
+            return None
+        return dict(item)
+    capabilities = _candidate_capability_names(item, key=container_key)
+    if not _material_candidate_capabilities(capabilities):
+        return None
+    local_id = str(item.get("candidate_id") or item.get("id") or f"{container_key}:{index}")
+    source_tool = tool or str(item.get("tool") or container_key)
+    candidate_id = f"{source_tool}:{job_id or 'unknown'}:{local_id}"
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": candidate_id,
+        "source": {
+            "tool": source_tool,
+            "local_id": local_id,
+        },
+        "capabilities": {cap: True for cap in sorted(capabilities)},
+    }
+    for field in (
+        "sequence",
+        "structure_path",
+        "backbone_path",
+        "full_structure_path",
+        "scores",
+        "artifacts",
+    ):
+        if item.get(field) is not None:
+            candidate[field] = item[field]
+    return candidate
+
+
+def _candidate_pool_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(item["candidate"]) for item in _candidate_pool_items_from_summary(summary)]
+
+
+def _candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for node in summary.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        output = node.get("output")
+        if not isinstance(output, dict):
+            continue
+        job_id = str(node.get("job_id") or "")
+        tool = str(node.get("tool") or "")
+        for key in ("candidates", "ranked_candidates", "representative_sequences"):
+            values = output.get(key)
+            if not isinstance(values, list):
+                continue
+            for index, item in enumerate(values):
+                candidate = _canonicalize_candidate_pool_item(
+                    item,
+                    container_key=key,
+                    tool=tool,
+                    job_id=job_id,
+                    index=index,
+                )
+                if candidate is None:
+                    continue
+                candidate_key = str(candidate.get("candidate_id"))
+                if candidate_key in seen:
+                    continue
+                seen.add(candidate_key)
+                candidates.append(
+                    {
+                        "candidate": candidate,
+                        "job_id": job_id,
+                        "tool": tool,
+                        "container_key": key,
+                        "index": index,
+                    }
+                )
+    return candidates
+
+
+def _material_candidate_capabilities(capabilities: set[str]) -> set[str]:
+    return {
+        capability
+        for capability in capabilities
+        if capability
+        in {
+            "has_sequence",
+            "has_backbone_structure",
+            "has_full_structure",
+            "has_structure",
+        }
+    }
 
 
 def _next_round_reason(decision: dict[str, Any]) -> str:

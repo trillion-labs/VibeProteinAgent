@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/search_sequence.input.json",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "context": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Natural-language sequence retrieval context used for internal GO/InterPro term resolution when exact terms are absent or semantic facets are present.",
+      "examples": ["NAD(P)HX repair proteins with dehydratase and epimerase activity", null]
+    },
+    "go_term": {
+      "type": ["string", "null"],
+      "pattern": "^GO:[0-9]{7}$",
+      "default": null,
+      "description": "Optional explicit Gene Ontology identifier in GO:NNNNNNN format. When provided, GO sequence retrieval is always run.",
+      "examples": ["GO:0052855", null]
+    },
+    "interpro_term": {
+      "type": ["string", "null"],
+      "pattern": "^IPR[0-9]{6}$",
+      "default": null,
+      "description": "Optional explicit InterPro accession in IPRNNNNNN format. When provided, InterPro sequence retrieval is always run.",
+      "examples": ["IPR000001", null]
+    },
+    "go_terms": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Bounded GO term records, usually from a resolver. Each record may include term_id, intent_id, label, term_relevance_score, and score_breakdown."
+    },
+    "interpro_terms": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Bounded InterPro term records, usually from a resolver. Each record may include term_id, intent_id, label, term_relevance_score, and score_breakdown."
+    },
+    "semantic_intents": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Optional semantic facets to resolve independently. Each item may include intent_id, label, query, and required."
+    },
+    "reviewed": {
+      "type": ["boolean", "null"],
+      "default": true,
+      "description": "If true, prefer reviewed Swiss-Prot records where source APIs support the filter; false restricts to unreviewed records; null returns both."
+    },
+    "taxon_id": {
+      "type": ["integer", "null"],
+      "default": null,
+      "description": "Optional NCBI taxonomy id to restrict returned UniProt sequences. Null disables taxonomy filtering."
+    },
+    "temporal_cutoff": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional ISO date (YYYY-MM-DD); only sequences with UniProt entry dates on or before this date are retained."
+    },
+    "include_fragments": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, include InterPro sequences flagged by UniProt as fragments. GO retrieval currently ignores this field."
+    },
+    "max_sequences": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "default": 300,
+      "description": "Maximum source sequences scanned or kept per retrieval source before downstream candidate bounding."
+    },
+    "max_downstream_candidates": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 40,
+      "description": "Maximum final canonical Candidate[] records emitted after source merge, deduplication, scoring, and intent-quota top-K."
+    },
+    "timeout_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 120,
+      "default": 20,
+      "description": "HTTP timeout in seconds for resolver and source retrieval calls."
+    },
+    "include_undated": {
+      "type": "boolean",
+      "default": false,
+      "description": "When temporal_cutoff is set, controls whether records lacking a parseable UniProt entry date are included."
+    },
+    "min_length": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "default": null,
+      "description": "Optional minimum sequence length in amino acids."
+    },
+    "max_length": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "default": null,
+      "description": "Optional maximum sequence length in amino acids."
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 200,
+      "description": "Number of records fetched per remote API page where supported."
+    },
+    "max_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5,
+      "description": "Maximum parallel HTTP fetches used by source retrieval adapters."
+    }
+  },
+  "additionalProperties": false
+}

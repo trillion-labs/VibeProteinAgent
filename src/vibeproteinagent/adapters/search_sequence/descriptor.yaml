@@ -1,0 +1,17 @@
+name: search_sequence
+version: "1.0.0"
+category: retrieval
+description: "Canonical sequence retrieval adapter that resolves semantic GO/InterPro terms, retrieves available source sequences, merges, deduplicates, scores, and emits bounded Candidate[] output."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 60
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [search_sequence]
+input_schema: schemas/search_sequence.input.json
+output_schema: schemas/search_sequence.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.search_sequence.adapter:SearchSequenceAdapter"

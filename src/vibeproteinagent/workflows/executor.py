@@ -6,13 +6,9 @@ from typing import Any
 
 from vibeproteinagent.adapters import ToolRegistry, validate_params
 from vibeproteinagent.adapters.availability import descriptor_availability
-from vibeproteinagent.adapters.descriptor import drop_optional_none_params, resolve_input_schema_dict
-from vibeproteinagent.core.errors import (
-    DependencyError,
-    ErrorCode,
-    InvalidParamsError,
-    TimeoutError_,
-    VPAError,
+from vibeproteinagent.adapters.descriptor import (
+    drop_optional_none_params,
+    resolve_input_schema_dict,
 )
 from vibeproteinagent.agents.planning.canonical_tools import (
     CANONICAL_CONSUMERS,
@@ -20,6 +16,13 @@ from vibeproteinagent.agents.planning.canonical_tools import (
     annotate_candidate_capabilities,
     candidate_capabilities_from_record,
     candidate_contract_for_inputs,
+)
+from vibeproteinagent.core.errors import (
+    DependencyError,
+    ErrorCode,
+    InvalidParamsError,
+    TimeoutError_,
+    VPAError,
 )
 from vibeproteinagent.workspace import (
     JobState,
@@ -33,6 +36,7 @@ from .cache import compute_cache_key, env_fingerprint
 from .descriptor import Workflow
 from .failure import FailurePolicy
 from .loader import serialize_workflow
+from .parameter_resolution import audit_adapter_defaults, normalize_tool_parameters
 from .planner import params_dict_from_workflow as _params_dict_from_workflow
 from .planner import resolve_iterable as _resolve_iterable
 from .planner import static_upstream as _static_upstream
@@ -134,6 +138,7 @@ def _candidate_runtime_gate(
             "reason": "required candidate stream is empty",
             "input_field": slot,
             "candidate_count": 0,
+            "technical_failure": False,
         }, None
     contract = candidate_contract_for_inputs(rt.desc.tool, resolved)
     if len(candidates) < contract.min_candidate_items:
@@ -142,9 +147,18 @@ def _candidate_runtime_gate(
             "reason": "candidate stream has fewer items than this tool requires",
             "input_field": slot,
             "candidate_count": len(candidates),
+            "compatible_candidate_count": 0,
+            "skipped_candidate_count": len(candidates),
             "missing_capabilities": [
                 f"at_least_{contract.min_candidate_items}_candidate_items"
             ],
+            "filtered_candidates": _bounded_filtered_candidates(
+                candidates,
+                missing_capabilities=[
+                    f"at_least_{contract.min_candidate_items}_candidate_items"
+                ],
+            ),
+            "technical_failure": False,
         }, None
     missing_by_candidate: list[dict[str, Any]] = []
     compatible_candidates: list[dict[str, Any]] = []
@@ -156,6 +170,7 @@ def _candidate_runtime_gate(
                 {
                     "index": index,
                     "candidate_id": candidate.get("candidate_id"),
+                    "source": _candidate_source_summary(candidate),
                     "missing_capabilities": missing,
                     "capabilities": sorted(capabilities),
                 }
@@ -166,7 +181,7 @@ def _candidate_runtime_gate(
         if len(compatible_candidates) >= contract.min_candidate_items:
             resolved[slot] = compatible_candidates
             return None, {
-                "status": "filtered_missing_candidate_capability",
+                "status": "partitioned",
                 "reason": (
                     "candidate stream contained incompatible candidates; "
                     "executing tool with compatible candidate subset"
@@ -174,6 +189,7 @@ def _candidate_runtime_gate(
                 "input_field": slot,
                 "candidate_count": len(candidates),
                 "compatible_candidate_count": len(compatible_candidates),
+                "skipped_candidate_count": len(missing_by_candidate),
                 "required_capabilities": sorted(contract.consumes),
                 "filtered_candidates": missing_by_candidate,
                 "technical_failure": False,
@@ -191,10 +207,48 @@ def _candidate_runtime_gate(
             "input_field": slot,
             "candidate_count": len(candidates),
             "compatible_candidate_count": len(compatible_candidates),
+            "skipped_candidate_count": len(missing_by_candidate),
+            "required_capabilities": sorted(contract.consumes),
             "missing_capabilities": missing_all,
             "missing_by_candidate": missing_by_candidate,
+            "filtered_candidates": missing_by_candidate,
+            "technical_failure": False,
         }, None
     return None, None
+
+
+def _bounded_filtered_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    missing_capabilities: list[str],
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates[:limit]):
+        capabilities = candidate_capabilities_from_record(candidate)
+        out.append(
+            {
+                "index": index,
+                "candidate_id": candidate.get("candidate_id"),
+                "source": _candidate_source_summary(candidate),
+                "missing_capabilities": list(missing_capabilities),
+                "capabilities": sorted(capabilities),
+            }
+        )
+    return out
+
+
+def _candidate_source_summary(candidate: dict[str, Any]) -> Any:
+    source = candidate.get("source")
+    if isinstance(source, dict):
+        return {
+            key: source.get(key)
+            for key in ("tool", "node_id", "local_id", "native_id", "workflow_id")
+            if source.get(key) not in (None, "")
+        }
+    if isinstance(source, str) and source:
+        return source
+    return None
 
 
 def _skip_output(
@@ -218,6 +272,22 @@ def _skip_output(
     }
     if upstream_empty_event is not None:
         output["upstream_empty_candidate_event"] = upstream_empty_event
+    if status == "skipped_missing_candidate_capability":
+        output["candidate_capability_filter_event"] = {
+            "status": "all_incompatible",
+            "reason": output["skip_reason"],
+            "input_field": gate.get("input_field"),
+            "candidate_count": gate.get("candidate_count", 0),
+            "compatible_candidate_count": gate.get("compatible_candidate_count", 0),
+            "skipped_candidate_count": gate.get(
+                "skipped_candidate_count",
+                len(gate.get("filtered_candidates") or []),
+            ),
+            "required_capabilities": list(gate.get("required_capabilities") or []),
+            "missing_capabilities": list(gate.get("missing_capabilities") or []),
+            "filtered_candidates": list(gate.get("filtered_candidates") or []),
+            "technical_failure": False,
+        }
     return output
 
 
@@ -452,6 +522,7 @@ class WorkflowExecutor:
         deadline = time.time() + float(max_wait_s)
         failed = False
         capability_filter_events: dict[str, dict[str, Any]] = {}
+        parameter_resolution_events: dict[str, list[dict[str, Any]]] = {}
 
         while time.time() < deadline:
             progressed = False
@@ -478,10 +549,16 @@ class WorkflowExecutor:
                         rt.state = "completed"
                         rt.output = _annotate_output_candidate_capabilities(job.output)
                         filter_event = capability_filter_events.pop(rt.runtime_id, None)
+                        param_events = parameter_resolution_events.pop(rt.runtime_id, None)
                         if filter_event is not None and isinstance(rt.output, dict):
                             rt.output = {
                                 **rt.output,
                                 "candidate_capability_filter_event": filter_event,
+                            }
+                        if param_events and isinstance(rt.output, dict):
+                            rt.output = {
+                                **rt.output,
+                                "parameter_resolution_events": param_events,
                             }
                         if _output_candidates(rt.output) == []:
                             event = _empty_candidate_event(rt)
@@ -628,7 +705,10 @@ class WorkflowExecutor:
                     event = _empty_candidate_event(
                         rt,
                         upstream_node=_first_candidate_input_source(rt),
-                        reason=str(runtime_gate.get("reason") or "candidate runtime gate skipped node"),
+                        reason=str(
+                            runtime_gate.get("reason")
+                            or "candidate runtime gate skipped node"
+                        ),
                     )
                     rt.state = "skipped"
                     rt.output = _skip_output(rt, runtime_gate, upstream_empty_event=event)
@@ -699,7 +779,21 @@ class WorkflowExecutor:
                 # Same JSON-Schema validator the CLI uses, so workflow nodes can't
                 # bypass param validation (Architecture v1 §6 + §8).
                 try:
+                    resolved, resolved_provenance, param_events = normalize_tool_parameters(
+                        tool=descriptor.name,
+                        inputs=resolved,
+                        provenance=rt.desc.input_provenance,
+                        original_inputs=rt.desc.inputs,
+                    )
                     resolved = drop_optional_none_params(descriptor, resolved)
+                    default_events = audit_adapter_defaults(
+                        descriptor=descriptor,
+                        resolved_inputs=resolved,
+                        sources=resolved_provenance,
+                    )
+                    param_events.extend(default_events)
+                    if param_events:
+                        parameter_resolution_events[rt.runtime_id] = param_events
                     validate_params(descriptor, resolved)
                     if descriptor.name == "rfdiffusion":
                         mode_status = _rfdiffusion_mode_readiness(resolved)
@@ -733,15 +827,28 @@ class WorkflowExecutor:
                         if hit.job_id:
                             try:
                                 cached_job = self.jobs.get(hit.job_id)
-                                cached_output = _annotate_output_candidate_capabilities(cached_job.output)
+                                cached_output = _annotate_output_candidate_capabilities(
+                                    cached_job.output
+                                )
                             except VPAError:
                                 cached_output = None
                         rt.state = "cached"
                         rt.output = cached_output
+                        param_events = parameter_resolution_events.pop(rt.runtime_id, None)
+                        if (
+                            capability_filter_event is not None
+                            and isinstance(rt.output, dict)
+                        ):
+                            rt.output["candidate_capability_filter_event"] = (
+                                capability_filter_event
+                            )
+                        if param_events and isinstance(rt.output, dict):
+                            rt.output["parameter_resolution_events"] = param_events
                         if _output_candidates(rt.output) == []:
                             event = _empty_candidate_event(rt)
+                            base_output = rt.output if isinstance(rt.output, dict) else {}
                             rt.output = {
-                                **rt.output,
+                                **base_output,
                                 "empty_candidate_event": event,
                                 "technical_failure": False,
                             }

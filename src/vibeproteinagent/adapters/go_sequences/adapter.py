@@ -11,13 +11,17 @@ from typing import Any
 import torch
 from pydantic import BaseModel, Field
 
-from vibeproteinagent.adapters._remote.fasta import write_fasta
+from vibeproteinagent.adapters._remote.fasta import FastaRecord, write_fasta
 from vibeproteinagent.adapters._remote.geneontology import (
     evidence_letter_code,
     extract_uniprot_accessions,
     go_associations,
 )
 from vibeproteinagent.adapters._remote.http import HttpClient
+from vibeproteinagent.adapters._remote.sequence_relevance import (
+    intent_quota_top_k,
+    sequence_relevance_score,
+)
 from vibeproteinagent.adapters._remote.temporal import before_cutoff
 from vibeproteinagent.adapters._remote.uniprot import (
     UniProtRecord,
@@ -31,7 +35,12 @@ from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 
 class GOSequencesInput(BaseModel):
-    go_id: str = Field(pattern=r"^GO:[0-9]{7}$")
+    go_id: str | None = Field(default=None, pattern=r"^GO:[0-9]{7}$")
+    go_terms: list[dict[str, Any]] = Field(default_factory=list)
+    intent_id: str | None = None
+    intent_label: str | None = None
+    term_relevance_score: float | None = None
+    term_score_breakdown: dict[str, Any] = Field(default_factory=dict)
     aspect: str | None = Field(
         None,
         description=(
@@ -40,6 +49,16 @@ class GOSequencesInput(BaseModel):
         ),
     )
     max_sequences: int = Field(1000, ge=1, le=10000)
+    max_downstream_candidates: int = Field(
+        25,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum scored sequence candidates emitted downstream. Retrieval "
+            "artifacts may contain more kept sequences; candidates are bounded "
+            "to the top-K by semantic relevance."
+        ),
+    )
     reviewed: bool | None = None
     taxon_id: int | None = None
     evidence_codes: list[str] = Field(default_factory=list)
@@ -66,6 +85,7 @@ class GOSequencesOutput(BaseModel):
     dropped_empty_sequence_count: int
     sequences: list[dict[str, Any]]
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    empty_facets: list[dict[str, Any]] = Field(default_factory=list)
     fasta_path: str
     metadata_jsonl: str
     dropped: dict[str, int]
@@ -174,6 +194,14 @@ class GOSequencesAdapter(ToolAdapter):
         self.device = device
 
     def run(self, params: GOSequencesInput, ctx: AdapterRunContext) -> GOSequencesOutput:
+        term_specs = _go_term_specs(params)
+        if not params.go_id and not term_specs:
+            return _empty_no_term_output(params, ctx)
+        if len(term_specs) > 1:
+            return self._run_multi_term(params, ctx, term_specs)
+        if not params.go_id and term_specs:
+            params = _params_for_go_term(params, term_specs[0])
+        assert params.go_id is not None
         t0 = time.time()
         out_dir = ctx.job_dir / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -316,20 +344,73 @@ class GOSequencesAdapter(ToolAdapter):
         }
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         ctx.emit_progress(1.0)
-        sequences = [
-            {
-                "candidate_id": f"go:{params.go_id}:{r.accession}",
-                "accession": r.accession,
-                "sequence": r.sequence,
-                "length": r.length,
-                "reviewed": r.reviewed,
-            }
-            for r in kept
-        ]
+        intent_query = " ".join(
+            str(item)
+            for item in (
+                params.go_id,
+                raw_go.get("label") or raw_go.get("name") or "",
+                raw_go.get("definition") or "",
+            )
+            if item
+        )
+        sequences = []
+        scored_candidate_rows = []
+        for r in kept:
+            semantic_relevance, relevance_breakdown = sequence_relevance_score(
+                metadata=r.metadata,
+                reviewed=r.reviewed,
+                length=r.length,
+                term_match_score=float(params.term_relevance_score or 0.0),
+                evidence_quality_score=_evidence_quality_score(filtered_assoc),
+                intent_query=intent_query,
+            )
+            sequences.append(
+                {
+                    "candidate_id": f"go:{params.go_id}:{r.accession}",
+                    "accession": r.accession,
+                    "sequence": r.sequence,
+                    "length": r.length,
+                    "reviewed": r.reviewed,
+                }
+            )
+            scored_candidate_rows.append(
+                {
+                    "candidate_id": f"go:{params.go_id}:{r.accession}",
+                    "accession": r.accession,
+                    "sequence": r.sequence,
+                    "length": r.length,
+                    "reviewed": r.reviewed,
+                    "sequence_relevance_score": semantic_relevance,
+                    "term_relevance_score": params.term_relevance_score,
+                    "score_breakdown": relevance_breakdown,
+                    "intent_id": params.intent_id or params.go_id,
+                    "intent": {
+                        "intent_id": params.intent_id or params.go_id,
+                        "source": "go_sequences",
+                        "term_id": params.go_id,
+                        "label": params.intent_label or raw_go.get("label") or raw_go.get("name"),
+                        "term_relevance_score": params.term_relevance_score,
+                        "score_breakdown": params.term_score_breakdown,
+                        "selected_reason": _selected_reason(params),
+                    },
+                }
+            )
+        candidate_rows = intent_quota_top_k(
+            scored_candidate_rows,
+            max_candidates=min(params.max_downstream_candidates, len(sequences) or 1),
+        )
         candidates = [
             _canonical_candidate_from_sequence(row, index)
-            for index, row in enumerate(sequences)
+            for index, row in enumerate(candidate_rows)
         ]
+        summary.update(
+            {
+                "downstream_candidate_count": len(candidates),
+                "max_downstream_candidates": params.max_downstream_candidates,
+                "sequence_relevance_bounded": True,
+            }
+        )
+        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         return GOSequencesOutput(
             go_id=params.go_id,
             go_label=raw_go.get("label") or raw_go.get("name"),
@@ -341,6 +422,7 @@ class GOSequencesAdapter(ToolAdapter):
             dropped_empty_sequence_count=dropped_empty_sequence_count,
             sequences=sequences,
             candidates=candidates,
+            empty_facets=_retrieval_empty_facets(params, candidates),
             fasta_path=str(fasta_path),
             metadata_jsonl=str(metadata_path),
             dropped=dropped,
@@ -358,11 +440,129 @@ class GOSequencesAdapter(ToolAdapter):
     def estimate_vram(self, params: GOSequencesInput) -> int:
         return 0
 
+    def _run_multi_term(
+        self,
+        params: GOSequencesInput,
+        ctx: AdapterRunContext,
+        term_specs: list[dict[str, Any]],
+    ) -> GOSequencesOutput:
+        t0 = time.time()
+        out_dir = ctx.job_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        child_outputs: list[GOSequencesOutput] = []
+        total = max(1, len(term_specs))
+        for index, term in enumerate(term_specs[:5]):
+            child_params = _params_for_go_term(params, term)
+            child_ctx = AdapterRunContext(
+                job_id=ctx.job_id,
+                workspace_root=ctx.workspace_root,
+                job_dir=out_dir / "terms" / f"go_{index:02d}_{str(child_params.go_id).replace(':', '_')}",
+                is_cancelled=ctx.is_cancelled,
+                log=ctx.log,
+                emit_progress=lambda pct, index=index, total=total: ctx.emit_progress(
+                    min(0.99, (index + pct) / total)
+                ),
+                fusion_inputs=ctx.fusion_inputs,
+            )
+            child_outputs.append(self.run(child_params, child_ctx))
+        candidate_rows = []
+        for child in child_outputs:
+            for candidate in child.candidates:
+                score = (((candidate.get("scores") or {}).get("go_sequences") or {}).get("sequence_relevance_score") or 0.0)
+                intent = ((candidate.get("scores") or {}).get("go_sequences") or {}).get("intent") or {}
+                candidate_rows.append(
+                    {
+                        "candidate": candidate,
+                        "sequence_relevance_score": score,
+                        "intent_id": intent.get("intent_id"),
+                    }
+                )
+        bounded = intent_quota_top_k(
+            candidate_rows,
+            max_candidates=min(params.max_downstream_candidates, len(candidate_rows) or 1),
+        )
+        candidates = [dict(row["candidate"]) for row in bounded]
+        for index, candidate in enumerate(candidates):
+            source = candidate.get("source")
+            if isinstance(source, dict):
+                source["index"] = index
+        sequences = [
+            item
+            for child in child_outputs
+            for item in child.sequences
+            if isinstance(item, dict)
+        ]
+        summary = {
+            "multi_intent": True,
+            "term_count": len(child_outputs),
+            "terms": [child.go_id for child in child_outputs],
+            "downstream_candidate_count": len(candidates),
+            "max_downstream_candidates": params.max_downstream_candidates,
+            "sequence_relevance_bounded": True,
+        }
+        empty_facets = [
+            facet
+            for child in child_outputs
+            for facet in getattr(child, "empty_facets", [])
+            if isinstance(facet, dict)
+        ]
+        if empty_facets:
+            summary["empty_facets"] = empty_facets
+        summary_path = out_dir / "go_sequences_summary.json"
+        fasta_path = out_dir / "go_sequences.fasta"
+        metadata_path = out_dir / "go_sequences_metadata.jsonl"
+        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        write_fasta(
+            [
+                FastaRecord(
+                    str(item.get("accession") or item.get("candidate_id")),
+                    str(item.get("sequence") or ""),
+                )
+                for item in sequences
+                if item.get("sequence")
+            ],
+            fasta_path,
+        )
+        with metadata_path.open("w") as fh:
+            for item in sequences:
+                fh.write(json.dumps(item, sort_keys=True) + "\n")
+        ctx.emit_progress(1.0)
+        first = child_outputs[0] if child_outputs else None
+        return GOSequencesOutput(
+            go_id=first.go_id if first else str(term_specs[0].get("term_id") or term_specs[0].get("id")),
+            go_label=first.go_label if first else None,
+            association_records=sum(child.association_records for child in child_outputs),
+            resolved_uniprot_accessions=sum(child.resolved_uniprot_accessions for child in child_outputs),
+            raw_result_count=sum(child.raw_result_count for child in child_outputs),
+            kept_sequences=sum(child.kept_sequences for child in child_outputs),
+            kept_sequence_count=sum(child.kept_sequence_count for child in child_outputs),
+            dropped_empty_sequence_count=sum(child.dropped_empty_sequence_count for child in child_outputs),
+            sequences=sequences,
+            candidates=candidates,
+            empty_facets=empty_facets,
+            fasta_path=str(fasta_path),
+            metadata_jsonl=str(metadata_path),
+            dropped={},
+            summary=summary,
+            artifacts={"summary_json": str(summary_path)},
+            runtime_ms=int((time.time() - t0) * 1000),
+        )
+
 
 def _canonical_candidate_from_sequence(row: dict[str, Any], index: int) -> dict[str, Any]:
     local_id = f"seq_{index:04d}"
     native_id = row.get("accession")
     sequence = str(row.get("sequence") or "")
+    semantic_relevance = {
+        "sequence_relevance_score": row.get("sequence_relevance_score"),
+        "term_relevance_score": row.get("term_relevance_score"),
+        "score_breakdown": dict(row.get("score_breakdown") or {}),
+        "intent_id": (row.get("intent") or {}).get("intent_id")
+        if isinstance(row.get("intent"), dict)
+        else None,
+        "selected_reason": _selected_reason_from_intent(row.get("intent")),
+        "intent": dict(row.get("intent") or {}),
+    }
     return {
         "schema_version": "candidate_v1",
         "candidate_id": stable_candidate_id(
@@ -381,14 +581,213 @@ def _canonical_candidate_from_sequence(row: dict[str, Any], index: int) -> dict[
             "index": index,
         },
         "sequence": sequence,
+        "capabilities": {
+            "has_sequence": True,
+            "has_candidate_scores": True,
+        },
         "scores": {
+            "semantic_relevance": semantic_relevance,
             "go_sequences": {
                 "length": row.get("length"),
                 "reviewed": row.get("reviewed"),
+                "sequence_relevance_score": row.get("sequence_relevance_score"),
+                "term_relevance_score": row.get("term_relevance_score"),
+                "semantic_relevance": {
+                    "score": row.get("sequence_relevance_score"),
+                    "score_breakdown": dict(row.get("score_breakdown") or {}),
+                    "selected_reason": _selected_reason_from_intent(row.get("intent")),
+                    "facets": [dict(row.get("intent") or {})],
+                },
+                "semantic_relevance_breakdown": row.get("score_breakdown"),
+                "intent": row.get("intent"),
             }
         },
         "artifacts": {},
     }
+
+
+def _go_term_specs(params: GOSequencesInput) -> list[dict[str, Any]]:
+    if params.go_terms:
+        return [
+            {
+                **dict(term),
+                "term_id": term.get("term_id") or term.get("id"),
+            }
+            for term in params.go_terms[:5]
+            if isinstance(term, dict) and (term.get("term_id") or term.get("id"))
+        ]
+    if params.go_id:
+        return [
+            {
+                "term_id": params.go_id,
+                "intent_id": params.intent_id or params.go_id,
+                "intent_label": params.intent_label,
+                "term_relevance_score": params.term_relevance_score,
+                "score_breakdown": params.term_score_breakdown,
+            }
+        ]
+    return []
+
+
+def _params_for_go_term(params: GOSequencesInput, term: dict[str, Any]) -> GOSequencesInput:
+    return params.model_copy(
+        update={
+            "go_id": str(term.get("term_id") or term.get("id")),
+            "go_terms": [],
+            "intent_id": term.get("intent_id") or term.get("term_id") or term.get("id"),
+            "intent_label": term.get("intent_label") or term.get("label"),
+            "term_relevance_score": term.get("term_relevance_score"),
+            "term_score_breakdown": term.get("score_breakdown") or {},
+        }
+    )
+
+
+def _empty_no_term_output(
+    params: GOSequencesInput,
+    ctx: AdapterRunContext,
+) -> GOSequencesOutput:
+    out_dir = ctx.job_dir / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fasta_path = out_dir / "go_sequences.fasta"
+    metadata_path = out_dir / "go_sequences_metadata.jsonl"
+    association_path = out_dir / "go_association_records.jsonl"
+    unresolved_path = out_dir / "go_unresolved_records.jsonl"
+    summary_path = out_dir / "go_sequences_summary.json"
+    raw_path = out_dir / "go_raw_response.json"
+    raw_uniprot_path = out_dir / "uniprot_raw_records.jsonl"
+    for path in (
+        fasta_path,
+        metadata_path,
+        association_path,
+        unresolved_path,
+        raw_uniprot_path,
+    ):
+        path.write_text("")
+    raw_path.write_text("{}\n")
+    empty_facets = [_no_term_empty_event(params)]
+    summary = {
+        "retrieval_status": "no_terms",
+        "reason": "no GO terms were provided by resolver or user input",
+        "candidate_accessions": 0,
+        "scanned_accessions": 0,
+        "downstream_candidate_count": 0,
+        "max_downstream_candidates": params.max_downstream_candidates,
+        "sequence_relevance_bounded": True,
+        "empty_facets": empty_facets,
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    ctx.emit_progress(1.0)
+    return GOSequencesOutput(
+        go_id=params.go_id or "",
+        go_label=None,
+        association_records=0,
+        resolved_uniprot_accessions=0,
+        raw_result_count=0,
+        kept_sequences=0,
+        kept_sequence_count=0,
+        dropped_empty_sequence_count=0,
+        sequences=[],
+        candidates=[],
+        empty_facets=empty_facets,
+        fasta_path=str(fasta_path),
+        metadata_jsonl=str(metadata_path),
+        dropped={},
+        summary=summary,
+        artifacts={
+            "association_records_jsonl": str(association_path),
+            "unresolved_records_jsonl": str(unresolved_path),
+            "summary_json": str(summary_path),
+            "raw_response_json": str(raw_path),
+            "uniprot_raw_records_jsonl": str(raw_uniprot_path),
+        },
+        runtime_ms=0,
+    )
+
+
+def _no_term_empty_event(params: GOSequencesInput) -> dict[str, Any]:
+    return {
+        "event_type": "empty_candidate_event",
+        "intent_id": params.intent_id,
+        "label": params.intent_label or "No GO term selected",
+        "query": params.intent_label,
+        "selected_term": None,
+        "term_id": None,
+        "term_relevance_score": params.term_relevance_score,
+        "score_breakdown": dict(params.term_score_breakdown or {}),
+        "selected_reason": "resolver did not select any GO term for this retrieval stream",
+        "resolver_evidence": {
+            "intent_id": params.intent_id,
+            "intent_label": params.intent_label,
+            "term_score_breakdown": dict(params.term_score_breakdown or {}),
+        },
+        "retrieval_status": "no_terms",
+        "candidate_count": 0,
+        "stage": "go_sequences",
+    }
+
+
+def _retrieval_empty_facets(
+    params: GOSequencesInput,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if candidates:
+        return []
+    if not params.intent_id and not params.go_id:
+        return []
+    return [
+        {
+            "event_type": "empty_candidate_event",
+            "intent_id": params.intent_id or params.go_id,
+            "label": params.intent_label,
+            "selected_term": params.go_id,
+            "term_id": params.go_id,
+            "term_relevance_score": params.term_relevance_score,
+            "score_breakdown": dict(params.term_score_breakdown or {}),
+            "selected_reason": _selected_reason(params),
+            "resolver_evidence": {
+                "intent_id": params.intent_id or params.go_id,
+                "intent_label": params.intent_label,
+                "term_score_breakdown": dict(params.term_score_breakdown or {}),
+            },
+            "retrieval_status": "empty",
+            "candidate_count": 0,
+            "stage": "go_sequences",
+        }
+    ]
+
+
+def _selected_reason(params: GOSequencesInput) -> str:
+    if params.intent_label:
+        return f"selected for query facet {params.intent_label!r}"
+    if params.intent_id and params.go_id and params.intent_id != params.go_id:
+        return f"selected term {params.go_id} for resolver facet {params.intent_id}"
+    if params.go_id:
+        return f"selected term {params.go_id}"
+    return "selected by resolver"
+
+
+def _selected_reason_from_intent(intent: Any) -> str:
+    if isinstance(intent, dict):
+        reason = intent.get("selected_reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason
+        label = intent.get("label")
+        if isinstance(label, str) and label.strip():
+            return f"selected for query facet {label!r}"
+        term_id = intent.get("term_id")
+        if isinstance(term_id, str) and term_id.strip():
+            return f"selected term {term_id}"
+    return "selected by resolver"
+
+
+def _evidence_quality_score(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    experimental = {"EXP", "IDA", "IPI", "IMP", "IGI", "IEP"}
+    letters = [evidence_letter_code(row.get("evidence")) for row in rows]
+    if not letters:
+        return 0.0
+    return min(1.0, sum(1 for letter in letters if letter in experimental) / max(1, len(letters)))
 
 
 __all__ = ["GOSequencesAdapter", "GOSequencesInput", "GOSequencesOutput"]

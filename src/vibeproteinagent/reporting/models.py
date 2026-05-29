@@ -51,6 +51,8 @@ class WorkflowNodeSummary:
     params: dict[str, Any] = field(default_factory=dict)
     cache_key: str | None = None
     output: Any | None = None
+    parameter_resolution_events: list[dict[str, Any]] = field(default_factory=list)
+    parameter_resolution_summary: dict[str, int] = field(default_factory=dict)
     artifacts: list[ReportArtifact] = field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
@@ -249,6 +251,10 @@ class ReportModel:
     warnings: list[ReportWarning] = field(default_factory=list)
     reproducibility: ReproducibilityBlock | None = None
     agent_transcript: AgentTranscript | None = None
+    satisfied_semantic_facets: list[dict[str, Any]] = field(default_factory=list)
+    empty_candidate_events: list[dict[str, Any]] = field(default_factory=list)
+    candidate_capability_filter_events: list[dict[str, Any]] = field(default_factory=list)
+    parameter_resolution_events: list[dict[str, Any]] = field(default_factory=list)
     raw_summary: dict[str, Any] = field(default_factory=dict)
 
 

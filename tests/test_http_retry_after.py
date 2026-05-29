@@ -234,3 +234,38 @@ def test_httperror_carries_retry_after_field() -> None:
 def test_httperror_default_retry_after_none() -> None:
     err = HttpError("test", status=500)
     assert err.retry_after_seconds is None
+
+
+def test_get_json_invalid_json_retries_and_raises_http_error() -> None:
+    state = {"call": 0}
+
+    def invalid_json(url, headers, timeout):
+        state["call"] += 1
+        return HttpResponse(url=url, status=200, headers={}, text="<html>not json</html>")
+
+    client = HttpClient(transport=invalid_json, retries=1, backoff_s=0.0)
+    with pytest.raises(HttpError, match="returned invalid JSON") as excinfo:
+        client.get_json("https://example.test/api")
+
+    assert state["call"] == 2
+    assert excinfo.value.status == 200
+
+
+def test_get_json_refetches_after_invalid_cached_json(tmp_path) -> None:
+    state = {"call": 0}
+
+    def invalid_then_valid(url, headers, timeout):
+        state["call"] += 1
+        if state["call"] == 1:
+            return HttpResponse(url=url, status=200, headers={}, text="<html>not json</html>")
+        return HttpResponse(url=url, status=200, headers={}, text='{"ok": true}')
+
+    client = HttpClient(
+        transport=invalid_then_valid,
+        retries=1,
+        backoff_s=0.0,
+        cache_dir=tmp_path,
+    )
+
+    assert client.get_json("https://example.test/api") == {"ok": True}
+    assert state["call"] == 2

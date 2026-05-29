@@ -1,7 +1,7 @@
 name: bindcraft
 version: "1.0.0"
 category: protein_design
-description: "End-to-end binder design against a target PDB. Integer target_hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; target_hotspot_residue_ids are explicit PDB IDs."
+description: "Target-conditioned binder design against a target PDB. Use target_hotspots for sequence-indexed hotspot positions, or target_hotspot_residue_ids for explicit PDB residue IDs such as A42 or B82A."
 runtime: python
 backend: jax
 gpu_required: true

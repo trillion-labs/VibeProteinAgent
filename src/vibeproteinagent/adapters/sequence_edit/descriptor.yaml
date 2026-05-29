@@ -1,7 +1,7 @@
 name: sequence_edit
 version: "1.0.0"
 category: sequence_engineering
-description: "Deterministic sequence editing with two operations: `mutate_residues` applies a position→amino-acid mapping to a sequence, and `check_wt_consistency` verifies that listed positions still match a reference wild-type. CPU; no model required."
+description: "Deterministic sequence editing with two operations: `mutate_residues` applies a position→amino-acid mapping to a sequence, and `check_wt_consistency` verifies that listed positions still match a reference wild-type."
 runtime: python
 backend: numpy
 gpu_required: false

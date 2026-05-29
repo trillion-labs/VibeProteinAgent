@@ -88,6 +88,49 @@ def test_memory_summarizer_is_bounded_and_does_not_mutate_bank() -> None:
     assert len(digest["latest_round"]["survivor_pool_summary"]["items"]) == 10
 
 
+def test_memory_summarizer_includes_bounded_capability_filter_events() -> None:
+    bank = MemoryBank()
+    workflow_summary = {
+        "workflow_id": "wf_1",
+        "state": "completed",
+        "nodes": [
+            {
+                "node_id": f"consumer_{index}",
+                "tool": "protein_qc",
+                "state": "completed",
+                "output": {
+                    "candidate_capability_filter_event": {
+                        "status": "filtered",
+                        "required_capabilities": ["has_full_structure"],
+                        "compatible_candidate_count": 0,
+                        "skipped_candidate_count": index + 1,
+                    }
+                },
+            }
+            for index in range(12)
+        ],
+    }
+    record = bank.record_round(
+        round_index=0,
+        workflow_summary=workflow_summary,
+        current_round_candidates=[],
+        survivor_pool=[],
+        max_round_reached=False,
+    )
+    before = list(bank.round_records)
+
+    digest = MemorySummarizer().summarize(
+        previous_digest=None,
+        latest_round_record=record,
+        memory_bank=bank,
+    )
+
+    events = digest["latest_round"]["candidate_capability_filter_events"]
+    assert len(events) == 10
+    assert events[0]["node_id"] == "consumer_0"
+    assert bank.round_records == before
+
+
 def test_prior_round_prompt_payload_omits_raw_surviving_candidates() -> None:
     context = PriorRoundContext(
         round_number=2,

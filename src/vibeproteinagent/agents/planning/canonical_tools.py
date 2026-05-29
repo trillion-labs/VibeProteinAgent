@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 CANONICAL_PRODUCERS: set[str] = {
+    "search_sequence",
     "go_sequences",
     "sequence_analysis",
     "merge_candidates",
@@ -53,7 +54,9 @@ CANONICAL_TERM_PRODUCERS: dict[str, dict[str, str]] = {
     "interpro_entry_lookup": {"interpro_id": "resolved_entries[0].accession"},
     "function_term_resolver": {
         "go_id": "selected_go_id",
+        "go_terms": "selected_go_terms",
         "interpro_id": "selected_interpro_id",
+        "interpro_terms": "selected_interpro_terms",
     },
 }
 
@@ -182,6 +185,7 @@ def _contract(
 
 TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     # Sequence or family retrieval producers.
+    "search_sequence": _contract(produces=_SEQUENCE_SCORES),
     "go_sequences": _contract(produces=_SEQUENCE),
     "interpro_sequences": _contract(produces=_SEQUENCE),
     "mmseqs2_gpu": _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES),
@@ -273,13 +277,24 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
     ],
     "boltzgen": [
         {
-            "name": "design_inverse_fold_folding_analyze",
+            "name": "targetless_design_inverse_fold_folding_analyze",
             "default": True,
             "inputs": {},
             "produces": sorted(_FULL_SEQUENCE_SCORES),
             "description": (
                 "Runs design, inverse-folding, folding, and analysis. Filtering is not part "
                 "of the VPA adapter contract."
+            ),
+        },
+        {
+            "name": "target_conditioned_design_inverse_fold_folding_analyze",
+            "default": False,
+            "inputs": {"target_pdb": "<path or canonical candidates>"},
+            "consumes": sorted(_FULL_STRUCTURE),
+            "produces": sorted(_FULL_SEQUENCE_SCORES),
+            "description": (
+                "Consumes a full target structure and runs BoltzGen design, inverse-folding, "
+                "folding, and analysis."
             ),
         },
     ],
@@ -301,8 +316,9 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_FULL_SEQUENCE_SCORES),
             "description": (
-                "Runs target-conditioned diffusion, AF2 initial guess, and ProteinMPNN "
-                "sequence generation. Filtering is not part of the VPA adapter contract."
+                "Runs protein-target-conditioned diffusion, AF2 initial guess, and "
+                "ProteinMPNN sequence generation. It is not a small-molecule ligand "
+                "binder-design route; use a ligand-binder capable tool for ligand targets."
             ),
         },
     ],
@@ -409,6 +425,10 @@ def candidate_contract_for_inputs(
         return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
     if tool_name == "proteina_complexa":
         return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
+    if tool_name == "boltzgen":
+        if inputs.get("target_pdb") or inputs.get("target_yaml") or inputs.get("candidates"):
+            return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
+        return _contract(produces=_FULL_SEQUENCE_SCORES)
     if tool_name == "pyrosetta":
         mode = inputs.get("mode") or "score"
         if mode == "interface":

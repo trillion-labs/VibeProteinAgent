@@ -54,6 +54,8 @@ _MSA_GENERATING_TOOLS = frozenset({
 # Top-K alignment rows to keep after sorting by % identity vs the query.
 _MSA_DISPLAY_TOP_K = 10
 _MSA_HARD_CAP = 200  # safety: do not parse arbitrarily large alignment files
+_AVAILABILITY_EVENT_LIMIT = 12
+_AVAILABILITY_FILTERED_CANDIDATE_LIMIT = 5
 _SCORE_KEYS = (
     # Generic / ranking
     "score",
@@ -175,6 +177,12 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
         agent_transcript=_collect_agent_transcript(
             workspace, workflow_id=job.workflow_id, job_id=job.job_id,
         ),
+        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes([node]),
+        empty_candidate_events=_empty_candidate_events_from_nodes([node]),
+        candidate_capability_filter_events=(
+            _candidate_capability_filter_events_from_nodes([node])
+        ),
+        parameter_resolution_events=_parameter_resolution_events_from_nodes([node]),
         raw_summary=_raw_job_summary(job, artifacts),
     )
 
@@ -219,6 +227,14 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
             params=params_by_node.get(node.node_id, {}),
             cache_key=node.cache_key,
             output=node.output,
+            parameter_resolution_events=_parameter_resolution_events_from_node_payload(
+                node.output,
+                node.error_details,
+            ),
+            parameter_resolution_summary=_parameter_resolution_summary_from_node_payload(
+                node.output,
+                node.error_details,
+            ),
             artifacts=artifacts,
             error_code=node.error_code,
             error_message=node.error_message,
@@ -297,6 +313,12 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
         agent_transcript=_collect_agent_transcript(
             workspace, workflow_id=wf.workflow_id,
         ),
+        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes(report_nodes),
+        empty_candidate_events=_empty_candidate_events_from_nodes(report_nodes),
+        candidate_capability_filter_events=(
+            _candidate_capability_filter_events_from_nodes(report_nodes)
+        ),
+        parameter_resolution_events=_parameter_resolution_events_from_nodes(report_nodes),
         raw_summary=_raw_workflow_summary(
             workflow_id=wf.workflow_id,
             name=wf.name,
@@ -318,11 +340,291 @@ def _node_from_job(job: JobRecord, artifacts: list[ReportArtifact]) -> WorkflowN
         params_hash=job.params_hash,
         params=job.params if isinstance(job.params, dict) else {},
         output=job.output,
+        parameter_resolution_events=_parameter_resolution_events_from_node_payload(
+            job.output,
+            job.error_details,
+        ),
+        parameter_resolution_summary=_parameter_resolution_summary_from_node_payload(
+            job.output,
+            job.error_details,
+        ),
         artifacts=artifacts,
         error_code=job.error_code,
         error_message=job.error_message,
         error_details=job.error_details,
     )
+
+
+def _empty_candidate_events_from_nodes(
+    nodes: list[WorkflowNodeSummary],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for node in nodes:
+        output = node.output if isinstance(node.output, dict) else {}
+        for key in ("empty_candidate_event", "upstream_empty_candidate_event"):
+            event = output.get(key)
+            if isinstance(event, dict):
+                events.append(_availability_empty_event(node, event))
+        facets = output.get("empty_facets")
+        if isinstance(facets, list):
+            for facet in facets:
+                if isinstance(facet, dict):
+                    events.append(_availability_empty_event(node, facet))
+        if len(events) >= _AVAILABILITY_EVENT_LIMIT:
+            break
+    return events[:_AVAILABILITY_EVENT_LIMIT]
+
+
+def _satisfied_semantic_facets_from_nodes(
+    nodes: list[WorkflowNodeSummary],
+) -> list[dict[str, Any]]:
+    facets: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        output = node.output if isinstance(node.output, dict) else {}
+        for row in _candidate_rows_for_availability(output):
+            semantic = _semantic_relevance_for_row(row)
+            if not semantic:
+                continue
+            intent = semantic.get("intent") if isinstance(semantic.get("intent"), dict) else {}
+            row_intent = row.get("intent") if isinstance(row.get("intent"), dict) else {}
+            intent_id = (
+                semantic.get("intent_id")
+                or intent.get("intent_id")
+                or row_intent.get("intent_id")
+            )
+            label = semantic.get("label") or intent.get("label")
+            query = semantic.get("query") or intent.get("query")
+            selected_term = (
+                semantic.get("selected_term")
+                or intent.get("selected_term")
+                or intent.get("term_id")
+                or intent.get("go_id")
+                or intent.get("interpro_id")
+            )
+            key = str(intent_id or label or query or selected_term or "").strip()
+            if not key:
+                continue
+            entry = facets.setdefault(
+                key,
+                {
+                    "intent_id": intent_id,
+                    "label": label,
+                    "query": query,
+                    "selected_terms": [],
+                    "candidate_count": 0,
+                    "candidate_ids": [],
+                    "tools": [],
+                    "nodes": [],
+                    "best_sequence_relevance_score": None,
+                    "selected_reason": semantic.get("selected_reason")
+                    or intent.get("selected_reason"),
+                },
+            )
+            entry["candidate_count"] += 1
+            _append_bounded_unique(entry["candidate_ids"], row.get("candidate_id"), limit=3)
+            _append_bounded_unique(entry["tools"], node.tool, limit=3)
+            _append_bounded_unique(entry["nodes"], node.node_id, limit=3)
+            _append_bounded_unique(entry["selected_terms"], selected_term, limit=3)
+            score = _as_float(semantic.get("sequence_relevance_score"))
+            current = entry.get("best_sequence_relevance_score")
+            if score is not None and (current is None or score > current):
+                entry["best_sequence_relevance_score"] = score
+        if len(facets) >= _AVAILABILITY_EVENT_LIMIT:
+            break
+    return list(facets.values())[:_AVAILABILITY_EVENT_LIMIT]
+
+
+def _candidate_rows_for_availability(output: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in (
+        "ranked_candidates",
+        "top_candidates",
+        "top_designs",
+        "designs",
+        "predictions",
+        "candidates",
+        "representative_sequences",
+        "sequences",
+    ):
+        value = output.get(key)
+        if isinstance(value, list):
+            rows.extend(item for item in value if isinstance(item, dict))
+    return rows
+
+
+def _semantic_relevance_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    scores = row.get("scores")
+    if isinstance(scores, dict):
+        semantic = scores.get("semantic_relevance")
+        if isinstance(semantic, dict):
+            return semantic
+        for nested in scores.values():
+            if not isinstance(nested, dict):
+                continue
+            semantic = nested.get("semantic_relevance")
+            if isinstance(semantic, dict):
+                payload = dict(semantic)
+                facets = semantic.get("facets")
+                if isinstance(facets, list) and facets and isinstance(facets[0], dict):
+                    payload.setdefault("intent", facets[0])
+                return payload
+    semantic = row.get("semantic_relevance")
+    if isinstance(semantic, dict):
+        return semantic
+    return None
+
+
+def _append_bounded_unique(target: list[Any], value: Any, *, limit: int) -> None:
+    if value in (None, "") or len(target) >= limit:
+        return
+    if value not in target:
+        target.append(value)
+
+
+def _candidate_capability_filter_events_from_nodes(
+    nodes: list[WorkflowNodeSummary],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for node in nodes:
+        output = node.output if isinstance(node.output, dict) else {}
+        event = output.get("candidate_capability_filter_event")
+        if isinstance(event, dict):
+            events.append(_availability_filter_event(node, event))
+        if len(events) >= _AVAILABILITY_EVENT_LIMIT:
+            break
+    return events[:_AVAILABILITY_EVENT_LIMIT]
+
+
+def _parameter_resolution_events_from_output(output: Any) -> list[dict[str, Any]]:
+    payload = output if isinstance(output, dict) else {}
+    raw_events = payload.get("parameter_resolution_events")
+    if not isinstance(raw_events, list):
+        return []
+    events: list[dict[str, Any]] = []
+    for event in raw_events:
+        if isinstance(event, dict):
+            events.append(dict(event))
+    return events
+
+
+def _parameter_resolution_events_from_node_payload(
+    output: Any,
+    error_details: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    events = _parameter_resolution_events_from_output(output)
+    details = error_details if isinstance(error_details, dict) else {}
+    conflict = details.get("parameter_conflict_event")
+    if isinstance(conflict, dict):
+        events.append(dict(conflict))
+    return events
+
+
+def _parameter_resolution_summary_from_node_payload(
+    output: Any,
+    error_details: dict[str, Any] | None,
+) -> dict[str, int]:
+    summary = {
+        "derived_count": 0,
+        "planner_override_count": 0,
+        "user_validation_count": 0,
+        "adapter_default_count": 0,
+        "conflict_count": 0,
+    }
+    for event in _parameter_resolution_events_from_node_payload(output, error_details):
+        source_before = str(event.get("source_before") or event.get("source") or "")
+        source_after = str(event.get("source_after") or "")
+        status = str(event.get("status") or "")
+        if source_after in {"runtime_derived", "upstream_candidate"}:
+            summary["derived_count"] += 1
+        if source_before == "planner_literal" and source_after != "planner_literal":
+            summary["planner_override_count"] += 1
+        if source_before in {"user_explicit", "known_input"} and source_after == source_before:
+            summary["user_validation_count"] += 1
+        if source_after == "adapter_default":
+            summary["adapter_default_count"] += 1
+        if status.startswith("failed_") or "conflict" in status:
+            summary["conflict_count"] += 1
+    return summary
+
+
+def _parameter_resolution_events_from_nodes(
+    nodes: list[WorkflowNodeSummary],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for node in nodes:
+        for event in node.parameter_resolution_events:
+            payload = {
+                "node_id": node.node_id,
+                "tool": node.tool,
+                **event,
+            }
+            events.append(payload)
+            if len(events) >= _AVAILABILITY_EVENT_LIMIT:
+                return events
+    return events
+
+
+def _availability_empty_event(
+    node: WorkflowNodeSummary,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    selected_term = event.get("selected_term")
+    if selected_term is None and event.get("selected_go_id"):
+        selected_term = event.get("selected_go_id")
+    if selected_term is None and event.get("selected_interpro_id"):
+        selected_term = event.get("selected_interpro_id")
+    return {
+        "event_type": str(event.get("event_type") or "empty_candidate_event"),
+        "node_id": node.node_id,
+        "tool": node.tool,
+        "intent_id": event.get("intent_id"),
+        "label": event.get("label") or event.get("facet_label"),
+        "query": event.get("query") or event.get("facet_query"),
+        "selected_term": selected_term,
+        "selected_reason": event.get("selected_reason"),
+        "candidate_count": _as_int(event.get("candidate_count")),
+        "retrieval_status": event.get("retrieval_status"),
+    }
+
+
+def _availability_filter_event(
+    node: WorkflowNodeSummary,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    filtered = event.get("filtered_candidates")
+    if not isinstance(filtered, list):
+        filtered = []
+    return {
+        "node_id": node.node_id,
+        "tool": node.tool,
+        "status": event.get("status"),
+        "reason": event.get("reason"),
+        "input_field": event.get("input_field"),
+        "candidate_count": _as_int(event.get("candidate_count")),
+        "compatible_candidate_count": _as_int(
+            event.get("compatible_candidate_count")
+        ),
+        "skipped_candidate_count": _as_int(event.get("skipped_candidate_count")),
+        "required_capabilities": [
+            str(item) for item in event.get("required_capabilities") or []
+        ],
+        "filtered_candidates": [
+            _availability_filtered_candidate(item)
+            for item in filtered[:_AVAILABILITY_FILTERED_CANDIDATE_LIMIT]
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _availability_filtered_candidate(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": item.get("candidate_id"),
+        "source": item.get("source"),
+        "capabilities": item.get("capabilities"),
+        "missing_capabilities": [
+            str(cap) for cap in item.get("missing_capabilities") or []
+        ],
+    }
 
 
 def _artifact_list(

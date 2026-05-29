@@ -1,8 +1,8 @@
 """Artifact fallback for PXDesign preview pipeline mode.
 
 The upstream preview pipeline can write raw diffusion CIFs with an ``xpb``
-placeholder binder chain before AF2/ColabDesign post-processing finishes. On
-B200 hosts, the ColabDesign JAX path may be unavailable on GPU, while CPU MPNN
+placeholder binder chain before AF2/ post-processing finishes. On
+B200 hosts, the  JAX path may be unavailable on GPU, while CPU MPNN
 sequence design remains fast enough for the tiny preview contract. This helper
 runs inside the dedicated PXDesign pipeline env and materialises the same
 ``design_outputs/<task>/summary.csv`` shape expected from upstream.

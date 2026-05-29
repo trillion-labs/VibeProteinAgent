@@ -1174,10 +1174,8 @@ def test_agent_plan_records_no_acceptable_terminal_submission(
     )
     data = controller.run_sync("rank and reject")
 
-    assert data["decision"]["decision"] == "no_acceptable_candidate"
-    assert data["decision"]["source_decision"] == "next_round_with_no_acceptable_candidate"
+    assert data["decision"]["decision"] == "no_available_candidate"
     assert data["decision"]["resolved_branch"]["action"] == "stop"
-    assert data["summary"]["latest"]["final_submission"]["outcome"] == "no_acceptable_candidate"
 
 
 def test_agent_plan_retries_bad_llm_entries_within_budget(

@@ -46,6 +46,7 @@ class ModeRouter:
                 params=merged_params,
                 force_new=force_new,
                 action="run_workflow",
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
 
         if tool:
@@ -59,6 +60,7 @@ class ModeRouter:
                 action=_direct_action(lower),
                 direct_jobs=direct_jobs,
                 execution=_direct_execution(lower),
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
 
         workflow_ref = _workflow_ref_from_text(text)
@@ -75,6 +77,7 @@ class ModeRouter:
                     job_refs=job_refs,
                     params=merged_params,
                     action=action,
+                    deliverable_contract=_deliverable_contract(text, merged_params),
                 )
             return ModeClassification(
                 mode="analysis_only",
@@ -84,6 +87,7 @@ class ModeRouter:
                 job_refs=job_refs,
                 params=merged_params,
                 action="summarize",
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
         if workflow_ref is not None:
             return ModeClassification(
@@ -93,6 +97,7 @@ class ModeRouter:
                 params=merged_params,
                 force_new=force_new,
                 action="run_workflow",
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
 
         tool_names = self._mentioned_tools(text)
@@ -107,6 +112,7 @@ class ModeRouter:
                 action=_direct_action(lower),
                 direct_jobs=direct_jobs,
                 execution=_direct_execution(lower),
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
         if len(tool_names) > 1 and _looks_direct_execution_request(lower):
             direct_jobs = _direct_jobs(tool_names, merged_params)
@@ -122,6 +128,7 @@ class ModeRouter:
                 action=_direct_action(lower),
                 direct_jobs=direct_jobs,
                 execution=_direct_execution(lower),
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
 
         workflow_match = _WF_RE.search(text)
@@ -137,6 +144,7 @@ class ModeRouter:
                 job_refs=[],
                 params=merged_params,
                 action="summarize",
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
 
         if (
@@ -152,6 +160,7 @@ class ModeRouter:
                 requested_tools=tool_names,
                 params=merged_params,
                 action="summarize",
+                deliverable_contract=_deliverable_contract(text, merged_params),
             )
 
         missing = []
@@ -167,6 +176,7 @@ class ModeRouter:
             params=merged_params,
             force_new=force_new,
             action="plan",
+            deliverable_contract=_deliverable_contract(text, merged_params),
         )
 
     def _mentioned_tools(self, text: str) -> list[str]:
@@ -250,6 +260,122 @@ def _has_scientific_design_intent(lower: str) -> bool:
             "constraints",
         ),
     )
+
+
+def _deliverable_contract(request: str, params: dict[str, Any]) -> dict[str, Any]:
+    lower = request.lower()
+    caps: list[str] = []
+    answer_type = "plain_language_answer"
+    terminal_submission_allowed = False
+    plain_language_answer_allowed = True
+    sequence_requested = _has_any_word(
+        lower,
+        (
+            "sequence",
+            "sequences",
+            "fasta",
+            "representative",
+            "homolog",
+            "ortholog",
+            "enzyme",
+            "activity",
+            "rank",
+            "candidate",
+            "candidates",
+        ),
+    )
+    structure_requested = (
+        "full structure" in lower
+        or "full-structure" in lower
+        or "3d structure" in lower
+        or "three-dimensional structure" in lower
+        or _has_any_word(
+            lower,
+            (
+                "structure",
+                "structures",
+                "fold",
+                "model",
+                "complex",
+                "interface",
+                "backbone",
+                "scaffold",
+                "pdb",
+                "cif",
+            ),
+        )
+    )
+    structure_param_supplied = any(
+        params.get(field)
+        for field in (
+            "target_pdb",
+            "pdb_path",
+            "structure_path",
+            "cif_path",
+            "target_cif",
+        )
+    )
+    candidate_action_requested = _has_any_word(
+        lower,
+        (
+            "design",
+            "generate",
+            "generation",
+            "binder",
+            "backbone",
+            "inverse-fold",
+            "inverse",
+            "refold",
+            "rank",
+            "candidate",
+            "candidates",
+        ),
+    )
+    if _has_any_word(
+        lower,
+        (
+            "report",
+            "analysis",
+            "analyze",
+            "compare",
+            "summarize",
+        ),
+    ):
+        answer_type = "workflow_report"
+        plain_language_answer_allowed = True
+    if sequence_requested:
+        answer_type = "candidate_submission"
+        caps = ["has_sequence"]
+        terminal_submission_allowed = True
+    if structure_requested:
+        answer_type = "candidate_submission"
+        caps = ["has_sequence", "has_full_structure"]
+        terminal_submission_allowed = True
+    if structure_param_supplied and candidate_action_requested:
+        answer_type = "candidate_submission"
+        caps = ["has_sequence", "has_full_structure"]
+        terminal_submission_allowed = True
+    rationale = "request asks for explanation without a concrete candidate deliverable"
+    if answer_type == "workflow_report":
+        rationale = "request asks for analysis or reporting rather than direct candidate submission"
+    elif structure_requested:
+        rationale = "request mentions structure/model/interface evidence, so terminal candidates require sequence and full structure"
+    elif structure_param_supplied and candidate_action_requested:
+        rationale = "request supplies a structure target for a candidate-generating action, so terminal candidates require sequence and full structure"
+    elif sequence_requested:
+        rationale = "request asks for sequence, representative, ranking, enzyme, activity, or candidate evidence"
+    return {
+        "version": "deliverable_contract_v1",
+        "source": "mode_router_local",
+        "deliverable_contract_source": "fallback",
+        "answer_type": answer_type,
+        "deliverable_kind": answer_type,
+        "required_candidate_capabilities": caps,
+        "optional_candidate_capabilities": ["has_candidate_scores"],
+        "terminal_submission_allowed": terminal_submission_allowed,
+        "plain_language_answer_allowed": plain_language_answer_allowed,
+        "rationale": rationale,
+    }
 
 
 def _has_any_word(lower: str, words: tuple[str, ...]) -> bool:

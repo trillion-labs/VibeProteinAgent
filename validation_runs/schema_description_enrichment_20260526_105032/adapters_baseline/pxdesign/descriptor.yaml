@@ -13,7 +13,7 @@ warm_load_capable: true
 pin_warm: false
 execution_isolation: persistent_sidecar
 environment_name: pxdesign-pipeline-vpa
-environment_reason: "Pipeline mode needs AF2/JAX/ColabDesign dependencies isolated from the shared vpa env; a persistent sidecar avoids per-call cold starts while infer mode remains in-process."
+environment_reason: "Pipeline mode needs AF2/JAX/ dependencies isolated from the shared vpa env; a persistent sidecar avoids per-call cold starts while infer mode remains in-process."
 support_status: verified
 support_status_reason: null
 availability_probe: "vibeproteinagent.adapters.pxdesign:availability_skip_reason"

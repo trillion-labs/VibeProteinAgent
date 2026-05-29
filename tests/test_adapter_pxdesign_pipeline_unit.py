@@ -209,8 +209,21 @@ def test_run_raises_dependency_error_when_env_absent(
 
     monkeypatch.setenv("VPA_PXDESIGN_PIPELINE_ENV", str(tmp_path / "no_such_env"))
     adapter = _make_adapter_without_warm()
+    target_pdb = tmp_path / "target.pdb"
+    target_pdb.write_text(
+        "\n".join(
+            [
+                "ATOM      1  N   ALA A   1      11.104  13.207   9.291  1.00 20.00           N",
+                "ATOM      2  CA  ALA A   1      12.560  13.207   9.291  1.00 20.00           C",
+                "ATOM      3  C   ALA A   1      13.000  14.600   9.700  1.00 20.00           C",
+                "TER",
+                "END",
+            ]
+        )
+        + "\n"
+    )
     target = tmp_path / "target.cif"
-    target.write_text("data_x\n#\n")
+    adapter_mod._convert_pdb_to_mmcif(target_pdb, target, target_chain="A")
     params = PXDesignInput(
         target_pdb=str(target),
         target_chain="A",
@@ -321,8 +334,21 @@ def test_run_pipeline_materializes_generated_sequence_outputs(
     )
 
     adapter = _make_adapter_without_warm()
+    target_pdb = tmp_path / "target.pdb"
+    target_pdb.write_text(
+        "\n".join(
+            [
+                "ATOM      1  N   ALA A   1      11.104  13.207   9.291  1.00 20.00           N",
+                "ATOM      2  CA  ALA A   1      12.560  13.207   9.291  1.00 20.00           C",
+                "ATOM      3  C   ALA A   1      13.000  14.600   9.700  1.00 20.00           C",
+                "TER",
+                "END",
+            ]
+        )
+        + "\n"
+    )
     target = tmp_path / "target.cif"
-    target.write_text("data_x\n#\n")
+    adapter_mod._convert_pdb_to_mmcif(target_pdb, target, target_chain="A")
     params = PXDesignInput(
         target_pdb=str(target),
         target_chain="A",
@@ -375,6 +401,72 @@ def test_prepare_pipeline_invocation_normalizes_pdb_target_to_cif(tmp_path: Path
     assert structure_file.is_file()
     assert invocation.input_structure_state["converted_to_cif"] is True
     assert invocation.input_structure_state["pipeline_structure_file"] == str(structure_file)
+
+
+def test_prepare_pipeline_invocation_records_defaulted_inputs(tmp_path: Path) -> None:
+    target = tmp_path / "target.pdb"
+    target.write_text(
+        "\n".join(
+            [
+                "ATOM      1  N   ALA A   1      11.104  13.207   9.291  1.00 20.00           N",
+                "ATOM      2  CA  ALA A   1      12.560  13.207   9.291  1.00 20.00           C",
+                "ATOM      3  C   ALA A   1      13.000  14.600   9.700  1.00 20.00           C",
+                "TER",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    params = PXDesignInput(target_pdb=str(target), num_samples=1, num_steps=5)
+
+    invocation = adapter_mod._prepare_pipeline_invocation(params, tmp_path / "job")
+
+    assert invocation.input_structure_state["defaulted_inputs"]["target_chain"]["value"] == "A"
+    assert invocation.input_structure_state["defaulted_inputs"]["binder_length"]["value"] == 60
+
+
+def test_run_pipeline_preflight_failure_writes_debug_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from vibeproteinagent.adapters import null_context
+
+    fake_env = tmp_path / "fakeenv"
+    (fake_env / "bin").mkdir(parents=True)
+    fake_py = fake_env / "bin" / "python"
+    fake_py.write_text("#!/bin/sh\necho ok\n")
+    fake_py.chmod(0o755)
+    monkeypatch.setenv("VPA_PXDESIGN_PIPELINE_ENV", str(fake_env))
+    monkeypatch.setattr(adapter_mod, "_pipeline_import_skip_reason", lambda _py: None)
+
+    target = tmp_path / "target.pdb"
+    target.write_text(
+        "\n".join(
+            [
+                "ATOM      1  N   ALA A   1      11.104  13.207   9.291  1.00 20.00           N",
+                "ATOM      2  CA  ALA A   1      12.560  13.207   9.291  1.00 20.00           C",
+                "TER",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    adapter = _make_adapter_without_warm()
+    job_dir = tmp_path / "job"
+
+    with pytest.raises(Exception, match="preflight failed"):
+        adapter.run(
+            PXDesignInput(target_pdb=str(target), target_chain="B", binder_length=30),
+            null_context(job_dir),
+        )
+
+    debug = json.loads((job_dir / "outputs" / "pxdesign_failure_debug.json").read_text())
+    assert debug["command"]
+    assert debug["cwd"] == str(job_dir)
+    assert debug["stdout_path"]
+    assert debug["stderr_path"]
+    assert debug["checkpoint_state"]
+    assert debug["input_structure_state"]["target_chain"] == "B"
+    assert "raw_artifact_state" in debug
 
 
 # --------------------------------------------------------------------------- output parsing

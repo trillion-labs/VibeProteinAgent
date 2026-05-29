@@ -22,6 +22,10 @@ def test_single_node_ir_compiles_with_inputs_passed_through() -> None:
             "id": "go_fetch",
             "tool": "go_sequences",
             "inputs": {"go_id": "GO:0003824", "max_sequences": 2},
+            "input_provenance": {
+                "go_id": "planner_literal",
+                "max_sequences": "planner_literal",
+            },
         }
     ]
 
@@ -35,5 +39,9 @@ def test_single_upstream_candidate_source_wires_directly() -> None:
     assert nodes[1]["inputs"] == {
         "top_k": 3,
         "candidates": "${outputs.go_fetch.candidates}",
+    }
+    assert nodes[1]["input_provenance"] == {
+        "top_k": "planner_literal",
+        "candidates": "compiled_wiring",
     }
     assert plan["required_tools"] == ["go_sequences", "rank_designs"]

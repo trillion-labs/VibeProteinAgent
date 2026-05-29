@@ -222,8 +222,24 @@ def _ensure_pxdesign_importable() -> None:
 class PXDesignInput(BaseModel):
     target_pdb: str | None = Field(None, description="Path to target structure (PDB or CIF).")
     candidates: list[dict[str, Any]] = Field(default_factory=list)
-    target_chain: str = Field(..., min_length=1)
-    binder_length: int = Field(..., ge=30, le=200)
+    target_chain: str = Field(
+        "A",
+        min_length=1,
+        description=(
+            "Target chain to design against. Defaults to A when the user did "
+            "not specify a chain; override for multimer targets or a specific "
+            "binding region."
+        ),
+    )
+    binder_length: int = Field(
+        60,
+        ge=30,
+        le=200,
+        description=(
+            "Desired binder length. Defaults to a bounded 60 aa starting point "
+            "when no explicit length is requested."
+        ),
+    )
     num_samples: int = Field(default=5, ge=1, le=256)
     num_steps: int = Field(default=400, ge=5, le=1000)
     seed: int | None = Field(default=None)
@@ -248,9 +264,16 @@ class PXDesignInput(BaseModel):
                 "Pass either all canonical Candidate[] or all legacy items."
             )
         if all(canonical):
-            structure_path = candidates[0].get("structure_path")
+            structure_path = (
+                candidates[0].get("structure_path")
+                or candidates[0].get("full_structure_path")
+                or candidates[0].get("backbone_path")
+            )
             if not structure_path:
-                raise ValueError("pxdesign canonical Candidate[] input requires structure_path")
+                raise ValueError(
+                    "pxdesign canonical Candidate[] input requires "
+                    "structure_path, full_structure_path, or backbone_path"
+                )
             out = dict(data)
             out.setdefault("target_pdb", structure_path)
             return out
@@ -313,6 +336,7 @@ def _prepare_pipeline_invocation(params: PXDesignInput, job_dir: Path) -> _Pipel
         staged_target,
         target_chain=params.target_chain,
     )
+    input_structure_state["defaulted_inputs"] = _pxdesign_defaulted_inputs(params)
 
     task_name = f"design_{target.stem}_{params.target_chain}_{params.binder_length}aa"
     seed_val = int(params.seed) if params.seed is not None else 101
@@ -369,10 +393,14 @@ def _prepare_pxdesign_structure_file(
     state: dict[str, Any] = {
         "original_structure_file": str(staged_target),
         "target_chain": target_chain,
+        "target_chain_default_policy": "defaults_to_A_when_unspecified",
+        "defaulted_inputs": {},
         "converted_to_cif": False,
         "pipeline_structure_file": str(staged_target),
     }
     if staged_target.suffix.lower() not in {".pdb", ".ent"}:
+        _preflight_structure_chain(staged_target, target_chain=target_chain)
+        state["conversion"] = "none"
         return staged_target, state
 
     cif_path = staged_target.with_suffix(".cif")
@@ -385,6 +413,48 @@ def _prepare_pxdesign_structure_file(
         }
     )
     return cif_path, state
+
+
+def _pxdesign_defaulted_inputs(params: PXDesignInput) -> dict[str, dict[str, Any]]:
+    fields_set = getattr(params, "model_fields_set", set())
+    defaults: dict[str, dict[str, Any]] = {}
+    if "target_chain" not in fields_set:
+        defaults["target_chain"] = {
+            "value": params.target_chain,
+            "reason": "user did not specify chain; conventional default",
+        }
+    if "binder_length" not in fields_set:
+        defaults["binder_length"] = {
+            "value": params.binder_length,
+            "reason": "user did not specify binder length; bounded compact-binder default",
+        }
+    return defaults
+
+
+def _preflight_structure_chain(structure_path: Path, *, target_chain: str) -> None:
+    suffix = structure_path.suffix.lower()
+    try:
+        if suffix in {".cif", ".mmcif"}:
+            from Bio.PDB import MMCIFParser
+
+            structure = MMCIFParser(QUIET=True).get_structure("target", str(structure_path))
+        else:
+            return
+        chain_ids = sorted({chain.id for model in structure for chain in model})
+        if target_chain not in chain_ids:
+            raise ValueError(
+                f"target_chain {target_chain!r} not present in structure chains {chain_ids!r}"
+            )
+    except Exception as exc:
+        raise VPAError(
+            "PXDesign target structure failed chain preflight before pipeline execution",
+            details={
+                "target_pdb": str(structure_path),
+                "target_chain": target_chain,
+                "exception_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        ) from exc
 
 
 def _convert_pdb_to_mmcif(
@@ -655,7 +725,52 @@ class PXDesignAdapter(ToolAdapter):
                 },
             )
 
-        invocation = _prepare_pipeline_invocation(params, ctx.job_dir)
+        try:
+            invocation = _prepare_pipeline_invocation(params, ctx.job_dir)
+        except Exception as exc:
+            job_outputs = ctx.job_dir / "outputs"
+            job_outputs.mkdir(parents=True, exist_ok=True)
+            stdout_path = job_outputs / "pipeline_preview.stdout.log"
+            stderr_path = job_outputs / "pipeline_preview.stderr.log"
+            stdout_path.touch(exist_ok=True)
+            stderr_path.write_text(str(exc))
+            command = [str(pipeline_python()), "-m", "pxdesign.runner.pipeline"]
+            input_structure_state = {
+                "original_structure_file": str(params.target_pdb),
+                "target_chain": params.target_chain,
+                "target_chain_default_policy": "defaults_to_A_when_unspecified",
+                "converted_to_cif": False,
+                "pipeline_structure_file": str(params.target_pdb),
+                "defaulted_inputs": _pxdesign_defaulted_inputs(params),
+            }
+            debug_path = job_outputs / "pxdesign_failure_debug.json"
+            details = _write_pxdesign_failure_debug(
+                debug_path=debug_path,
+                command=command,
+                cwd=ctx.job_dir,
+                returncode=None,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                env=_pipeline_subprocess_env(seed=params.seed),
+                ckpt_path=getattr(
+                    self,
+                    "ckpt_path",
+                    PXDESIGN_CKPT_DIR / f"{PXDESIGN_MODEL_NAME}.pt",
+                ),
+                job_outputs=job_outputs,
+                task_name="preflight",
+                preflight_result={
+                    "stage": "prepare_pipeline_invocation",
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                    "availability_skip_reason": availability_skip_reason(),
+                },
+                input_structure_state=input_structure_state,
+            )
+            raise VPAError(
+                f"PXDesign input preflight failed before pipeline execution. See {debug_path}.",
+                details=details,
+            ) from exc
         job_outputs = invocation.job_outputs
         task_name = invocation.task_name
         seed_val = invocation.seed_val
@@ -920,6 +1035,7 @@ def _run_preview_pipeline_until_artifacts(
                         mpnn_temperature=mpnn_temperature,
                         debug_path=debug_path,
                         ckpt_path=resolved_ckpt_path,
+                        input_structure_state=input_structure_state,
                     )
                     return
                 rc = proc.poll()
@@ -935,6 +1051,7 @@ def _run_preview_pipeline_until_artifacts(
                                 mpnn_temperature=mpnn_temperature,
                                 debug_path=debug_path,
                                 ckpt_path=resolved_ckpt_path,
+                                input_structure_state=input_structure_state,
                             )
                             return
                         details = _write_pxdesign_failure_debug(
@@ -1070,6 +1187,7 @@ def _materialize_preview_sequence_outputs(
     mpnn_temperature: float,
     debug_path: Path,
     ckpt_path: Path,
+    input_structure_state: dict[str, Any] | None = None,
 ) -> None:
     env = _pipeline_subprocess_env(seed=seed)
     env["JAX_PLATFORMS"] = "cpu"
@@ -1118,6 +1236,7 @@ def _materialize_preview_sequence_outputs(
                 "availability_skip_reason": availability_skip_reason(),
                 "fallback_timeout_s": exc.timeout,
             },
+            input_structure_state=input_structure_state,
         )
         raise VPAError(
             f"PXDesign preview ProteinMPNN fallback timed out. See {debug_path}.",
@@ -1136,6 +1255,7 @@ def _materialize_preview_sequence_outputs(
             job_outputs=job_outputs,
             task_name=task_name,
             preflight_result={"availability_skip_reason": availability_skip_reason()},
+            input_structure_state=input_structure_state,
         )
         raise VPAError(
             f"PXDesign preview ProteinMPNN fallback failed with status "
@@ -1227,6 +1347,7 @@ def _pxdesign_candidates(
             },
             "sequence": design.sequence,
             "structure_path": structure_path,
+            "full_structure_path": structure_path,
             "scores": {
                 "pxdesign": {
                     "score": design.score,

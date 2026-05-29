@@ -41,14 +41,29 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+if ! bash -n "${SCRIPT_PATH}"; then
+  printf 'matrix script syntax preflight failed: %s\n' "${SCRIPT_PATH}" >&2
+  exit 2
+fi
+
 LOG_DIR="${RUN_ROOT}/logs"
 WORKSPACE_ROOT="${RUN_ROOT}/workspaces"
 DAEMON_WORKSPACE="matrix_daemon_${STAMP}"
+if [[ -d "${RUN_ROOT}" ]] && find "${RUN_ROOT}" -mindepth 1 -print -quit | grep -q .; then
+  printf 'output directory is not empty; use a clean run directory for release evidence: %s\n' "${RUN_ROOT}" >&2
+  exit 2
+fi
 mkdir -p "${LOG_DIR}" "${WORKSPACE_ROOT}"
 RUN_ROOT="$(cd "${RUN_ROOT}" && pwd)"
 LOG_DIR="${RUN_ROOT}/logs"
 WORKSPACE_ROOT="${RUN_ROOT}/workspaces"
 PLANNER_LABEL="two_stage_tool_mode_selection_ir"
+SCRIPT_SHA_START="$(sha256sum "${SCRIPT_PATH}" | awk '{print $1}')"
+if [[ -e "${RUN_ROOT}/status.tsv" || -e "${RUN_ROOT}/summary.json" || -e "${RUN_ROOT}/RUN_SUMMARY.md" ]]; then
+  printf 'output directory already contains matrix result files; use a clean run directory: %s\n' "${RUN_ROOT}" >&2
+  exit 2
+fi
 
 exec > >(tee -a "${RUN_ROOT}/matrix.log") 2>&1
 
@@ -112,7 +127,8 @@ CASE_EVENTS_TSV="${RUN_ROOT}/case_events.tsv"
 EXPECTED_CASES_TSV="${RUN_ROOT}/expected_cases.tsv"
 SUMMARY_MD="${RUN_ROOT}/RUN_SUMMARY.md"
 SUMMARY_JSON="${RUN_ROOT}/summary.json"
-printf 'case\tmode\tprovider\tmodel\tstatus\texit_code\tseconds\toutput\n' > "${STATUS_TSV}"
+RELEASE_GUARDRAIL_JSON="${RUN_ROOT}/release_evidence_guardrail.json"
+printf 'case\tmode\tprovider\tmodel\tstatus\tcase_status\tprocess_exit_code\tapi_ok\trun_state\tvalidation_status\tseconds\toutput\n' > "${STATUS_TSV}"
 printf 'timestamp\tcase\tmode\tprovider\tmodel\tevent\tseconds\tpath\n' > "${CASE_EVENTS_TSV}"
 printf 'case\tmode\tprovider\tmodel\n' > "${EXPECTED_CASES_TSV}"
 
@@ -188,6 +204,30 @@ if decision.get("decision") in {"submit_candidate", "no_acceptable_candidate"} a
 PY
 }
 
+inspect_case_json() {
+  local output="$1"
+  run_py - "${output}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+api_ok = "unknown"
+run_state = "unknown"
+try:
+    with open(path, encoding="utf-8") as handle:
+        envelope = json.load(handle)
+    api_ok = "true" if envelope.get("ok") is True else "false"
+    data = envelope.get("data")
+    if isinstance(data, dict):
+        state = data.get("state")
+        if state is not None:
+            run_state = str(state)
+except Exception:
+    pass
+print(f"{api_ok}\t{run_state}")
+PY
+}
+
 case_output_path() {
   local case_name="$1"
   local label="${case_name##*_}"
@@ -215,7 +255,7 @@ run_case() {
   mkdir -p "${case_dir}"
   local stderr="${case_dir}/${case_name}.stderr.log"
   local stderr_tmp="${stderr}.tmp"
-  local start elapsed rc status
+  local start elapsed rc status api_ok run_state validation_status
   local extra_args=()
   if [[ -n "${extra_param}" ]]; then
     extra_args+=(--param "${extra_param}")
@@ -252,13 +292,16 @@ run_case() {
   elapsed=$(( $(date +%s) - start ))
   mv -f "${output_tmp}" "${output}" 2>/dev/null || true
   mv -f "${stderr_tmp}" "${stderr}" 2>/dev/null || true
+  IFS=$'\t' read -r api_ok run_state < <(inspect_case_json "${output}")
   if [[ "${rc}" -eq 0 ]] && validate_case "${mode}" "${output}" >> "${case_dir}/${case_name}.validate.log" 2>&1; then
     status="PASS"
+    validation_status="PASS"
   else
     status="FAIL"
+    validation_status="FAIL"
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${case_name}" "${mode}" "${provider}" "${model}" "${status}" "${rc}" "${elapsed}" "${output}" >> "${STATUS_TSV}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${case_name}" "${mode}" "${provider}" "${model}" "${status}" "${status}" "${rc}" "${api_ok}" "${run_state}" "${validation_status}" "${elapsed}" "${output}" >> "${STATUS_TSV}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date -Is)" "${case_name}" "${mode}" "${provider}" "${model}" "${status}" "${elapsed}" "${output}" >> "${CASE_EVENTS_TSV}"
   log "END ${case_name}: ${status} (exit=${rc}, ${elapsed}s)"
@@ -274,8 +317,8 @@ record_blocked_case() {
   mkdir -p "${RUN_ROOT}/${label}"
   local output="${RUN_ROOT}/${label}/${case_name}.blocked.txt"
   printf '%s\n' "${reason}" > "${output}"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${case_name}" "${mode}" "${provider}" "${model}" "BLOCKED" "127" "0" "${output}" >> "${STATUS_TSV}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${case_name}" "${mode}" "${provider}" "${model}" "BLOCKED" "BLOCKED" "127" "unknown" "blocked" "BLOCKED" "0" "${output}" >> "${STATUS_TSV}"
   log "SKIP ${case_name}: ${reason}"
 }
 
@@ -423,7 +466,14 @@ finalize_incomplete_run() {
 }
 
 write_summary() {
-  run_py - "${STATUS_TSV}" "${SUMMARY_MD}" "${SUMMARY_JSON}" "${RUN_ROOT}" "${SMOKE}" <<'PY'
+  local script_sha_end release_evidence_valid
+  script_sha_end="$(sha256sum "${SCRIPT_PATH}" | awk '{print $1}')"
+  release_evidence_valid="true"
+  if [[ "${script_sha_end}" != "${SCRIPT_SHA_START}" ]]; then
+    release_evidence_valid="false"
+    log "Matrix script changed during run; this run is not release evidence."
+  fi
+  run_py - "${STATUS_TSV}" "${SUMMARY_MD}" "${SUMMARY_JSON}" "${RUN_ROOT}" "${SMOKE}" "${SCRIPT_PATH}" "${SCRIPT_SHA_START}" "${script_sha_end}" "${release_evidence_valid}" "${RELEASE_GUARDRAIL_JSON}" <<'PY'
 import csv
 import json
 import os
@@ -434,6 +484,8 @@ from pathlib import Path
 
 status_tsv, summary_md, summary_json, run_root = map(Path, sys.argv[1:5])
 smoke = sys.argv[5] == "1"
+script_path, script_sha_start, script_sha_end, release_evidence_valid = sys.argv[6:10]
+release_guardrail_json = Path(sys.argv[10])
 rows = list(csv.DictReader(status_tsv.open(encoding="utf-8"), delimiter="\t"))
 expected_path = run_root / "expected_cases.tsv"
 expected_rows = (
@@ -443,9 +495,12 @@ expected_rows = (
 )
 observed_cases = {row["case"] for row in rows}
 missing_cases = [row for row in expected_rows if row["case"] not in observed_cases]
-passed = sum(1 for r in rows if r["status"] == "PASS")
-blocked = sum(1 for r in rows if r["status"] == "BLOCKED")
-failed = sum(1 for r in rows if r["status"] == "FAIL")
+def case_status(row):
+    return row.get("case_status") or row.get("status") or "MISSING"
+
+passed = sum(1 for r in rows if case_status(r) == "PASS")
+blocked = sum(1 for r in rows if case_status(r) == "BLOCKED")
+failed = sum(1 for r in rows if case_status(r) == "FAIL")
 lines = [
     f"# Live Provider Matrix on {os.environ.get('VPA_VALIDATION_HOST_LABEL', 'unknown-host')}",
     "",
@@ -461,7 +516,7 @@ lines = [
 for row in rows:
     lines.append(
         f"| `{row['case']}` | {row['mode']} | {row['provider']} | "
-        f"`{row['model']}` | **{row['status']}** | {row['seconds']} |"
+        f"`{row['model']}` | **{case_status(row)}** | {row['seconds']} |"
     )
 for row in missing_cases:
     lines.append(
@@ -518,7 +573,7 @@ def first_error(row):
 def reason_for(rows_for_provider, status):
     if status == "BLOCKED":
         return "preflight_failed"
-    failed_rows = [row for row in rows_for_provider if row["status"] == "FAIL"]
+    failed_rows = [row for row in rows_for_provider if case_status(row) == "FAIL"]
     if failed_rows:
         err = first_error(failed_rows[0]).lower()
         if "planner_ir_schema_violation" in err:
@@ -538,14 +593,14 @@ for row in rows:
 
 providers = []
 for provider, provider_rows in sorted(grouped.items()):
-    status_values = {row["status"] for row in provider_rows}
+    status_values = {case_status(row) for row in provider_rows}
     if status_values <= {"BLOCKED"}:
         status = "BLOCKED"
     elif "FAIL" in status_values:
         status = "FAIL"
     else:
         status = "PASS"
-    first_problem = next((row for row in provider_rows if row["status"] != "PASS"), None)
+    first_problem = next((row for row in provider_rows if case_status(row) != "PASS"), None)
     duration = sum(float(row.get("seconds") or 0) for row in provider_rows)
     provider_dir = run_root / provider
     provider_dir.mkdir(parents=True, exist_ok=True)
@@ -563,10 +618,57 @@ for provider, provider_rows in sorted(grouped.items()):
     )
     providers.append(record)
 
-counts = Counter(record["status"] for record in providers)
+case_counts = {
+    "PASS": passed,
+    "FAIL": failed,
+    "BLOCKED": blocked,
+    "MISSING": len(missing_cases),
+}
+provider_counts = Counter(record["status"] for record in providers)
 pr_name = run_root.name
 if not pr_name.startswith("pr"):
     pr_name = "live_provider_matrix"
+def log_guardrail_violations(run_root):
+    patterns = (
+        "command not found",
+        "syntax error",
+        "unexpected eof",
+        "unbound variable",
+    )
+    violations = []
+    for path in (run_root / "matrix.log", run_root / "runner.log"):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")[-1000000:]
+        for line in text.splitlines():
+            lowered = line.lower()
+            matched = next((pattern for pattern in patterns if pattern in lowered), None)
+            if matched is None:
+                continue
+            violations.append(
+                {
+                    "path": str(path),
+                    "pattern": matched,
+                    "line": line[-500:],
+                }
+            )
+            if len(violations) >= 20:
+                return violations
+    return violations
+log_violations = log_guardrail_violations(run_root)
+release_evidence = {
+    "clean_run_directory_required": True,
+    "script_path": script_path,
+    "script_sha_start": script_sha_start,
+    "script_sha_end": script_sha_end,
+    "script_unchanged_during_run": script_sha_start == script_sha_end,
+    "log_guardrail_violations": log_violations,
+    "release_evidence_valid": release_evidence_valid == "true" and not log_violations,
+}
+release_guardrail_json.write_text(
+    json.dumps(release_evidence, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
 summary_json.write_text(
     json.dumps(
         {
@@ -574,15 +676,18 @@ summary_json.write_text(
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "planner": os.environ.get("VPA_VALIDATION_PLANNER_LABEL", "two_stage_ir"),
             "providers": providers,
-            "counts": {
-                "PASS": counts.get("PASS", 0),
-                "FAIL": counts.get("FAIL", 0),
-                "BLOCKED": counts.get("BLOCKED", 0),
-                "MISSING": len(missing_cases),
+            "counts": case_counts,
+            "case_counts": case_counts,
+            "provider_counts": {
+                "PASS": provider_counts.get("PASS", 0),
+                "FAIL": provider_counts.get("FAIL", 0),
+                "BLOCKED": provider_counts.get("BLOCKED", 0),
+                "MISSING": 0,
             },
             "expected_case_count": len(expected_rows),
             "recorded_case_count": len(rows),
             "missing_cases": missing_cases,
+            "release_evidence": release_evidence,
             "notes": (
                 "live provider matrix smoke cycle."
                 if smoke

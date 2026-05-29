@@ -81,6 +81,8 @@ def _node_to_dict(n: Any) -> dict[str, Any]:
         out["version"] = n.version
     if n.inputs:
         out["inputs"] = n.inputs
+    if getattr(n, "input_provenance", None):
+        out["input_provenance"] = n.input_provenance
     if not n.cache:
         out["cache"] = False
     if n.foreach:

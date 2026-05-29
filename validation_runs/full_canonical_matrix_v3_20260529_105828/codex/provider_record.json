@@ -1,0 +1,8 @@
+{
+  "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_105828/codex",
+  "duration_seconds": 0.0,
+  "first_error": "codex command not found",
+  "provider": "codex",
+  "reason": "preflight_failed",
+  "status": "BLOCKED"
+}

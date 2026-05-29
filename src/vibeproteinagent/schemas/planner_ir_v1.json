@@ -65,6 +65,21 @@
             "additionalProperties": true,
             "default": {}
           },
+          "input_provenance": {
+            "type": "object",
+            "additionalProperties": {
+              "enum": [
+                "user_explicit",
+                "known_input",
+                "planner_literal",
+                "compiled_wiring",
+                "upstream_candidate",
+                "runtime_derived",
+                "adapter_default"
+              ]
+            },
+            "default": {}
+          },
           "upstream": {
             "type": "array",
             "items": {

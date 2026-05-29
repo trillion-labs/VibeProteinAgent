@@ -5,11 +5,22 @@
   "required": ["interpro_id"],
   "properties": {
     "interpro_id": {
-      "type": "string",
+      "type": ["string", "null"],
       "pattern": "^IPR[0-9]{6}$",
       "description": "InterPro family/domain accession in IPRNNNNNN format. Selects the InterPro entry whose member UniProt sequences are returned. Use literature_search to discover the right InterPro ID for a keyword.",
       "examples": ["IPR000001", "IPR036291", "IPR011009"]
     },
+    "interpro_terms": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Bounded InterPro term records from function_term_resolver. Each term is retrieved independently and merged using intent-quota top-K.",
+      "examples": [[{"intent_id": "facet_a", "term_id": "IPR000001", "term_relevance_score": 0.8}]]
+    },
+    "intent_id": {"type": ["string", "null"], "default": null, "description": "Semantic intent id associated with interpro_id when a resolver provided one."},
+    "intent_label": {"type": ["string", "null"], "default": null, "description": "Semantic intent label associated with interpro_id when a resolver provided one."},
+    "term_relevance_score": {"type": ["number", "null"], "default": null, "description": "Resolver term relevance score propagated into sequence scoring."},
+    "term_score_breakdown": {"type": "object", "additionalProperties": true, "default": {}, "description": "Resolver term relevance score components."},
     "max_sequences": {
       "type": "integer",
       "minimum": 1,
@@ -17,6 +28,14 @@
       "default": 1000,
       "description": "Maximum number of UniProt sequences to return from this InterPro entry.",
       "examples": [100, 500, 2000]
+    },
+    "max_downstream_candidates": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 25,
+      "description": "Maximum scored sequence candidates emitted to downstream candidate-consuming tools. Retrieval artifacts can contain more kept sequences; candidate output is bounded to top-K by semantic relevance.",
+      "examples": [10, 25, 100]
     },
     "reviewed": {
       "type": ["boolean", "null"],

@@ -13,7 +13,7 @@ warm_load_capable: true
 pin_warm: true
 execution_isolation: persistent_sidecar
 environment_name: BindCraft
-environment_reason: "BindCraft pins JAX/CUDA, PyRosetta, ColabDesign, and numpy<2 outside the shared vpa env; a persistent sidecar avoids per-call cold starts."
+environment_reason: "BindCraft pins JAX/CUDA, PyRosetta, , and numpy<2 outside the shared vpa env; a persistent sidecar avoids per-call cold starts."
 support_status: verified
 support_status_reason: null
 availability_probe: "vibeproteinagent.adapters.bindcraft:availability_skip_reason"

@@ -302,6 +302,86 @@ def test_function_term_resolver_ready_when_one_requested_namespace_resolves(
     assert out.targets[0]["ready_for_execution"] is True
 
 
+def test_function_term_resolver_preserves_independent_semantic_intents(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def fake_go(
+        client: Any,
+        query: str,
+        *,
+        aspect: str | None,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        del client, aspect, limit
+        if "facet a" in query.lower():
+            return (
+                [
+                    {
+                        "id": "GO:0000001",
+                        "name": "facet A catalytic activity",
+                        "definition": "Supports facet A.",
+                        "source": "quickgo",
+                    }
+                ],
+                {},
+            )
+        return ([], {})
+
+    def empty_interpro(
+        client: Any,
+        query: str,
+        *,
+        limit: int,
+        entry_type: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        del client, query, limit, entry_type
+        return ([], {})
+
+    monkeypatch.setattr(
+        "vibeproteinagent.adapters.function_term_resolver.adapter.search_go_terms",
+        fake_go,
+    )
+    monkeypatch.setattr(
+        "vibeproteinagent.adapters.function_term_resolver.adapter.search_interpro_entries",
+        empty_interpro,
+    )
+
+    out = FunctionTermResolverAdapter({}, tmp_path, torch.device("cpu")).run(
+        FunctionTermResolverInput(
+            query="facet A and facet B",
+            semantic_intents=[
+                {"intent_id": "facet_a", "label": "facet A", "query": "facet A"},
+                {"intent_id": "facet_b", "label": "facet B", "query": "facet B"},
+            ],
+            preferred_namespaces=["go"],
+        ),
+        null_context(tmp_path / "function_multi_intent"),
+    )
+
+    assert [intent["intent_id"] for intent in out.semantic_intents] == [
+        "facet_a",
+        "facet_b",
+    ]
+    assert out.ready_for_execution is True
+    assert out.matches[0]["intent_id"] == "facet_a"
+    assert "score_breakdown" in out.matches[0]
+    assert out.selected_go_terms[0]["intent_id"] == "facet_a"
+    assert out.selected_go_terms[0]["term_id"] == "GO:0000001"
+    assert len(out.empty_facets) == 1
+    empty_facet = out.empty_facets[0]
+    assert empty_facet["event_type"] == "empty_candidate_event"
+    assert empty_facet["intent_id"] == "facet_b"
+    assert empty_facet["label"] == "facet B"
+    assert empty_facet["query"] == "facet B"
+    assert empty_facet["selected_go_id"] is None
+    assert empty_facet["selected_interpro_id"] is None
+    assert empty_facet["candidate_count"] == 0
+    assert empty_facet["retrieval_status"] == "empty"
+    assert empty_facet["selected_reason"]
+    assert empty_facet["resolver_evidence"]["intent_id"] == "facet_b"
+
+
 def test_runtime_guard_reports_unresolved_term_source_before_submission() -> None:
     consumer = SimpleNamespace(
         runtime_id="dehydratase_sequences",

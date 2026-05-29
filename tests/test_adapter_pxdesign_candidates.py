@@ -22,6 +22,8 @@ def test_pxdesign_emits_canonical_candidates() -> None:
     validate_candidate_v1(candidate)
     assert candidate["source"]["tool"] == "pxdesign"
     assert candidate["source"]["native_id"] == "legacy"
+    assert candidate["structure_path"] == "/tmp/d.cif"
+    assert candidate["full_structure_path"] == "/tmp/d.cif"
     assert candidate["scores"]["pxdesign"]["pipeline"] == "diffusion_af2_initial_guess_proteinmpnn"
 
 
@@ -38,6 +40,16 @@ def test_pxdesign_output_preserves_legacy_fields() -> None:
 
 def test_pxdesign_consumes_canonical_legacy_and_rejects_mixed() -> None:
     assert PXDesignInput(candidates=[_candidate()], target_chain="A", binder_length=60).target_pdb == "/tmp/target.pdb"
+    full = {**_candidate(), "structure_path": None, "full_structure_path": "/tmp/full.cif"}
+    full.pop("structure_path")
+    assert PXDesignInput(candidates=[full], target_chain="A", binder_length=60).target_pdb == "/tmp/full.cif"
+    backbone = {**_candidate(), "structure_path": None, "backbone_path": "/tmp/backbone.pdb"}
+    backbone.pop("structure_path")
+    assert PXDesignInput(candidates=[backbone], target_chain="A", binder_length=60).target_pdb == "/tmp/backbone.pdb"
     assert PXDesignInput(target_pdb="/tmp/target.pdb", target_chain="A", binder_length=60).target_pdb == "/tmp/target.pdb"
+    no_structure = {**_candidate()}
+    no_structure.pop("structure_path")
+    with pytest.raises(ValidationError, match="structure_path, full_structure_path, or backbone_path"):
+        PXDesignInput(candidates=[no_structure], target_chain="A", binder_length=60)
     with pytest.raises(ValidationError, match="Mixed canonical and legacy"):
         PXDesignInput(candidates=[_candidate(), {"target_pdb": "/tmp/legacy.pdb"}], target_chain="A", binder_length=60)

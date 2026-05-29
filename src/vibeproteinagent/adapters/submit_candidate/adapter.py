@@ -184,6 +184,9 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
         "rank": _as_int(row.get("rank")),
         "sequence": _first_str(row, "sequence", "protein_sequence", "designed_sequence"),
         "structure_path": _first_str(row, *_STRUCTURE_KEYS),
+        "full_structure_path": _first_str(row, "full_structure_path"),
+        "backbone_path": _first_str(row, "backbone_path"),
+        "capabilities": row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {},
         "score": _as_float(row.get("score")),
         "scores": scores,
         "scores_highlighted": {
@@ -243,6 +246,9 @@ def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "index": source.get("index"),
         "sequence": candidate.get("sequence"),
         "structure_path": candidate.get("structure_path"),
+        "full_structure_path": candidate.get("full_structure_path"),
+        "backbone_path": candidate.get("backbone_path"),
+        "capabilities": candidate.get("capabilities"),
         "source": source,
     }
     if isinstance(producer_scores, dict):

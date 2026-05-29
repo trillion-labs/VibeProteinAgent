@@ -8,7 +8,11 @@ import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.adapters.context import null_context
+from vibeproteinagent.agents.planning.canonical_tools import CandidateCapabilityContract
+from vibeproteinagent.workflows.descriptor import WorkflowNode
+from vibeproteinagent.workflows.state import NodeRuntime
 from vibeproteinagent.workflows import Workflow, WorkflowExecutor, load_workflow
+import vibeproteinagent.workflows.executor as executor_mod
 from vibeproteinagent.workspace import JobState, JobStore, Workspace
 
 
@@ -153,6 +157,15 @@ def test_runtime_capability_gate_skips_before_adapter_execution(
         "has_backbone_structure",
         "has_full_structure",
     ]
+    filter_event = outputs["struct_metrics"]["candidate_capability_filter_event"]
+    assert filter_event["status"] == "all_incompatible"
+    assert filter_event["compatible_candidate_count"] == 0
+    assert filter_event["skipped_candidate_count"] == 1
+    assert filter_event["filtered_candidates"][0]["candidate_id"] == "cand_seq"
+    assert filter_event["filtered_candidates"][0]["source"] == {
+        "tool": "go_sequences",
+        "local_id": "0",
+    }
 
 
 def test_runtime_capability_gate_filters_mixed_candidate_stream(
@@ -207,10 +220,81 @@ def test_runtime_capability_gate_filters_mixed_candidate_stream(
     assert workflow_state == "completed"
     assert states["sequence_metrics"] == "completed"
     event = outputs["sequence_metrics"]["candidate_capability_filter_event"]
-    assert event["status"] == "filtered_missing_candidate_capability"
+    assert event["status"] == "partitioned"
     assert event["compatible_candidate_count"] == 1
     assert event["filtered_candidates"][0]["candidate_id"] == "cand_backbone"
+    assert event["filtered_candidates"][0]["source"] == {
+        "tool": "rfdiffusion",
+        "local_id": "0",
+    }
+    assert event["filtered_candidates"][0]["capabilities"] == ["has_backbone_structure"]
     assert outputs["sequence_metrics"]["representative_sequences"][0]["sequence"] == "ACDEFGHIK"
+
+
+def test_memory_bank_summarizes_empty_facets_and_capability_filter_events() -> None:
+    from vibeproteinagent.agents.execution.memory_bank import MemoryBank
+
+    bank = MemoryBank()
+    record = bank.record_round(
+        round_index=0,
+        workflow_summary={
+            "workflow_id": "wf_test",
+            "state": "completed",
+            "nodes": [
+                {
+                    "node_id": "resolver",
+                    "tool": "function_term_resolver",
+                    "state": "completed",
+                    "output": {
+                        "empty_facets": [
+                            {
+                                "event_type": "empty_candidate_event",
+                                "intent_id": "facet_b",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "node_id": "sequence_metrics",
+                    "tool": "sequence_analysis",
+                    "state": "completed",
+                    "output": {
+                        "candidate_capability_filter_event": {
+                            "status": "partitioned",
+                            "filtered_candidates": [{"candidate_id": "cand_backbone"}],
+                        }
+                    },
+                },
+                {
+                    "node_id": "struct_metrics",
+                    "tool": "structure_analysis",
+                    "state": "skipped",
+                    "output": {
+                        "status": "skipped_missing_candidate_capability",
+                        "candidate_capability_filter_event": {
+                            "status": "all_incompatible",
+                            "filtered_candidates": [{"candidate_id": "cand_seq"}],
+                            "compatible_candidate_count": 0,
+                            "skipped_candidate_count": 1,
+                        },
+                    },
+                },
+            ],
+        },
+        current_round_candidates=[],
+        survivor_pool=[],
+        max_round_reached=False,
+    )
+
+    assert record["empty_candidate_events"][0]["intent_id"] == "facet_b"
+    assert record["candidate_capability_filter_events"][0]["node_id"] == "sequence_metrics"
+    assert record["candidate_capability_filter_events"][1]["status"] == "all_incompatible"
+    digest = bank.bounded_digest()
+    statuses = {
+        event["status"]
+        for event in digest["recent_rounds"][0]["candidate_capability_filter_events"]
+    }
+    assert {"partitioned", "all_incompatible"} <= statuses
 
 
 def test_empty_candidate_cascade_allows_non_candidate_dependents_to_consume_skip_status(
@@ -242,3 +326,98 @@ def test_empty_candidate_cascade_allows_non_candidate_dependents_to_consume_skip
     assert states["sequence_metrics"] == "skipped"
     assert states["dependent_status"] == "completed"
     assert outputs["dependent_status"]["payload"] == "skipped_no_candidates"
+
+
+def test_runtime_item_count_gate_skips_single_candidate_stream(
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(executor_mod.CANONICAL_CONSUMERS, "noop", "candidates")
+    monkeypatch.setattr(
+        executor_mod,
+        "candidate_contract_for_inputs",
+        lambda tool, inputs: CandidateCapabilityContract(min_candidate_items=2),
+    )
+    wf = Workflow(name="runtime_min_items_skip", version="1.0.0")
+    wf.node(
+        "pair_consumer",
+        tool="noop",
+        inputs={"candidates": "${outputs.prior_round.candidates}"},
+    )
+
+    states, outputs, workflow_state = _run_without_worker(
+        tmp_workspace,
+        tmp_path,
+        wf,
+        virtual_outputs={
+            "prior_round": {
+                "candidates": [
+                    {
+                        "schema_version": "candidate_v1",
+                        "candidate_id": "cand_one",
+                        "source": {"tool": "rfdiffusion", "local_id": "0"},
+                        "structure_path": "/tmp/one.pdb",
+                        "capabilities": {"has_backbone_structure": True},
+                    }
+                ]
+            }
+        },
+    )
+
+    assert workflow_state == "completed"
+    assert states["pair_consumer"] == "skipped"
+    assert outputs["pair_consumer"]["status"] == "skipped_missing_candidate_capability"
+    assert outputs["pair_consumer"]["candidate_capability_filter_event"]["status"] == "all_incompatible"
+    assert outputs["pair_consumer"]["candidate_capability_filter_event"][
+        "missing_capabilities"
+    ] == ["at_least_2_candidate_items"]
+    assert outputs["pair_consumer"]["candidate_capability_filter_event"][
+        "filtered_candidates"
+    ][0]["source"] == {"tool": "rfdiffusion", "local_id": "0"}
+
+
+def test_runtime_item_count_gate_allows_two_candidate_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(executor_mod.CANONICAL_CONSUMERS, "noop", "candidates")
+    monkeypatch.setattr(
+        executor_mod,
+        "candidate_contract_for_inputs",
+        lambda tool, inputs: CandidateCapabilityContract(min_candidate_items=2),
+    )
+    rt = NodeRuntime(
+        desc=WorkflowNode(
+            id="pair_consumer",
+            tool="noop",
+            inputs={"candidates": "${outputs.prior_round.candidates}"},
+        ),
+        runtime_id="pair_consumer",
+    )
+    resolved = {
+        "candidates": [
+            {
+                "schema_version": "candidate_v1",
+                "candidate_id": "cand_a",
+                "source": {"tool": "rfdiffusion", "local_id": "0"},
+                "structure_path": "/tmp/a.pdb",
+                "capabilities": {"has_backbone_structure": True},
+            },
+            {
+                "schema_version": "candidate_v1",
+                "candidate_id": "cand_b",
+                "source": {"tool": "rfdiffusion", "local_id": "1"},
+                "structure_path": "/tmp/b.pdb",
+                "capabilities": {"has_backbone_structure": True},
+            },
+        ]
+    }
+
+    gate, filter_event = executor_mod._candidate_runtime_gate(rt, resolved)
+
+    assert gate is None
+    assert filter_event is None
+    assert [item["candidate_id"] for item in resolved["candidates"]] == [
+        "cand_a",
+        "cand_b",
+    ]

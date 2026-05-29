@@ -55,3 +55,23 @@ def test_interpro_sequences_mocked_temporal_filter(tmp_path, monkeypatch):
     assert out.dropped_by_temporal_filter == 1
     assert Path(out.fasta_path).read_text().startswith(">P00001")
     assert Path(out.artifacts["uniprot_raw_records_jsonl"]).exists()
+
+
+def test_interpro_sequences_empty_resolver_terms_are_structured_empty_output(tmp_path):
+    adapter = InterProSequencesAdapter(
+        config={},
+        weights_dir=tmp_path,
+        device=torch.device("cpu"),
+    )
+
+    out = adapter.run(
+        InterProSequencesInput(interpro_id=None, interpro_terms=[], max_sequences=10),
+        null_context(tmp_path),
+    )
+
+    assert out.candidates == []
+    assert out.summary["retrieval_status"] == "no_terms"
+    assert out.empty_facets[0]["event_type"] == "empty_candidate_event"
+    assert out.empty_facets[0]["retrieval_status"] == "no_terms"
+    assert Path(out.fasta_path).exists()
+    assert Path(out.artifacts["summary_json"]).exists()

@@ -1,7 +1,7 @@
 name: rfdiffusion
 version: "1.0.0"
 category: protein_design
-description: "RFdiffusion backbone generation. Integer target_residues/target_hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; raw contigs remain RFdiffusion-native structure syntax."
+description: "Backbone generation for unconditional design, motif scaffolding, and target-conditioned binders. Integer target_residues/target_hotspots are FASTA/sequence 1-indexed when target_sequence/target_fasta_path is provided; raw contigs remain RFdiffusion-native structure syntax."
 runtime: python
 backend: pytorch
 gpu_required: true

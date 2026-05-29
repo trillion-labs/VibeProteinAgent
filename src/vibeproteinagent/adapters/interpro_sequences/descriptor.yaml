@@ -1,7 +1,7 @@
 name: interpro_sequences
 version: "1.0.0"
 category: retrieval
-description: "Retrieves UniProt FASTA sequences belonging to an InterPro domain or family accession (e.g., IPR000123). Filters by organism, length, review status, and date cutoff. Use for domain/family-driven sequence collection (paralog libraries, family MSAs)."
+description: "Legacy/internal InterPro-specific UniProt sequence retrieval used by search_sequence. Directly callable for exact InterPro debug workflows, but normal agent planning should use search_sequence."
 runtime: python
 backend: numpy
 gpu_required: false

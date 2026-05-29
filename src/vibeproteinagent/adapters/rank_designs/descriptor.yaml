@@ -1,7 +1,7 @@
 name: rank_designs
 version: "1.0.0"
 category: analysis
-description: "Aggregates upstream prediction outputs, structure-analysis records, and QC results for a candidate set and returns a deterministically ranked top-K list. Use as the final triage step in a design workflow."
+description: "Aggregates upstream prediction outputs, structure-analysis records, and quality control (QC) results for a candidate set and returns a deterministically ranked top-K list. Use as the final triage step in a design workflow."
 runtime: python
 backend: numpy
 gpu_required: false
