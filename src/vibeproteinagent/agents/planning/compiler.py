@@ -20,6 +20,7 @@ from vibeproteinagent.agents.planning.fixup import (
     missing_explicit_mode,
     missing_canonical_input_slot,
     node_reference_used_as_literal_path,
+    planner_literal_candidate_stream_reference,
     prior_round_used_as_tool,
     prior_round_referenced_without_context,
     upstream_does_not_produce_candidates,
@@ -65,6 +66,7 @@ def compile_planner_ir(
     """
 
     _reject_virtual_tool_nodes(llm_ir)
+    llm_ir = _pre_normalize_candidate_stream_executor_refs(llm_ir)
     validate_planner_ir_v1(llm_ir)
     _reject_prior_round_without_context(
         llm_ir,
@@ -82,6 +84,7 @@ def compile_planner_ir(
                 node,
                 node_by_id,
                 prior_round_capabilities=prior_round_capabilities,
+                prior_round_context_available=prior_round_context is not None,
             )
         )
 
@@ -104,6 +107,40 @@ def compile_planner_ir(
     _validate_executor_ir_shape(plan)
     validate_compiled_planner_plan(plan)
     return plan
+
+
+def _pre_normalize_candidate_stream_executor_refs(llm_ir: dict[str, Any]) -> dict[str, Any]:
+    """Convert tolerated candidate-stream executor refs before IR validation.
+
+    Planner IR should express topology through upstream entries. This narrow
+    pre-pass exists only so LLM-authored `${outputs.<node>.candidates}` in a
+    canonical candidate-stream field can reach the compiler's structured
+    candidate-source normalization instead of failing as generic syntax.
+    """
+    updated = deepcopy(llm_ir)
+    for node in updated.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        tool = str(node.get("tool") or "")
+        main_stream_field = CANONICAL_CONSUMERS.get(tool)
+        if main_stream_field is None:
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        provenance = node.get("input_provenance")
+        if (
+            isinstance(provenance, dict)
+            and provenance.get(main_stream_field, "planner_literal") != "planner_literal"
+        ):
+            continue
+        value = inputs.get(main_stream_field)
+        if not isinstance(value, str):
+            continue
+        target = _candidate_stream_ref_target(value)
+        if target is not None and value.strip().startswith("${outputs."):
+            inputs[main_stream_field] = target
+    return updated
 
 
 def validate_compiled_planner_plan(plan: dict[str, Any]) -> None:
@@ -274,6 +311,7 @@ def _compile_node(
     node_by_id: dict[str, dict[str, Any]],
     *,
     prior_round_capabilities: set[str] | None,
+    prior_round_context_available: bool,
 ) -> list[dict[str, Any]]:
     node_id = node["id"]
     tool = node["tool"]
@@ -283,6 +321,15 @@ def _compile_node(
 
     _validate_explicit_mode(node_id=node_id, tool=tool, inputs=inputs)
     _sync_provenance_fields(provenance, inputs, default_source="planner_literal")
+    _normalize_planner_literal_candidate_stream_refs(
+        node_id=node_id,
+        tool=tool,
+        inputs=inputs,
+        provenance=provenance,
+        upstreams=upstreams,
+        node_by_id=node_by_id,
+        prior_round_context_available=prior_round_context_available,
+    )
     _drop_empty_planner_literal_aux_candidate_streams(tool, inputs, provenance)
 
     if not upstreams:
@@ -395,6 +442,73 @@ def _drop_empty_planner_literal_aux_candidate_streams(
             continue
         inputs.pop(field, None)
         provenance.pop(field, None)
+
+
+def _normalize_planner_literal_candidate_stream_refs(
+    *,
+    node_id: str,
+    tool: str,
+    inputs: dict[str, Any],
+    provenance: dict[str, str],
+    upstreams: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    prior_round_context_available: bool,
+) -> None:
+    main_stream_field = CANONICAL_CONSUMERS.get(tool)
+    if main_stream_field is None:
+        return
+    value = inputs.get(main_stream_field)
+    if not isinstance(value, str):
+        return
+    if provenance.get(main_stream_field, "planner_literal") != "planner_literal":
+        return
+    target = _candidate_stream_ref_target(value)
+    if target is None:
+        raise planner_literal_candidate_stream_reference(
+            node_id=node_id,
+            tool=tool,
+            field=main_stream_field,
+            literal_value=value,
+        )
+    if target == "prior_round":
+        if not prior_round_context_available:
+            raise prior_round_referenced_without_context(
+                consumer_node_id=node_id,
+                upstream_node="prior_round",
+            )
+    elif target not in node_by_id:
+        raise planner_literal_candidate_stream_reference(
+            node_id=node_id,
+            tool=tool,
+            field=main_stream_field,
+            literal_value=value,
+        )
+    _append_candidate_upstream(upstreams, target)
+    inputs.pop(main_stream_field, None)
+    provenance.pop(main_stream_field, None)
+
+
+def _candidate_stream_ref_target(value: str) -> str | None:
+    text = value.strip()
+    if text == "prior_round":
+        return "prior_round"
+    prefix = "${outputs."
+    suffix = ".candidates}"
+    if text.startswith(prefix) and text.endswith(suffix):
+        target = text[len(prefix):-len(suffix)]
+        return target or None
+    return text or None
+
+
+def _append_candidate_upstream(upstreams: list[dict[str, Any]], target: str) -> None:
+    for upstream in upstreams:
+        if (
+            isinstance(upstream, dict)
+            and upstream.get("node") == target
+            and upstream.get("relationship") == "candidate_source"
+        ):
+            return
+    upstreams.append({"node": target, "relationship": "candidate_source"})
 
 
 def _drop_planner_literal_derived_source_artifacts(

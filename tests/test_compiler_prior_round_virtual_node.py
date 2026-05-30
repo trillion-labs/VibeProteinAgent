@@ -75,6 +75,168 @@ def test_prior_round_single_upstream_wires_directly_without_real_node() -> None:
     assert "prior_round" not in {node["id"] for node in nodes}
 
 
+def test_planner_literal_prior_round_candidate_stream_compiles_to_virtual_upstream() -> None:
+    plan = compile_planner_ir(
+        _ir(
+            [
+                {
+                    "id": "fold",
+                    "tool": "esm3",
+                    "intent": "Fold a prior-round sequence candidate.",
+                    "inputs": {"candidates": "prior_round"},
+                    "upstream": [],
+                }
+            ]
+        ),
+        prior_round_context=_prior_context(capabilities={"has_sequence": 1}),
+    )
+
+    nodes = plan["workflow_plan"]["nodes"]
+    assert nodes == [
+        {
+            "id": "fold",
+            "tool": "esm3",
+            "inputs": {"candidates": "${outputs.prior_round.candidates}"},
+            "input_provenance": {"candidates": "compiled_wiring"},
+        }
+    ]
+
+
+def test_planner_literal_node_id_candidate_stream_compiles_to_candidate_upstream() -> None:
+    plan = compile_planner_ir(
+        _ir(
+            [
+                {
+                    "id": "seqs",
+                    "tool": "go_sequences",
+                    "intent": "Retrieve sequence candidates.",
+                    "inputs": {"go_id": "GO:0003824"},
+                    "upstream": [],
+                },
+                {
+                    "id": "rank",
+                    "tool": "rank_designs",
+                    "intent": "Rank the retrieved candidates.",
+                    "inputs": {"candidates": "seqs", "top_k": 3},
+                    "upstream": [],
+                },
+            ]
+        )
+    )
+
+    rank = plan["workflow_plan"]["nodes"][1]
+    assert rank["inputs"] == {
+        "top_k": 3,
+        "candidates": "${outputs.seqs.candidates}",
+    }
+    assert rank["input_provenance"] == {
+        "top_k": "planner_literal",
+        "candidates": "compiled_wiring",
+    }
+
+
+def test_known_input_candidate_stream_literal_is_not_rewritten() -> None:
+    plan = compile_planner_ir(
+        _ir(
+            [
+                {
+                    "id": "seqs",
+                    "tool": "go_sequences",
+                    "intent": "Retrieve sequence candidates.",
+                    "inputs": {"go_id": "GO:0003824"},
+                    "upstream": [],
+                },
+                {
+                    "id": "rank",
+                    "tool": "rank_designs",
+                    "intent": "Keep user/known candidate stream ownership intact.",
+                    "inputs": {"candidates": "seqs", "top_k": 3},
+                    "input_provenance": {
+                        "candidates": "known_input",
+                        "top_k": "planner_literal",
+                    },
+                    "upstream": [],
+                },
+            ]
+        )
+    )
+
+    rank = plan["workflow_plan"]["nodes"][1]
+    assert rank["inputs"]["candidates"] == "seqs"
+    assert rank["input_provenance"]["candidates"] == "known_input"
+
+
+def test_planner_literal_outputs_candidate_stream_compiles_to_candidate_upstream() -> None:
+    plan = compile_planner_ir(
+        _ir(
+            [
+                {
+                    "id": "seqs",
+                    "tool": "go_sequences",
+                    "intent": "Retrieve sequence candidates.",
+                    "inputs": {"go_id": "GO:0003824"},
+                    "upstream": [],
+                },
+                {
+                    "id": "rank",
+                    "tool": "rank_designs",
+                    "intent": "Rank the retrieved candidates.",
+                    "inputs": {
+                        "candidates": "${outputs.seqs.candidates}",
+                        "top_k": 3,
+                    },
+                    "upstream": [],
+                },
+            ]
+        )
+    )
+
+    rank = plan["workflow_plan"]["nodes"][1]
+    assert rank["inputs"]["candidates"] == "${outputs.seqs.candidates}"
+    assert rank["input_provenance"]["candidates"] == "compiled_wiring"
+
+
+def test_unknown_planner_literal_candidate_stream_raises_structured_fixup() -> None:
+    with pytest.raises(StructuredFixup) as exc_info:
+        compile_planner_ir(
+            _ir(
+                [
+                    {
+                        "id": "rank",
+                        "tool": "rank_designs",
+                        "intent": "Rank a candidate stream.",
+                        "inputs": {"candidates": "missing_source", "top_k": 3},
+                        "upstream": [],
+                    }
+                ]
+            )
+        )
+
+    payload = exc_info.value.payload
+    assert payload["error_kind"] == "planner_literal_candidate_stream_reference"
+    assert payload["field"] == "candidates"
+    assert payload["literal_value"] == "missing_source"
+
+
+def test_prior_round_candidate_stream_literal_without_context_raises_fixup() -> None:
+    with pytest.raises(StructuredFixup) as exc_info:
+        compile_planner_ir(
+            _ir(
+                [
+                    {
+                        "id": "rank",
+                        "tool": "rank_designs",
+                        "intent": "Rank prior candidates.",
+                        "inputs": {"candidates": "prior_round", "top_k": 3},
+                        "upstream": [],
+                    }
+                ]
+            )
+        )
+
+    assert exc_info.value.payload["error_kind"] == "prior_round_referenced_without_context"
+
+
 def test_prior_round_and_real_upstream_merge_in_declared_order() -> None:
     plan = compile_planner_ir(
         _ir(

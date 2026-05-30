@@ -397,6 +397,7 @@ def test_fixup_kinds_exact_set() -> None:
         "missing_explicit_mode",
         "missing_canonical_input_slot",
         "node_reference_used_as_literal_path",
+        "planner_literal_candidate_stream_reference",
         "prior_round_used_as_tool",
         "upstream_does_not_produce_candidates",
         "candidate_capability_mismatch",

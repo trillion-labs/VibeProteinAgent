@@ -13,6 +13,8 @@ from vibeproteinagent.agents.execution.controller import (
     _submit_candidate_params_from_decision,
 )
 from vibeproteinagent.agents.execution.policies import ExecutionPolicy
+from vibeproteinagent.workspace.store import JobStore
+from vibeproteinagent.workflows.store import WorkflowStore
 from vibeproteinagent.workspace import Workspace
 
 
@@ -176,6 +178,82 @@ def test_submit_execution_validates_public_decision_payload_only(
     assert job_id == "job_submit"
     assert submission["terminal"] is True
     assert broker.params["reasoning"] == "The candidate satisfies the criteria."
+
+
+def test_submit_execution_resolves_workflow_node_alias_to_job_id(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VPA_NORMALIZE_DECISION_REASONING", "strict")
+    controller = AgentController(tmp_workspace)
+    run = controller.session_store.create_run("submit alias")
+    workflow_store = WorkflowStore(tmp_workspace)
+    workflow_id = workflow_store.create(
+        name="alias workflow",
+        version="1",
+        descriptor_yaml="name: alias workflow\n",
+        params={},
+    )
+    workflow_store.add_node(
+        workflow_id=workflow_id,
+        node_id="binder_design",
+        tool_name="pxdesign",
+        tool_version="1.0.0",
+        upstream=[],
+        params_hash="params",
+        input_hash="input",
+        cache_key="cache",
+    )
+    job = JobStore(tmp_workspace).submit(
+        "pxdesign",
+        "1.0.0",
+        {"target_pdb": "/tmp/target.pdb"},
+        workflow_id=workflow_id,
+        workflow_node_id="binder_design",
+    )
+    workflow_store.update_node_state(
+        workflow_id,
+        "binder_design",
+        "completed",
+        job_id=job.job_id,
+        output={"candidates": [{"candidate_id": "cand_a"}]},
+    )
+    controller.session_store.update_run(run.run_id, workflow_ids=[workflow_id])
+    broker = _SubmitBroker()
+    decision = _valid_decision()
+    decision["submit_candidate"]["candidates"][0]["job_id"] = "binder_design"
+
+    controller._execute_submit_candidate_decision(
+        run.run_id,
+        broker,
+        decision,
+        round_index=0,
+        policy=ExecutionPolicy(submit=True),
+    )
+
+    assert broker.params["candidates"][0]["job_id"] == job.job_id
+
+
+def test_submit_execution_leaves_unknown_job_alias_for_schema_validation(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VPA_NORMALIZE_DECISION_REASONING", "strict")
+    controller = AgentController(tmp_workspace)
+    run = controller.session_store.create_run("submit unknown alias")
+    broker = _SubmitBroker()
+    decision = _valid_decision()
+    decision["submit_candidate"]["candidates"][0]["job_id"] = "not_a_known_node"
+
+    controller._execute_submit_candidate_decision(
+        run.run_id,
+        broker,
+        decision,
+        round_index=0,
+        policy=ExecutionPolicy(submit=True),
+    )
+
+    assert broker.params["candidates"][0]["job_id"] == "not_a_known_node"
 
 
 def test_decision_error_details_are_json_safe_without_payload_cycle() -> None:

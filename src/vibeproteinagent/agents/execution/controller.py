@@ -44,6 +44,7 @@ from vibeproteinagent.agents.tools.schemas import tool_names_from_plan
 from vibeproteinagent.core.errors import ErrorCode, InvalidParamsError, TimeoutError_, VPAError
 from vibeproteinagent.workers.supervisor_client import SupervisorClient
 from vibeproteinagent.workflows import WorkflowExecutor, load_workflow
+from vibeproteinagent.workflows.store import WorkflowStore
 from vibeproteinagent.workspace import Workspace
 
 from .candidate_archive import CandidateArchive
@@ -1246,6 +1247,12 @@ class AgentController:
         deliverable_contract: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str]:
         params = _submit_candidate_params_from_decision(_decision_v1_payload(decision))
+        params = _normalize_submit_candidate_job_refs_for_execution(
+            params,
+            run_id=run_id,
+            session_store=self.session_store,
+            workspace=self.workspace,
+        )
         result = broker.submit_job(
             "submit_candidate",
             params,
@@ -2057,6 +2064,79 @@ def _strict_submit_candidate_params(decision: dict[str, Any]) -> dict[str, Any]:
         "decision is not a submit_candidate action",
         details={"decision": decision},
     )
+
+
+_SUBMIT_JOB_ID_RE = re.compile(r"^job_[A-Za-z0-9]+$")
+
+
+def _normalize_submit_candidate_job_refs_for_execution(
+    params: dict[str, Any],
+    *,
+    run_id: str,
+    session_store: AgentSessionStore,
+    workspace: Workspace,
+) -> dict[str, Any]:
+    """Resolve submit_candidate node aliases to real job ids before tool validation.
+
+    Decision LLMs sometimes put a workflow node id such as ``rank_final`` or
+    ``binder_design`` in the submit selector's ``job_id`` field. The adapter
+    contract correctly requires a concrete ``job_...`` id, so the controller
+    resolves only aliases that are proven to belong to this run's workflows.
+    Unknown strings are left untouched and still fail strict validation.
+    """
+
+    candidates = params.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return params
+    node_jobs = _workflow_node_job_aliases_for_run(
+        run_id,
+        session_store=session_store,
+        workspace=workspace,
+    )
+    if not node_jobs:
+        return params
+    out = dict(params)
+    normalized: list[Any] = []
+    changed = False
+    for item in candidates:
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+        ref = dict(item)
+        job_id = ref.get("job_id")
+        if isinstance(job_id, str) and not _SUBMIT_JOB_ID_RE.match(job_id):
+            resolved = node_jobs.get(job_id)
+            if resolved:
+                ref["job_id"] = resolved
+                changed = True
+        normalized.append(ref)
+    if changed:
+        out["candidates"] = normalized
+    return out
+
+
+def _workflow_node_job_aliases_for_run(
+    run_id: str,
+    *,
+    session_store: AgentSessionStore,
+    workspace: Workspace,
+) -> dict[str, str]:
+    try:
+        workflow_ids = list(session_store.get_run(run_id).workflow_ids)
+    except Exception:
+        return {}
+    aliases: dict[str, str] = {}
+    store = WorkflowStore(workspace)
+    # Later rounds are more relevant to terminal decisions when node ids repeat.
+    for workflow_id in reversed(workflow_ids):
+        try:
+            nodes = store.list_nodes(workflow_id)
+        except Exception:
+            continue
+        for node in nodes:
+            if node.node_id and node.job_id:
+                aliases.setdefault(str(node.node_id), str(node.job_id))
+    return aliases
 
 
 def _legacy_lift_submit_candidate_params(decision: dict[str, Any]) -> dict[str, Any]:

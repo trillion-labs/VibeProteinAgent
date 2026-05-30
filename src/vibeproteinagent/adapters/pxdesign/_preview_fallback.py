@@ -21,6 +21,7 @@ class PreviewFallbackChainMetadata:
     raw_to_pdb_chain: dict[str, str]
     binder_chains: list[str]
     cond_chains: list[str]
+    mpnn_design_mode: str
 
 
 def _read_atom_site_rows(cif_path: Path) -> list[dict[str, str]]:
@@ -83,6 +84,11 @@ def _chain_metadata(rows: list[dict[str, str]]) -> PreviewFallbackChainMetadata:
             binder_raw_chains.add(raw_chain)
     if not binder_raw_chains:
         raise ValueError("PXDesign preview fallback requires an XPB binder chain")
+    if len(binder_raw_chains) > 1:
+        raise ValueError(
+            "PXDesign preview fallback supports exactly one XPB binder chain"
+        )
+    binder_only = set(ordered_raw_chains) == binder_raw_chains
 
     used: set[str] = set()
     raw_to_pdb: dict[str, str] = {}
@@ -95,7 +101,11 @@ def _chain_metadata(rows: list[dict[str, str]]) -> PreviewFallbackChainMetadata:
     for raw_chain in ordered_raw_chains:
         if raw_chain not in binder_raw_chains:
             continue
-        pdb_chain = _pdb_chain_name(raw_chain, used, preferred="B")
+        # pxdbench.design_binder passes fix_pos=",".join(cond_chains). For
+        # binder-only preview CIFs this becomes an empty string and crashes
+        # colabdesign's position parser. Map the temporary PDB binder to chain A
+        # and route it through monomer ProteinMPNN instead.
+        pdb_chain = _pdb_chain_name(raw_chain, used, preferred="A" if binder_only else "B")
         raw_to_pdb[raw_chain] = pdb_chain
         used.add(pdb_chain)
 
@@ -113,6 +123,7 @@ def _chain_metadata(rows: list[dict[str, str]]) -> PreviewFallbackChainMetadata:
         raw_to_pdb_chain=raw_to_pdb,
         binder_chains=binder_chains,
         cond_chains=cond_chains,
+        mpnn_design_mode="monomer" if binder_only else "binder",
     )
 
 
@@ -167,7 +178,7 @@ def materialize_preview_outputs(
 ) -> Path:
     """Run CPU ProteinMPNN and write final preview design_outputs artifacts."""
     from ml_collections import ConfigDict
-    from pxdbench.tools.protmpnn.main_mpnn import design_binder
+    from pxdbench.tools.protmpnn.main_mpnn import design_binder, design_monomer
     from pxdesign.utils.pipeline import replace_last_xpb_chain_sequence
 
     task_dir = output_root / "design_outputs" / task_name
@@ -190,15 +201,24 @@ def materialize_preview_outputs(
             "fix_interface": False,
         }
     )
-    results = design_binder(
-        str(work_dir),
-        [pdb_stem],
-        1,
-        binder_chains=metadata.binder_chains,
-        cond_chains=metadata.cond_chains,
-        mpnn_cfg=mpnn_cfg,
-        if_print=True,
-    )
+    if metadata.mpnn_design_mode == "monomer":
+        results = design_monomer(
+            str(work_dir),
+            [pdb_stem],
+            1,
+            mpnn_cfg=mpnn_cfg,
+            if_print=True,
+        )
+    else:
+        results = design_binder(
+            str(work_dir),
+            [pdb_stem],
+            1,
+            binder_chains=metadata.binder_chains,
+            cond_chains=metadata.cond_chains,
+            mpnn_cfg=mpnn_cfg,
+            if_print=True,
+        )
     if not results:
         raise RuntimeError("ProteinMPNN fallback returned no sequences")
     sequence = str(results[0]["sequence"])

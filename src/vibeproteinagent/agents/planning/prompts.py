@@ -69,6 +69,8 @@ provides an identifier for a legacy retrieval tool. Resolver outputs are not
 protein candidates. The compiler injects candidate arrays, resolved term IDs,
 and merge nodes. When prior_round_context is present, a node may use
 `{"node": "prior_round", "relationship": "candidate_source"}`.
+Do not write `inputs.candidates: "prior_round"`; prior-round candidates are
+available only through that upstream candidate_source relationship.
 
 Return one strict JSON object with this shape:
 {

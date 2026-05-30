@@ -8,6 +8,7 @@ FIXUP_KINDS = {
     "missing_explicit_mode",
     "missing_canonical_input_slot",
     "node_reference_used_as_literal_path",
+    "planner_literal_candidate_stream_reference",
     "prior_round_used_as_tool",
     "prior_round_referenced_without_context",
     "upstream_does_not_produce_candidates",
@@ -199,6 +200,46 @@ def prior_round_used_as_tool(
                     "description": "Drop the invalid prior_round tool node.",
                     "target_node_id": node_id,
                 }
+            ],
+        }
+    )
+
+
+def planner_literal_candidate_stream_reference(
+    *,
+    node_id: str,
+    tool: str,
+    field: str,
+    literal_value: str,
+) -> StructuredFixup:
+    return StructuredFixup(
+        {
+            "error_kind": "planner_literal_candidate_stream_reference",
+            "node_id": node_id,
+            "tool": tool,
+            "field": field,
+            "literal_value": literal_value,
+            "explanation": (
+                f"Input {field!r} on node {node_id!r} is a planner literal "
+                f"candidate stream reference {literal_value!r}. Candidate "
+                "streams must be expressed through upstream candidate_source "
+                "entries so the compiler can generate canonical wiring."
+            ),
+            "options": [
+                {
+                    "choice_id": "remove_input",
+                    "description": (
+                        "Remove the literal candidate-stream input and use an "
+                        "upstream candidate_source entry instead."
+                    ),
+                    "target_node_id": node_id,
+                    "field": field,
+                },
+                {
+                    "choice_id": "remove_node",
+                    "description": "Drop this node if it cannot be wired canonically.",
+                    "target_node_id": node_id,
+                },
             ],
         }
     )
