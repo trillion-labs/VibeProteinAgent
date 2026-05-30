@@ -41,6 +41,8 @@ def test_pxdesign_subprocess_failure_writes_debug_contract(
     assert Path(payload["stderr_path"]).is_file()
     assert payload["checkpoint_state"]["pxdesign_checkpoint_exists"] is True
     assert payload["raw_artifact_state"]["raw_cif_exists"] is False
+    assert payload["preview_fallback_chain_metadata"] is None
+    assert payload["preview_fallback_chain_metadata_error"] is None
     assert "env_summary" in payload
     assert "preflight_result" in payload
     assert exc_info.value.details["command"] == payload["command"]
@@ -84,6 +86,8 @@ def test_pxdesign_preview_fallback_failure_writes_debug_contract(
     payload = json.loads((tmp_path / "pxdesign_failure_debug.json").read_text())
     assert payload["returncode"] == 5
     assert payload["raw_artifact_state"]["raw_cif_exists"] is True
+    assert payload["preview_fallback_chain_metadata"] is None
+    assert payload["preview_fallback_chain_metadata_error"] == "metadata_not_written"
     assert Path(payload["stdout_path"]).name == "pipeline_preview_fallback.stdout.log"
     assert Path(payload["stderr_path"]).name == "pipeline_preview_fallback.stderr.log"
     assert exc_info.value.details["command"] == payload["command"]

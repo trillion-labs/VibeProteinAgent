@@ -25,6 +25,7 @@ from vibeproteinagent.agents.planning.fixup import (
     upstream_does_not_produce_candidates,
 )
 from vibeproteinagent.agents.planning.ir import validate_planner_ir_v1
+from vibeproteinagent.agents.planning.parameter_ownership import policy_for
 from vibeproteinagent.agents.planning.terminal_tools import TERMINAL_CONTROLLER_TOOLS
 from vibeproteinagent.core.errors import InvalidParamsError
 from vibeproteinagent.workflows.descriptor import Workflow
@@ -43,6 +44,7 @@ _PATH_FIELD_NAMES = frozenset(
         "target_structure",
         "input_pdb",
         "input_cif",
+        "input_json",
     }
 )
 _AUX_CANDIDATE_STREAM_FIELDS_BY_TOOL = {
@@ -204,6 +206,12 @@ def _reject_node_ids_used_as_literal_paths(
         for path, value in _iter_path_like_literals(inputs):
             if value not in reference_ids:
                 continue
+            if _candidate_upstream_derived_source_artifact(
+                tool=str(node.get("tool") or ""),
+                field=path,
+                node=node,
+            ):
+                continue
             raise node_reference_used_as_literal_path(
                 node_id=str(node.get("id") or ""),
                 tool=str(node.get("tool") or ""),
@@ -239,6 +247,28 @@ def _is_path_like_field(field: str) -> bool:
     return lowered in _PATH_FIELD_NAMES or lowered.endswith("_path") or lowered.endswith("_file")
 
 
+def _candidate_upstream_derived_source_artifact(
+    *,
+    tool: str,
+    field: str,
+    node: dict[str, Any],
+) -> bool:
+    if not any(
+        isinstance(upstream, dict)
+        and upstream.get("relationship") == "candidate_source"
+        for upstream in node.get("upstream") or []
+    ):
+        return False
+    top_level_field = field.split(".", 1)[0].split("[", 1)[0]
+    policy = policy_for(tool, top_level_field)
+    if policy.ownership != "source_artifact" or not policy.derive_when_upstream:
+        return False
+    provenance = node.get("input_provenance")
+    if not isinstance(provenance, dict):
+        return True
+    return provenance.get(top_level_field, "planner_literal") == "planner_literal"
+
+
 def _compile_node(
     node: dict[str, Any],
     node_by_id: dict[str, dict[str, Any]],
@@ -266,6 +296,8 @@ def _compile_node(
         upstream for upstream in upstreams
         if upstream.get("relationship") == "candidate_source"
     ]
+    if candidate_upstreams:
+        _drop_planner_literal_derived_source_artifacts(tool, inputs, provenance)
     if term_upstreams:
         _wire_term_upstreams(
             node_id=node_id,
@@ -358,6 +390,30 @@ def _drop_empty_planner_literal_aux_candidate_streams(
         return
     for field in fields:
         if inputs.get(field) != []:
+            continue
+        if provenance.get(field, "planner_literal") != "planner_literal":
+            continue
+        inputs.pop(field, None)
+        provenance.pop(field, None)
+
+
+def _drop_planner_literal_derived_source_artifacts(
+    tool: str,
+    inputs: dict[str, Any],
+    provenance: dict[str, str],
+) -> None:
+    """Let canonical upstream candidates supply runtime-owned source artifacts.
+
+    When a node has candidate_source upstreams, fields such as
+    protenix_v2.input_json or proteinmpnn.pdb_path are derived from the wired
+    candidates by runtime/adapter code. Planner literals in those fields are
+    not authoritative and should not reach executor ownership validation.
+    """
+    for field in list(inputs):
+        policy = policy_for(tool, field)
+        if policy.ownership != "source_artifact":
+            continue
+        if not policy.derive_when_upstream:
             continue
         if provenance.get(field, "planner_literal") != "planner_literal":
             continue

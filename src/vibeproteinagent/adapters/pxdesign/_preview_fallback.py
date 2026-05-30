@@ -11,7 +11,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class PreviewFallbackChainMetadata:
+    raw_to_pdb_chain: dict[str, str]
+    binder_chains: list[str]
+    cond_chains: list[str]
 
 
 def _read_atom_site_rows(cif_path: Path) -> list[dict[str, str]]:
@@ -43,8 +52,73 @@ def _read_atom_site_rows(cif_path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _write_mpnn_pdb(cif_path: Path, pdb_path: Path) -> None:
+def _raw_chain_id(row: dict[str, str]) -> str:
+    return row.get("label_asym_id") or row.get("auth_asym_id") or "chain"
+
+
+def _is_xpb_row(row: dict[str, str]) -> bool:
+    return (row.get("label_comp_id") or row.get("auth_comp_id") or "").upper() == "XPB"
+
+
+def _pdb_chain_name(raw_chain: str, used: set[str], *, preferred: str | None = None) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    if preferred and preferred in alphabet and preferred not in used:
+        return preferred
+    if len(raw_chain) == 1 and raw_chain in alphabet and raw_chain not in used:
+        return raw_chain
+    for chain in alphabet:
+        if chain not in used:
+            return chain
+    raise ValueError("Too many raw CIF chains to map into one-character PDB chain IDs")
+
+
+def _chain_metadata(rows: list[dict[str, str]]) -> PreviewFallbackChainMetadata:
+    ordered_raw_chains: list[str] = []
+    binder_raw_chains: set[str] = set()
+    for row in rows:
+        raw_chain = _raw_chain_id(row)
+        if raw_chain not in ordered_raw_chains:
+            ordered_raw_chains.append(raw_chain)
+        if _is_xpb_row(row):
+            binder_raw_chains.add(raw_chain)
+    if not binder_raw_chains:
+        raise ValueError("PXDesign preview fallback requires an XPB binder chain")
+
+    used: set[str] = set()
+    raw_to_pdb: dict[str, str] = {}
+    for raw_chain in ordered_raw_chains:
+        if raw_chain in binder_raw_chains:
+            continue
+        pdb_chain = _pdb_chain_name(raw_chain, used)
+        raw_to_pdb[raw_chain] = pdb_chain
+        used.add(pdb_chain)
+    for raw_chain in ordered_raw_chains:
+        if raw_chain not in binder_raw_chains:
+            continue
+        pdb_chain = _pdb_chain_name(raw_chain, used, preferred="B")
+        raw_to_pdb[raw_chain] = pdb_chain
+        used.add(pdb_chain)
+
+    binder_chains = [
+        raw_to_pdb[raw_chain]
+        for raw_chain in ordered_raw_chains
+        if raw_chain in binder_raw_chains
+    ]
+    cond_chains = [
+        raw_to_pdb[raw_chain]
+        for raw_chain in ordered_raw_chains
+        if raw_chain not in binder_raw_chains
+    ]
+    return PreviewFallbackChainMetadata(
+        raw_to_pdb_chain=raw_to_pdb,
+        binder_chains=binder_chains,
+        cond_chains=cond_chains,
+    )
+
+
+def _write_mpnn_pdb(cif_path: Path, pdb_path: Path) -> PreviewFallbackChainMetadata:
     rows = _read_atom_site_rows(cif_path)
+    metadata = _chain_metadata(rows)
     coords = [
         (float(row["Cartn_x"]), float(row["Cartn_y"]), float(row["Cartn_z"]))
         for row in rows
@@ -71,7 +145,7 @@ def _write_mpnn_pdb(cif_path: Path, pdb_path: Path) -> None:
                 resname = "GLY"
             atom_name = row["label_atom_id"]
             atom_field = f" {atom_name:<3}" if len(atom_name) < 4 else atom_name[:4]
-            chain = (row["label_asym_id"] or "A")[0]
+            chain = metadata.raw_to_pdb_chain[_raw_chain_id(row)]
             resseq = int(row["label_seq_id"])
             elem = row["type_symbol"].upper()[:2]
             fh.write(
@@ -80,6 +154,7 @@ def _write_mpnn_pdb(cif_path: Path, pdb_path: Path) -> None:
                 f"  1.00  0.00          {elem:>2s}\n"
             )
         fh.write("TER\nENDMDL\nEND\n")
+    return metadata
 
 
 def materialize_preview_outputs(
@@ -103,7 +178,9 @@ def materialize_preview_outputs(
 
     pdb_stem = raw_cif.stem
     pdb_path = work_dir / f"{pdb_stem}.pdb"
-    _write_mpnn_pdb(raw_cif, pdb_path)
+    metadata = _write_mpnn_pdb(raw_cif, pdb_path)
+    metadata_path = task_dir / "preview_fallback_chain_metadata.json"
+    metadata_path.write_text(json.dumps(asdict(metadata), indent=2, sort_keys=True) + "\n")
 
     mpnn_cfg = ConfigDict(
         {
@@ -117,8 +194,8 @@ def materialize_preview_outputs(
         str(work_dir),
         [pdb_stem],
         1,
-        binder_chains=["B"],
-        cond_chains=["A"],
+        binder_chains=metadata.binder_chains,
+        cond_chains=metadata.cond_chains,
         mpnn_cfg=mpnn_cfg,
         if_print=True,
     )

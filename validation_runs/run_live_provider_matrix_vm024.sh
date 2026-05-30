@@ -71,6 +71,353 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
+case_progress_monitor() {
+  local workspace="$1"
+  local case_name="$2"
+  local provider="$3"
+  local model="$4"
+  local start_us="$5"
+  local stop_file="$6"
+  run_py - "${VPA_HOME}" "${workspace}" "${case_name}" "${provider}" "${model}" \
+    "${start_us}" "${stop_file}" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional in shell environments
+    yaml = None
+
+vpa_home, workspace, case_name, provider, model, start_us_raw, stop_file_raw = sys.argv[1:8]
+start_us = int(start_us_raw)
+stop_file = Path(stop_file_raw)
+db_path = Path(vpa_home) / "workspaces" / workspace / "workspace.db"
+use_color = os.environ.get("VPA_VALIDATION_COLOR", "1") != "0"
+
+
+def style(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if use_color else text
+
+
+def stamp() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def emit(line: str = "") -> None:
+    print(line, flush=True)
+
+
+def title(text: str) -> None:
+    emit(f"[{stamp()}] {style('◆', '36;1')} {style(text, '1')}")
+
+
+def info(text: str) -> None:
+    emit(f"[{stamp()}]   {style('·', '36')} {text}")
+
+
+def ok(text: str) -> None:
+    emit(f"[{stamp()}]   {style('✓', '32;1')} {text}")
+
+
+def warn(text: str) -> None:
+    emit(f"[{stamp()}]   {style('!', '33;1')} {text}")
+
+
+def fail(text: str) -> None:
+    emit(f"[{stamp()}]   {style('✗', '31;1')} {text}")
+
+
+def short(value: Any, n: int = 12) -> str:
+    text = str(value or "")
+    return text if len(text) <= n else text[:n]
+
+
+def connect() -> sqlite3.Connection | None:
+    if not db_path.exists():
+        return None
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=1.0)
+        con.row_factory = sqlite3.Row
+        return con
+    except sqlite3.Error:
+        return None
+
+
+def safe_json(value: Any, default: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def table_exists(con: sqlite3.Connection, table: str) -> bool:
+    row = con.execute(
+        "select 1 from sqlite_master where type='table' and name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def latest_run(con: sqlite3.Connection) -> sqlite3.Row | None:
+    if not table_exists(con, "agent_runs"):
+        return None
+    return con.execute(
+        """
+        select * from agent_runs
+        where created_at >= ?
+        order by created_at desc
+        limit 1
+        """,
+        (start_us,),
+    ).fetchone()
+
+
+def rows_for_current_workflows(
+    con: sqlite3.Connection,
+    run: sqlite3.Row | None,
+) -> list[sqlite3.Row]:
+    if not table_exists(con, "workflows"):
+        return []
+    workflow_ids = safe_json(run["workflow_ids_json"], []) if run is not None else []
+    if workflow_ids:
+        placeholders = ",".join("?" for _ in workflow_ids)
+        return con.execute(
+            f"""
+            select * from workflows
+            where workflow_id in ({placeholders})
+            order by submitted_at
+            """,
+            tuple(workflow_ids),
+        ).fetchall()
+    return con.execute(
+        """
+        select * from workflows
+        where submitted_at >= ?
+        order by submitted_at
+        """,
+        (start_us,),
+    ).fetchall()
+
+
+def nodes_for_workflow(con: sqlite3.Connection, workflow_id: str) -> list[sqlite3.Row]:
+    if not table_exists(con, "workflow_nodes"):
+        return []
+    return con.execute(
+        """
+        select * from workflow_nodes
+        where workflow_id = ?
+        order by rowid
+        """,
+        (workflow_id,),
+    ).fetchall()
+
+
+def decisions(con: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    if not table_exists(con, "agent_decisions"):
+        return []
+    return con.execute(
+        """
+        select * from agent_decisions
+        where run_id = ?
+        order by created_at
+        """,
+        (run_id,),
+    ).fetchall()
+
+
+def plan_shape_from_descriptor(descriptor: str) -> list[dict[str, Any]]:
+    if yaml is None:
+        return []
+    try:
+        payload = yaml.safe_load(descriptor) or {}
+    except Exception:
+        return []
+    nodes = payload.get("nodes")
+    return nodes if isinstance(nodes, list) else []
+
+
+def node_inputs(node: dict[str, Any]) -> list[str]:
+    upstream: list[str] = []
+    raw = node.get("upstream")
+    if isinstance(raw, list):
+        upstream.extend(str(v) for v in raw)
+    inputs = node.get("inputs")
+    if isinstance(inputs, dict):
+        for value in inputs.values():
+            if isinstance(value, str) and value.startswith("${outputs."):
+                token = value.removeprefix("${outputs.").split(".", 1)[0]
+                if token and token not in upstream:
+                    upstream.append(token)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str) and item.startswith("${outputs."):
+                        token = item.removeprefix("${outputs.").split(".", 1)[0]
+                        if token and token not in upstream:
+                            upstream.append(token)
+    return upstream
+
+
+def print_trajectory(round_no: int, workflow: sqlite3.Row) -> None:
+    workflow_id = workflow["workflow_id"]
+    title(
+        f"Round {round_no} trajectory · workflow {short(workflow_id, 16)}"
+    )
+    nodes = plan_shape_from_descriptor(workflow["descriptor"] or "")
+    if not nodes:
+        info("trajectory descriptor unavailable; watching workflow node states")
+        return
+    for idx, node in enumerate(nodes, start=1):
+        node_id = str(node.get("id") or f"node_{idx}")
+        tool = str(node.get("tool") or "?")
+        upstream = node_inputs(node)
+        edge = f" ← {', '.join(upstream)}" if upstream else ""
+        emit(
+            f"[{stamp()}]     {style(str(idx).rjust(2), '36')}  "
+            f"{style(tool, '1')}  {node_id}{edge}"
+        )
+
+
+def decision_label(decision_json: str) -> tuple[str, str]:
+    payload = safe_json(decision_json, {})
+    decision = str(payload.get("decision") or "?")
+    reason = str(payload.get("reason") or payload.get("reasoning") or "")
+    if len(reason) > 160:
+        reason = reason[:157] + "..."
+    return decision, reason
+
+
+printed_run = False
+printed_wait = False
+seen_workflows: set[str] = set()
+seen_node_state: dict[tuple[str, str], str] = {}
+seen_decisions: set[tuple[int, int]] = set()
+seen_run_state: str | None = None
+round_by_workflow: dict[str, int] = {}
+
+title(f"Live progress · {case_name} · {provider}/{model}")
+
+while True:
+    con = connect()
+    if con is None:
+        if not printed_wait:
+            info(f"waiting for workspace database: {db_path}")
+            printed_wait = True
+        time.sleep(2)
+        if stop_file.exists():
+            break
+        continue
+    try:
+        run = latest_run(con)
+        if run is None:
+            if not printed_wait:
+                info("thinking / provider planning has started; waiting for agent run record")
+                printed_wait = True
+        else:
+            run_state = str(run["state"])
+            if not printed_run:
+                title(f"Agent run {short(run['run_id'], 16)} started")
+                info(f"state={run_state}  workspace={workspace}")
+                printed_run = True
+            if run_state != seen_run_state:
+                if seen_run_state is not None:
+                    info(f"agent state → {run_state}")
+                seen_run_state = run_state
+
+            workflows = rows_for_current_workflows(con, run)
+            for index, workflow in enumerate(workflows, start=1):
+                workflow_id = str(workflow["workflow_id"])
+                round_by_workflow.setdefault(workflow_id, index)
+                if workflow_id not in seen_workflows:
+                    print_trajectory(round_by_workflow[workflow_id], workflow)
+                    seen_workflows.add(workflow_id)
+                wf_state = str(workflow["state"])
+                wf_key = (workflow_id, "__workflow__")
+                if seen_node_state.get(wf_key) != wf_state:
+                    seen_node_state[wf_key] = wf_state
+                    if wf_state == "completed":
+                        ok(
+                            f"Round {round_by_workflow[workflow_id]} workflow completed "
+                            f"({short(workflow_id, 16)})"
+                        )
+                    elif wf_state == "failed":
+                        fail(
+                            f"Round {round_by_workflow[workflow_id]} workflow failed "
+                            f"({short(workflow_id, 16)})"
+                        )
+                    elif wf_state == "running":
+                        info(
+                            f"Round {round_by_workflow[workflow_id]} workflow running "
+                            f"({short(workflow_id, 16)})"
+                        )
+
+                for node in nodes_for_workflow(con, workflow_id):
+                    key = (workflow_id, str(node["node_id"]))
+                    node_state = str(node["state"])
+                    if seen_node_state.get(key) == node_state:
+                        continue
+                    seen_node_state[key] = node_state
+                    label = (
+                        f"R{round_by_workflow[workflow_id]} "
+                        f"{node['tool_name']}:{node['node_id']}"
+                    )
+                    job = f" job={short(node['job_id'])}" if node["job_id"] else ""
+                    if node_state == "completed":
+                        ok(f"{label} passed{job}")
+                    elif node_state == "failed":
+                        reason = " ".join(
+                            str(v)
+                            for v in (node["error_code"], node["error_message"])
+                            if v
+                        )
+                        fail(f"{label} failed{job}  {reason}".rstrip())
+                    elif node_state == "skipped":
+                        warn(f"{label} skipped")
+                    elif node_state == "running":
+                        info(f"{label} running{job}")
+
+            for row in decisions(con, str(run["run_id"])):
+                key = (int(row["round_index"]), int(row["created_at"]))
+                if key in seen_decisions:
+                    continue
+                seen_decisions.add(key)
+                decision, reason = decision_label(row["decision_json"])
+                msg = f"Round {int(row['round_index']) + 1} decision: {decision}"
+                if reason:
+                    msg += f" · {reason}"
+                if decision in {"submit_candidate", "submitted_final_candidate"}:
+                    ok(msg)
+                elif decision.startswith("next_round"):
+                    info(msg)
+                else:
+                    warn(msg)
+
+            if run_state == "completed":
+                ok(f"Agent run completed · {case_name}")
+            elif run_state == "failed":
+                fail(f"Agent run failed · {case_name}")
+    except sqlite3.Error as exc:
+        warn(f"progress monitor skipped one poll: {exc}")
+    finally:
+        con.close()
+
+    if stop_file.exists():
+        break
+    time.sleep(3)
+
+title(f"Progress monitor closed · {case_name}")
+PY
+}
+
 run_vpa() {
   (
     cd "${REPO_ROOT}"
@@ -262,15 +609,25 @@ run_case() {
   local stderr="${case_dir}/${case_name}.stderr.log"
   local stderr_tmp="${stderr}.tmp"
   local start elapsed rc status api_ok run_state validation_status
+  local progress_stop="${case_dir}/${case_name}.progress.stop"
+  local progress_pid=""
+  local case_start_us
   local extra_args=()
   if [[ -n "${extra_param}" ]]; then
     extra_args+=(--param "${extra_param}")
   fi
+  case_start_us="$(date '+%s%6N')"
   start="$(date +%s)"
   log "START ${case_name} (${mode}, ${provider}, ${model})"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date -Is)" "${case_name}" "${mode}" "${provider}" "${model}" "STARTED" "0" "${output}" >> "${CASE_EVENTS_TSV}"
-  rm -f "${output_tmp}" "${stderr_tmp}"
+  rm -f "${output_tmp}" "${stderr_tmp}" "${progress_stop}"
+  if [[ "${VPA_VALIDATION_PROGRESS:-1}" != "0" ]]; then
+    case_progress_monitor \
+      "${workspace}" "${case_name}" "${provider}" "${model}" \
+      "${case_start_us}" "${progress_stop}" &
+    progress_pid="$!"
+  fi
   set +e
   if [[ "${mode}" == "plan" ]]; then
     if [[ -n "${target_arg}" ]]; then
@@ -295,6 +652,10 @@ run_case() {
   fi
   rc=$?
   set -e
+  if [[ -n "${progress_pid}" ]]; then
+    touch "${progress_stop}"
+    wait "${progress_pid}" 2>/dev/null || true
+  fi
   elapsed=$(( $(date +%s) - start ))
   mv -f "${output_tmp}" "${output}" 2>/dev/null || true
   mv -f "${stderr_tmp}" "${stderr}" 2>/dev/null || true

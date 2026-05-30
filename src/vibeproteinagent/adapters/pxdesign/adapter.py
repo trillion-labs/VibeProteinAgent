@@ -793,9 +793,10 @@ class PXDesignAdapter(ToolAdapter):
             "mpnn_temperature": params.mpnn_temperature,
             "timeout_s": 8 * 3600,
         }
-        if "ckpt_path" in inspect.signature(_run_preview_pipeline_until_artifacts).parameters:
+        preview_signature = inspect.signature(_run_preview_pipeline_until_artifacts)
+        if "ckpt_path" in preview_signature.parameters:
             preview_kwargs["ckpt_path"] = ckpt_path
-        if "input_structure_state" in inspect.signature(_run_preview_pipeline_until_artifacts).parameters:
+        if "input_structure_state" in preview_signature.parameters:
             preview_kwargs["input_structure_state"] = input_structure_state
         _run_preview_pipeline_until_artifacts(**preview_kwargs)
 
@@ -1086,10 +1087,12 @@ def _run_preview_pipeline_until_artifacts(
                         env=env,
                         ckpt_path=resolved_ckpt_path,
                         job_outputs=job_outputs,
-                            task_name=task_name,
-                            preflight_result={"availability_skip_reason": availability_skip_reason()},
-                            input_structure_state=input_structure_state,
-                        )
+                        task_name=task_name,
+                        preflight_result={
+                            "availability_skip_reason": availability_skip_reason()
+                        },
+                        input_structure_state=input_structure_state,
+                    )
                     raise VPAError(
                         f"PXDesign preview pipeline exited with status {rc} "
                         f"before emitting design artifacts. See {debug_path}.",
@@ -1107,10 +1110,12 @@ def _run_preview_pipeline_until_artifacts(
                         env=env,
                         ckpt_path=resolved_ckpt_path,
                         job_outputs=job_outputs,
-                            task_name=task_name,
-                            preflight_result={"availability_skip_reason": availability_skip_reason()},
-                            input_structure_state=input_structure_state,
-                        )
+                        task_name=task_name,
+                        preflight_result={
+                            "availability_skip_reason": availability_skip_reason()
+                        },
+                        input_structure_state=input_structure_state,
+                    )
                     raise VPAError(
                         f"PXDesign preview pipeline timed out before emitting "
                         f"design artifacts. See {debug_path}.",
@@ -1139,6 +1144,21 @@ def _write_pxdesign_failure_debug(
     input_structure_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_cif = _raw_preview_cif(job_outputs, task_name)
+    chain_metadata_path = (
+        job_outputs
+        / "design_outputs"
+        / task_name
+        / "preview_fallback_chain_metadata.json"
+    )
+    fallback_chain_metadata = None
+    fallback_chain_metadata_error = None
+    if chain_metadata_path.is_file():
+        try:
+            fallback_chain_metadata = json.loads(chain_metadata_path.read_text())
+        except Exception as exc:
+            fallback_chain_metadata_error = str(exc)
+    elif raw_cif is not None:
+        fallback_chain_metadata_error = "metadata_not_written"
     env_keys = (
         "CONDA_PREFIX",
         "CUDA_VISIBLE_DEVICES",
@@ -1173,6 +1193,9 @@ def _write_pxdesign_failure_debug(
                 job_outputs / "design_outputs" / task_name / "summary.csv"
             ).is_file(),
         },
+        "preview_fallback_chain_metadata": fallback_chain_metadata,
+        "preview_fallback_chain_metadata_path": str(chain_metadata_path),
+        "preview_fallback_chain_metadata_error": fallback_chain_metadata_error,
     }
     debug_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return payload

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -725,7 +727,7 @@ def test_preview_fallback_mpnn_pdb_is_single_model(tmp_path: Path) -> None:
     )
     pdb_path = tmp_path / "mpnn_input.pdb"
 
-    _preview_fallback._write_mpnn_pdb(raw_cif, pdb_path)
+    metadata = _preview_fallback._write_mpnn_pdb(raw_cif, pdb_path)
 
     lines = pdb_path.read_text().splitlines()
     assert lines[0] == "MODEL        1"
@@ -734,6 +736,148 @@ def test_preview_fallback_mpnn_pdb_is_single_model(tmp_path: Path) -> None:
     assert sum(1 for line in lines if line.startswith("MODEL")) == 1
     assert sum(1 for line in lines if line.startswith("ENDMDL")) == 1
     assert any(" GLY B" in line for line in lines if line.startswith("ATOM"))
+    assert metadata.raw_to_pdb_chain == {"A": "A", "B": "B"}
+    assert metadata.binder_chains == ["B"]
+    assert metadata.cond_chains == ["A"]
+
+
+def test_preview_fallback_binder_only_b0_uses_existing_chain_only(tmp_path: Path) -> None:
+    raw_cif = tmp_path / "design_sample_0.cif"
+    raw_cif.write_text(
+        "\n".join(
+            [
+                "data_design",
+                "loop_",
+                "_atom_site.group_PDB",
+                "_atom_site.type_symbol",
+                "_atom_site.label_atom_id",
+                "_atom_site.label_comp_id",
+                "_atom_site.label_asym_id",
+                "_atom_site.label_seq_id",
+                "_atom_site.Cartn_x",
+                "_atom_site.Cartn_y",
+                "_atom_site.Cartn_z",
+                "ATOM N N xpb B0 1 1.0 2.0 3.0",
+                "ATOM C CA xpb B0 1 2.0 2.0 3.0",
+                "ATOM C C xpb B0 1 3.0 2.0 3.0",
+                "#",
+            ]
+        )
+        + "\n"
+    )
+    pdb_path = tmp_path / "mpnn_input.pdb"
+
+    metadata = _preview_fallback._write_mpnn_pdb(raw_cif, pdb_path)
+
+    assert metadata.raw_to_pdb_chain == {"B0": "B"}
+    assert metadata.binder_chains == ["B"]
+    assert metadata.cond_chains == []
+    assert all(line[21] == "B" for line in pdb_path.read_text().splitlines()
+               if line.startswith("ATOM"))
+
+
+def test_preview_fallback_requires_xpb_binder_chain(tmp_path: Path) -> None:
+    raw_cif = tmp_path / "design_sample_0.cif"
+    raw_cif.write_text(
+        "\n".join(
+            [
+                "data_design",
+                "loop_",
+                "_atom_site.group_PDB",
+                "_atom_site.type_symbol",
+                "_atom_site.label_atom_id",
+                "_atom_site.label_comp_id",
+                "_atom_site.label_asym_id",
+                "_atom_site.label_seq_id",
+                "_atom_site.Cartn_x",
+                "_atom_site.Cartn_y",
+                "_atom_site.Cartn_z",
+                "ATOM N N ALA A 1 1.0 2.0 3.0",
+                "ATOM C CA ALA A 1 2.0 2.0 3.0",
+                "#",
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.raises(ValueError, match="XPB binder chain"):
+        _preview_fallback._write_mpnn_pdb(raw_cif, tmp_path / "mpnn_input.pdb")
+
+
+def test_preview_fallback_materialize_uses_parsed_chains(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw_cif = tmp_path / "design_sample_0.cif"
+    raw_cif.write_text(
+        "\n".join(
+            [
+                "data_design",
+                "loop_",
+                "_atom_site.group_PDB",
+                "_atom_site.type_symbol",
+                "_atom_site.label_atom_id",
+                "_atom_site.label_comp_id",
+                "_atom_site.label_asym_id",
+                "_atom_site.label_seq_id",
+                "_atom_site.Cartn_x",
+                "_atom_site.Cartn_y",
+                "_atom_site.Cartn_z",
+                "ATOM N N xpb B0 1 1.0 2.0 3.0",
+                "ATOM C CA xpb B0 1 2.0 2.0 3.0",
+                "ATOM C C xpb B0 1 3.0 2.0 3.0",
+                "#",
+            ]
+        )
+        + "\n"
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_design_binder(*args: Any, **kwargs: Any) -> list[dict[str, str]]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return [{"sequence": "GAG"}]
+
+    def fake_replace(_raw_cif: str, final_cif: str, sequence: str) -> None:
+        Path(final_cif).write_text(f"data_final\n# {sequence}\n")
+
+    ml_collections = types.ModuleType("ml_collections")
+    ml_collections.ConfigDict = dict
+    main_mpnn = types.ModuleType("pxdbench.tools.protmpnn.main_mpnn")
+    main_mpnn.design_binder = fake_design_binder
+    pipeline = types.ModuleType("pxdesign.utils.pipeline")
+    pipeline.replace_last_xpb_chain_sequence = fake_replace
+    for name in [
+        "pxdbench",
+        "pxdbench.tools",
+        "pxdbench.tools.protmpnn",
+        "pxdesign",
+        "pxdesign.utils",
+    ]:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "ml_collections", ml_collections)
+    monkeypatch.setitem(sys.modules, "pxdbench.tools.protmpnn.main_mpnn", main_mpnn)
+    monkeypatch.setitem(sys.modules, "pxdesign.utils.pipeline", pipeline)
+
+    final_cif = _preview_fallback.materialize_preview_outputs(
+        raw_cif=raw_cif,
+        task_name="design_target_A_60aa",
+        output_root=tmp_path,
+        temperature=0.1,
+        seed=101,
+    )
+
+    assert final_cif.is_file()
+    assert calls[0]["kwargs"]["binder_chains"] == ["B"]
+    assert calls[0]["kwargs"]["cond_chains"] == []
+    task_dir = tmp_path / "design_outputs" / "design_target_A_60aa"
+    metadata = json.loads((task_dir / "preview_fallback_chain_metadata.json").read_text())
+    assert metadata == {
+        "binder_chains": ["B"],
+        "cond_chains": [],
+        "raw_to_pdb_chain": {"B0": "B"},
+    }
+    rows = list(csv.DictReader((task_dir / "summary.csv").open()))
+    assert rows[0]["sequence"] == "GAG"
 
 
 def test_collect_pipeline_outputs_handles_renamed_columns(tmp_path: Path) -> None:

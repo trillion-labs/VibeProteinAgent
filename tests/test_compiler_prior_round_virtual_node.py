@@ -18,11 +18,24 @@ def _ir(nodes: list[dict]) -> dict:
     }
 
 
-def _prior_context() -> PriorRoundContext:
+def _prior_context(
+    *,
+    capabilities: dict[str, int] | None = None,
+) -> PriorRoundContext:
+    prompt_context = None
+    if capabilities is not None:
+        prompt_context = {
+            "latest_round": {
+                "capability_summary": {
+                    "survivor_pool": {"capability_counts": capabilities}
+                }
+            }
+        }
     return PriorRoundContext(
         round_number=2,
         prior_decision_reason="Continue from the prior round.",
         survivor_snapshot_id="csnap_survivor",
+        prompt_context=prompt_context,
     )
 
 
@@ -172,7 +185,7 @@ def test_prior_round_tool_node_raises_structured_fixup() -> None:
     assert exc_info.value.payload["error_kind"] == "prior_round_used_as_tool"
 
 
-def test_node_id_used_as_literal_path_raises_structured_fixup() -> None:
+def test_node_id_used_as_root_literal_path_raises_structured_fixup() -> None:
     with pytest.raises(StructuredFixup) as exc_info:
         compile_planner_ir(
             _ir(
@@ -187,11 +200,9 @@ def test_node_id_used_as_literal_path_raises_structured_fixup() -> None:
                     {
                         "id": "seq_design",
                         "tool": "proteinmpnn",
-                        "intent": "Design sequence from backbone.",
+                        "intent": "Design sequence from a literal path.",
                         "inputs": {"pdb_path": "backbone_gen"},
-                        "upstream": [
-                            {"node": "backbone_gen", "relationship": "candidate_source"}
-                        ],
+                        "upstream": [],
                     },
                 ]
             )
@@ -201,6 +212,41 @@ def test_node_id_used_as_literal_path_raises_structured_fixup() -> None:
     assert payload["error_kind"] == "node_reference_used_as_literal_path"
     assert payload["field"] == "pdb_path"
     assert payload["literal_value"] == "backbone_gen"
+
+
+def test_node_id_used_as_derived_source_artifact_with_upstream_is_dropped() -> None:
+    plan = compile_planner_ir(
+        _ir(
+            [
+                {
+                    "id": "backbone_gen",
+                    "tool": "rfdiffusion",
+                    "intent": "Generate a backbone.",
+                    "inputs": {"mode": "unconditional"},
+                    "upstream": [],
+                },
+                {
+                    "id": "seq_design",
+                    "tool": "proteinmpnn",
+                    "intent": "Design sequence from backbone.",
+                    "inputs": {"pdb_path": "backbone_gen", "num_designs": 1},
+                    "upstream": [
+                        {"node": "backbone_gen", "relationship": "candidate_source"}
+                    ],
+                },
+            ]
+        )
+    )
+
+    seq_design = plan["workflow_plan"]["nodes"][1]
+    assert seq_design["inputs"] == {
+        "num_designs": 1,
+        "candidates": "${outputs.backbone_gen.candidates}",
+    }
+    assert seq_design["input_provenance"] == {
+        "num_designs": "planner_literal",
+        "candidates": "compiled_wiring",
+    }
 
 
 def test_nested_node_id_path_fixup_removes_nested_input() -> None:
@@ -271,29 +317,35 @@ def test_node_id_used_as_literal_path_inside_list_raises_structured_fixup() -> N
     assert exc_info.value.payload["field"] == "structures[0].pdb_path"
 
 
-def test_virtual_prior_round_used_as_literal_path_raises_structured_fixup() -> None:
-    with pytest.raises(StructuredFixup) as exc_info:
-        compile_planner_ir(
-            _ir(
-                [
-                    {
-                        "id": "seq_design",
-                        "tool": "proteinmpnn",
-                        "intent": "Design sequence from prior survivor.",
-                        "inputs": {"pdb_path": "prior_round"},
-                        "upstream": [
-                            {"node": "prior_round", "relationship": "candidate_source"}
-                        ],
-                    },
-                ]
-            ),
-            prior_round_context=_prior_context(),
-        )
+def test_virtual_prior_round_used_as_derived_source_artifact_is_dropped() -> None:
+    plan = compile_planner_ir(
+        _ir(
+            [
+                {
+                    "id": "seq_design",
+                    "tool": "proteinmpnn",
+                    "intent": "Design sequence from prior survivor.",
+                    "inputs": {"pdb_path": "prior_round", "num_designs": 1},
+                    "upstream": [
+                        {"node": "prior_round", "relationship": "candidate_source"}
+                    ],
+                },
+            ]
+        ),
+        prior_round_context=_prior_context(
+            capabilities={"has_backbone_structure": 1}
+        ),
+    )
 
-    payload = exc_info.value.payload
-    assert payload["error_kind"] == "node_reference_used_as_literal_path"
-    assert payload["field"] == "pdb_path"
-    assert payload["literal_value"] == "prior_round"
+    seq_design = plan["workflow_plan"]["nodes"][0]
+    assert seq_design["inputs"] == {
+        "num_designs": 1,
+        "candidates": "${outputs.prior_round.candidates}",
+    }
+    assert seq_design["input_provenance"] == {
+        "num_designs": "planner_literal",
+        "candidates": "compiled_wiring",
+    }
 
 
 def test_list_index_node_id_path_fixup_removes_nested_input() -> None:

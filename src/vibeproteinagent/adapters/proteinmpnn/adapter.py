@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -151,17 +153,27 @@ class ProteinMPNNAdapter(ToolAdapter):
                 torch.cuda.manual_seed_all(int(params.seed))
 
         assert params.pdb_path is not None
-        pdb_path = str(Path(params.pdb_path).expanduser())
-        pdb_dict_list = parse_PDB(pdb_path, input_chain_list=params.chains, ca_only=False)
+        source_structure_path = Path(params.pdb_path).expanduser()
+        pdb_path, input_chains, conversion_metadata = _materialize_mpnn_pdb_input(
+            source_structure_path,
+            requested_chains=params.chains,
+            job_dir=ctx.job_dir,
+        )
+        if conversion_metadata:
+            out_meta = ctx.job_dir / "outputs" / "proteinmpnn_input_chain_map.json"
+            out_meta.parent.mkdir(parents=True, exist_ok=True)
+            out_meta.write_text(json.dumps(conversion_metadata, indent=2, sort_keys=True) + "\n")
+
+        pdb_dict_list = parse_PDB(str(pdb_path), input_chain_list=input_chains, ca_only=False)
         if not pdb_dict_list:
             raise ValueError(f"parse_PDB returned no records for {pdb_path}")
         protein = pdb_dict_list[0]
         ctx.emit_progress(0.10)
 
         chain_id_dict: dict[str, tuple[list[str], list[str]]] | None = None
-        if params.chains is not None:
+        if input_chains is not None:
             # All listed chains are "designed"; nothing visible-only.
-            chain_id_dict = {protein["name"]: (list(params.chains), [])}
+            chain_id_dict = {protein["name"]: (list(input_chains), [])}
 
         omit_aas_set = set(params.omit_aas)
         omit_AAs_np = np.array(
@@ -316,7 +328,10 @@ class ProteinMPNNAdapter(ToolAdapter):
                     design.model_dump(),
                     index,
                     params=params,
-                    structure_path=pdb_path,
+                    structure_path=str(source_structure_path),
+                    mpnn_input_pdb_path=(
+                        str(pdb_path) if Path(pdb_path) != source_structure_path else None
+                    ),
                 )
                 for index, design in enumerate(designs)
             ],
@@ -444,12 +459,236 @@ def _infer_cif_protein_chain_ids(path: Path) -> list[str]:
     return sorted(chains)
 
 
+def _materialize_mpnn_pdb_input(
+    structure_path: Path,
+    *,
+    requested_chains: list[str] | None,
+    job_dir: Path,
+) -> tuple[Path, list[str] | None, dict[str, Any] | None]:
+    if structure_path.suffix.lower() not in {".cif", ".mmcif"}:
+        chains = requested_chains
+        if chains is None:
+            inferred = _infer_protein_chain_ids(structure_path)
+            chains = inferred or None
+        return structure_path, chains, None
+
+    rows = _read_cif_atom_rows(structure_path)
+    raw_to_pdb = _raw_to_pdb_chain_map(rows)
+    pdb_path = job_dir / "inputs" / f"{structure_path.stem}_proteinmpnn_input.pdb"
+    pdb_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_cif_rows_as_pdb(rows, pdb_path, raw_to_pdb)
+    mapped_chains = _map_requested_chains(requested_chains, raw_to_pdb)
+    metadata = {
+        "source_structure_path": str(structure_path),
+        "mpnn_input_pdb_path": str(pdb_path),
+        "raw_to_pdb_chain": raw_to_pdb,
+        "requested_chains": requested_chains,
+        "mpnn_chains": mapped_chains,
+    }
+    return pdb_path, mapped_chains, metadata
+
+
+def _read_cif_atom_rows(path: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    lines = path.read_text(errors="replace").splitlines()
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() != "loop_":
+            index += 1
+            continue
+        index += 1
+        headers: list[str] = []
+        while index < len(lines) and lines[index].strip().startswith("_"):
+            header = lines[index].strip()
+            if header.startswith("_atom_site."):
+                headers.append(header.removeprefix("_atom_site."))
+            index += 1
+        if not headers:
+            while index < len(lines) and lines[index].strip() != "#":
+                index += 1
+            continue
+        while index < len(lines):
+            raw = lines[index].strip()
+            if not raw or raw == "#" or raw == "loop_" or raw.startswith("_"):
+                break
+            parts = shlex.split(raw)
+            if len(parts) >= len(headers):
+                row = {header: parts[pos] for pos, header in enumerate(headers)}
+                if str(row.get("group_PDB") or "").upper() == "ATOM":
+                    rows.append(row)
+            index += 1
+    if not rows:
+        raise ValueError(f"No _atom_site ATOM rows found in {path}")
+    return rows
+
+
+def _raw_to_pdb_chain_map(rows: list[dict[str, str]]) -> dict[str, str]:
+    used: set[str] = set()
+    out: dict[str, str] = {}
+    for row in rows:
+        raw_chain = _cif_chain_id(row)
+        if raw_chain in out:
+            continue
+        pdb_chain = _pdb_chain_name(raw_chain, used)
+        out[raw_chain] = pdb_chain
+        used.add(pdb_chain)
+    return out
+
+
+def _cif_chain_id(row: dict[str, str]) -> str:
+    return _clean_cif_value(row.get("auth_asym_id")) or _clean_cif_value(
+        row.get("label_asym_id")
+    ) or "_"
+
+
+def _clean_cif_value(value: str | None) -> str:
+    if value in {None, "", ".", "?"}:
+        return ""
+    return str(value)
+
+
+def _pdb_chain_name(raw_chain: str, used: set[str]) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    if len(raw_chain) == 1 and raw_chain in alphabet and raw_chain not in used:
+        return raw_chain
+    for chain in alphabet:
+        if chain not in used:
+            return chain
+    raise ValueError("Too many mmCIF chains to map into one-character PDB chain IDs")
+
+
+def _map_requested_chains(
+    requested_chains: list[str] | None,
+    raw_to_pdb: dict[str, str],
+) -> list[str]:
+    if requested_chains is None:
+        return list(raw_to_pdb.values())
+    pdb_values = set(raw_to_pdb.values())
+    mapped: list[str] = []
+    missing: list[str] = []
+    for chain in requested_chains:
+        if chain in raw_to_pdb:
+            mapped.append(raw_to_pdb[chain])
+        elif chain in pdb_values:
+            mapped.append(chain)
+        else:
+            missing.append(chain)
+    if missing:
+        raise ValueError(
+            "Requested ProteinMPNN chain(s) are absent from mmCIF input: "
+            f"{missing}; available={sorted(raw_to_pdb)}"
+        )
+    return mapped
+
+
+def _write_cif_rows_as_pdb(
+    rows: list[dict[str, str]],
+    pdb_path: Path,
+    raw_to_pdb: dict[str, str],
+) -> None:
+    records: list[dict[str, Any]] = []
+    coords: list[tuple[float, float, float]] = []
+    residue_numbers: dict[tuple[str, str], int] = {}
+    next_residue: dict[str, int] = {}
+    for row in rows:
+        raw_chain = _cif_chain_id(row)
+        raw_resseq = (
+            _clean_cif_value(row.get("auth_seq_id"))
+            or _clean_cif_value(row.get("label_seq_id"))
+            or str(next_residue.get(raw_chain, 1))
+        )
+        try:
+            x = float(row["Cartn_x"])
+            y = float(row["Cartn_y"])
+            z = float(row["Cartn_z"])
+        except (KeyError, ValueError):
+            continue
+        coords.append((x, y, z))
+        records.append(
+            {
+                "row": row,
+                "chain": raw_to_pdb[raw_chain],
+                "resseq": _pdb_resseq(
+                    raw_chain, raw_resseq, residue_numbers, next_residue
+                ),
+                "coords": (x, y, z),
+            }
+        )
+    if not records:
+        raise ValueError("No mmCIF ATOM rows with numeric coordinates could be written")
+    mean_x = sum(x for x, _, _ in coords) / len(coords)
+    mean_y = sum(y for _, y, _ in coords) / len(coords)
+    mean_z = sum(z for _, _, z in coords) / len(coords)
+    max_abs = max(
+        max(abs(x - mean_x), abs(y - mean_y), abs(z - mean_z))
+        for x, y, z in coords
+    )
+    scale = 200.0 / max_abs if max_abs > 200.0 else 1.0
+
+    with pdb_path.open("w") as handle:
+        handle.write("MODEL        1\n")
+        serial = 1
+        for record in records:
+            row = record["row"]
+            x, y, z = record["coords"]
+            x = (x - mean_x) * scale
+            y = (y - mean_y) * scale
+            z = (z - mean_z) * scale
+            atom_name = (
+                _clean_cif_value(row.get("auth_atom_id"))
+                or _clean_cif_value(row.get("label_atom_id"))
+                or "CA"
+            )
+            resname = (
+                _clean_cif_value(row.get("auth_comp_id"))
+                or _clean_cif_value(row.get("label_comp_id"))
+                or "GLY"
+            ).upper()
+            if resname == "MSE":
+                resname = "MET"
+            if resname == "XPB":
+                resname = "GLY"
+            elem = (
+                _clean_cif_value(row.get("type_symbol"))
+                or atom_name.strip()[:1]
+                or "C"
+            ).upper()[:2]
+            atom_field = f" {atom_name:<3}" if len(atom_name) < 4 else atom_name[:4]
+            handle.write(
+                f"ATOM  {serial:5d} {atom_field} {resname:>3s} {record['chain']:1s}"
+                f"{record['resseq']:4d}    {x:8.3f}{y:8.3f}{z:8.3f}"
+                f"  1.00  0.00          {elem:>2s}\n"
+            )
+            serial += 1
+        handle.write("TER\nENDMDL\nEND\n")
+
+
+def _pdb_resseq(
+    raw_chain: str,
+    raw_resseq: str,
+    residue_numbers: dict[tuple[str, str], int],
+    next_residue: dict[str, int],
+) -> int:
+    try:
+        value = int(raw_resseq)
+    except ValueError:
+        key = (raw_chain, raw_resseq)
+        if key not in residue_numbers:
+            value = next_residue.get(raw_chain, 1)
+            residue_numbers[key] = value
+            next_residue[raw_chain] = value + 1
+        return residue_numbers[key]
+    next_residue[raw_chain] = max(next_residue.get(raw_chain, 1), value + 1)
+    return value
+
+
 def _canonical_candidate_from_design(
     design: dict[str, Any],
     index: int,
     *,
     params: ProteinMPNNInput,
     structure_path: str,
+    mpnn_input_pdb_path: str | None = None,
 ) -> dict[str, Any]:
     local_id = f"seq_{index:04d}"
     sequence = str(design.get("sequence") or "")
@@ -481,6 +720,10 @@ def _canonical_candidate_from_design(
         },
         "artifacts": {},
     }
+    if mpnn_input_pdb_path:
+        candidate["artifacts"]["proteinmpnn"] = {
+            "mpnn_input_pdb_path": mpnn_input_pdb_path,
+        }
     if params.candidates and _is_canonical_candidate(params.candidates[0]):
         upstream_scores = params.candidates[0].get("scores")
         if isinstance(upstream_scores, dict):
