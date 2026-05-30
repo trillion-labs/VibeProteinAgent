@@ -122,6 +122,12 @@ export VPA_VALIDATION_CLAUDE_MODEL="${VPA_VALIDATION_CLAUDE_MODEL:-sonnet}"
 export VPA_VALIDATION_OPENROUTER_MODEL="${VPA_VALIDATION_OPENROUTER_MODEL:-qwen/qwen3.5-9b}"
 mkdir -p "${VPA_HOME}" "${VPA_RUNTIME_DIR}" "${VPA_MODEL_CACHE}" "${HF_HOME}" "${TORCH_HOME}"
 
+if [[ "${VPA_VALIDATION_SKIP_PREFLIGHT:-0}" != "1" ]]; then
+  log "running deterministic preflight before live provider matrix"
+  run_py "${REPO_ROOT}/validation_runs/preflight_live_provider_matrix.py" \
+    | tee "${RUN_ROOT}/preflight_live_provider_matrix.json"
+fi
+
 STATUS_TSV="${RUN_ROOT}/status.tsv"
 CASE_EVENTS_TSV="${RUN_ROOT}/case_events.tsv"
 EXPECTED_CASES_TSV="${RUN_ROOT}/expected_cases.tsv"

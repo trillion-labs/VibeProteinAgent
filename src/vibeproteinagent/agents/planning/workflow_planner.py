@@ -242,7 +242,11 @@ def _candidate_tool_inventory(
             request_tokens,
         )
         scored.append((score, -index, name, tool))
-    selected = [tool for score, _neg_index, _name, tool in sorted(scored, reverse=True) if score > 0]
+    selected = [
+        tool
+        for score, _neg_index, _name, tool in sorted(scored, reverse=True)
+        if score > 0
+    ]
     if len(selected) < limit:
         selected.extend(
             tool
@@ -270,11 +274,11 @@ def _required_input_penalty(tool: dict[str, Any], request_tokens: set[str]) -> i
     if not isinstance(required, list):
         return 0
     penalty = 0
-    for field in required:
-        if not isinstance(field, str):
+    for field_name in required:
+        if not isinstance(field_name, str):
             continue
-        field_tokens = _text_tokens(field)
-        if field in _FILLABLE_TEXT_FIELDS:
+        field_tokens = _text_tokens(field_name)
+        if field_name in _FILLABLE_TEXT_FIELDS:
             continue
         if field_tokens and field_tokens & request_tokens:
             continue
@@ -670,7 +674,10 @@ def _validate_planner_ir_against_selected_tools(
                     PlannerIRViolation(
                         path=f"/nodes/{index}",
                         issue="placeholder_value_not_allowed",
-                        expected="Use known literal inputs or mark unknown values as missing_inputs.",
+                        expected=(
+                            "Use known literal inputs or mark unknown values "
+                            "as missing_inputs."
+                        ),
                     )
                 )
             continue
@@ -731,7 +738,8 @@ def _validate_planner_ir_against_selected_tools(
                             f"Root tool {tool_name!r} node {node.get('id')!r} is missing "
                             f"required executable inputs {missing_required}. Known inputs: "
                             f"{sorted(known)}. Valid root inputs: {root_input_fields(schema)}. "
-                            "Use a resolver/lookup producer first when exact identifiers are absent."
+                            "Use a resolver/lookup producer first when exact "
+                            "identifiers are absent."
                         ),
                         metadata={
                             "tool": tool_name,
@@ -770,11 +778,11 @@ def _validate_planner_ir_against_selected_tools(
         valid_fields = {str(name) for name in properties}
         if not isinstance(inputs, dict):
             continue
-        for field in inputs:
-            if str(field) not in valid_fields:
+        for input_field in inputs:
+            if str(input_field) not in valid_fields:
                 violations.append(
                     PlannerIRViolation(
-                        path=f"/nodes/{index}/inputs/{field}",
+                        path=f"/nodes/{index}/inputs/{input_field}",
                         issue="input_field_not_in_tool_schema",
                         expected=(
                             f"Tool {tool_name!r} inputs may use only fields from "
@@ -833,8 +841,8 @@ def _prepare_planner_ir_for_verification(
         if not isinstance(provenance, dict):
             provenance = {}
             node["input_provenance"] = provenance
-        for field in inputs:
-            provenance.setdefault(str(field), "planner_literal")
+        for input_field in inputs:
+            provenance.setdefault(str(input_field), "planner_literal")
         if isinstance(tool_name, str):
             mode_field = explicit_mode_input_field(tool_name)
             if mode_field != "mode" and "mode" in inputs and mode_field not in inputs:
@@ -848,12 +856,12 @@ def _prepare_planner_ir_for_verification(
         schema = schema_by_name.get(tool_name)
         properties = schema.get("properties") if isinstance(schema, dict) else None
         if isinstance(properties, dict):
-            for field in sorted(set(known_inputs) & set(properties)):
-                if field in inputs:
+            for input_field in sorted(set(known_inputs) & set(properties)):
+                if input_field in inputs:
                     continue
-                inputs[field] = known_inputs[field]
-                provenance[field] = "known_input"
-                satisfied_fields.add(field)
+                inputs[input_field] = known_inputs[input_field]
+                provenance[input_field] = "known_input"
+                satisfied_fields.add(input_field)
         if isinstance(tool_name, str):
             _apply_planner_default_inputs(
                 tool_name,
@@ -862,12 +870,12 @@ def _prepare_planner_ir_for_verification(
                 known_inputs=known_inputs,
                 defaulted_inputs=defaulted_inputs,
             )
-            satisfied_fields.update(str(field) for field in inputs)
-            for field in inputs:
-                provenance.setdefault(str(field), "planner_literal")
-        for field in list(provenance):
-            if field not in inputs:
-                provenance.pop(field, None)
+            satisfied_fields.update(str(input_field) for input_field in inputs)
+            for input_field in inputs:
+                provenance.setdefault(str(input_field), "planner_literal")
+        for input_field in list(provenance):
+            if input_field not in inputs:
+                provenance.pop(input_field, None)
     prepared["missing_inputs"] = _remaining_missing_inputs(
         prepared.get("missing_inputs"),
         satisfied_fields,
@@ -896,19 +904,19 @@ def _apply_planner_default_inputs(
             "reason": "user did not specify binder length; bounded compact-binder default",
         },
     }
-    for field, payload in defaults.items():
-        if field in inputs:
+    for input_field, payload in defaults.items():
+        if input_field in inputs:
             continue
-        if field in known_inputs:
-            inputs[field] = known_inputs[field]
+        if input_field in known_inputs:
+            inputs[input_field] = known_inputs[input_field]
             continue
-        inputs[field] = payload["value"]
+        inputs[input_field] = payload["value"]
         if defaulted_inputs is not None:
             defaulted_inputs.append(
                 {
                     "node_id": node_id,
                     "tool": tool_name,
-                    "field": field,
+                    "field": input_field,
                     **payload,
                 }
             )
@@ -1000,10 +1008,10 @@ def _missing_required_inputs_for_node(
     input_names = set(inputs) if isinstance(inputs, dict) else set()
     available = input_names | set(known_inputs) | set(wired_inputs or set())
     missing: list[str] = []
-    for field in _required_field_options(schema):
-        if field in available:
+    for input_field in _required_field_options(schema):
+        if input_field in available:
             continue
-        missing.append(field)
+        missing.append(input_field)
     if _schema_branch_satisfied(schema, available):
         return []
     return missing
@@ -1034,7 +1042,10 @@ def _term_source_input_fields(
         upstream_id = upstream.get("node")
         upstream_node = node_by_id.get(str(upstream_id))
         upstream_tool = upstream_node.get("tool") if isinstance(upstream_node, dict) else None
-        if isinstance(upstream_tool, str) and field in CANONICAL_TERM_PRODUCERS.get(upstream_tool, {}):
+        if (
+            isinstance(upstream_tool, str)
+            and field in CANONICAL_TERM_PRODUCERS.get(upstream_tool, {})
+        ):
             return {field}
     return set()
 
@@ -1729,31 +1740,51 @@ def _prior_round_context_payload(
     if prior_round_context is None:
         return None
     if is_dataclass(prior_round_context):
-        prompt_digest = getattr(prior_round_context, "prompt_digest", None)
-        if isinstance(prompt_digest, dict):
-            return {
-                "round_number": getattr(prior_round_context, "round_number", None),
-                "prior_decision_reason": getattr(
-                    prior_round_context,
-                    "prior_decision_reason",
-                    "",
-                ),
-                "digest": prompt_digest,
-            }
-        payload = asdict(prior_round_context)
-        payload.pop("surviving_candidates", None)
-        return payload
+        prompt_context = getattr(prior_round_context, "prompt_context", None)
+        if not isinstance(prompt_context, dict):
+            prompt_context = getattr(prior_round_context, "prompt_digest", None)
+        return _prompt_only_prior_round_payload(
+            round_number=getattr(prior_round_context, "round_number", None),
+            prior_decision_reason=getattr(
+                prior_round_context,
+                "prior_decision_reason",
+                "",
+            ),
+            prompt_context=prompt_context if isinstance(prompt_context, dict) else {},
+        )
     if isinstance(prior_round_context, dict):
-        payload = dict(prior_round_context)
-        payload.pop("surviving_candidates", None)
-        return payload
-    return {
-        "round_number": getattr(prior_round_context, "round_number"),
-        "prior_decision_reason": getattr(
+        prompt_context = prior_round_context.get("prompt_context")
+        if not isinstance(prompt_context, dict):
+            prompt_context = prior_round_context.get("digest")
+        return _prompt_only_prior_round_payload(
+            round_number=prior_round_context.get("round_number"),
+            prior_decision_reason=prior_round_context.get("prior_decision_reason", ""),
+            prompt_context=prompt_context if isinstance(prompt_context, dict) else {},
+        )
+    prompt_context = getattr(prior_round_context, "prompt_context", None)
+    if not isinstance(prompt_context, dict):
+        prompt_context = getattr(prior_round_context, "prompt_digest", None)
+    return _prompt_only_prior_round_payload(
+        round_number=getattr(prior_round_context, "round_number", None),
+        prior_decision_reason=getattr(
             prior_round_context,
             "prior_decision_reason",
+            "",
         ),
-        "summary": getattr(prior_round_context, "summary", None),
+        prompt_context=prompt_context if isinstance(prompt_context, dict) else {},
+    )
+
+
+def _prompt_only_prior_round_payload(
+    *,
+    round_number: Any,
+    prior_decision_reason: Any,
+    prompt_context: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "round_number": round_number,
+        "prior_decision_reason": prior_decision_reason,
+        "digest": prompt_context,
     }
 
 
@@ -2032,8 +2063,12 @@ def _validate_output_refs_against_input_schema(
                         "field": field,
                         "ref": ref,
                         "upstream_tool": getattr(upstream, "tool", None),
-                        "expected_types": sorted(_schema_possible_types(input_schema, input_root)),
-                        "actual_types": sorted(_schema_possible_types(output_schema, output_schema)),
+                        "expected_types": sorted(
+                            _schema_possible_types(input_schema, input_root)
+                        ),
+                        "actual_types": sorted(
+                            _schema_possible_types(output_schema, output_schema)
+                        ),
                         "hint": (
                             "Use an output field whose schema matches the target input; "
                             "for candidate rows prefer fields such as sequences, designs, "
@@ -2768,8 +2803,24 @@ class WorkflowPlanner:
                 "set_selected_modes": [
                     {"name": "tool_name", "selected_mode": "allowed_mode_or_null"}
                 ],
-                "add_nodes": [{"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}],
-                "replace_nodes": [{"id": "node_id", "tool": "tool_name", "intent": "...", "inputs": {}, "upstream": []}],
+                "add_nodes": [
+                    {
+                        "id": "node_id",
+                        "tool": "tool_name",
+                        "intent": "...",
+                        "inputs": {},
+                        "upstream": [],
+                    }
+                ],
+                "replace_nodes": [
+                    {
+                        "id": "node_id",
+                        "tool": "tool_name",
+                        "intent": "...",
+                        "inputs": {},
+                        "upstream": [],
+                    }
+                ],
                 "update_node_inputs": [{"node_id": "node_id", "inputs": {"field": "value"}}],
                 "set_missing_inputs": [],
                 "remove_node_ids": ["node_id"],
@@ -2809,7 +2860,14 @@ class WorkflowPlanner:
         patch = await self._ask_plan_verification_repair(
             planner_ir={},
             selected_tools=[
-                {"name": spec["name"], **({"selected_mode": spec["selected_mode"]} if "selected_mode" in spec else {})}
+                {
+                    "name": spec["name"],
+                    **(
+                        {"selected_mode": spec["selected_mode"]}
+                        if "selected_mode" in spec
+                        else {}
+                    ),
+                }
                 for spec in _candidate_tool_specs(selection)
             ],
             available_tools=available_tools,
@@ -2820,7 +2878,14 @@ class WorkflowPlanner:
         _empty_ir, repaired_tools = _apply_plan_verification_patch(
             planner_ir={},
             selected_tools=[
-                {"name": spec["name"], **({"selected_mode": spec["selected_mode"]} if "selected_mode" in spec else {})}
+                {
+                    "name": spec["name"],
+                    **(
+                        {"selected_mode": spec["selected_mode"]}
+                        if "selected_mode" in spec
+                        else {}
+                    ),
+                }
                 for spec in _candidate_tool_specs(selection)
             ],
             available_tools=available_tools,
@@ -2904,7 +2969,10 @@ class WorkflowPlanner:
                             {
                                 "path": "/selected_tools",
                                 "issue": "empty_tool_selection",
-                                "expected": "Select at least one available tool before Planner IR is called.",
+                                "expected": (
+                                    "Select at least one available tool before "
+                                    "Planner IR is called."
+                                ),
                             }
                         ],
                     },

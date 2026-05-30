@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.agents.config import AgentConfig
 from vibeproteinagent.agents.evaluation import decision as decision_mod
 from vibeproteinagent.agents.execution import ExecutionPolicy
@@ -51,6 +50,29 @@ def _candidate(candidate_id: str = "cand_prior") -> dict[str, Any]:
         "sequence": "ACDE",
         "scores": {"go_sequences": {"confidence": 0.8}},
         "artifacts": {},
+    }
+
+
+def _workflow_summary(
+    workflow_id: str,
+    job_id: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "workflow_id": workflow_id,
+        "state": "completed",
+        "job_ids": [job_id],
+        "nodes": [
+            {
+                "node_id": "go_candidates",
+                "tool": "go_sequences",
+                "state": "completed",
+                "job_id": job_id,
+                "output": {"candidates": candidates},
+            }
+        ],
+        "metrics_used": ["go_sequences.confidence"],
+        "top_designs": [],
     }
 
 
@@ -162,9 +184,28 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
         return await original_plan_v1(self, *args, **kwargs)
 
     monkeypatch.setattr(planner_mod.WorkflowPlanner, "_plan_v1", spy_plan_v1)
+    summarizer_records: list[dict[str, Any]] = []
+    original_summarize = controller_mod.MemorySummarizer.summarize
+
+    def spy_summarize(self, *args, **kwargs):
+        record = kwargs.get("latest_round_record")
+        if isinstance(record, dict):
+            summarizer_records.append(record)
+            assert "current_round_candidates" not in record
+            assert "survivor_pool" not in record
+        return original_summarize(self, *args, **kwargs)
+
+    monkeypatch.setattr(controller_mod.MemorySummarizer, "summarize", spy_summarize)
 
     async def fake_decide(self, *args, **kwargs):
-        del self, args, kwargs
+        del self
+        if args and isinstance(args[0], dict):
+            assert "survivor_pool" not in args[0]
+        prompt_context = kwargs.get("prompt_context")
+        assert isinstance(prompt_context, dict)
+        serialized = json.dumps(prompt_context, sort_keys=True)
+        assert "ACDE" not in serialized
+        assert "confidence\": 0.8" not in serialized
         return {
             "decision": "next_round",
             "reasoning": "Rank survivors in a second round.",
@@ -197,39 +238,28 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
             }
         )
         if len(captured["execute_calls"]) == 1:
+            raw_summary = _workflow_summary("wf_round1", "job_go", [_candidate()])
             return WorkflowExecutionOutcome(
                 "wf_round1",
                 "completed",
                 True,
-                {
-                    "workflow_id": "wf_round1",
-                    "state": "completed",
-                    "job_ids": ["job_go"],
-                    "nodes": [
-                        {
-                            "node_id": "go_candidates",
-                            "tool": "go_sequences",
-                            "state": "completed",
-                            "job_id": "job_go",
-                            "output": {"candidates": [_candidate()]},
-                        }
-                    ],
-                    "metrics_used": ["go_sequences.confidence"],
-                    "top_designs": [],
-                },
+                raw_summary,
+                raw_workflow_summary=raw_summary,
             )
+        raw_summary = {
+            "workflow_id": "wf_round2",
+            "state": "completed",
+            "job_ids": ["job_rank"],
+            "nodes": [],
+            "final_submission": {"submission_id": "sub_final"},
+            "metrics_used": ["rank_designs.score"],
+        }
         return WorkflowExecutionOutcome(
             "wf_round2",
             "completed",
             True,
-            {
-                "workflow_id": "wf_round2",
-                "state": "completed",
-                "job_ids": ["job_rank"],
-                "nodes": [],
-                "final_submission": {"submission_id": "sub_final"},
-                "metrics_used": ["rank_designs.score"],
-            },
+            raw_summary,
+            raw_workflow_summary=raw_summary,
         )
 
     monkeypatch.setattr(controller_mod.AgentController, "_execute_validated_plan", fake_execute)
@@ -239,11 +269,12 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
 
     assert report["state"] == "completed"
     assert calls == {"plan_v1": 2}
+    assert summarizer_records
     assert not hasattr(controller, "_maybe_compile_planner_ir")
     round2_prior_context = captured["execute_calls"][1]["prior_round_context"]
     assert isinstance(round2_prior_context, PriorRoundContext)
     assert round2_prior_context.round_number == 2
-    assert round2_prior_context.surviving_candidates == [_candidate()]
+    assert round2_prior_context.survivor_snapshot_id is not None
     assert round2_prior_context.prior_decision_reason == (
         "Survivors need ranking before final submission."
     )

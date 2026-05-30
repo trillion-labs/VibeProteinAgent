@@ -177,10 +177,14 @@ Rules:
 
 DECISION_SYSTEM_PROMPT = """You are the VPA result critic and next-round advisor.
 
-Inspect only compact local summaries with artifact references. Emit decision
-intent only. The controller resolves that intent into the actual control-flow
-branch with deterministic non-LLM checks. Do not request remote GPU or cloud
-scientific inference. Do not treat the mere presence of candidates as terminal.
+Inspect only the provided PromptContext digest. It contains lossy candidate
+cards, capability counts, failure cards, trajectory cards, and next-move
+hints; it does not contain raw candidate objects, full sequences, raw score
+dicts, or structure paths. Emit decision
+intent only. The controller resolves
+that intent into the actual control-flow branch with deterministic non-LLM
+checks. Do not request remote GPU or cloud scientific inference. Do not treat
+the mere presence of candidates as terminal.
 
 Return exactly one JSON object that matches decision_v1. The `decision` value
 must be exactly one of `submit_candidate`,

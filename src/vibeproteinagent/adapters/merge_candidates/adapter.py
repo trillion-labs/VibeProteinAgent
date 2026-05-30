@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, Field, field_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.agents.planning.candidate_merge import merge_candidate_records
 
 
 class MergeCandidatesInput(BaseModel):
@@ -22,7 +24,10 @@ class MergeCandidatesInput(BaseModel):
     ) -> list[list[dict[str, Any]]]:
         for candidate_set in candidate_sets:
             for candidate in candidate_set:
-                validate_candidate_v1(candidate)
+                try:
+                    validate_candidate_v1(candidate)
+                except JsonSchemaValidationError as exc:
+                    raise ValueError(f"invalid candidate_v1: {exc.message}") from exc
         return candidate_sets
 
 
@@ -42,26 +47,21 @@ class MergeCandidatesAdapter(ToolAdapter):
         ctx: AdapterRunContext,
     ) -> MergeCandidatesOutput:
         ctx.emit_progress(0.0)
-        merged, duplicates_removed = _merge(params.candidate_sets)
+        result = merge_candidate_records(params.candidate_sets)
         ctx.emit_progress(1.0)
         return MergeCandidatesOutput(
-            candidates=merged,
+            candidates=result.candidates,
             merge_audit={
                 "input_counts": [len(candidate_set) for candidate_set in params.candidate_sets],
-                "output_count": len(merged),
+                "output_count": len(result.candidates),
                 "dedup_policy": params.dedup_policy,
-                "duplicates_removed": duplicates_removed,
+                "duplicates_removed": result.audit["duplicates_removed"],
+                "duplicate_groups": result.audit["duplicate_groups"],
+                "conflicts": result.audit["conflicts"],
             },
         )
 
     def estimate_vram(self, params: MergeCandidatesInput) -> int:
         return 0
-
-
-def _merge(
-    candidate_sets: list[list[dict[str, Any]]],
-) -> tuple[list[dict[str, Any]], int]:
-    return [candidate for candidate_set in candidate_sets for candidate in candidate_set], 0
-
 
 __all__ = ["MergeCandidatesAdapter", "MergeCandidatesInput", "MergeCandidatesOutput"]

@@ -20,7 +20,10 @@ from vibeproteinagent.agents.planning.fixup import (
     StructuredFixup,
     apply_enum_fixup_choice,
 )
-from vibeproteinagent.agents.planning.workflow_planner import WorkflowPlanner
+from vibeproteinagent.agents.planning.workflow_planner import (
+    WorkflowPlanner,
+    _prior_round_context_payload,
+)
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse
 from vibeproteinagent.workspace import Workspace
 
@@ -46,8 +49,9 @@ class _PlannerProvider:
 def _prior_context() -> PriorRoundContext:
     return PriorRoundContext(
         round_number=2,
-        surviving_candidates=[{"schema_version": "candidate_v1", "candidate_id": "c1"}],
         prior_decision_reason="Continue with survivors.",
+        survivor_snapshot_id="snap_survivors",
+        prompt_context={"latest_round": {"survivor_pool_summary": {"count": 1}}},
     )
 
 
@@ -182,6 +186,44 @@ def test_plan_v1_prompt_includes_prior_round_with_context() -> None:
     user_message = json.loads(provider.messages[1][1].content)
     assert "prior_round_context" in user_message
     assert "prior_round" in user_message["canonical_wiring"]["candidate_producers"]
+    assert "surviving_candidates" not in user_message["prior_round_context"]
+    assert "survivor_snapshot_id" not in user_message["prior_round_context"]
+
+
+def test_prior_round_payload_omits_snapshot_and_raw_candidates() -> None:
+    payload = _prior_round_context_payload(
+        {
+            "round_number": 2,
+            "prior_decision_reason": "continue",
+            "surviving_candidates": [{"candidate_id": "c1"}],
+            "candidates": [{"candidate_id": "c2"}],
+            "raw_candidates": [{"candidate_id": "c3"}],
+            "current_round_candidates": [{"candidate_id": "c4"}],
+            "survivor_pool": [{"candidate_id": "c5"}],
+            "survivor_snapshot_id": "snap_survivor",
+            "candidate_snapshot_id": "snap_candidate",
+            "current_snapshot_id": "snap_current",
+            "raw_workflow_summary": {"nodes": []},
+            "workflow_summary_raw": {"nodes": []},
+            "digest": {"latest_round": {"survivor_pool_summary": {"count": 5}}},
+        }
+    )
+
+    assert payload is not None
+    for key in (
+        "surviving_candidates",
+        "candidates",
+        "raw_candidates",
+        "current_round_candidates",
+        "survivor_pool",
+        "survivor_snapshot_id",
+        "candidate_snapshot_id",
+        "current_snapshot_id",
+        "raw_workflow_summary",
+        "workflow_summary_raw",
+    ):
+        assert key not in payload
+    assert payload["digest"]["latest_round"]["survivor_pool_summary"]["count"] == 5
 
 
 def test_compiler_rejects_first_round_prior_round_reference() -> None:
@@ -213,23 +255,21 @@ def test_compiler_allows_prior_round_when_context_exists() -> None:
     )
 
 
-def test_compiler_uses_actual_prior_round_candidate_capabilities() -> None:
+def test_compiler_uses_prompt_context_prior_round_candidate_capabilities() -> None:
     context = PriorRoundContext(
         round_number=2,
-        surviving_candidates=[
-            {
-                "schema_version": "candidate_v1",
-                "candidate_id": "seq_only",
-                "sequence": "ACDE",
-                "capabilities": {
-                    "has_sequence": True,
-                    "has_backbone_structure": False,
-                    "has_full_structure": False,
-                    "has_candidate_scores": False,
-                },
-            }
-        ],
         prior_decision_reason="Continue with sequence-only survivor.",
+        prompt_context={
+            "latest_round": {
+                "capability_summary": {
+                    "survivor_pool": {
+                        "count": 1,
+                        "capability_counts": {"has_sequence": 1},
+                        "truncated": False,
+                    }
+                }
+            }
+        },
     )
     ir = {
         "version": "planner_ir_v1",

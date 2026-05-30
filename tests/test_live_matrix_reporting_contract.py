@@ -236,8 +236,13 @@ def test_live_matrix_script_keeps_clean_run_guardrails() -> None:
         cwd=Path.cwd(),
     )
     assert "bash -n \"${SCRIPT_PATH}\"" in script
+    assert "preflight_live_provider_matrix.py" in script
+    assert "VPA_VALIDATION_SKIP_PREFLIGHT" in script
     assert "case_status" in script
     assert "output directory is not empty; use a clean run directory" in script
     assert "output directory already contains matrix result files" in script
-    assert 'final_submission.get("outcome") not in {"accepted", "no_acceptable_candidate"}' in script
+    assert (
+        'final_submission.get("outcome") not in {"accepted", "no_acceptable_candidate"}'
+        in script
+    )
     assert 'result.get("technical_failure") is not False' in script

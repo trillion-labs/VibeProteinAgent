@@ -61,6 +61,7 @@ def _write_mpnn_pdb(cif_path: Path, pdb_path: Path) -> None:
     # temporary MPNN input; the returned CIF keeps the original coordinates.
     scale = 200.0 / max_abs if max_abs > 200.0 else 1.0
     with pdb_path.open("w") as fh:
+        fh.write("MODEL        1\n")
         for serial, row in enumerate(rows, 1):
             x = (float(row["Cartn_x"]) - mean_x) * scale
             y = (float(row["Cartn_y"]) - mean_y) * scale
@@ -78,7 +79,7 @@ def _write_mpnn_pdb(cif_path: Path, pdb_path: Path) -> None:
                 f"{resseq:4d}    {x:8.3f}{y:8.3f}{z:8.3f}"
                 f"  1.00  0.00          {elem:>2s}\n"
             )
-        fh.write("TER\nEND\n")
+        fh.write("TER\nENDMDL\nEND\n")
 
 
 def materialize_preview_outputs(

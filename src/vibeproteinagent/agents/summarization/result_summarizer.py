@@ -9,7 +9,11 @@ from .artifact_summarizer import ArtifactSummarizer
 
 
 class ResultSummarizer:
-    """Build compact result packets from persisted jobs/workflows."""
+    """Build display/local-summary packets from persisted jobs/workflows.
+
+    These summaries are not candidate materialization sources. Full candidate
+    payloads belong in raw workflow storage and CandidateArchive records.
+    """
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
@@ -26,7 +30,7 @@ class ResultSummarizer:
             "params_hash": job.params_hash,
             "workflow_id": job.workflow_id,
             "workflow_node_id": job.workflow_node_id,
-            "output": _compact(job.output),
+            "output": decision_safe_summary(_compact(job.output)),
             "artifacts": artifacts,
             "error": (
                 {
@@ -61,7 +65,7 @@ class ResultSummarizer:
                     "tool": n.tool_name,
                     "state": n.state,
                     "job_id": n.job_id,
-                    "output": _compact(n.output),
+                    "output": decision_safe_summary(_compact(n.output)),
                     "artifacts": artifacts_by_job.get(n.job_id or "", {}),
                     "error_code": n.error_code,
                     "error_message": n.error_message,
@@ -78,11 +82,71 @@ class ResultSummarizer:
         }
 
 
+def decision_safe_summary(value: Any) -> Any:
+    """Remove audit-only duplicate lineage from display/local decision summaries.
+
+    This is not the source for LLM decision prompts; those receive the lossy
+    PromptContext contract instead.
+    """
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [decision_safe_summary(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("schema_version") == "candidate_v1":
+        return _candidate_display_card(value)
+    out: dict[str, Any] = {}
+    for key, item in value.items():
+        key_str = str(key)
+        if key_str == "merge_audit" and isinstance(item, dict):
+            out[key_str] = _count_only_merge_audit(item)
+            continue
+        if key_str.startswith("__candidate_merge") or key_str in {
+            "duplicate_groups",
+            "versions",
+        }:
+            continue
+        out[key_str] = decision_safe_summary(item)
+    return out
+
+
+def _count_only_merge_audit(audit: dict[str, Any]) -> dict[str, Any]:
+    duplicate_groups = audit.get("duplicate_groups")
+    conflicts = audit.get("conflicts")
+    summary: dict[str, Any] = {
+        "duplicates_removed": _int_or_zero(audit.get("duplicates_removed")),
+        "duplicate_group_count": (
+            len(duplicate_groups)
+            if isinstance(duplicate_groups, list)
+            else _int_or_zero(audit.get("duplicate_group_count"))
+        ),
+        "conflict_count": (
+            len(conflicts)
+            if isinstance(conflicts, list)
+            else _int_or_zero(audit.get("conflict_count"))
+        ),
+    }
+    if "output_count" in audit:
+        summary["output_count"] = _int_or_zero(audit.get("output_count"))
+    if audit.get("dedup_policy") is not None:
+        summary["dedup_policy"] = str(audit.get("dedup_policy"))
+    return summary
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _compact(value: Any, *, depth: int = 0) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict) and value.get("schema_version") == "candidate_v1":
-        return dict(value)
+        return _candidate_display_card(value)
     if depth >= 3:
         return f"<{type(value).__name__}>"
     if isinstance(value, list):
@@ -96,6 +160,88 @@ def _compact(value: Any, *, depth: int = 0) -> Any:
             out[str(key)] = _compact(val, depth=depth + 1)
         return out
     return str(value)
+
+
+def _candidate_display_card(candidate: dict[str, Any]) -> dict[str, Any]:
+    card: dict[str, Any] = {
+        "schema_version": "candidate_v1",
+        "candidate_id": candidate.get("candidate_id"),
+    }
+    source = _candidate_source_card(candidate.get("source"))
+    if source:
+        card["source"] = source
+    capabilities = _candidate_capability_flags(candidate.get("capabilities"))
+    if capabilities:
+        card["capabilities"] = capabilities
+    modalities = _candidate_available_modalities(candidate, capabilities)
+    if modalities:
+        card["available_modalities"] = modalities
+    sequence = candidate.get("sequence")
+    if isinstance(sequence, str):
+        card["sequence_length"] = len(sequence)
+    scores = candidate.get("scores")
+    if isinstance(scores, dict):
+        card["score_keys"] = sorted(str(key) for key in scores)
+    artifacts = candidate.get("artifacts")
+    if isinstance(artifacts, dict):
+        card["artifact_keys"] = sorted(str(key) for key in artifacts)
+    for field, output_field in (
+        ("structure_path", "has_structure_path"),
+        ("backbone_path", "has_backbone_path"),
+        ("full_structure_path", "has_full_structure_path"),
+    ):
+        if isinstance(candidate.get(field), str) and candidate.get(field).strip():
+            card[output_field] = True
+    status = candidate.get("status")
+    if isinstance(status, (str, int, float, bool)):
+        card["status"] = status
+    return {key: value for key, value in card.items() if value not in (None, {}, [])}
+
+
+def _candidate_source_card(source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
+    allowed = {
+        "tool",
+        "node_id",
+        "job_id",
+        "workflow_id",
+        "adapter",
+        "source_kind",
+        "local_id",
+    }
+    return {
+        str(key): value
+        for key, value in source.items()
+        if key in allowed and isinstance(value, (str, int, float, bool))
+    }
+
+
+def _candidate_capability_flags(capabilities: Any) -> dict[str, bool]:
+    if not isinstance(capabilities, dict):
+        return {}
+    return {
+        str(key): bool(value)
+        for key, value in capabilities.items()
+        if isinstance(value, bool) or str(key).startswith("has_")
+    }
+
+
+def _candidate_available_modalities(
+    candidate: dict[str, Any],
+    capabilities: dict[str, bool],
+) -> list[str]:
+    modalities = [key.removeprefix("has_") for key, value in capabilities.items() if value]
+    if isinstance(candidate.get("sequence"), str):
+        modalities.append("sequence")
+    for field, modality in (
+        ("structure_path", "structure"),
+        ("backbone_path", "backbone_structure"),
+        ("full_structure_path", "full_structure"),
+    ):
+        if isinstance(candidate.get(field), str) and candidate.get(field).strip():
+            modalities.append(modality)
+    return sorted(set(modalities))
 
 
 def _extract_metric_names(nodes: list[Any]) -> list[str]:

@@ -18,9 +18,8 @@ from vibeproteinagent.workspace import JobState, JobStore, Workspace
 
 def _run_pending_jobs(store: JobStore, registry: ToolRegistry, stop: threading.Event) -> None:
     import typing
-    import torch
 
-    device = torch.device("cpu")
+    device = "cpu"
     weights_dir = Path("/tmp/vpa_test_weights")
     weights_dir.mkdir(exist_ok=True)
     while not stop.is_set():
@@ -235,56 +234,62 @@ def test_memory_bank_summarizes_empty_facets_and_capability_filter_events() -> N
     from vibeproteinagent.agents.execution.memory_bank import MemoryBank
 
     bank = MemoryBank()
-    record = bank.record_round(
-        round_index=0,
-        workflow_summary={
-            "workflow_id": "wf_test",
-            "state": "completed",
-            "nodes": [
-                {
-                    "node_id": "resolver",
-                    "tool": "function_term_resolver",
-                    "state": "completed",
-                    "output": {
-                        "empty_facets": [
-                            {
-                                "event_type": "empty_candidate_event",
-                                "intent_id": "facet_b",
-                            }
-                        ]
-                    },
-                },
-                {
-                    "node_id": "sequence_metrics",
-                    "tool": "sequence_analysis",
-                    "state": "completed",
-                    "output": {
-                        "candidate_capability_filter_event": {
-                            "status": "partitioned",
-                            "filtered_candidates": [{"candidate_id": "cand_backbone"}],
+    workflow_summary = {
+        "workflow_id": "wf_test",
+        "state": "completed",
+        "nodes": [
+            {
+                "node_id": "resolver",
+                "tool": "function_term_resolver",
+                "state": "completed",
+                "output": {
+                    "empty_facets": [
+                        {
+                            "event_type": "empty_candidate_event",
+                            "intent_id": "facet_b",
                         }
+                    ]
+                },
+            },
+            {
+                "node_id": "sequence_metrics",
+                "tool": "sequence_analysis",
+                "state": "completed",
+                "output": {
+                    "candidate_capability_filter_event": {
+                        "status": "partitioned",
+                        "filtered_candidates": [{"candidate_id": "cand_backbone"}],
+                    }
+                },
+            },
+            {
+                "node_id": "struct_metrics",
+                "tool": "structure_analysis",
+                "state": "skipped",
+                "output": {
+                    "status": "skipped_missing_candidate_capability",
+                    "candidate_capability_filter_event": {
+                        "status": "all_incompatible",
+                        "filtered_candidates": [{"candidate_id": "cand_seq"}],
+                        "compatible_candidate_count": 0,
+                        "skipped_candidate_count": 1,
                     },
                 },
-                {
-                    "node_id": "struct_metrics",
-                    "tool": "structure_analysis",
-                    "state": "skipped",
-                    "output": {
-                        "status": "skipped_missing_candidate_capability",
-                        "candidate_capability_filter_event": {
-                            "status": "all_incompatible",
-                            "filtered_candidates": [{"candidate_id": "cand_seq"}],
-                            "compatible_candidate_count": 0,
-                            "skipped_candidate_count": 1,
-                        },
-                    },
-                },
-            ],
-        },
-        current_round_candidates=[],
-        survivor_pool=[],
-        max_round_reached=False,
+            },
+        ],
+    }
+    bank.record_round_raw(
+        run_id="arun_test",
+        round_index=0,
+        workflow_id="wf_test",
+        workflow_summary_raw=workflow_summary,
+        candidate_snapshot_id="csnap_current",
+        survivor_snapshot_id="csnap_survivor",
     )
+    record = bank.latest_round_record()
+    assert record is not None
+    record["current_round_candidate_summary"] = {"count": 0, "items": [], "truncated": False}
+    record["survivor_pool_summary"] = {"count": 0, "items": [], "truncated": False}
 
     assert record["empty_candidate_events"][0]["intent_id"] == "facet_b"
     assert record["candidate_capability_filter_events"][0]["node_id"] == "sequence_metrics"
@@ -368,7 +373,10 @@ def test_runtime_item_count_gate_skips_single_candidate_stream(
     assert workflow_state == "completed"
     assert states["pair_consumer"] == "skipped"
     assert outputs["pair_consumer"]["status"] == "skipped_missing_candidate_capability"
-    assert outputs["pair_consumer"]["candidate_capability_filter_event"]["status"] == "all_incompatible"
+    assert (
+        outputs["pair_consumer"]["candidate_capability_filter_event"]["status"]
+        == "all_incompatible"
+    )
     assert outputs["pair_consumer"]["candidate_capability_filter_event"][
         "missing_capabilities"
     ] == ["at_least_2_candidate_items"]

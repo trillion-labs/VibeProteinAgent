@@ -25,6 +25,7 @@ class AgentSessionStore:
         conn = self.workspace.connect()
         try:
             _create_agent_tables(conn)
+            _ensure_agent_table_columns(conn)
         finally:
             conn.close()
 
@@ -266,6 +267,185 @@ class AgentSessionStore:
             conn.close()
         return decision_id
 
+    def add_memory_event(self, event: dict[str, Any]) -> str:
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO agent_memory_events (
+                  event_id, run_id, round_index, workflow_id, event_type,
+                  payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["event_id"],
+                    event["run_id"],
+                    int(event["round_index"]),
+                    event.get("workflow_id"),
+                    event["event_type"],
+                    canonical_json(event.get("payload") or {}),
+                    int(event["created_at"]),
+                ),
+            )
+        finally:
+            conn.close()
+        return str(event["event_id"])
+
+    def add_candidate_record(self, run_id: str, record: dict[str, Any]) -> str:
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO agent_candidate_records (
+                  run_id, candidate_id, version_id, round_index, workflow_id,
+                  node_id, job_id, status, candidate_json, raw_source_json,
+                  validation_errors_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    record["candidate_id"],
+                    record["version_id"],
+                    int(record["round_index"]),
+                    record.get("workflow_id"),
+                    record.get("node_id"),
+                    record.get("job_id"),
+                    record["status"],
+                    canonical_json(record.get("candidate") or {}),
+                    canonical_json(record.get("raw_source") or {}),
+                    canonical_json(record.get("validation_errors") or []),
+                    now_us(),
+                ),
+            )
+        finally:
+            conn.close()
+        return str(record["version_id"])
+
+    def add_candidate_snapshot(self, run_id: str, snapshot: dict[str, Any]) -> str:
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO agent_candidate_snapshots (
+                  run_id, snapshot_id, round_index, kind, candidate_ids_json,
+                  candidate_refs_json, workflow_ids_json, merge_audit_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    snapshot["snapshot_id"],
+                    int(snapshot["round_index"]),
+                    snapshot["kind"],
+                    canonical_json(snapshot.get("candidate_ids") or []),
+                    canonical_json(snapshot.get("candidate_refs") or []),
+                    canonical_json(snapshot.get("workflow_ids") or []),
+                    canonical_json(snapshot.get("merge_audit") or {}),
+                    now_us(),
+                ),
+            )
+        finally:
+            conn.close()
+        return str(snapshot["snapshot_id"])
+
+    def add_prompt_context(
+        self,
+        run_id: str,
+        round_index: int,
+        context: dict[str, Any],
+    ) -> str:
+        context_id = f"apctx_{uuid.uuid4().hex}"
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO agent_prompt_contexts (
+                  context_id, run_id, round_index, context_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (context_id, run_id, int(round_index), canonical_json(context), now_us()),
+            )
+        finally:
+            conn.close()
+        return context_id
+
+    def get_candidate_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        conn = self.workspace.connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT run_id, snapshot_id, round_index, kind, candidate_ids_json,
+                       candidate_refs_json, workflow_ids_json, merge_audit_json
+                FROM agent_candidate_snapshots
+                WHERE snapshot_id = ?
+                """,
+                (snapshot_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "snapshot_id": row["snapshot_id"],
+            "round_index": int(row["round_index"]),
+            "kind": row["kind"],
+            "candidate_ids": json.loads(row["candidate_ids_json"] or "[]"),
+            "candidate_refs": json.loads(row["candidate_refs_json"] or "[]"),
+            "workflow_ids": json.loads(row["workflow_ids_json"] or "[]"),
+            "merge_audit": json.loads(row["merge_audit_json"] or "{}"),
+        }
+
+    def get_candidate_record_by_version(self, version_id: str) -> dict[str, Any] | None:
+        conn = self.workspace.connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT run_id, candidate_id, version_id, round_index, workflow_id, node_id,
+                       job_id, status, candidate_json, raw_source_json,
+                       validation_errors_json
+                FROM agent_candidate_records
+                WHERE version_id = ?
+                """,
+                (version_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return _row_to_candidate_record(row)
+
+    def list_candidate_records(
+        self,
+        *,
+        run_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            args.append(run_id)
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            args.append(workflow_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        conn = self.workspace.connect()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT run_id, candidate_id, version_id, round_index, workflow_id, node_id,
+                       job_id, status, candidate_json, raw_source_json,
+                       validation_errors_json
+                FROM agent_candidate_records
+                {where}
+                ORDER BY round_index ASC, created_at ASC
+                """,
+                args,
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_row_to_candidate_record(row) for row in rows]
+
     def list_runs(self, *, limit: int = 50) -> list[AgentRunRecord]:
         conn = self.workspace.connect()
         try:
@@ -462,8 +642,80 @@ def _create_agent_tables(conn: sqlite3.Connection) -> None:
           created_at    INTEGER NOT NULL,
           FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS agent_memory_events (
+          event_id     TEXT PRIMARY KEY,
+          run_id       TEXT NOT NULL,
+          round_index  INTEGER NOT NULL,
+          workflow_id  TEXT,
+          event_type   TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at   INTEGER NOT NULL,
+          FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_memory_events_run
+          ON agent_memory_events(run_id, round_index, created_at);
+
+        CREATE TABLE IF NOT EXISTS agent_candidate_records (
+          run_id                 TEXT NOT NULL,
+          candidate_id           TEXT NOT NULL,
+          version_id             TEXT PRIMARY KEY,
+          round_index            INTEGER NOT NULL,
+          workflow_id            TEXT,
+          node_id                TEXT,
+          job_id                 TEXT,
+          status                 TEXT NOT NULL,
+          candidate_json         TEXT NOT NULL,
+          raw_source_json        TEXT NOT NULL,
+          validation_errors_json TEXT NOT NULL DEFAULT '[]',
+          created_at             INTEGER NOT NULL,
+          FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_candidate_records_run
+          ON agent_candidate_records(run_id, round_index, created_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_candidate_records_workflow
+          ON agent_candidate_records(workflow_id);
+
+        CREATE TABLE IF NOT EXISTS agent_candidate_snapshots (
+          run_id             TEXT NOT NULL,
+          snapshot_id         TEXT PRIMARY KEY,
+          round_index         INTEGER NOT NULL,
+          kind                TEXT NOT NULL,
+          candidate_ids_json  TEXT NOT NULL,
+          candidate_refs_json TEXT NOT NULL DEFAULT '[]',
+          workflow_ids_json   TEXT NOT NULL DEFAULT '[]',
+          merge_audit_json    TEXT NOT NULL,
+          created_at          INTEGER NOT NULL,
+          FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_prompt_contexts (
+          context_id   TEXT PRIMARY KEY,
+          run_id       TEXT NOT NULL,
+          round_index  INTEGER NOT NULL,
+          context_json TEXT NOT NULL,
+          created_at   INTEGER NOT NULL,
+          FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+        );
         """
     )
+
+
+def _ensure_agent_table_columns(conn: sqlite3.Connection) -> None:
+    snapshot_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(agent_candidate_snapshots)").fetchall()
+    }
+    if "candidate_refs_json" not in snapshot_cols:
+        conn.execute(
+            "ALTER TABLE agent_candidate_snapshots "
+            "ADD COLUMN candidate_refs_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "workflow_ids_json" not in snapshot_cols:
+        conn.execute(
+            "ALTER TABLE agent_candidate_snapshots "
+            "ADD COLUMN workflow_ids_json TEXT NOT NULL DEFAULT '[]'"
+        )
 
 
 def _row_to_run(row: sqlite3.Row) -> AgentRunRecord:
@@ -488,6 +740,22 @@ def _row_to_run(row: sqlite3.Row) -> AgentRunRecord:
         created_at=int(row["created_at"]),
         updated_at=int(row["updated_at"]),
     )
+
+
+def _row_to_candidate_record(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "run_id": row["run_id"] if "run_id" in row.keys() else None,
+        "candidate_id": row["candidate_id"],
+        "version_id": row["version_id"],
+        "round_index": int(row["round_index"]),
+        "workflow_id": row["workflow_id"],
+        "node_id": row["node_id"],
+        "job_id": row["job_id"],
+        "status": row["status"],
+        "candidate": json.loads(row["candidate_json"] or "{}"),
+        "raw_source": json.loads(row["raw_source_json"] or "{}"),
+        "validation_errors": json.loads(row["validation_errors_json"] or "[]"),
+    }
 
 
 __all__ = [

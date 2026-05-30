@@ -15,7 +15,15 @@
         "input_counts": {"type": "array", "items": {"type": "integer"}},
         "output_count": {"type": "integer"},
         "dedup_policy": {"type": "string", "enum": ["keep_all"]},
-        "duplicates_removed": {"type": "integer"}
+        "duplicates_removed": {"type": "integer"},
+        "duplicate_groups": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        }
       },
       "additionalProperties": false
     }

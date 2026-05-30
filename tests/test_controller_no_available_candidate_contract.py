@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Sequence
 from typing import Any
 
+import pytest
+
 from vibeproteinagent.agents.config import AgentConfig
 from vibeproteinagent.agents.execution.controller import AgentController, WorkflowExecutionOutcome
 from vibeproteinagent.agents.execution.policies import ExecutionPolicy
@@ -71,6 +73,25 @@ def _candidate(candidate_id: str) -> dict[str, Any]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _allow_mocked_workflow_plans(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        WorkflowPlanner,
+        "validate_invocation",
+        lambda self, plan, *args, **kwargs: None,
+    )
+
+
+def _completed_outcome(workflow_id: str, summary: dict[str, Any]) -> WorkflowExecutionOutcome:
+    return WorkflowExecutionOutcome(
+        workflow_id=workflow_id,
+        state="completed",
+        executed=True,
+        summary=summary,
+        raw_workflow_summary=summary,
+    )
+
+
 def test_max_round_empty_candidate_without_survivors_is_deterministic(
     tmp_workspace: Workspace,
     monkeypatch,
@@ -100,11 +121,9 @@ def test_max_round_empty_candidate_without_survivors_is_deterministic(
 
     def execute(self, *args, **kwargs):
         del self, args, kwargs
-        return WorkflowExecutionOutcome(
-            workflow_id="wf_empty",
-            state="completed",
-            executed=True,
-            summary={
+        return _completed_outcome(
+            "wf_empty",
+            {
                 "state": "completed",
                 "workflow_id": "wf_empty",
                 "job_ids": [],
@@ -192,11 +211,9 @@ def test_max_round_no_survivors_without_empty_event_is_deterministic(
 
     def execute(self, *args, **kwargs):
         del self, args, kwargs
-        return WorkflowExecutionOutcome(
-            workflow_id="wf_no_candidates",
-            state="completed",
-            executed=True,
-            summary={
+        return _completed_outcome(
+            "wf_no_candidates",
+            {
                 "state": "completed",
                 "workflow_id": "wf_no_candidates",
                 "job_ids": [],
@@ -254,7 +271,7 @@ def test_nonmax_empty_candidate_branches_next_round_without_decision_llm(
         if plan_calls["count"] == 2:
             prior = kwargs.get("prior_round_context")
             assert prior is not None
-            assert prior.surviving_candidates == []
+            assert prior.survivor_snapshot_id is not None
             assert prior.prompt_digest["latest_round"]["branch_decision"]["action"] == "next_round"
         return {
             "mode": "agent_plan",
@@ -281,11 +298,9 @@ def test_nonmax_empty_candidate_branches_next_round_without_decision_llm(
         del self, args
         execute_calls.append(kwargs)
         if len(execute_calls) == 1:
-            return WorkflowExecutionOutcome(
-                workflow_id="wf_empty",
-                state="completed",
-                executed=True,
-                summary={
+            return _completed_outcome(
+                "wf_empty",
+                {
                     "state": "completed",
                     "workflow_id": "wf_empty",
                     "job_ids": [],
@@ -306,11 +321,9 @@ def test_nonmax_empty_candidate_branches_next_round_without_decision_llm(
                     ],
                 },
             )
-        return WorkflowExecutionOutcome(
-            workflow_id="wf_done",
-            state="completed",
-            executed=True,
-            summary={
+        return _completed_outcome(
+            "wf_done",
+            {
                 "state": "completed",
                 "workflow_id": "wf_done",
                 "job_ids": [],
@@ -387,11 +400,9 @@ def test_partial_empty_event_with_current_candidates_uses_decision_llm(
     def execute(self, *args, **kwargs):
         del self, args, kwargs
         if plan_calls["count"] == 1:
-            return WorkflowExecutionOutcome(
-                workflow_id="wf_partial_empty",
-                state="completed",
-                executed=True,
-                summary={
+            return _completed_outcome(
+                "wf_partial_empty",
+                {
                     "state": "completed",
                     "workflow_id": "wf_partial_empty",
                     "job_ids": [],
@@ -418,11 +429,9 @@ def test_partial_empty_event_with_current_candidates_uses_decision_llm(
                     ],
                 },
             )
-        return WorkflowExecutionOutcome(
-            workflow_id="wf_done",
-            state="completed",
-            executed=True,
-            summary={
+        return _completed_outcome(
+            "wf_done",
+            {
                 "state": "completed",
                 "workflow_id": "wf_done",
                 "job_ids": [],

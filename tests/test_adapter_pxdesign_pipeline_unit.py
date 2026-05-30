@@ -33,6 +33,7 @@ from vibeproteinagent.adapters.pxdesign import (
     PXDESIGN_VENDOR,
     PXDesignAdapter,
     PXDesignInput,
+    _preview_fallback,
     availability_skip_reason,
     pipeline_env,
     pipeline_python,
@@ -694,6 +695,45 @@ def test_preview_pipeline_terminates_at_raw_cif_before_vendor_filtering(
     )
 
     assert events == ["popen", "terminate", "materialize"]
+
+
+def test_preview_fallback_mpnn_pdb_is_single_model(tmp_path: Path) -> None:
+    raw_cif = tmp_path / "design_sample_0.cif"
+    raw_cif.write_text(
+        "\n".join(
+            [
+                "data_design",
+                "loop_",
+                "_atom_site.group_PDB",
+                "_atom_site.type_symbol",
+                "_atom_site.label_atom_id",
+                "_atom_site.label_comp_id",
+                "_atom_site.label_asym_id",
+                "_atom_site.label_seq_id",
+                "_atom_site.Cartn_x",
+                "_atom_site.Cartn_y",
+                "_atom_site.Cartn_z",
+                "ATOM N N ALA A 1 1.0 2.0 3.0",
+                "ATOM C CA ALA A 1 2.0 2.0 3.0",
+                "ATOM C C ALA A 1 3.0 2.0 3.0",
+                "ATOM N N XPB B 1 6.0 2.0 3.0",
+                "ATOM C CA XPB B 1 7.0 2.0 3.0",
+                "#",
+            ]
+        )
+        + "\n"
+    )
+    pdb_path = tmp_path / "mpnn_input.pdb"
+
+    _preview_fallback._write_mpnn_pdb(raw_cif, pdb_path)
+
+    lines = pdb_path.read_text().splitlines()
+    assert lines[0] == "MODEL        1"
+    assert lines[-2] == "ENDMDL"
+    assert lines[-1] == "END"
+    assert sum(1 for line in lines if line.startswith("MODEL")) == 1
+    assert sum(1 for line in lines if line.startswith("ENDMDL")) == 1
+    assert any(" GLY B" in line for line in lines if line.startswith("ATOM"))
 
 
 def test_collect_pipeline_outputs_handles_renamed_columns(tmp_path: Path) -> None:

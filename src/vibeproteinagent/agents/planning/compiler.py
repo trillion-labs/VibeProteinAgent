@@ -45,6 +45,9 @@ _PATH_FIELD_NAMES = frozenset(
         "input_cif",
     }
 )
+_AUX_CANDIDATE_STREAM_FIELDS_BY_TOOL = {
+    "rank_designs": frozenset({"predictions", "analyses", "qc_results"}),
+}
 
 
 def compile_planner_ir(
@@ -250,6 +253,7 @@ def _compile_node(
 
     _validate_explicit_mode(node_id=node_id, tool=tool, inputs=inputs)
     _sync_provenance_fields(provenance, inputs, default_source="planner_literal")
+    _drop_empty_planner_literal_aux_candidate_streams(tool, inputs, provenance)
 
     if not upstreams:
         return [_executor_node(node_id, tool, inputs, provenance)]
@@ -342,6 +346,23 @@ def _validate_explicit_mode(
             received_mode=received_mode,
             mode_field=mode_field,
         )
+
+
+def _drop_empty_planner_literal_aux_candidate_streams(
+    tool: str,
+    inputs: dict[str, Any],
+    provenance: dict[str, str],
+) -> None:
+    fields = _AUX_CANDIDATE_STREAM_FIELDS_BY_TOOL.get(tool)
+    if not fields:
+        return
+    for field in fields:
+        if inputs.get(field) != []:
+            continue
+        if provenance.get(field, "planner_literal") != "planner_literal":
+            continue
+        inputs.pop(field, None)
+        provenance.pop(field, None)
 
 
 def _validate_canonical_upstreams(
@@ -456,34 +477,32 @@ def _node_candidate_capabilities(
 def _prior_round_candidate_capabilities(prior_round_context: Any | None) -> set[str] | None:
     if prior_round_context is None:
         return None
-    candidates = getattr(prior_round_context, "surviving_candidates", None)
+    prompt_context = getattr(prior_round_context, "prompt_context", None)
     if isinstance(prior_round_context, dict):
-        candidates = prior_round_context.get("surviving_candidates")
-    if not isinstance(candidates, list):
+        prompt_context = (
+            prior_round_context.get("prompt_context")
+            or prior_round_context.get("digest")
+        )
+    return _prior_round_capabilities_from_prompt_context(prompt_context)
+
+
+def _prior_round_capabilities_from_prompt_context(value: Any) -> set[str]:
+    if not isinstance(value, dict):
         return set()
+    latest = value.get("latest_round") if isinstance(value.get("latest_round"), dict) else value
+    summary = latest.get("capability_summary") if isinstance(latest, dict) else None
     capabilities: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        candidate_caps = candidate.get("capabilities")
-        if isinstance(candidate_caps, dict):
-            capabilities.update(
-                str(name)
-                for name, value in candidate_caps.items()
-                if name.startswith("has_") and value is True
-            )
-        if candidate.get("sequence"):
-            capabilities.add("has_sequence")
-        if candidate.get("structure_path") or candidate.get("backbone_path"):
-            capabilities.add("has_backbone_structure")
-        if candidate.get("full_structure_path") or (
-            isinstance(candidate_caps, dict)
-            and candidate_caps.get("has_full_structure") is True
-        ):
-            capabilities.add("has_full_structure")
-        scores = candidate.get("scores")
-        if isinstance(scores, dict) and scores:
-            capabilities.add("has_candidate_scores")
+    if isinstance(summary, dict):
+        for section in ("survivor_pool", "survivor", "current_round"):
+            section_value = summary.get(section)
+            if not isinstance(section_value, dict):
+                continue
+            counts = section_value.get("capability_counts")
+            if isinstance(counts, dict):
+                capabilities.update(str(name) for name, count in counts.items() if count)
+        direct = summary.get("capabilities")
+        if isinstance(direct, dict):
+            capabilities.update(str(name) for name, count in direct.items() if count)
     return capabilities
 
 

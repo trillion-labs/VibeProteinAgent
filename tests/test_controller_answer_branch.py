@@ -8,13 +8,11 @@ from typing import Any
 import pytest
 
 from vibeproteinagent.agents.config import AgentConfig
-from vibeproteinagent.agents.evaluation import decision as decision_mod
 from vibeproteinagent.agents.execution.controller import (
     AgentController,
     WorkflowExecutionOutcome,
-    _candidate_pool_from_summary,
+    _candidate_pool_items_from_summary,
     _first_submit_candidate_ref,
-    _summary_has_candidate_pool,
 )
 from vibeproteinagent.agents.execution.policies import ExecutionPolicy
 from vibeproteinagent.agents.execution.run_result import AgentRunResult
@@ -74,26 +72,37 @@ def _run_controller(controller: AgentController, workspace: Workspace) -> dict[s
     )
 
 
+@pytest.fixture(autouse=True)
+def _allow_mocked_workflow_plans(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        WorkflowPlanner,
+        "validate_invocation",
+        lambda self, plan, *args, **kwargs: None,
+    )
+
+
 def _outcome(workflow_id: str, job_id: str) -> WorkflowExecutionOutcome:
+    summary = {
+        "state": "completed",
+        "workflow_id": workflow_id,
+        "job_ids": [job_id],
+        "metrics_used": ["pI"],
+        "nodes": [
+            {
+                "node_id": "analyze",
+                "tool": "noop",
+                "state": "completed",
+                "job_id": job_id,
+                "output": {"representative_sequences": [{"pI": 6.74}]},
+            }
+        ],
+    }
     return WorkflowExecutionOutcome(
         workflow_id=workflow_id,
         state="completed",
         executed=True,
-        summary={
-            "state": "completed",
-            "workflow_id": workflow_id,
-            "job_ids": [job_id],
-            "metrics_used": ["pI"],
-            "nodes": [
-                {
-                    "node_id": "analyze",
-                    "tool": "noop",
-                    "state": "completed",
-                    "job_id": job_id,
-                    "output": {"representative_sequences": [{"pI": 6.74}]},
-                }
-            ],
-        },
+        summary=summary,
+        raw_workflow_summary=summary,
     )
 
 
@@ -129,7 +138,6 @@ def test_metric_only_representative_sequences_are_not_candidate_pool() -> None:
         ]
     }
 
-    assert _summary_has_candidate_pool(summary) is False
     assert _first_submit_candidate_ref(summary) is None
 
 
@@ -154,7 +162,7 @@ def test_sequence_representative_sequences_are_candidate_pool() -> None:
         ]
     }
 
-    assert _summary_has_candidate_pool(summary) is True
+    assert _first_submit_candidate_ref(summary) is not None
 
 
 def test_legacy_candidate_materialization_drops_non_schema_metadata() -> None:
@@ -179,7 +187,7 @@ def test_legacy_candidate_materialization_drops_non_schema_metadata() -> None:
         ]
     }
 
-    pool = _candidate_pool_from_summary(summary)
+    pool = [dict(item["candidate"]) for item in _candidate_pool_items_from_summary(summary)]
 
     assert len(pool) == 1
     assert "metadata" not in pool[0]
@@ -397,7 +405,7 @@ def test_max_round_semantic_sequence_only_survivor_can_submit(
         submit_calls["count"] += 1
         candidate_ref = decision["submit_candidate"]["candidates"][0]
         assert candidate_ref["job_id"] == "job_sequence_summary"
-        assert candidate_ref["candidate_id"] == "noop:job_sequence_summary:design_1"
+        assert candidate_ref["candidate_id"] == "design_1"
         assert candidate_ref["index"] == 0
         return (
             {
@@ -427,7 +435,10 @@ def test_max_round_semantic_sequence_only_survivor_can_submit(
     assert report["decision"]["decision"] == "submit_candidate"
     assert report["decision"]["submit_job_id"] == "job_submit_sequence"
     assert report["decision"]["submission_policy"]["version"] == "terminal_submission_policy_v1"
-    assert "has_sequence" in report["decision"]["submission_policy"]["matched_candidate_capabilities"]
+    assert (
+        "has_sequence"
+        in report["decision"]["submission_policy"]["matched_candidate_capabilities"]
+    )
     assert report["result"] == {"workflow_ids": ["wf_semantic"], "state": "completed"}
 
 
@@ -501,7 +512,9 @@ def test_max_round_structure_contract_does_not_submit_sequence_only_candidate(
         config=AgentConfig(max_rounds=1, max_entries=3),
     )
     run = controller.session_store.create_run("structure contract test")
-    broker = AgentToolBroker(tmp_workspace, controller.registry, controller.session_store, run.run_id)
+    broker = AgentToolBroker(
+        tmp_workspace, controller.registry, controller.session_store, run.run_id
+    )
     report = asyncio.run(
         controller._run_agent_plan(
             run.run_id,
@@ -663,7 +676,10 @@ def test_multi_round_agent_can_end_with_non_submit_stop(
                 {
                     "decision": "next_round_with_surviving_candidate",
                     "reasoning": "Need a second local calculation.",
-                    "next_round": {"reason": "Compute the requested property.", "recommended": True},
+                    "next_round": {
+                        "reason": "Compute the requested property.",
+                        "recommended": True,
+                    },
                     "metrics_used": ["pI"],
                 },
             _no_acceptable_intent(),

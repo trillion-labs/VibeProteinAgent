@@ -21,8 +21,8 @@ def _ir(nodes: list[dict]) -> dict:
 def _prior_context() -> PriorRoundContext:
     return PriorRoundContext(
         round_number=2,
-        surviving_candidates=[],
         prior_decision_reason="Continue from the prior round.",
+        survivor_snapshot_id="csnap_survivor",
     )
 
 

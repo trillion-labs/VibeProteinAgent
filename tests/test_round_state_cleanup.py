@@ -148,7 +148,7 @@ def test_round_state_cleanup_after_normal_submission(
     _allow_tool_environment(monkeypatch)
     _patch_plan_v1(monkeypatch)
     controller = _controller(tmp_workspace)
-    controller._round_state = PriorRoundContext(99, [], "stale")
+    controller._round_state = PriorRoundContext(99, "stale")
 
     monkeypatch.setattr(
         controller_mod.AgentController,
@@ -184,7 +184,7 @@ def test_round_state_cleanup_after_exception(
     _allow_tool_environment(monkeypatch)
     _patch_plan_v1(monkeypatch)
     controller = _controller(tmp_workspace)
-    controller._round_state = PriorRoundContext(99, [], "stale")
+    controller._round_state = PriorRoundContext(99, "stale")
 
     def fail_execute(self, *args, **kwargs):
         del self, args, kwargs
@@ -287,7 +287,7 @@ def test_controller_reuse_does_not_leak_round_state(
     )
 
     _run_agent_plan(controller, tmp_workspace)
-    controller._round_state = PriorRoundContext(99, [{"candidate_id": "stale"}], "stale")
+    controller._round_state = PriorRoundContext(99, "stale")
     _run_agent_plan(controller, tmp_workspace)
 
     assert observed_prior_contexts == [None, None]

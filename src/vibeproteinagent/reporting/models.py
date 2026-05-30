@@ -72,7 +72,7 @@ class ReportCandidate:
     score: float | None = None
     sequence: str | None = None
     structure_path: str | None = None
-    scores: dict[str, float | int | str | None] = field(default_factory=dict)
+    scores: dict[str, Any] = field(default_factory=dict)
     qc_flags: list[str] = field(default_factory=list)
     liabilities: list[Any] = field(default_factory=list)
     source: dict[str, Any] = field(default_factory=dict)
@@ -254,6 +254,7 @@ class ReportModel:
     satisfied_semantic_facets: list[dict[str, Any]] = field(default_factory=list)
     empty_candidate_events: list[dict[str, Any]] = field(default_factory=list)
     candidate_capability_filter_events: list[dict[str, Any]] = field(default_factory=list)
+    candidate_merge_events: list[dict[str, Any]] = field(default_factory=list)
     parameter_resolution_events: list[dict[str, Any]] = field(default_factory=list)
     raw_summary: dict[str, Any] = field(default_factory=dict)
 

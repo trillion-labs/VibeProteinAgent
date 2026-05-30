@@ -97,17 +97,27 @@ def write_report(
 def _bundle_model(model: ReportModel, root: Path) -> ReportModel:
     path_map: dict[str, str] = {}
     structures_dir = root / "structures"
-    for idx, artifact in enumerate(model.artifacts, start=1):
-        src = Path(artifact.path)
+    structure_sources: list[tuple[str, str | None, str | None]] = [
+        (artifact.path, artifact.field, artifact.sha256 or artifact.artifact_id)
+        for artifact in model.artifacts
+    ]
+    structure_sources.extend(
+        (candidate.structure_path, candidate.candidate_id, None)
+        for candidate in [*model.candidates, *model.final_candidates]
+        if candidate.structure_path
+    )
+    for idx, (path, label, token_source) in enumerate(structure_sources, start=1):
+        src = Path(path)
         if not src.is_file() or src.suffix.lower() not in {".pdb", ".ent", ".cif", ".mmcif"}:
             continue
-        if artifact.path in path_map:
+        expanded = str(src.expanduser())
+        if path in path_map or expanded in path_map:
             continue
-        token = (artifact.sha256 or artifact.artifact_id or str(idx))[:12]
-        target = structures_dir / f"{_safe_filename(artifact.field)}_{token}{src.suffix}"
+        token = (token_source or str(idx))[:12]
+        target = structures_dir / f"{_safe_filename(label or 'structure')}_{token}{src.suffix}"
         shutil.copyfile(src, target)
-        path_map[artifact.path] = str(target)
-        path_map[str(src.expanduser())] = str(target)
+        path_map[path] = str(target)
+        path_map[expanded] = str(target)
 
     if not path_map:
         return model
@@ -122,7 +132,11 @@ def _bundle_model(model: ReportModel, root: Path) -> ReportModel:
 
     artifacts = [rewrite_artifact(artifact) for artifact in model.artifacts]
     nodes = [
-        replace(node, artifacts=[rewrite_artifact(artifact) for artifact in node.artifacts])
+        replace(
+            node,
+            output=_rewrite_paths(node.output, path_map),
+            artifacts=[rewrite_artifact(artifact) for artifact in node.artifacts],
+        )
         for node in model.graph.nodes
     ]
     candidates = [
@@ -133,11 +147,28 @@ def _bundle_model(model: ReportModel, root: Path) -> ReportModel:
         )
         for candidate in model.candidates
     ]
+    final_candidates = [
+        replace(
+            candidate,
+            structure_path=rewrite_path(candidate.structure_path),
+            artifacts=[rewrite_artifact(artifact) for artifact in candidate.artifacts],
+        )
+        for candidate in model.final_candidates
+    ]
     raw_summary = _rewrite_paths(model.raw_summary, path_map)
+    final_submission = _rewrite_paths(model.final_submission, path_map)
+    submissions = _rewrite_paths(model.submissions, path_map)
     return replace(
         model,
         graph=replace(model.graph, nodes=nodes),
         candidates=candidates,
+        final_candidates=final_candidates,
+        final_submission=(
+            final_submission
+            if isinstance(final_submission, dict) or final_submission is None
+            else model.final_submission
+        ),
+        submissions=submissions if isinstance(submissions, list) else model.submissions,
         artifacts=artifacts,
         raw_summary=raw_summary if isinstance(raw_summary, dict) else model.raw_summary,
     )
@@ -311,6 +342,7 @@ def render_report_html(
     show_msa = bool(model.msa_blocks)
     show_candidates = bool(model.final_submission or model.final_candidates or model.candidates)
     show_conversation = model.agent_transcript is not None
+    show_merge_audit = bool(model.candidate_merge_events)
     show_availability = bool(
         model.satisfied_semantic_facets
         or model.empty_candidate_events
@@ -323,6 +355,8 @@ def render_report_html(
         nav_items.append(("conversation", "Conversation", "❝"))
     if show_availability:
         nav_items.append(("availability", "Availability", "◌"))
+    if show_merge_audit:
+        nav_items.append(("merge-audit", "Merge audit", "◇"))
     if show_candidates:
         nav_items.append(("candidates", "Candidates", "★"))
     if show_workflow:
@@ -393,6 +427,9 @@ def render_report_html(
     )
     availability_section = (
         _candidate_availability_section(model) if show_availability else ""
+    )
+    merge_audit_section = (
+        _candidate_merge_audit_section(model) if show_merge_audit else ""
     )
 
     # ----- Candidates section -----
@@ -512,6 +549,7 @@ def render_report_html(
     {summary_card}
     {conversation_section}
     {availability_section}
+    {merge_audit_section}
     {candidates_section}
     {workflow_section}
     {plots_section}
@@ -620,6 +658,70 @@ def _candidate_availability_section(model: ReportModel) -> str:
   {filter_block}
   {parameter_block}
 </section>"""
+
+
+def _candidate_merge_audit_section(model: ReportModel) -> str:
+    items = "".join(
+        _candidate_merge_event_html(event)
+        for event in model.candidate_merge_events[:12]
+        if isinstance(event, dict)
+    )
+    return f"""<section id="merge-audit" class="card">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Candidate Merge Audit</p>
+      <h2 class="card-title">Duplicate Enrichment Merges</h2>
+    </div>
+    <span class="card-meta">{len(model.candidate_merge_events)} event(s)</span>
+  </header>
+  <p class="widget-explainer">Compact audit entries for duplicate candidate versions that were merged before reporting. Candidate cards show only the retained representative.</p>
+  <div class="artifact-list">{items}</div>
+</section>"""
+
+
+def _candidate_merge_event_html(event: dict[str, Any]) -> str:
+    groups = event.get("groups") if isinstance(event.get("groups"), list) else []
+    group_html = "".join(
+        _candidate_merge_group_pill_html(group)
+        for group in groups[:6]
+        if isinstance(group, dict)
+    )
+    counts = (
+        f'{event.get("duplicates_removed") or 0} merged / '
+        f'{event.get("duplicate_group_count") or 0} group(s) / '
+        f'{event.get("conflict_count") or 0} conflict(s)'
+    )
+    truncated = " · truncated" if event.get("truncated") else ""
+    return f"""
+      <div class="artifact-row">
+        <div>
+          <strong>{_h(str(event.get("node_id") or "merge_candidates"))}</strong>
+          <div class="artifact-meta">
+            <span class="artifact-pill"><strong>counts</strong> {_h(counts + truncated)}</span>
+            {group_html}
+          </div>
+        </div>
+        <code>{_h(str(event.get("tool") or ""))}</code>
+      </div>"""
+
+
+def _candidate_merge_group_pill_html(group: dict[str, Any]) -> str:
+    label = str(group.get("retained_candidate_id") or group.get("identity_key") or "candidate")
+    details = [
+        f"type {group.get('identity_type')}"
+        if group.get("identity_type")
+        else "",
+        f"versions {group.get('merged_count')}"
+        if group.get("merged_count") not in (None, "")
+        else "",
+    ]
+    tools = ", ".join(_bounded_str_list(group.get("source_tools"), limit=3))
+    if tools:
+        details.append(f"tools {tools}")
+    scores = ", ".join(_bounded_str_list(group.get("score_namespaces"), limit=3))
+    if scores:
+        details.append(f"scores {scores}")
+    return f'<span class="artifact-pill">{_h(label)}: {_h("; ".join(item for item in details if item))}</span>'
 
 
 def _satisfied_semantic_facet_html(facet: dict[str, Any]) -> str:

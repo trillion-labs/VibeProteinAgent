@@ -8,6 +8,7 @@ from vibeproteinagent.agents.config import resolve_decision_normalization_mode
 from vibeproteinagent.agents.planning.prompts import DECISION_SYSTEM_PROMPT
 from vibeproteinagent.agents.provider import ChatMessage
 from vibeproteinagent.agents.provider.types import ChatProvider
+from vibeproteinagent.agents.summarization.result_summarizer import decision_safe_summary
 from vibeproteinagent.core.errors import InvalidParamsError
 
 from .decision_validator import DecisionSchemaViolation, validate_decision_v1
@@ -26,15 +27,17 @@ class DecisionEngine:
         summary: dict[str, Any],
         *,
         success_criteria: dict[str, Any] | None = None,
+        prompt_context: dict[str, Any] | None = None,
         model: str | None = None,
         idempotency_key: str | None = None,
         retry_error: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        local = self.local_decision(summary, success_criteria=success_criteria)
+        safe_summary = decision_safe_summary(summary)
+        local = self.local_decision(safe_summary, success_criteria=success_criteria)
         if self.provider is None:
             return local
         payload = {
-            "summary": summary,
+            "prompt_context": prompt_context if isinstance(prompt_context, dict) else {},
             "success_criteria": success_criteria or {},
             "local_decision": local,
         }

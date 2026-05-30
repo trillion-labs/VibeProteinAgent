@@ -48,6 +48,25 @@ def _candidate() -> dict[str, Any]:
     }
 
 
+def _workflow_summary(workflow_id: str, job_id: str) -> dict[str, Any]:
+    return {
+        "workflow_id": workflow_id,
+        "state": "completed",
+        "job_ids": [job_id],
+        "nodes": [
+            {
+                "node_id": "go_candidates",
+                "tool": "go_sequences",
+                "state": "completed",
+                "job_id": job_id,
+                "output": {"candidates": [_candidate()]},
+            }
+        ],
+        "metrics_used": [],
+        "top_designs": [],
+    }
+
+
 def _selection(*tools: str) -> dict[str, Any]:
     return {
         "mode": "tool_selection",
@@ -152,31 +171,28 @@ def test_next_round_v1_plan_preserves_source_kind_and_skips_legacy_validators(
         del self, run_id, broker, params, policy, prior_round_context
         executed_plans.append(plan)
         if len(executed_plans) == 1:
+            raw_summary = _workflow_summary("wf1", "job_go")
             return WorkflowExecutionOutcome(
                 "wf1",
                 "completed",
                 True,
-                {
-                    "workflow_id": "wf1",
-                    "state": "completed",
-                    "job_ids": ["job_go"],
-                    "nodes": [{"output": {"candidates": [_candidate()]}}],
-                    "metrics_used": [],
-                    "top_designs": [],
-                },
+                raw_summary,
+                raw_workflow_summary=raw_summary,
             )
+        raw_summary = {
+            "workflow_id": "wf2",
+            "state": "completed",
+            "job_ids": ["job_rank"],
+            "nodes": [],
+            "final_submission": {"submission_id": "sub_final"},
+            "metrics_used": [],
+        }
         return WorkflowExecutionOutcome(
             "wf2",
             "completed",
             True,
-            {
-                "workflow_id": "wf2",
-                "state": "completed",
-                "job_ids": ["job_rank"],
-                "nodes": [],
-                "final_submission": {"submission_id": "sub_final"},
-                "metrics_used": [],
-            },
+            raw_summary,
+            raw_workflow_summary=raw_summary,
         )
 
     monkeypatch.setattr(controller_mod.AgentController, "_execute_validated_plan", fake_execute)

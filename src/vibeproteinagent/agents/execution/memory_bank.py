@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import copy
+import uuid
+from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from vibeproteinagent.workspace.store import now_us
 
 
 def _candidate_summary(candidates: list[dict[str, Any]], *, limit: int = 10) -> dict[str, Any]:
@@ -85,54 +89,146 @@ def _skipped_nodes(summary: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @dataclass
-class MemoryBank:
-    """Deterministic source-of-truth memory for multi-round agent execution."""
+class RawMemoryEvent:
+    event_id: str
+    run_id: str
+    round_index: int
+    workflow_id: str | None
+    event_type: str
+    payload: dict[str, Any]
+    created_at: int
 
+
+@dataclass
+class RoundLedgerRecord:
+    round_index: int
+    workflow_id: str | None
+    workflow_summary_raw: dict[str, Any]
+    candidate_snapshot_id: str | None
+    survivor_snapshot_id: str | None
+    decision_event_ids: list[str] = field(default_factory=list)
+    branch_event_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MemoryBank:
+    """Lossless in-process ledger for multi-round agent execution."""
+
+    raw_events: list[RawMemoryEvent] = field(default_factory=list)
+    round_ledgers: list[RoundLedgerRecord] = field(default_factory=list)
     round_records: list[dict[str, Any]] = field(default_factory=list)
     controller_branches: list[dict[str, Any]] = field(default_factory=list)
     raw_decision_outputs: list[dict[str, Any]] = field(default_factory=list)
-    survivor_pool: list[dict[str, Any]] = field(default_factory=list)
+    session_store: Any | None = None
 
-    def record_round(
+    def record_event(
         self,
         *,
+        run_id: str,
         round_index: int,
-        workflow_summary: dict[str, Any],
-        current_round_candidates: list[dict[str, Any]],
-        survivor_pool: list[dict[str, Any]],
-        max_round_reached: bool,
-        branch_decision: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        self.survivor_pool = [dict(candidate) for candidate in survivor_pool]
-        record = {
+        workflow_id: str | None,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> RawMemoryEvent:
+        event = RawMemoryEvent(
+            event_id=f"amev_{uuid.uuid4().hex}",
+            run_id=run_id,
+            round_index=int(round_index),
+            workflow_id=workflow_id,
+            event_type=event_type,
+            payload=copy.deepcopy(payload),
+            created_at=now_us(),
+        )
+        self.raw_events.append(event)
+        if self.session_store is not None and hasattr(self.session_store, "add_memory_event"):
+            self.session_store.add_memory_event(asdict(event))
+        return event
+
+    def record_round_raw(
+        self,
+        *,
+        run_id: str,
+        round_index: int,
+        workflow_id: str | None,
+        workflow_summary_raw: dict[str, Any],
+        candidate_snapshot_id: str | None,
+        survivor_snapshot_id: str | None,
+    ) -> RoundLedgerRecord:
+        event = self.record_event(
+            run_id=run_id,
+            round_index=round_index,
+            workflow_id=workflow_id,
+            event_type="workflow_round_raw",
+            payload=workflow_summary_raw,
+        )
+        record = RoundLedgerRecord(
+            round_index=int(round_index),
+            workflow_id=workflow_id,
+            workflow_summary_raw=copy.deepcopy(workflow_summary_raw),
+            candidate_snapshot_id=candidate_snapshot_id,
+            survivor_snapshot_id=survivor_snapshot_id,
+        )
+        self.round_ledgers.append(record)
+        legacy = {
             "round_index": round_index,
-            "workflow_id": workflow_summary.get("workflow_id"),
-            "state": workflow_summary.get("state"),
-            "empty_candidate_events": _empty_events(workflow_summary),
+            "workflow_id": workflow_id,
+            "state": workflow_summary_raw.get("state"),
+            "raw_event_id": event.event_id,
+            "candidate_snapshot_id": candidate_snapshot_id,
+            "survivor_snapshot_id": survivor_snapshot_id,
+            "workflow_summary_raw": copy.deepcopy(workflow_summary_raw),
+            "empty_candidate_events": _empty_events(workflow_summary_raw),
             "candidate_capability_filter_events": _capability_filter_events(
-                workflow_summary
+                workflow_summary_raw
             ),
-            "skipped_nodes": _skipped_nodes(workflow_summary),
-            "current_round_candidates": [dict(candidate) for candidate in current_round_candidates],
-            "current_round_candidate_summary": _candidate_summary(current_round_candidates),
-            "survivor_pool": [dict(candidate) for candidate in survivor_pool],
-            "survivor_pool_summary": _candidate_summary(survivor_pool),
-            "max_round_reached": max_round_reached,
-            "branch_decision": dict(branch_decision) if isinstance(branch_decision, dict) else None,
-            "workflow_summary": workflow_summary,
+            "skipped_nodes": _skipped_nodes(workflow_summary_raw),
         }
-        self.round_records.append(record)
+        self.round_records.append(legacy)
         return record
 
-    def record_branch(self, round_index: int, branch_decision: dict[str, Any]) -> None:
+    def record_branch(
+        self,
+        round_index: int,
+        branch_decision: dict[str, Any],
+        *,
+        run_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> None:
         entry = {"round_index": round_index, "branch_decision": dict(branch_decision)}
         self.controller_branches.append(entry)
+        if run_id is not None:
+            event = self.record_event(
+                run_id=run_id,
+                round_index=round_index,
+                workflow_id=workflow_id,
+                event_type="branch_decision",
+                payload=dict(branch_decision),
+            )
+            if self.round_ledgers and self.round_ledgers[-1].round_index == round_index:
+                self.round_ledgers[-1].branch_event_ids.append(event.event_id)
         if self.round_records and self.round_records[-1].get("round_index") == round_index:
             self.round_records[-1]["branch_decision"] = dict(branch_decision)
 
-    def record_decision(self, round_index: int, decision: dict[str, Any]) -> None:
+    def record_decision(
+        self,
+        round_index: int,
+        decision: dict[str, Any],
+        *,
+        run_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> None:
         entry = {"round_index": round_index, "decision": dict(decision)}
         self.raw_decision_outputs.append(entry)
+        if run_id is not None:
+            event = self.record_event(
+                run_id=run_id,
+                round_index=round_index,
+                workflow_id=workflow_id,
+                event_type="decision",
+                payload=dict(decision),
+            )
+            if self.round_ledgers and self.round_ledgers[-1].round_index == round_index:
+                self.round_ledgers[-1].decision_event_ids.append(event.event_id)
         if self.round_records and self.round_records[-1].get("round_index") == round_index:
             decisions = self.round_records[-1].setdefault("raw_decision_outputs", [])
             if isinstance(decisions, list):
@@ -158,14 +254,22 @@ class MemoryBank:
                     "current_round_candidate_summary": record.get(
                         "current_round_candidate_summary", {}
                     ),
+                    "current_round_merge_summary": record.get(
+                        "current_round_merge_summary", {}
+                    ),
                     "survivor_pool_summary": record.get("survivor_pool_summary", {}),
+                    "survivor_merge_summary": record.get("survivor_merge_summary", {}),
                     "max_round_reached": record.get("max_round_reached"),
                     "branch_decision": record.get("branch_decision"),
                 }
                 for record in rounds
             ],
-            "survivor_pool_summary": _candidate_summary(self.survivor_pool),
+            "survivor_pool_summary": (
+                dict(self.round_records[-1].get("survivor_pool_summary") or {})
+                if self.round_records
+                else _candidate_summary([])
+            ),
         }
 
 
-__all__ = ["MemoryBank"]
+__all__ = ["MemoryBank", "RawMemoryEvent", "RoundLedgerRecord"]

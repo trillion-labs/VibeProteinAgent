@@ -83,6 +83,12 @@ async def _decision_entry(
         return await DecisionEngine(provider).decide(
             {"state": "completed", "metrics_used": ["score"]},
             success_criteria={"return_final": True},
+            prompt_context={
+                "latest_round": {
+                    "state": "completed",
+                    "candidate_summary": {"count": 1, "items": []},
+                }
+            },
             model="fake",
             idempotency_key=f"decision:{attempt}",
             retry_error=retry_context,
@@ -150,3 +156,139 @@ def test_strict_decision_retry_cap_raises_final_schema_violation(
         asyncio.run(_decision_entry(controller, provider))
 
     assert len(provider.messages) == 2
+
+
+def test_decision_llm_receives_prompt_context_not_workflow_summary() -> None:
+    provider = _DecisionProvider(
+        [
+            {
+                "decision": "next_round_with_surviving_candidate",
+                "reasoning": "review prompt context",
+                "next_round": {"recommended": False, "reason": "done"},
+                "metrics_used": [],
+            }
+        ]
+    )
+    summary = {
+        "state": "completed",
+        "nodes": [
+            {
+                "node_id": "merge",
+                "tool": "merge_candidates",
+                "output": {
+                    "candidates": [
+                        {
+                            "schema_version": "candidate_v1",
+                            "candidate_id": "cand_x",
+                            "sequence": "ACDEFGHIKLMNPQRSTVWY",
+                            "scores": {"rank_designs": {"ranking_score": 0.91}},
+                            "structure_path": "/tmp/raw.pdb",
+                            "source": {"tool": "go_sequences", "local_id": "x"},
+                            "__candidate_merge_positions": [0, 1],
+                        }
+                    ],
+                    "merge_audit": {
+                        "dedup_policy": "keep_all",
+                        "output_count": 1,
+                        "duplicates_removed": 1,
+                        "duplicate_groups": [
+                            {
+                                "identity_key": "candidate_id:cand_x",
+                                "versions": [
+                                    {
+                                        "source": {
+                                            "tool": "go_sequences",
+                                            "native_id": "ACC1",
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                        "conflicts": [{"field": "scores.semantic_relevance"}],
+                    },
+                },
+            }
+        ],
+    }
+
+    asyncio.run(
+        DecisionEngine(provider).decide(
+            summary,
+            success_criteria={"review": True},
+            prompt_context={
+                "latest_round": {
+                    "state": "completed",
+                    "candidate_summary": {
+                        "count": 1,
+                        "items": [
+                            {
+                                "candidate_id": "cand_x",
+                                "source": {"tool": "go_sequences"},
+                                "score_keys": ["rank_designs"],
+                            }
+                        ],
+                    },
+                    "merge_summary": {
+                        "current_round": {
+                            "output_count": 1,
+                            "duplicate_group_count": 1,
+                        }
+                    },
+                }
+            },
+            model="fake",
+        )
+    )
+
+    payload = json.loads(provider.messages[0][1].content)
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "summary" not in payload
+    assert payload["prompt_context"]["latest_round"]["candidate_summary"]["count"] == 1
+    assert "ACDEFGHIKLMNPQRSTVWY" not in serialized
+    assert "ranking_score" not in serialized
+    assert "/tmp/raw.pdb" not in serialized
+    assert "duplicate_groups" not in serialized
+    assert "versions" not in serialized
+    assert "__candidate_merge_positions" not in serialized
+
+
+def test_decision_safe_summary_is_not_decision_llm_candidate_source() -> None:
+    provider = _DecisionProvider(
+        [
+            {
+                "decision": "next_round_with_no_acceptable_candidate",
+                "reasoning": "no prompt context candidates",
+                "next_round": {"recommended": False, "reason": "done"},
+                "metrics_used": [],
+            }
+        ]
+    )
+
+    asyncio.run(
+        DecisionEngine(provider).decide(
+            {
+                "state": "completed",
+                "nodes": [
+                    {
+                        "output": {
+                            "candidates": [
+                                {
+                                    "schema_version": "candidate_v1",
+                                    "candidate_id": "raw_candidate",
+                                    "sequence": "MMMMMMMMMMMMMMMM",
+                                    "scores": {"raw": {"score": 1.0}},
+                                }
+                            ]
+                        }
+                    }
+                ],
+            },
+            success_criteria={"review": True},
+            model="fake",
+        )
+    )
+
+    payload = json.loads(provider.messages[0][1].content)
+    assert payload["prompt_context"] == {}
+    assert "raw_candidate" not in json.dumps(payload)
+    assert "MMMMMMMMMMMMMMMM" not in json.dumps(payload)

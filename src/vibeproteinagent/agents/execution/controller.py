@@ -17,6 +17,10 @@ from vibeproteinagent.agents.config import (
 )
 from vibeproteinagent.agents.evaluation import DecisionEngine, DecisionSchemaViolation
 from vibeproteinagent.agents.planning import WorkflowPlanner
+from vibeproteinagent.agents.planning.candidate_merge import (
+    merge_candidate_records,
+    summarize_candidate_merge_audit,
+)
 from vibeproteinagent.agents.planning.compiler import (
     PLANNER_COMPILED_SOURCE_KIND,
     apply_fixup_choice,
@@ -42,9 +46,10 @@ from vibeproteinagent.workers.supervisor_client import SupervisorClient
 from vibeproteinagent.workflows import WorkflowExecutor, load_workflow
 from vibeproteinagent.workspace import Workspace
 
-from .policies import ExecutionPolicy
+from .candidate_archive import CandidateArchive
 from .memory_bank import MemoryBank
 from .memory_summarizer import MemorySummarizer
+from .policies import ExecutionPolicy
 from .round_state import PriorRoundContext
 from .run_result import AgentRunResult
 
@@ -58,6 +63,7 @@ class WorkflowExecutionOutcome:
     state: str
     executed: bool
     summary: dict[str, Any]
+    raw_workflow_summary: dict[str, Any] | None = None
 
 
 class AgentController:
@@ -78,6 +84,7 @@ class AgentController:
         self.session_store = session_store or AgentSessionStore(workspace)
         self.router = ModeRouter(self.registry)
         self._round_state: PriorRoundContext | None = None
+        self._candidate_archive: CandidateArchive | None = None
 
     def run_sync(
         self,
@@ -564,9 +571,12 @@ class AgentController:
         final_state = "submitted"
         final_result: AgentRunResult | None = None
         self._round_state = None
-        memory_bank = MemoryBank()
+        memory_bank = MemoryBank(session_store=self.session_store)
+        candidate_archive = CandidateArchive(self.workspace, session_store=self.session_store)
+        self._candidate_archive = candidate_archive
         prompt_digest: dict[str, Any] | None = None
         survivor_pool: list[dict[str, Any]] = []
+        survivor_snapshot_id: str | None = None
 
         for round_index in range(max(1, self.config.max_rounds)):
             prior_round_context = self._round_state
@@ -597,15 +607,58 @@ class AgentController:
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
-            current_round_candidates = self._collect_current_round_candidates(outcome.summary)
-            survivor_pool = _merge_candidate_pool(survivor_pool, current_round_candidates)
-            max_round_reached = round_index >= self.config.max_rounds - 1
-            round_record = memory_bank.record_round(
+            raw_workflow_summary = (
+                outcome.raw_workflow_summary
+                if outcome.raw_workflow_summary is not None
+                else candidate_archive.raw_workflow_summary(outcome.workflow_id)
+            )
+            current_snapshot = candidate_archive.ingest_workflow_round(
+                run_id=run_id,
                 round_index=round_index,
-                workflow_summary=outcome.summary,
-                current_round_candidates=current_round_candidates,
-                survivor_pool=survivor_pool,
-                max_round_reached=max_round_reached,
+                workflow_id=outcome.workflow_id,
+                raw_workflow_summary=raw_workflow_summary,
+            )
+            current_round_candidates = candidate_archive.materialize(
+                current_snapshot.snapshot_id
+            )
+            current_round_merge_summary = summarize_candidate_merge_audit(
+                current_snapshot.merge_audit
+            )
+            survivor_snapshot = candidate_archive.merge_survivors(
+                run_id=run_id,
+                round_index=round_index,
+                previous_snapshot_id=survivor_snapshot_id,
+                current_snapshot_id=current_snapshot.snapshot_id,
+            )
+            survivor_snapshot_id = survivor_snapshot.snapshot_id
+            survivor_pool = candidate_archive.materialize(survivor_snapshot_id)
+            survivor_merge_summary = summarize_candidate_merge_audit(
+                survivor_snapshot.merge_audit
+            )
+            max_round_reached = round_index >= self.config.max_rounds - 1
+            memory_bank.record_round_raw(
+                run_id=run_id,
+                round_index=round_index,
+                workflow_id=outcome.workflow_id,
+                workflow_summary_raw=raw_workflow_summary,
+                candidate_snapshot_id=current_snapshot.snapshot_id,
+                survivor_snapshot_id=survivor_snapshot_id,
+            )
+            round_record = memory_bank.latest_round_record() or {}
+            round_record["current_round_candidate_summary"] = candidate_archive.candidate_summary(
+                current_snapshot.snapshot_id
+            )
+            round_record["survivor_pool_summary"] = candidate_archive.candidate_summary(
+                survivor_snapshot_id
+            )
+            round_record["max_round_reached"] = max_round_reached
+            round_record["survivor_merge_summary"] = survivor_merge_summary
+            round_record["current_round_merge_summary"] = current_round_merge_summary
+            round_record["capability_summary"] = candidate_archive.capability_summary(
+                survivor_snapshot_id
+            )
+            round_record["failure_cards"] = candidate_archive.failure_cards(
+                current_snapshot.snapshot_id
             )
             prior_prompt_digest = prompt_digest
             prompt_digest = MemorySummarizer().summarize(
@@ -613,10 +666,13 @@ class AgentController:
                 latest_round_record=round_record,
                 memory_bank=memory_bank,
             )
+            self.session_store.add_prompt_context(run_id, round_index, prompt_digest)
             outcome.summary["current_round_candidate_summary"] = round_record[
                 "current_round_candidate_summary"
             ]
+            outcome.summary["current_round_merge_summary"] = current_round_merge_summary
             outcome.summary["survivor_pool_summary"] = round_record["survivor_pool_summary"]
+            outcome.summary["survivor_merge_summary"] = survivor_merge_summary
             outcome.summary["empty_candidate_events"] = round_record["empty_candidate_events"]
             outcome.summary["candidate_capability_filter_events"] = round_record[
                 "candidate_capability_filter_events"
@@ -631,7 +687,10 @@ class AgentController:
             ):
                 decision = {
                     "decision": "no_available_candidate",
-                    "reasoning": "Max rounds reached with no current candidates and no survivor pool.",
+                    "reasoning": (
+                        "Max rounds reached with no current candidates and no "
+                        "survivor pool."
+                    ),
                     "technical_failure": False,
                     "next_round": {
                         "recommended": False,
@@ -646,8 +705,18 @@ class AgentController:
                     "metrics_used": [],
                     "notes": [],
                 }
-                memory_bank.record_branch(round_index, decision["resolved_branch"])
-                memory_bank.record_decision(round_index, decision)
+                memory_bank.record_branch(
+                    round_index,
+                    decision["resolved_branch"],
+                    run_id=run_id,
+                    workflow_id=outcome.workflow_id,
+                )
+                memory_bank.record_decision(
+                    round_index,
+                    decision,
+                    run_id=run_id,
+                    workflow_id=outcome.workflow_id,
+                )
                 latest_round_record = memory_bank.latest_round_record()
                 if latest_round_record is not None:
                     prompt_digest = MemorySummarizer().summarize(
@@ -655,6 +724,7 @@ class AgentController:
                         latest_round_record=latest_round_record,
                         memory_bank=memory_bank,
                     )
+                    self.session_store.add_prompt_context(run_id, round_index, prompt_digest)
                     outcome.summary["memory_digest"] = prompt_digest
                 outcome.summary["branch_decision"] = decision["resolved_branch"]
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
@@ -665,8 +735,6 @@ class AgentController:
                     reasoning="No available candidate was produced before max rounds.",
                 )
                 break
-            if survivor_pool and not current_round_candidates:
-                outcome.summary["survivor_pool"] = survivor_pool[:20]
             final_submission = outcome.summary.get("final_submission")
             if isinstance(final_submission, dict):
                 decision = {
@@ -680,7 +748,12 @@ class AgentController:
                     "notes": [],
                     "submission": final_submission,
                 }
-                memory_bank.record_decision(round_index, decision)
+                memory_bank.record_decision(
+                    round_index,
+                    decision,
+                    run_id=run_id,
+                    workflow_id=outcome.workflow_id,
+                )
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
@@ -707,6 +780,7 @@ class AgentController:
                             outcome.summary,
                             success_criteria=current_plan.get("success_criteria")
                             or {},
+                            prompt_context=prompt_digest,
                             model=self.config.model_for_role("analyst"),
                             idempotency_key=f"{run_id}:decision:{round_index}:{attempt}",
                             retry_error=retry_context,
@@ -732,7 +806,12 @@ class AgentController:
                                 "details": _json_safe_decision_details(exc.details),
                             }
                         )
-            memory_bank.record_decision(round_index, decision)
+            memory_bank.record_decision(
+                round_index,
+                decision,
+                run_id=run_id,
+                workflow_id=outcome.workflow_id,
+            )
             if decision.get("decision") == "answer":
                 final_result = AgentRunResult.from_answer_decision(decision)
                 outcome.summary["answer"] = final_result.to_dict()
@@ -774,7 +853,12 @@ class AgentController:
                 max_rounds=self.config.max_rounds,
             )
             decision["resolved_branch"] = branch
-            memory_bank.record_branch(round_index, branch)
+            memory_bank.record_branch(
+                round_index,
+                branch,
+                run_id=run_id,
+                workflow_id=outcome.workflow_id,
+            )
             latest_round_record = memory_bank.latest_round_record()
             if latest_round_record is not None:
                 prompt_digest = MemorySummarizer().summarize(
@@ -782,6 +866,7 @@ class AgentController:
                     latest_round_record=latest_round_record,
                     memory_bank=memory_bank,
                 )
+                self.session_store.add_prompt_context(run_id, round_index, prompt_digest)
                 outcome.summary["memory_digest"] = prompt_digest
             outcome.summary["branch_decision"] = branch
             if branch["action"] == "submit_candidate":
@@ -876,12 +961,14 @@ class AgentController:
                         decisions.append(decision)
                         break
                     try:
-                        submission, submit_job_id = self._execute_no_acceptable_candidate_submission(
-                            run_id,
-                            broker,
-                            decision,
-                            round_index=round_index,
-                            policy=policy,
+                        submission, submit_job_id = (
+                            self._execute_no_acceptable_candidate_submission(
+                                run_id,
+                                broker,
+                                decision,
+                                round_index=round_index,
+                                policy=policy,
+                            )
                         )
                     except VPAError as exc:
                         notes = decision.setdefault("notes", [])
@@ -931,23 +1018,26 @@ class AgentController:
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
                 decisions.append(decision)
                 break
-            next_round = decision.get("next_round") or {}
             self.session_store.add_decision(run_id, decision, round_index=round_index)
             decisions.append(decision)
             self._round_state = PriorRoundContext(
                 round_number=round_index + 2,
-                surviving_candidates=survivor_pool,
                 prior_decision_reason=_next_round_reason(decision),
                 summary=self._prior_round_summary(outcome.summary),
-                prompt_digest=prompt_digest,
+                prompt_context=prompt_digest,
+                survivor_snapshot_id=survivor_snapshot_id,
             )
             try:
-                async def compile_with_fixup(planner_ir: dict[str, Any]) -> dict[str, Any]:
+                async def compile_with_fixup(
+                    planner_ir: dict[str, Any],
+                    *,
+                    _round_index: int = round_index,
+                ) -> dict[str, Any]:
                     return await self._compile_with_fixup(
                         planner_ir,
                         provider=provider,
                         idempotency_key_prefix=(
-                            f"{run_id}:next-round-fixup:{round_index}"
+                            f"{run_id}:next-round-fixup:{_round_index}"
                         ),
                         prior_round_context=self._round_state,
                     )
@@ -957,13 +1047,14 @@ class AgentController:
                     failures=entry_failures,
                     factory=lambda attempt,
                     retry_context=None,
+                    _round_index=round_index,
                     prior_round_context=self._round_state: planner._plan_v1(
                         request,
                         available_tools=available_tools,
                         known_inputs=classification.params,
                         model=self.config.model_for_role("planner"),
                         idempotency_key=(
-                            f"{run_id}:next-round:{round_index}:{attempt}"
+                            f"{run_id}:next-round:{_round_index}:{attempt}"
                         ),
                         compile_with_fixup=compile_with_fixup,
                         prior_round_context=prior_round_context,
@@ -976,7 +1067,7 @@ class AgentController:
                     allow_internal_tools=_plan_allows_internal_tools(current_plan),
                 )
             except VPAError as exc:
-                has_candidates = _summary_has_candidate_pool(outcome.summary) or bool(survivor_pool)
+                has_candidates = bool(current_round_candidates) or bool(survivor_pool)
                 reason = (
                     "A completed workflow finished, but the next-round planner "
                     "could not produce a valid executable continuation plan."
@@ -1013,12 +1104,14 @@ class AgentController:
                     )
                 if has_candidates:
                     try:
-                        submission, submit_job_id = self._execute_no_acceptable_candidate_submission(
-                            run_id,
-                            broker,
-                            decision,
-                            round_index=round_index,
-                            policy=policy,
+                        submission, submit_job_id = (
+                            self._execute_no_acceptable_candidate_submission(
+                                run_id,
+                                broker,
+                                decision,
+                                round_index=round_index,
+                                policy=policy,
+                            )
                         )
                     except VPAError as submit_exc:
                         notes = decision.setdefault("notes", [])
@@ -1087,12 +1180,6 @@ class AgentController:
             plan=plan,
         )
 
-    def _collect_surviving_candidates(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
-        return self._collect_current_round_candidates(summary)
-
-    def _collect_current_round_candidates(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
-        return _candidate_pool_from_summary(summary)
-
     def _prior_round_summary(self, summary: dict[str, Any]) -> dict[str, Any]:
         return {
             "workflow_id": summary.get("workflow_id"),
@@ -1109,11 +1196,18 @@ class AgentController:
     ) -> dict[str, Any]:
         if prior_round is None:
             return {"outputs": {}}
+        if self._candidate_archive is not None and prior_round.survivor_snapshot_id:
+            return self._candidate_archive.materialize_executor_outputs(
+                snapshot_id=prior_round.survivor_snapshot_id,
+                round_number=prior_round.round_number,
+                reason=prior_round.prior_decision_reason,
+                summary=prior_round.summary or {},
+            )
         return {
             "outputs": {
                 "prior_round": {
                     "round_number": prior_round.round_number,
-                    "candidates": prior_round.surviving_candidates,
+                    "candidates": [],
                     "reason": prior_round.prior_decision_reason,
                     "summary": prior_round.summary or {},
                 }
@@ -1482,6 +1576,10 @@ class AgentController:
             except TimeoutError_ as exc:
                 final = executor.store.get(workflow_id)
                 summary = ResultSummarizer(self.workspace).summarize_workflow(workflow_id)
+                raw_workflow_summary = CandidateArchive(
+                    self.workspace,
+                    session_store=self.session_store,
+                ).raw_workflow_summary(workflow_id)
                 summary["warm_results"] = warm_results
                 summary["state"] = "timeout"
                 summary["error"] = {
@@ -1490,18 +1588,34 @@ class AgentController:
                     "details": exc.details,
                 }
                 self.session_store.add_summary(run_id, summary, workflow_id=workflow_id)
-                return WorkflowExecutionOutcome(workflow_id, "timeout", True, summary)
+                return WorkflowExecutionOutcome(
+                    workflow_id,
+                    "timeout",
+                    True,
+                    summary,
+                    raw_workflow_summary=raw_workflow_summary,
+                )
             executed = True
         else:
             final = executor.store.get(workflow_id)
             executed = False
 
         summary = ResultSummarizer(self.workspace).summarize_workflow(workflow_id)
+        raw_workflow_summary = CandidateArchive(
+            self.workspace,
+            session_store=self.session_store,
+        ).raw_workflow_summary(workflow_id)
         summary["warm_results"] = warm_results
         self.session_store.add_summary(run_id, summary, workflow_id=workflow_id)
         state = final.state if executed else "submitted_not_executed"
         summary["state"] = state
-        return WorkflowExecutionOutcome(workflow_id, state, executed, summary)
+        return WorkflowExecutionOutcome(
+            workflow_id,
+            state,
+            executed,
+            summary,
+            raw_workflow_summary=raw_workflow_summary,
+        )
 
     def validate_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
         return WorkflowPlanner(self.registry).validate_plan(
@@ -1724,15 +1838,6 @@ def _first_submit_candidate_ref(
         }
         return ref
     return None
-
-
-def _summary_has_candidate_pool(summary: dict[str, Any]) -> bool:
-    if _candidate_pool_from_summary(summary):
-        return True
-    pool = summary.get("survivor_pool")
-    if isinstance(pool, list) and pool:
-        return True
-    return False
 
 
 def _candidate_capability_names(candidate: dict[str, Any], *, key: str) -> set[str]:
@@ -2071,9 +2176,14 @@ def _canonicalize_candidate_pool_item(
     capabilities = _candidate_capability_names(item, key=container_key)
     if not _material_candidate_capabilities(capabilities):
         return None
-    local_id = str(item.get("candidate_id") or item.get("id") or f"{container_key}:{index}")
+    explicit_candidate_id = item.get("candidate_id")
+    local_id = str(explicit_candidate_id or item.get("id") or f"{container_key}:{index}")
     source_tool = tool or str(item.get("tool") or container_key)
-    candidate_id = f"{source_tool}:{job_id or 'unknown'}:{local_id}"
+    candidate_id = (
+        str(explicit_candidate_id).strip()
+        if explicit_candidate_id is not None and str(explicit_candidate_id).strip()
+        else f"{source_tool}:{job_id or 'unknown'}:{local_id}"
+    )
     candidate = {
         "schema_version": "candidate_v1",
         "candidate_id": candidate_id,
@@ -2096,13 +2206,17 @@ def _canonicalize_candidate_pool_item(
     return candidate
 
 
-def _candidate_pool_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    return [dict(item["candidate"]) for item in _candidate_pool_items_from_summary(summary)]
-
-
 def _candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return _merge_candidate_pool_items(_raw_candidate_pool_items_from_summary(summary))
+
+
+def _candidate_pool_merge_summary_from_summary(summary: dict[str, Any]) -> dict[str, int]:
+    result = _merge_candidate_pool_items_result(_raw_candidate_pool_items_from_summary(summary))
+    return summarize_candidate_merge_audit(result.audit)
+
+
+def _raw_candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
     for node in summary.get("nodes") or []:
         if not isinstance(node, dict):
             continue
@@ -2125,10 +2239,6 @@ def _candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict[str
                 )
                 if candidate is None:
                     continue
-                candidate_key = str(candidate.get("candidate_id"))
-                if candidate_key in seen:
-                    continue
-                seen.add(candidate_key)
                 candidates.append(
                     {
                         "candidate": candidate,
@@ -2139,6 +2249,77 @@ def _candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict[str
                     }
                 )
     return candidates
+
+
+def _merge_candidate_pool_items(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _merge_candidate_pool_items_result(raw_items).items
+
+
+@dataclass(frozen=True)
+class _CandidatePoolItemsMergeResult:
+    items: list[dict[str, Any]]
+    audit: dict[str, Any]
+
+
+def _merge_candidate_pool_items_result(
+    raw_items: list[dict[str, Any]],
+) -> _CandidatePoolItemsMergeResult:
+    candidates = [
+        item["candidate"]
+        for item in raw_items
+        if isinstance(item.get("candidate"), dict)
+    ]
+    result = merge_candidate_records(
+        candidates,
+        strip_private_keys=False,
+        include_private_positions=True,
+    )
+    merged_items: list[dict[str, Any]] = []
+    for merged_candidate in result.candidates:
+        representative_position = _candidate_merge_representative_position(merged_candidate)
+        representative_item = (
+            raw_items[representative_position]
+            if representative_position is not None and 0 <= representative_position < len(raw_items)
+            else None
+        )
+        if not isinstance(representative_item, dict):
+            positions = _candidate_merge_positions(merged_candidate)
+            representative_item = (
+                raw_items[positions[0]]
+                if positions and 0 <= positions[0] < len(raw_items)
+                else {}
+            )
+        merged_items.append(
+            {
+                **representative_item,
+                "candidate": _strip_candidate_merge_private(merged_candidate),
+            }
+        )
+    return _CandidatePoolItemsMergeResult(items=merged_items, audit=result.audit)
+
+
+def _candidate_merge_positions(candidate: dict[str, Any]) -> list[int]:
+    positions = candidate.get("__candidate_merge_positions")
+    if not isinstance(positions, list):
+        return []
+    out: list[int] = []
+    for item in positions:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _candidate_merge_representative_position(candidate: dict[str, Any]) -> int | None:
+    try:
+        return int(candidate.get("__candidate_merge_representative_position"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _strip_candidate_merge_private(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in candidate.items() if not str(key).startswith("__")}
 
 
 def _material_candidate_capabilities(capabilities: set[str]) -> set[str]:
@@ -2171,17 +2352,19 @@ def _merge_candidate_pool(
     survivor_pool: list[dict[str, Any]],
     current_round_candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for candidate in [*survivor_pool, *current_round_candidates]:
-        if not _is_candidate_v1(candidate):
-            continue
-        key = str(candidate.get("candidate_id"))
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(dict(candidate))
-    return merged
+    return _merge_candidate_pool_result(survivor_pool, current_round_candidates).candidates
+
+
+def _merge_candidate_pool_result(
+    survivor_pool: list[dict[str, Any]],
+    current_round_candidates: list[dict[str, Any]],
+):
+    return merge_candidate_records(
+        [
+            [candidate for candidate in survivor_pool if _is_candidate_v1(candidate)],
+            [candidate for candidate in current_round_candidates if _is_candidate_v1(candidate)],
+        ]
+    )
 
 
 def _has_empty_candidate_outcome(round_record: dict[str, Any]) -> bool:
