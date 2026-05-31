@@ -16,7 +16,7 @@ const envPython = path.join(installRoot, "envs", "vpa", "bin", "python");
 async function main() {
   if (command === "install") {
     if (args.includes("--dry-run")) {
-      const dryRun = await ensureDryRunPython();
+      const dryRun = await ensureInstallerPython();
       try {
         const status = runPythonDryRun(
           dryRun.python,
@@ -31,8 +31,19 @@ async function main() {
       }
       return;
     }
-    await ensureSharedEnv();
-    runPython(envPython, ["-m", "vibeproteinagent.install.cli", ...args.slice(1)]);
+    const installer = await ensureInstallerPython();
+    try {
+      const status = runPythonDryRun(
+        installer.python,
+        ["-m", "vibeproteinagent.install.cli", ...args.slice(1)],
+        installer.useSourcePath
+      );
+      if (status !== 0) {
+        process.exit(status || 1);
+      }
+    } finally {
+      installer.cleanup();
+    }
     return;
   }
   if (command === "doctor") {
@@ -79,7 +90,14 @@ async function ensureSharedEnv() {
   ensurePackageInstalled(envPython);
 }
 
-async function ensureDryRunPython() {
+async function ensureInstallerPython() {
+  if (process.env.VPA_INSTALLER_PYTHON && fs.existsSync(process.env.VPA_INSTALLER_PYTHON)) {
+    return {
+      python: process.env.VPA_INSTALLER_PYTHON,
+      useSourcePath: true,
+      cleanup: () => {}
+    };
+  }
   if (fs.existsSync(envPython)) {
     return { python: envPython, useSourcePath: false, cleanup: () => {} };
   }

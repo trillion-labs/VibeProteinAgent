@@ -28,7 +28,7 @@ def resolve_selection(
 ) -> InstallSelection:
     if profile and tools:
         raise InvalidParamsError("choose either --profile or --tools, not both")
-    selected_profile = profile or ("base" if not tools else None)
+    selected_profile = profile or (manifest.defaults.default_profile if not tools else None)
     if selected_profile and selected_profile not in manifest.profiles:
         raise InvalidParamsError(
             f"unknown install profile '{selected_profile}'",

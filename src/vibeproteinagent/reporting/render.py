@@ -327,6 +327,11 @@ def render_report_html(
     timestamp).
     """
     del share, report_format  # share/bundle behaviour handled upstream in write_report
+    # Deduplicate / enrich candidate records for display so one protein that
+    # appears as both a final pick and one or more explored records doesn't
+    # render as several near-empty cards. Display-only — the run record is
+    # untouched.
+    model = _prepare_candidate_view(model)
     plots = build_plots(model)
     title = f"VPA report · {model.summary.id}"
     final_top = model.final_candidates[:top_k]
@@ -343,29 +348,31 @@ def render_report_html(
     show_candidates = bool(model.final_submission or model.final_candidates or model.candidates)
     show_conversation = model.agent_transcript is not None
     show_merge_audit = bool(model.candidate_merge_events)
-    show_availability = bool(
-        model.satisfied_semantic_facets
-        or model.empty_candidate_events
-        or model.candidate_capability_filter_events
-        or model.parameter_resolution_events
-    )
+    # The "Candidate Availability" / "Empty and Filtered Candidate Streams"
+    # section is suppressed entirely per user request — its content was mostly
+    # no-op parameter-default audit noise and added little to the report.
+    show_availability = False
 
+    # Order top-to-bottom to follow the run's story: what ran (workflow) →
+    # what it produced (candidates) → analytics → per-tool detail → audit
+    # trails → the agent's own reasoning → how to replay. The agent
+    # conversation sits near the bottom so results lead, not chatter.
     nav_items: list[tuple[str, str, str]] = [("summary", "Summary", "◎")]
-    if show_conversation:
-        nav_items.append(("conversation", "Conversation", "❝"))
-    if show_availability:
-        nav_items.append(("availability", "Availability", "◌"))
-    if show_merge_audit:
-        nav_items.append(("merge-audit", "Merge audit", "◇"))
-    if show_candidates:
-        nav_items.append(("candidates", "Candidates", "★"))
     if show_workflow:
         nav_items.append(("workflow", "Workflow", "⌥"))
+    if show_candidates:
+        nav_items.append(("candidates", "Candidates", "★"))
     if show_plots:
         nav_items.append(("plots", "Plots", "▦"))
     if show_msa:
         nav_items.append(("msa", "MSA", "≡"))
     nav_items.append(("details", "Per-tool results", "⊞"))
+    if show_availability:
+        nav_items.append(("availability", "Availability", "◌"))
+    if show_merge_audit:
+        nav_items.append(("merge-audit", "Merge audit", "◇"))
+    if show_conversation:
+        nav_items.append(("conversation", "Conversation", "❝"))
     nav_items.append(("reproducibility", "Reproducibility", "⟲"))
 
     nav_html = "".join(
@@ -375,7 +382,17 @@ def render_report_html(
         for anchor, label, glyph in nav_items
     )
 
-    viewer_payloads = _collect_viewer_payloads(top)
+    # Load structures for every candidate we actually render — final picks
+    # *and* any surviving explored cards — so explored cards aren't left with
+    # an empty viewer. Dedup by candidate_id to avoid loading a file twice.
+    _viewer_candidates: list[ReportCandidate] = []
+    _seen_viewer_ids: set[str] = set()
+    for _c in (*final_top, *explored_top):
+        if _c.candidate_id in _seen_viewer_ids:
+            continue
+        _seen_viewer_ids.add(_c.candidate_id)
+        _viewer_candidates.append(_c)
+    viewer_payloads = _collect_viewer_payloads(_viewer_candidates)
     viewer_data_script = (
         f'<script id="vpa-structures" type="application/json">{_script_json(viewer_payloads)}</script>'
         if viewer_payloads
@@ -454,7 +471,10 @@ def render_report_html(
         final_block = f"""
   <div class="candidate-group candidate-group-final">
     <div class="candidate-group-head">
-      <p class="card-eyebrow">Final picks</p>
+      <div class="candidate-group-title">
+        <span class="candidate-group-badge candidate-group-badge-final">★ Final picks</span>
+        <span class="candidate-group-sub">Submitted as this run's answer.</span>
+      </div>
       <span class="card-meta">{_h(final_label)}</span>
     </div>
     {_candidate_cards(final_top, total_candidates=len(model.final_candidates))}
@@ -464,7 +484,10 @@ def render_report_html(
         explored_block = f"""
   <div class="candidate-group candidate-group-explored">
     <div class="candidate-group-head">
-      <p class="card-eyebrow">Explored candidates</p>
+      <div class="candidate-group-title">
+        <span class="candidate-group-badge candidate-group-badge-explored">Explored candidates</span>
+        <span class="candidate-group-sub">Evaluated during the search but not submitted.</span>
+      </div>
       <span class="card-meta">{len(model.candidates)} total</span>
     </div>
     {_candidate_cards(explored_top, total_candidates=len(model.candidates))}
@@ -547,11 +570,8 @@ def render_report_html(
   </header>
   <main class="content">
     {summary_card}
-    {conversation_section}
-    {availability_section}
-    {merge_audit_section}
-    {candidates_section}
     {workflow_section}
+    {candidates_section}
     {plots_section}
     {msa_section}
     <section id="details" class="card">
@@ -561,6 +581,9 @@ def render_report_html(
       <p class="widget-explainer">Each tool used in this workflow gets its own structured panel below — metrics, tables, downloadable artifacts. The raw JSON output is collapsed at the bottom of each panel for reference.</p>
       {_node_details(model.graph.nodes)}
     </section>
+    {availability_section}
+    {merge_audit_section}
+    {conversation_section}
     <section id="reproducibility" class="card">
       <header class="card-header">
         <div><p class="card-eyebrow">Reproducibility</p><h2 class="card-title">Replay command</h2></div>
@@ -593,9 +616,17 @@ def _candidate_availability_section(model: ReportModel) -> str:
         _candidate_capability_filter_event_html(event)
         for event in model.candidate_capability_filter_events[:12]
     )
+    # Drop no-op default-fallback events (e.g. rfdiffusion's dozen optional
+    # params each logging "adapter schema default will be used") — they bury
+    # any real resolution under noise. Keep only meaningful source changes.
+    meaningful_param_events = [
+        event
+        for event in model.parameter_resolution_events
+        if not _is_trivial_param_resolution(event)
+    ]
     parameter_items = "".join(
         _parameter_resolution_event_html(event)
-        for event in model.parameter_resolution_events[:12]
+        for event in meaningful_param_events[:12]
     )
     empty_block = (
         f"""
@@ -638,7 +669,7 @@ def _candidate_availability_section(model: ReportModel) -> str:
   <div class="candidate-group">
     <div class="candidate-group-head">
       <p class="card-eyebrow">Parameter resolution</p>
-      <span class="card-meta">{len(model.parameter_resolution_events)} event(s)</span>
+      <span class="card-meta">{len(meaningful_param_events)} event(s)</span>
     </div>
     <div class="artifact-list">{parameter_items}</div>
   </div>"""
@@ -800,6 +831,27 @@ def _candidate_capability_filter_event_html(event: dict[str, Any]) -> str:
       </div>"""
 
 
+def _is_trivial_param_resolution(event: dict[str, Any]) -> bool:
+    """True when an event is a no-op default fallback (display noise).
+
+    A parameter-resolution event where the source didn't actually change
+    (e.g. ``adapter_default -> adapter_default``, reason "adapter schema
+    default will be used") records nothing the reader can act on — it just
+    means an optional parameter the planner left unset kept its schema
+    default. Adapters with many optional fields (rfdiffusion) emit a dozen
+    of these per node, burying any *real* resolution (an override, an
+    upstream-derived value, an inferred default) under noise. We drop the
+    no-ops from the report and keep only events where the source meaningfully
+    moved.
+    """
+    before = event.get("source_before") or event.get("source")
+    after = event.get("source_after")
+    if not after:
+        # No "after" recorded — keep; this is a differently-shaped event.
+        return False
+    return before == after
+
+
 def _parameter_resolution_event_html(event: dict[str, Any]) -> str:
     node = str(event.get("node_id") or "?")
     tool = str(event.get("tool") or "?")
@@ -871,6 +923,69 @@ def _bounded_str_list(value: Any, *, limit: int) -> list[str]:
     return out
 
 
+# Aliases that map a canonical metric key to the metric-name suffixes it can
+# appear under once a candidate's scores have been flattened to ``tool:metric``
+# keys (see ``_flatten_scores``). Lets the executive summary find e.g. pLDDT
+# whether it's stored as ``plddt``, ``mean_plddt``, or ``esm3:mean_plddt``.
+_SUMMARY_METRIC_ALIASES: dict[str, tuple[str, ...]] = {
+    "plddt": ("plddt", "mean_plddt"),
+    "iptm": ("iptm",),
+    "ptm": ("ptm",),
+    "dockq": ("dockq",),
+    "delta_g": ("delta_g", "dg", "binding_energy"),
+    "ranking_confidence": ("ranking_confidence",),
+}
+
+
+def _summary_top_candidate(model: ReportModel) -> ReportCandidate | None:
+    """The candidate the executive summary should headline.
+
+    Prefers the submitted ``final_candidates`` (the run's actual answer) and
+    falls back to the explored pool. Before the candidate-view dedup the
+    summary read ``candidates[0]`` directly, but that list is now explored-only
+    and can be empty for runs whose explored entries all collapsed into the
+    final pick — so reading it alone blanked the whole Confidence panel.
+    """
+    if model.final_candidates:
+        return model.final_candidates[0]
+    if model.candidates:
+        return model.candidates[0]
+    return None
+
+
+def _summary_candidate_count(model: ReportModel) -> int:
+    """Distinct candidate count for KPI tiles / headline.
+
+    ``final_candidates`` and ``candidates`` are disjoint after the view dedup
+    (explored entries matching a final pick are dropped), so the run's distinct
+    candidate population is simply their sum.
+    """
+    return len(model.final_candidates) + len(model.candidates)
+
+
+def _lookup_candidate_metric(candidate: ReportCandidate, base_key: str) -> Any:
+    """Resolve a canonical metric for a candidate across flat / nested keys.
+
+    Handles both legacy flat scores (``{"plddt": 0.98}``) and the flattened
+    ``tool:metric`` form (``{"esm3:mean_plddt": 0.98}``) produced for enriched
+    final picks, plus name aliases (pLDDT ↔ mean_plddt). Returns the first
+    numeric match, or ``None``.
+    """
+    scores = candidate.scores or {}
+    aliases = _SUMMARY_METRIC_ALIASES.get(base_key, (base_key,))
+    for alias in aliases:
+        val = scores.get(alias)
+        if val is not None and not isinstance(val, dict):
+            return val
+    for key, val in scores.items():
+        if isinstance(val, dict):
+            continue
+        metric = str(key).split(":", 1)[-1].lower()
+        if metric in aliases:
+            return val
+    return None
+
+
 def _executive_dashboard(model: ReportModel) -> str:
     """CELLKEY-style 3-panel dashboard for the Executive Summary card.
 
@@ -917,7 +1032,7 @@ def _exec_vitals_panel(model: ReportModel) -> str:
     tiles.append(_kpi_tile(state_glyph, state.title(), "Status", accent=state_class))
     tiles.append(_kpi_tile("⏱", _duration(model.summary.runtime_ms), "Runtime"))
 
-    n_candidates = len(model.candidates)
+    n_candidates = _summary_candidate_count(model)
     cand_accent = "good" if n_candidates >= 1 else "neutral"
     tiles.append(_kpi_tile(
         "", str(n_candidates), "Candidates", accent=cand_accent,
@@ -993,7 +1108,7 @@ _EXEC_CONFIDENCE_SPECS: tuple[tuple[str, str, str, float, float], ...] = (
 
 def _exec_confidence_panel(model: ReportModel) -> str:
     """Middle panel — up to three confidence donuts for the top candidate."""
-    top = model.candidates[0] if model.candidates else None
+    top = _summary_top_candidate(model)
     if top is None:
         return ""
     donuts: list[str] = []
@@ -1003,14 +1118,14 @@ def _exec_confidence_panel(model: ReportModel) -> str:
         if key == "score":
             value = top.score
         else:
-            value = top.scores.get(key)
+            value = _lookup_candidate_metric(top, key)
+        # pLDDT is always presented on [0,100]; values logged on [0,1] are
+        # scaled up so the donut fills correctly and reads "98" not "0.98".
+        value = _plddt_on_100(key, value)
         num = _num(value)
         if num is None:
             continue
-        # Auto-scale dual-range metrics (e.g. pLDDT as 0-1 vs 0-100).
         gauge_hi = hi
-        if key == "plddt" and num <= 1.5:
-            gauge_hi = 1.0
         quality = _quality_class(key, num)
         donut_html = _gauge_svg(
             value=num, lo=lo, hi=gauge_hi, quality=quality,
@@ -1035,7 +1150,7 @@ def _exec_confidence_panel(model: ReportModel) -> str:
             f'<div class="exec-donut-meta">'
             f'<div class="exec-donut-label">Top candidate</div>'
             f'<div class="exec-donut-id"><code>{_h(top.candidate_id)}</code></div>'
-            f'<div class="exec-donut-tip">Rank #{rank} of {len(model.candidates)}</div>'
+            f'<div class="exec-donut-tip">Rank #{rank} of {_summary_candidate_count(model)}</div>'
             f'</div></div>'
         )
     return (
@@ -1200,7 +1315,7 @@ def _exec_verdict_callout(model: ReportModel) -> str:
     so the reader has a clear "should I trust this?" cue right below the
     numbers. Icon + colour reflect the verdict severity.
     """
-    top = model.candidates[0] if model.candidates else None
+    top = _summary_top_candidate(model)
     if top is None:
         return (
             '<div class="exec-verdict exec-verdict-neutral">'
@@ -1211,10 +1326,12 @@ def _exec_verdict_callout(model: ReportModel) -> str:
             '</div></div>'
         )
     cautions: list[str] = []
-    plddt = _as_unit(top.scores.get("plddt"))
+    plddt = _as_unit(_lookup_candidate_metric(top, "plddt"))
     if plddt is not None and plddt < 0.7:
-        cautions.append(f"mean pLDDT {plddt:.2f} suggests low structural confidence")
-    ptm = _as_unit(top.scores.get("ptm"))
+        cautions.append(
+            f"mean pLDDT {plddt * 100:.0f} suggests low structural confidence"
+        )
+    ptm = _as_unit(_lookup_candidate_metric(top, "ptm"))
     if ptm is not None and ptm < 0.5:
         cautions.append(f"pTM {ptm:.2f} below 0.5 — overall fold may be unreliable")
     # ipTM is the "interface trustworthiness" call — only meaningful when
@@ -1223,7 +1340,7 @@ def _exec_verdict_callout(model: ReportModel) -> str:
     # trustworthy" warning for a monomer that has no interface to begin
     # with.
     if not _is_monomer_candidate(top):
-        iptm = _as_unit(top.scores.get("iptm"))
+        iptm = _as_unit(_lookup_candidate_metric(top, "iptm"))
         if iptm is not None and iptm < 0.5:
             cautions.append(
                 f"ipTM {iptm:.2f} below 0.5 — interface unlikely to be trustworthy"
@@ -1256,16 +1373,17 @@ def _exec_verdict_callout(model: ReportModel) -> str:
 
 
 def _hero_sequence_block(model: ReportModel) -> str:
-    if not model.candidates:
+    top = _summary_top_candidate(model)
+    if top is None:
         return ""
-    seq = model.candidates[0].sequence
+    seq = top.sequence
     if not seq:
         return ""
     seq_html = _colored_sequence(seq)
     return (
         f'<div class="hero-sequence">'
         f'<div class="hero-sequence-head">'
-        f'<span class="eyebrow">Input sequence · {len(seq)} residues</span>'
+        f'<span class="eyebrow">Candidate sequence · {len(seq)} residues</span>'
         f'<button class="copy-btn" data-copy="{_attr(seq)}">Copy</button>'
         f'</div>'
         f'<div class="hero-sequence-body"><code>{seq_html}</code></div>'
@@ -1297,13 +1415,13 @@ def _executive_headline(model: ReportModel) -> str:
         else state_phrase
     ]
 
-    n_candidates = len(model.candidates)
+    n_candidates = _summary_candidate_count(model)
     if n_candidates:
         pieces.append(
             f"{n_candidates} candidate" if n_candidates == 1 else f"{n_candidates} candidates"
         )
 
-    top = model.candidates[0] if model.candidates else None
+    top = _summary_top_candidate(model)
     if top is not None:
         bits: list[str] = []
         for key, label_short in (
@@ -1312,8 +1430,9 @@ def _executive_headline(model: ReportModel) -> str:
             ("ptm", "pTM"),
             ("delta_g", "ΔG"),
         ):
-            value = top.scores.get(key)
+            value = _lookup_candidate_metric(top, key)
             if value is not None and _num(value) is not None:
+                value = _plddt_on_100(key, value)
                 bits.append(f"{label_short} {_fmt(value)}")
             if len(bits) == 2:
                 break
@@ -1779,6 +1898,109 @@ def _structure_sequence_track(
     )
 
 
+def _flatten_scores(scores: dict[str, Any] | None) -> dict[str, Any]:
+    """Flatten a candidate ``scores`` map to numeric leaves keyed for bars.
+
+    Candidate records from the archive nest their metrics under the
+    producing tool (``{"esm3": {"mean_plddt": .98, "ptm": .86}, ...}``),
+    which the flat ``tool:metric`` form the score-bar/table renderers
+    expect can't read — so those cards come up blank. This flattens one
+    level of nesting into ``"esm3:mean_plddt"`` keys and keeps only
+    numeric (non-bool) leaves. Already-flat numeric entries pass through
+    unchanged, so the function is idempotent on a flat map.
+    """
+    flat: dict[str, Any] = {}
+    for key, value in (scores or {}).items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            flat[key] = value
+        elif isinstance(value, dict):
+            for sub_key, sub_val in value.items():
+                if isinstance(sub_val, bool) or not isinstance(sub_val, (int, float)):
+                    continue
+                flat[f"{key}:{sub_key}"] = sub_val
+        # strings / lists / None are not bar-renderable — dropped.
+    return flat
+
+
+def _candidate_metric_richness(candidate: ReportCandidate) -> int:
+    """Count a candidate's distinct numeric metric leaves.
+
+    Used to pick the "richest" representative when several candidate
+    records describe the same protein — the one carrying the most metric
+    results wins. A present structure breaks ties toward the viewable one.
+    """
+    n = len(_flatten_scores(candidate.scores))
+    if candidate.score is not None:
+        n += 1
+    if candidate.structure_path:
+        n += 1
+    return n
+
+
+def _prepare_candidate_view(model: ReportModel) -> ReportModel:
+    """Return a model with deduplicated / enriched candidate lists.
+
+    Three display-only transforms (the underlying run record is untouched):
+
+    1. **Enrich final picks.** A ranked/submitted record often carries only
+       a couple of headline scores while the matching explored record holds
+       the full evaluation suite (esm3, protein_qc, ...). We merge the
+       same-``candidate_id`` explored scores into each final pick and flatten
+       them so the final card shows the complete, richest metric set.
+    2. **Drop duplicate proteins from the explored list.** An explored entry
+       whose ``candidate_id`` *or* ``sequence`` already appears among the
+       final picks is the same physical protein at a different pipeline
+       stage — showing it again as a separate card is what made one protein
+       look like three. Those are removed.
+    3. **Collapse remaining duplicates.** Among the survivors, keep a single
+       richest-scored representative per ``candidate_id`` and per sequence,
+       then restore rank order for display.
+    """
+    final = list(model.final_candidates)
+    explored = list(model.candidates)
+    if not final and not explored:
+        return model
+
+    final_ids = {c.candidate_id for c in final}
+    final_seqs = {c.sequence for c in final if c.sequence}
+
+    enriched_final: list[ReportCandidate] = []
+    for fc in final:
+        merged = _flatten_scores(fc.scores)
+        for ec in explored:
+            if ec.candidate_id == fc.candidate_id and ec.scores:
+                merged.update(_flatten_scores(ec.scores))
+        enriched_final.append(replace(fc, scores=merged))
+
+    rank_index = {id(ec): i for i, ec in enumerate(explored)}
+    kept: list[ReportCandidate] = []
+    seen_ids: set[str] = set()
+    seen_seqs: set[str] = set()
+    # Richest first so the representative we keep per id/sequence is the one
+    # carrying the most metrics.
+    for ec in sorted(explored, key=_candidate_metric_richness, reverse=True):
+        if ec.candidate_id in final_ids:
+            continue
+        if ec.sequence and ec.sequence in final_seqs:
+            continue
+        if ec.candidate_id in seen_ids:
+            continue
+        if ec.sequence and ec.sequence in seen_seqs:
+            continue
+        seen_ids.add(ec.candidate_id)
+        if ec.sequence:
+            seen_seqs.add(ec.sequence)
+        kept.append(ec)
+    kept.sort(key=lambda ec: rank_index[id(ec)])
+    explored_display = [replace(ec, scores=_flatten_scores(ec.scores)) for ec in kept]
+
+    return replace(
+        model, final_candidates=enriched_final, candidates=explored_display
+    )
+
+
 def _candidate_cards(
     candidates: list[ReportCandidate],
     *,
@@ -2099,10 +2321,59 @@ def _all_designs_table(candidates: list[ReportCandidate]) -> str:
 def _score_cell(value: Any, *, key: str) -> str:
     if value is None:
         return "<td></td>"
+    value = _plddt_on_100(key, value)
     return f'<td class="quality-{_quality_class(key, value)}">{_h(_fmt(value))}</td>'
 
 
 # ----------------------------------------------------------------- workflow
+
+
+def _topo_sort_nodes(
+    nodes: list[WorkflowNodeSummary],
+) -> list[WorkflowNodeSummary]:
+    """Return ``nodes`` in dependency (topological) order for display.
+
+    The graph's stored order is *insertion* order, which need not match
+    the data-flow order — e.g. ``protein_qc`` can be inserted ahead of the
+    ``esm3`` node it consumes. Ordering by upstream dependencies makes the
+    DAG's left-to-right layout (and the numbered composition list) agree
+    with the "consumes" edges, removing the apparent contradiction between
+    the visual order and the dependency text.
+
+    Kahn's algorithm with an insertion-order-stable ready queue, so
+    independent steps keep their original relative order. Falls back to
+    the original order on a cycle or when nothing resolves.
+    """
+    if len(nodes) < 2:
+        return list(nodes)
+    by_id = {n.node_id: n for n in nodes}
+    order_index = {n.node_id: i for i, n in enumerate(nodes)}
+    indeg: dict[str, int] = {n.node_id: 0 for n in nodes}
+    deps: dict[str, list[str]] = {n.node_id: [] for n in nodes}
+    for n in nodes:
+        for u in (n.upstream or []):
+            if u in by_id and u != n.node_id:
+                indeg[n.node_id] += 1
+                deps[u].append(n.node_id)
+    ready = sorted(
+        (nid for nid, d in indeg.items() if d == 0),
+        key=lambda nid: order_index[nid],
+    )
+    result: list[str] = []
+    while ready:
+        nid = ready.pop(0)
+        result.append(nid)
+        newly = False
+        for v in deps.get(nid, []):
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                ready.append(v)
+                newly = True
+        if newly:
+            ready.sort(key=lambda x: order_index[x])
+    if len(result) != len(nodes):
+        return list(nodes)  # cycle / unresolved — keep stored order
+    return [by_id[nid] for nid in result]
 
 
 def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
@@ -2126,6 +2397,10 @@ def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
     """
     if not nodes:
         return "<p class='empty'>No workflow graph available.</p>"
+
+    # Lay the cards out in data-flow order, not insertion order, so the
+    # arrows read left-to-right and match the composition text below.
+    nodes = _topo_sort_nodes(nodes)
 
     NODE_W = 190
     NODE_H = 64
@@ -2514,7 +2789,7 @@ def _workflow_composition(model: ReportModel) -> str:
     parameters recovered from its output plus any upstream dependency — so
     the run's flow is legible without prior knowledge of the run.
     """
-    nodes = model.graph.nodes
+    nodes = _topo_sort_nodes(model.graph.nodes)
     if len(nodes) < 2:
         return ""
     summary = model.summary
@@ -3035,7 +3310,7 @@ def _qc_widget(output: dict[str, Any]) -> str:
     for key, name, explanation, qual_fn in _QC_METRIC_SPECS:
         if key not in metrics:
             continue
-        value = metrics.get(key)
+        value = _plddt_on_100(key, metrics.get(key))
         num = _num(value)
         if num is None:
             continue
@@ -5552,7 +5827,7 @@ def _design_widget(output: dict[str, Any], *, tool: str) -> str:
             if length is not None else "<td>—</td>",
         ]
         for key, _ in present:
-            num = _num(d.get(key))
+            num = _num(_plddt_on_100(key, d.get(key)))
             if num is None:
                 cells.append("<td>—</td>")
                 continue
@@ -5584,6 +5859,13 @@ def _design_widget(output: dict[str, Any], *, tool: str) -> str:
         f'<h4 class="widget-title">{_h(title)}</h4>'
         f"{explainer}{chips_html}{table_html}</div>"
     )
+
+
+# ProteinMPNN sequence recovery against a random sequence sits near 1/20
+# (~5%) for the 20 canonical amino acids. A recovery at or below this floor
+# signals there was no meaningful native reference (a de novo backbone), so
+# the number is treated as "not a real recovery" rather than a poor design.
+_SEQ_RECOVERY_MEANINGFUL_FLOOR = 0.15
 
 
 _MPNN_TOOL_INFO: dict[str, tuple[str, str]] = {
@@ -5641,12 +5923,25 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
             '<p class="empty">No designs were emitted.</p></div>'
         )
 
-    # The recovery table appears only when at least one design carries a
-    # non-null seq_recovery (a native reference was available to score against).
-    has_recovery = any(_num(d.get("seq_recovery")) is not None for d in designs)
+    # ProteinMPNN always *can* emit a seq_recovery number, but it only means
+    # something when the backbone carried a real native sequence to score
+    # against. For a de novo backbone (e.g. from rfdiffusion) the "native"
+    # residues are placeholders, so recovery collapses to roughly the 1/20
+    # (~5%) random baseline and the number is noise rather than a quality
+    # signal. We therefore distinguish:
+    #   * has_recovery        — at least one non-null seq_recovery present
+    #   * meaningful_recovery — at least one recovery clears the random floor
+    # and only draw the recovery column when it's actually meaningful; below
+    # the floor we show a score-only table plus a one-line caveat so the run
+    # stays auditable without implying a real 2% recovery.
+    recoveries = [
+        r for r in (_num(d.get("seq_recovery")) for d in designs) if r is not None
+    ]
+    has_recovery = bool(recoveries)
+    meaningful_recovery = any(r > _SEQ_RECOVERY_MEANINGFUL_FLOOR for r in recoveries)
 
     table_html = ""
-    if has_recovery:
+    if meaningful_recovery:
         rows: list[str] = []
         for i, d in enumerate(designs, 1):
             score = _num(d.get("score"))
@@ -5671,6 +5966,22 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
             '<h5 class="widget-subhead">Score &amp; sequence recovery</h5>'
             '<div class="table-wrap"><table><thead><tr>'
             "<th>#</th><th>Score</th><th>Sequence recovery</th>"
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+        )
+    elif has_recovery and any(_num(d.get("score")) is not None for d in designs):
+        # Recovery was reported but is at the random baseline (no native
+        # reference). Drop the noisy recovery column and just show the
+        # still-informative score; the per-design score therefore lives in
+        # this table rather than riding along in the sequence labels below.
+        rows = [
+            f"<tr><td>{i}</td>"
+            f"<td>{_h(_fmt(_num(d.get('score')))) if _num(d.get('score')) is not None else '—'}</td></tr>"
+            for i, d in enumerate(designs, 1)
+        ]
+        table_html = (
+            '<h5 class="widget-subhead">Score</h5>'
+            '<div class="table-wrap"><table><thead><tr>'
+            "<th>#</th><th>Score</th>"
             f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
         )
 
@@ -5877,6 +6188,8 @@ def _esm_widget(output: dict[str, Any], *, tool: str) -> str:
             value = cs.get(key)
             if value is None:
                 continue
+            # pLDDT-family → [0,100]; pTM and other heads stay on [0,1].
+            value = _plddt_on_100(key, value)
             num = _num(value) or 0.0
             gauge_hi = 1.0 if num <= 1.5 else 100.0
             cards.append(_score_card(
@@ -5964,6 +6277,7 @@ def _protenix_widget(output: dict[str, Any]) -> str:
         value = metrics.get(key, output.get(key))
         if value is None:
             continue
+        value = _plddt_on_100(key, value)
         num = _num(value) or 0.0
         gauge_hi = 1.0 if (key == "plddt" and num <= 1.5) else hi
         cards.append(_score_card(
@@ -7160,6 +7474,9 @@ def _score_bar_row(key: str, value: Any, *, candidate_tool: str = "") -> str:
     tool-specific explanation instead of the generic "composite score"
     placeholder.
     """
+    # pLDDT family is presented on [0,100] everywhere; rescale here so the
+    # bar fill, the printed value, and the quality colour all agree.
+    value = _plddt_on_100(key, value)
     num = _num(value)
     if num is None:
         return ""
@@ -7333,7 +7650,12 @@ def _agent_transcript_section(transcript: AgentTranscript) -> str:
     plan_html = _agent_plan_block(transcript)
     final_html = _agent_final_block(transcript.final_response)
     timeline_html = _agent_step_timeline_block(transcript.step_summaries)
-    decisions_html = _agent_decisions_block(transcript.decisions)
+    # ``submit_candidate`` is a terminal action, not a per-round verdict —
+    # keep it out of the round-by-round decision audit (and the round count).
+    round_decisions = [
+        d for d in transcript.decisions if not _is_submit_candidate(d.decision_label)
+    ]
+    decisions_html = _agent_decisions_block(round_decisions)
     transcript_html = _agent_full_transcript_block(
         transcript.messages, transcript.tool_calls,
     )
@@ -7347,17 +7669,19 @@ def _agent_transcript_section(transcript: AgentTranscript) -> str:
         meta_chips.append(
             f'<span class="conv-meta-chip">{_h(transcript.provider)}</span>'
         )
-    msg_count = len(transcript.messages)
+    # Count only what the transcript actually renders (system/infra messages
+    # and submit_candidate tool calls are filtered out downstream).
+    msg_count = sum(1 for m in transcript.messages if m.role.strip().lower() != "system")
     if msg_count:
         meta_chips.append(
             f'<span class="conv-meta-chip">{msg_count} message{"s" if msg_count != 1 else ""}</span>'
         )
-    tc_count = len(transcript.tool_calls)
+    tc_count = sum(1 for tc in transcript.tool_calls if not _is_submit_candidate(tc.tool_name))
     if tc_count:
         meta_chips.append(
             f'<span class="conv-meta-chip">{tc_count} tool call{"s" if tc_count != 1 else ""}</span>'
         )
-    round_count = len(transcript.decisions)
+    round_count = len(round_decisions)
     if round_count > 1:
         meta_chips.append(
             f'<span class="conv-meta-chip">{round_count} rounds</span>'
@@ -7480,65 +7804,25 @@ def _agent_plan_block(transcript: AgentTranscript) -> str:
 
 
 def _render_plan_structured(plan: dict[str, Any]) -> str:
-    """Render the ``agent_plans.plan_json`` dict as a polished outline.
+    """Render the ``agent_plans.plan_json`` dict as a tight, focused card.
 
-    Visual hierarchy (top → bottom):
+    By deliberate product choice the plan card surfaces only the two
+    things a reader actually wants to confirm about the agent's plan:
 
-    1. **Goal** — single lede paragraph.
-    2. **Planned steps** — numbered list of ``tool · reason`` rows
-       (the actual workflow the agent will execute).
-    3. **Tool chips** — required + warm-in-advance tools as two
-       side-by-side chip strips.
-    4. **Plan details** — collapsible ``<details>`` carrying
-       assumptions, missing inputs, success criteria, rationale,
-       mode, and any extra fields. Default closed so the visible card
-       stays compact.
+    1. **Required tools** — the tools the agent committed to running,
+       as a chip strip (with the warm-in-advance set when distinct).
+    2. **Assumptions** — the premises the agent stated it was operating
+       under.
 
-    Recognised keys (with synonyms): ``goal``, ``workflow_plan``,
-    ``required_tools`` / ``candidate_tools``, ``warm_tools``,
-    ``assumptions``, ``missing_inputs``, ``success_criteria``,
-    ``reason`` / ``rationale``, ``mode``. Anything else falls into
-    the collapsible "Other fields" sublist so the structured renderer
-    doesn't silently swallow data.
+    Everything else the planner records (goal restatement, per-step
+    plan, rationale, mode, deliverable contract, metadata, source kind,
+    and any other bookkeeping fields) is intentionally *not* shown here —
+    the workflow DAG already documents what ran, and the rest is internal
+    audit noise for a human reading the report.
     """
     blocks: list[str] = []
 
-    # ---- (1) Goal — lede paragraph ----
-    goal = plan.get("goal")
-    if isinstance(goal, str) and goal.strip():
-        blocks.append(
-            '<p class="conv-plan-goal">'
-            f'{_render_agent_prose(goal.strip())}'
-            '</p>'
-        )
-
-    # ---- (2) Planned steps ----
-    workflow_plan = plan.get("workflow_plan")
-    if isinstance(workflow_plan, list) and workflow_plan:
-        steps = []
-        for step in workflow_plan:
-            if not isinstance(step, dict):
-                continue
-            tool = str(step.get("tool") or step.get("name") or "step")
-            reason = step.get("reason") or step.get("why") or step.get("purpose")
-            steps.append(
-                '<li>'
-                f'<code class="conv-plan-tool">{_h(tool)}</code>'
-                + (
-                    f'<span class="conv-plan-reason">{_render_agent_prose(str(reason))}</span>'
-                    if reason else ""
-                )
-                + '</li>'
-            )
-        if steps:
-            blocks.append(
-                '<div class="conv-plan-list conv-plan-list-steps">'
-                '<h5 class="conv-plan-list-head">Planned steps</h5>'
-                f'<ol>{"".join(steps)}</ol>'
-                '</div>'
-            )
-
-    # ---- (3) Tool chips — required + warm in advance ----
+    # ---- (1) Tool chips — required + warm in advance ----
     # ``candidate_tools`` is a synonym for ``required_tools`` emitted by the
     # tool-selection mode of the planner. Prefer the explicit required_tools
     # when both are present; otherwise candidate_tools takes its place.
@@ -7570,81 +7854,20 @@ def _render_plan_structured(plan: dict[str, Any]) -> str:
                 f'<div class="conv-plan-tools-row">{"".join(cols)}</div>'
             )
 
-    # ---- (4) Plan details — collapsed by default ----
-    details_blocks: list[str] = []
-    # Rationale prose (the planner's "why this plan" field).
-    for key in ("reason", "rationale", "explanation"):
-        v = plan.get(key)
-        if isinstance(v, str) and v.strip():
-            details_blocks.append(
-                '<div class="conv-plan-detail-section">'
-                '<h5 class="conv-plan-list-head">Plan rationale</h5>'
-                f'<div class="conv-plan-rationale">{_render_agent_prose(v.strip())}</div>'
+    # ---- (2) Assumptions ----
+    assumptions = plan.get("assumptions")
+    if isinstance(assumptions, list) and assumptions:
+        lis = "".join(
+            f"<li>{_render_agent_prose(_stringify_final_item(item))}</li>"
+            for item in assumptions if item
+        )
+        if lis:
+            blocks.append(
+                '<div class="conv-plan-list">'
+                '<h5 class="conv-plan-list-head">Assumptions</h5>'
+                f'<ul class="conv-plan-detail-list">{lis}</ul>'
                 '</div>'
             )
-            break
-    # Assumptions / missing inputs / success criteria as lists.
-    for key, label in (
-        ("assumptions",      "Assumptions"),
-        ("missing_inputs",   "Missing inputs"),
-        ("success_criteria", "Success criteria"),
-    ):
-        items = plan.get(key)
-        if isinstance(items, list) and items:
-            lis = "".join(
-                f"<li>{_render_agent_prose(_stringify_final_item(item))}</li>"
-                for item in items if item
-            )
-            if lis:
-                details_blocks.append(
-                    '<div class="conv-plan-detail-section">'
-                    f'<h5 class="conv-plan-list-head">{_h(label)}</h5>'
-                    f'<ul class="conv-plan-detail-list">{lis}</ul>'
-                    '</div>'
-                )
-    # Mode (small metadata chip).
-    mode = plan.get("mode")
-    if isinstance(mode, str) and mode.strip():
-        details_blocks.append(
-            '<div class="conv-plan-detail-section">'
-            '<h5 class="conv-plan-list-head">Mode</h5>'
-            f'<code class="conv-plan-meta">{_h(mode.strip())}</code>'
-            '</div>'
-        )
-    # Any other unknown fields → small extras block (collapsed as code).
-    known_keys = {
-        "goal", "workflow_plan", "required_tools", "candidate_tools",
-        "warm_tools", "reason", "rationale", "explanation",
-        "assumptions", "missing_inputs", "success_criteria", "mode",
-    }
-    extras_rows: list[str] = []
-    for k, v in plan.items():
-        if k in known_keys:
-            continue
-        rendered = _render_extra_value(v)
-        if rendered:
-            extras_rows.append(
-                f'<dt>{_h(_pretty_field_name(k))}</dt><dd>{rendered}</dd>'
-            )
-    if extras_rows:
-        details_blocks.append(
-            '<div class="conv-plan-detail-section">'
-            '<h5 class="conv-plan-list-head">Other fields</h5>'
-            f'<dl class="conv-final-dl">{"".join(extras_rows)}</dl>'
-            '</div>'
-        )
-
-    if details_blocks:
-        blocks.append(
-            '<details class="conv-plan-details">'
-            '<summary class="conv-plan-details-summary">'
-            '<span class="conv-plan-details-label">Plan details</span>'
-            f'<span class="conv-plan-details-meta">{len(details_blocks)} '
-            f'section{"s" if len(details_blocks) != 1 else ""}</span>'
-            '</summary>'
-            f'<div class="conv-plan-details-body">{"".join(details_blocks)}</div>'
-            '</details>'
-        )
 
     return "".join(blocks)
 
@@ -7665,7 +7888,7 @@ def _agent_final_block(final: str | None) -> str:
 # as one of these synonyms shows up. Lowercase + underscore — the renderer
 # normalises keys before matching.
 _FINAL_DECISION_KEYS  = ("decision", "verdict", "status", "outcome")
-_FINAL_REASON_KEYS    = ("reason", "summary", "narrative", "explanation", "rationale", "message")
+_FINAL_REASON_KEYS    = ("reason", "reasoning", "summary", "narrative", "explanation", "rationale", "message")
 _FINAL_CHANGES_KEYS   = ("changes", "recommendations", "action_items", "next_steps", "actions", "todo")
 _FINAL_NOTES_KEYS     = ("notes", "caveats", "warnings", "observations")
 _FINAL_METRICS_KEYS   = ("metrics_used", "metrics", "metrics_evaluated", "criteria_evaluated")
@@ -7836,8 +8059,17 @@ def _render_structured_final(data: dict[str, Any]) -> str:
                 '</div>'
             )
 
+    # ---- Submission decision — the submit_candidate payload, prettified ----
+    # ``submit_candidate`` is the internal terminal tool's argument blob; we
+    # never dump it as raw JSON (it reads as noise). Instead we surface the
+    # one thing a reader cares about: which candidate was submitted and the
+    # agent's justification for it.
+    submission_html = _render_submission_decision(data.get("submit_candidate"))
+    if submission_html:
+        parts.append(submission_html)
+
     # ---- Anything else — key/value rows so nothing is silently dropped ----
-    known_keys: set[str] = set()
+    known_keys: set[str] = {"submit_candidate"}
     for ks in (_FINAL_DECISION_KEYS, _FINAL_REASON_KEYS, _FINAL_CHANGES_KEYS,
                _FINAL_NOTES_KEYS, _FINAL_METRICS_KEYS, _FINAL_NEXT_ROUND_KEYS):
         known_keys.update(ks)
@@ -7866,6 +8098,64 @@ def _render_structured_final(data: dict[str, Any]) -> str:
             f'<code class="conv-codeblock">{_h(_pretty_json(data))}</code>'
         )
     return "".join(parts)
+
+
+def _render_submission_decision(value: Any) -> str:
+    """Prettify the ``submit_candidate`` argument blob from a final response.
+
+    Expected shape (tolerant of missing keys)::
+
+        {"candidates": [
+            {"candidate_id": "cand_…", "justification": "…",
+             "scores_to_highlight": ["esm3", "protein_qc"], "job_id": "…"}
+        ]}
+
+    Renders one row per submitted candidate — the candidate id as a code
+    chip, the agent's justification as prose, and any highlighted score
+    groups as small chips. Returns "" when there's nothing usable so the
+    caller can skip the section entirely.
+    """
+    if not isinstance(value, dict):
+        return ""
+    cands = value.get("candidates")
+    if not isinstance(cands, list):
+        # Some agents inline a single candidate dict rather than a list.
+        cands = [value] if value.get("candidate_id") else []
+    rows: list[str] = []
+    for cand in cands:
+        if not isinstance(cand, dict):
+            continue
+        cid = str(cand.get("candidate_id") or "").strip()
+        justification = str(cand.get("justification") or "").strip()
+        highlight = cand.get("scores_to_highlight")
+        head_bits: list[str] = []
+        if cid:
+            head_bits.append(f'<code class="conv-submit-id">{_h(cid)}</code>')
+        if isinstance(highlight, list) and highlight:
+            chips = "".join(
+                f'<code class="conv-final-metric">{_h(str(s))}</code>'
+                for s in highlight if s
+            )
+            if chips:
+                head_bits.append(f'<span class="conv-submit-chips">{chips}</span>')
+        head_html = (
+            f'<div class="conv-submit-head">{"".join(head_bits)}</div>'
+            if head_bits else ""
+        )
+        just_html = (
+            f'<div class="conv-submit-just">{_render_agent_prose(justification)}</div>'
+            if justification else ""
+        )
+        if head_html or just_html:
+            rows.append(f'<div class="conv-submit-row">{head_html}{just_html}</div>')
+    if not rows:
+        return ""
+    return (
+        '<div class="conv-final-section">'
+        '<h5 class="conv-final-section-head">Submission decision</h5>'
+        f'<div class="conv-submit-list">{"".join(rows)}</div>'
+        '</div>'
+    )
 
 
 def _stringify_final_item(item: Any) -> str:
@@ -7931,6 +8221,12 @@ def _agent_full_transcript_block(
     ``<details>`` showing pretty-printed args / result.
     """
     tool_calls = tool_calls or []
+    # ``system`` messages are the planner/infra prompt (full tool registry,
+    # "do not add submit_candidate nodes", ...) — pure noise in a human-facing
+    # transcript. ``submit_candidate`` tool calls are the terminal submission,
+    # surfaced in the Candidates section instead. Drop both here.
+    messages = [m for m in messages if m.role.strip().lower() != "system"]
+    tool_calls = [tc for tc in tool_calls if not _is_submit_candidate(tc.tool_name)]
     if not messages and not tool_calls:
         return ""
 
@@ -7980,7 +8276,7 @@ def _agent_message_bubble(msg: AgentMessage) -> str:
         f'{_h(glyph)} {_h(label)}</span>'
         f'{model_chip}'
         '</header>'
-        f'<div class="conv-bubble-body">{_render_agent_prose(msg.content)}</div>'
+        f'<div class="conv-bubble-body">{_render_agent_message_content(msg.content)}</div>'
         '</article>'
     )
 
@@ -8045,6 +8341,17 @@ def _agent_tool_call_chip(tc: AgentToolCall) -> str:
     )
 
 
+# ``submit_candidate`` is an internal terminal/control action, not an analysis
+# tool. It is surfaced once as the "Final pick / submission decision" in the
+# Candidates section; everywhere else in the agent transcript (execution
+# timeline, decision audit, tool-call chips) it is filtered out as noise.
+_SUBMIT_CANDIDATE_TOOL = "submit_candidate"
+
+
+def _is_submit_candidate(name: str | None) -> bool:
+    return (name or "").strip().lower() == _SUBMIT_CANDIDATE_TOOL
+
+
 def _agent_step_timeline_block(steps: list[AgentStepSummary]) -> str:
     """Vertical execution timeline — one card per step the agent ran.
 
@@ -8053,7 +8360,11 @@ def _agent_step_timeline_block(steps: list[AgentStepSummary]) -> str:
     compact body showing the tool/workflow name + state pill + key
     metrics. The whole section is omitted when the agent didn't
     record any per-step summary (e.g. a single-shot tool call).
+
+    ``submit_candidate`` steps are dropped — the submission decision is
+    shown once in the Candidates section, not as a pipeline step.
     """
+    steps = [s for s in steps if not _is_submit_candidate(s.tool)]
     if not steps:
         return ""
     cards: list[str] = []
@@ -8309,6 +8620,112 @@ def _render_agent_prose(text: str) -> str:
     return "".join(html_parts)
 
 
+def _clip_text(value: str, limit: int) -> str:
+    """Single-line truncation with an ellipsis for inline summaries."""
+    s = " ".join(str(value).split())
+    if len(s) <= limit:
+        return s
+    return s[: limit - 1].rstrip() + "…"
+
+
+def _describe_json_payload(data: Any) -> str:
+    """Build a short, escaped HTML gist of a parsed JSON object/array.
+
+    Used to replace wall-of-text JSON message bubbles (e.g. the tool
+    registry the planner is handed) with a one-line headline plus a few
+    key facts. Lists of named objects are summarised by their names so a
+    reader sees "12 tools (rfdiffusion, proteinmpnn, …)" instead of a
+    multi-kilobyte blob.
+    """
+    def _names(items: list[Any]) -> list[str]:
+        out: list[str] = []
+        for it in items:
+            if isinstance(it, dict):
+                name = it.get("name") or it.get("id") or it.get("tool")
+                if name:
+                    out.append(str(name))
+        return out
+
+    facets: list[str] = []
+    if isinstance(data, dict):
+        n = len(data)
+        headline = f"Structured message · {n} field{'s' if n != 1 else ''}"
+        for key, val in data.items():
+            label = _h(str(key))
+            if isinstance(val, list):
+                names = _names(val)
+                if names:
+                    shown = ", ".join(_h(x) for x in names[:6])
+                    extra = f" +{len(names) - 6} more" if len(names) > 6 else ""
+                    facets.append(
+                        f"<li><b>{label}</b>: {len(val)} ({shown}{extra})</li>"
+                    )
+                else:
+                    facets.append(
+                        f"<li><b>{label}</b>: {len(val)} "
+                        f"item{'s' if len(val) != 1 else ''}</li>"
+                    )
+            elif isinstance(val, dict):
+                facets.append(
+                    f"<li><b>{label}</b>: {{{len(val)} "
+                    f"field{'s' if len(val) != 1 else ''}}}</li>"
+                )
+            elif val is None or val == "":
+                facets.append(f"<li><b>{label}</b>: —</li>")
+            else:
+                facets.append(f"<li><b>{label}</b>: {_h(_clip_text(str(val), 90))}</li>")
+    elif isinstance(data, list):
+        n = len(data)
+        names = _names(data)
+        if names:
+            shown = ", ".join(_h(x) for x in names[:8])
+            extra = f" +{len(names) - 8} more" if len(names) > 8 else ""
+            headline = f"List · {n} entr{'ies' if n != 1 else 'y'} ({shown}{extra})"
+        else:
+            headline = f"List · {n} item{'s' if n != 1 else ''}"
+    else:
+        headline = "Structured payload"
+
+    ul = (
+        f"<ul class='conv-json-facets'>{''.join(facets)}</ul>" if facets else ""
+    )
+    return f"<span class='conv-json-headline'>{headline}</span>{ul}"
+
+
+def _render_agent_message_content(text: str) -> str:
+    """Render a transcript message body, summarising raw-JSON payloads.
+
+    Most messages are prose and pass straight through ``_render_agent_prose``.
+    But some bubbles (notably the tool-registry the planner receives) carry a
+    single large JSON object/array as their entire content — a wall of text
+    that buries the conversation. When the whole content parses as JSON we
+    render a compact summary headline plus a click-to-expand raw view instead.
+    Small JSON (<= 300 chars) is just pretty-printed inline; non-JSON prose is
+    untouched.
+    """
+    s = (text or "").strip()
+    if not s or s[0] not in "{[":
+        return _render_agent_prose(text)
+    try:
+        data = json.loads(s)
+    except Exception:
+        return _render_agent_prose(text)
+    if not isinstance(data, (dict, list)):
+        return _render_agent_prose(text)
+
+    pretty = json.dumps(data, indent=2, ensure_ascii=False)
+    if len(pretty) <= 300:
+        return f"<code class='conv-json-inline'>{_h(pretty)}</code>"
+    summary_html = _describe_json_payload(data)
+    return (
+        "<details class='conv-json-block'>"
+        f"<summary class='conv-json-summary'>{summary_html}"
+        "<span class='conv-json-toggle'>show raw JSON</span></summary>"
+        f"<code class='conv-json-raw'>{_h(pretty)}</code>"
+        "</details>"
+    )
+
+
 def _why_candidate(candidate: ReportCandidate) -> str:
     justification = candidate.source.get("justification")
     if isinstance(justification, str) and justification.strip():
@@ -8501,6 +8918,34 @@ def _num(value: object) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+# pLDDT and its named derivatives are logged by some adapters on the [0,1]
+# unit scale (e.g. esm3 ``mean_plddt`` ≈ 0.98, protein_qc ``plddt`` ≈ 0.98)
+# and by others already on AlphaFold's [0,100] scale. The report always
+# presents pLDDT on [0,100], so a value that arrives as a unit fraction
+# (<= 1.5) is scaled up by 100 before it drives any label, gauge fill, or
+# quality colour. Keyed on the canonical (provenance-prefix-stripped) base
+# metric name so ``esm3:mean_plddt`` and bare ``plddt`` both match.
+_PLDDT_FAMILY_KEYS = frozenset({
+    "plddt", "mean_plddt", "scaffold_plddt", "binder_plddt", "iplddt",
+})
+
+
+def _plddt_on_100(key: str, value: Any) -> Any:
+    """Rescale a pLDDT-family value to the [0,100] scale when needed.
+
+    Only touches pLDDT-family metrics whose value looks like a unit
+    fraction (<= 1.5). Non-pLDDT keys, already-[0,100] values, and
+    non-numeric inputs pass through unchanged.
+    """
+    base = str(key).split(":", 1)[-1].lower()
+    if base not in _PLDDT_FAMILY_KEYS:
+        return value
+    num = _num(value)
+    if num is None or not (0.0 <= num <= 1.5):
+        return value
+    return num * 100.0
 
 
 def _short(value: str, length: int = 16) -> str:
@@ -9027,6 +9472,25 @@ body {
   font-size:11px; color:var(--subtle); align-self:center;
   padding:2px 4px;
 }
+.conv-submit-list { display:flex; flex-direction:column; gap:10px; }
+.conv-submit-row {
+  border:1px solid var(--line); border-radius:8px;
+  padding:10px 12px; background:#fbfafe;
+}
+.conv-submit-head {
+  display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:6px;
+}
+.conv-submit-id {
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; font-weight:600; color:var(--ink);
+  background:#fff; border:1px solid var(--line);
+  border-radius:5px; padding:2px 8px;
+}
+.conv-submit-chips { display:inline-flex; flex-wrap:wrap; gap:5px; }
+.conv-submit-just {
+  font-size:13.5px; line-height:1.6; color:var(--ink);
+}
+.conv-submit-just p { margin:0; }
 .conv-final-dl { margin:0; }
 .conv-final-dl dt {
   font-size:10.5px; font-weight:700;
@@ -9052,6 +9516,51 @@ body {
   margin:10px 0; padding:10px 12px;
   background:#0f0a1f; color:#ede9fe;
   border-radius:8px; font-size:12.5px; line-height:1.55;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Transcript JSON payloads — a summarised, collapsible alternative to dumping
+   a multi-kilobyte blob (e.g. the tool registry) straight into a chat bubble.
+   The summary headline + key-fact list reads at a glance; the raw JSON stays
+   one click away. */
+.conv-json-inline {
+  display:block; white-space:pre-wrap; word-break:break-word;
+  margin:4px 0; padding:8px 10px;
+  background:color-mix(in srgb, var(--ink) 4%, var(--panel));
+  border:1px solid var(--line); border-radius:8px;
+  font-size:12px; line-height:1.5;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--ink);
+}
+.conv-json-block { margin:2px 0; }
+.conv-json-summary {
+  cursor:pointer; user-select:none; list-style:none;
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:8px;
+  padding:8px 10px; border-radius:8px;
+  background:color-mix(in srgb, var(--accent) 5%, var(--panel));
+  border:1px solid var(--line);
+}
+.conv-json-summary::-webkit-details-marker { display:none; }
+.conv-json-headline {
+  font-weight:600; font-size:13px; color:var(--ink);
+}
+.conv-json-toggle {
+  margin-left:auto; font-size:11px; font-weight:600; letter-spacing:0.03em;
+  text-transform:uppercase; color:var(--accent);
+}
+.conv-json-block[open] .conv-json-toggle::after { content:' (hide)'; }
+.conv-json-facets {
+  flex-basis:100%; margin:6px 0 0; padding:0 0 0 2px;
+  list-style:none; display:flex; flex-direction:column; gap:3px;
+}
+.conv-json-facets li {
+  font-size:12px; color:var(--muted); line-height:1.5;
+}
+.conv-json-facets li b { color:var(--ink); font-weight:600; }
+.conv-json-raw {
+  display:block; white-space:pre; overflow-x:auto;
+  margin:8px 0 2px; padding:10px 12px;
+  background:#0f0a1f; color:#ede9fe;
+  border-radius:8px; font-size:12px; line-height:1.55;
   font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -9848,13 +10357,64 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 .dag-circle.state-failed    { fill:var(--poor); }
 .dag-circle.state-cancelled { fill:var(--accent-2); }
 
+/* Candidate groups — visually separate the submitted "Final picks" from
+   the "Explored candidates" that were evaluated but not submitted. The two
+   groups previously shared identical chrome, so they read as one flat list.
+   Final picks get an accent-tinted frame + glow; explored gets a muted,
+   recessed frame so the eye lands on the answer first. */
+.candidate-group {
+  border-radius:16px; padding:8px 20px 18px; margin:20px 0;
+  border:1px solid var(--line);
+}
+.candidate-group-final {
+  border:1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background:color-mix(in srgb, var(--accent) 6%, var(--panel));
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent),
+             var(--shadow-card);
+}
+.candidate-group-explored {
+  border:1px dashed var(--line);
+  background:color-mix(in srgb, var(--ink) 2.5%, var(--panel));
+  opacity:0.97;
+}
+.candidate-group-head {
+  display:flex; justify-content:space-between; align-items:center;
+  gap:16px; flex-wrap:wrap;
+  padding:14px 0 12px; margin-bottom:6px;
+  border-bottom:1px solid var(--line);
+}
+.candidate-group-title { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+.candidate-group-badge {
+  display:inline-flex; align-items:center;
+  font-size:13px; font-weight:700; letter-spacing:-0.005em;
+  padding:5px 13px; border-radius:999px; white-space:nowrap;
+}
+.candidate-group-badge-final {
+  color:#fff;
+  background:var(--accent);
+  box-shadow:0 1px 4px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.candidate-group-badge-explored {
+  color:var(--muted);
+  background:color-mix(in srgb, var(--ink) 7%, transparent);
+  border:1px solid var(--line);
+}
+.candidate-group-sub {
+  color:var(--subtle); font-size:12.5px; font-weight:500; letter-spacing:0;
+}
+/* Explored cards sit one level down the hierarchy — flatten their shadow so
+   they don't compete with the final picks. */
+.candidate-group-explored .candidate-card {
+  box-shadow:none; background:var(--panel);
+}
+
 /* Candidate card */
 .candidate-card {
   border:1px solid var(--line); border-radius:12px; padding:22px 24px; margin:16px 0;
   background:var(--panel);
   box-shadow:var(--shadow-tile);
 }
-/* Small uppercase eyebrow ("Top #N", "Candidate", "Input sequence ...").
+/* Small uppercase eyebrow ("Top #N", "Candidate", "Candidate sequence ...").
    Without an explicit rule the <p class="eyebrow"> inherits browser <p>
    defaults — that's why the "Candidate" subtitle was floating with a
    weird gap above the heading. Match the rest of the report's eyebrow
@@ -9938,6 +10498,16 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   background:var(--accent-soft); border-color:var(--accent); color:var(--accent);
 }
 .structure-control input[type="checkbox"] { accent-color:var(--accent); margin:0; }
+/* Backbone-only models have no sidechain atoms, so the toggle is disabled.
+   Mute it and switch the cursor to the not-allowed affordance; the label's
+   title attribute carries the explanation on hover. */
+.structure-control-disabled {
+  opacity:0.45; cursor:not-allowed;
+}
+.structure-control-disabled:hover {
+  background:var(--panel); border-color:var(--line); color:var(--ink);
+}
+.structure-control-disabled input[type="checkbox"] { cursor:not-allowed; }
 .structure-control select {
   font-size:12px; border:none; background:transparent; color:inherit; cursor:pointer;
   padding:0; font-family:inherit;
@@ -10475,6 +11045,38 @@ td.quality-poor { color:var(--poor); font-weight:600; }
   letter-spacing:0.05em; font-weight:600;
 }
 .artifact-row { display:flex; flex-wrap:wrap; gap:8px; }
+/* Candidate-availability + merge-audit event rows. These live in
+   ``.artifact-list`` and share a node-title + metadata-pill + tool-chip
+   shape. Without these rules the pills had no chip styling (so labels and
+   values ran together — "binder_length_maxsource…") and the trailing
+   <code> tool floated into a ragged staircase. Scope the layout to
+   ``.artifact-list`` so the download-artifact rows (``.artifact-section``)
+   are untouched. */
+.artifact-list { display:flex; flex-direction:column; gap:10px; margin-top:4px; }
+.artifact-list .artifact-row {
+  align-items:flex-start; gap:12px;
+  padding:12px 14px; border:1px solid var(--line); border-radius:10px;
+  background:var(--panel); box-shadow:var(--shadow-tile);
+}
+.artifact-list .artifact-row > div:first-child { flex:1 1 auto; min-width:0; }
+.artifact-list .artifact-row > div:first-child > strong {
+  display:block; margin-bottom:7px; font-size:13.5px; color:var(--ink);
+}
+.artifact-list .artifact-row > code {
+  flex:0 0 auto; align-self:flex-start;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; padding:3px 9px; border-radius:6px;
+  background:var(--accent-soft); color:var(--accent); white-space:nowrap;
+}
+.artifact-list .artifact-meta { display:flex; flex-wrap:wrap; gap:6px; }
+.artifact-pill {
+  display:inline-flex; align-items:baseline; gap:5px;
+  padding:3px 9px; border-radius:999px;
+  background:color-mix(in srgb, var(--ink) 4%, var(--panel));
+  border:1px solid var(--line);
+  font-size:12px; color:var(--muted); line-height:1.55;
+}
+.artifact-pill strong { color:var(--ink); font-weight:600; }
 .artifact-link {
   display:flex; flex-direction:column; gap:3px;
   padding:9px 13px; background:#ffffff; border:1px solid var(--line);
@@ -11570,6 +12172,25 @@ def _js() -> str:
       }
     } catch (e) { /* selectedAtoms may not be available in some versions */ }
 
+    // Detect whether the model carries any sidechain atoms at all. Backbone-
+    // only outputs (rfdiffusion scaffolds, esm3 backbone predictions, ...)
+    // contain just N/CA/C/O per residue, so the "Sidechains" toggle has
+    // literally nothing to draw. We disable + explain it rather than letting
+    // the user click a dead control. Any non-hydrogen protein atom outside
+    // the backbone set proves sidechains exist.
+    let hasSidechains = false;
+    try {
+      const BACKBONE = { N: 1, CA: 1, C: 1, O: 1, OXT: 1 };
+      const allAtoms = viewer.selectedAtoms({});
+      for (const a of allAtoms) {
+        if (a.hetflag) continue;                       // ligands / waters
+        const el = (a.elem || '').toUpperCase();
+        if (el === 'H' || el === 'D') continue;        // sticks show heavy atoms
+        const name = (a.atom || '').toUpperCase().trim();
+        if (!BACKBONE[name]) { hasSidechains = true; break; }
+      }
+    } catch (e) { /* selectedAtoms may not be available in some versions */ }
+
     // Honour a per-section default colour (set by the Python renderer for
     // binder-design complexes — defaults binder/target to chain colouring so
     // the two are visually distinct from the first paint). Falls back to the
@@ -11625,10 +12246,24 @@ def _js() -> str:
     }
     const sidechainsBox = section.querySelector('.structure-sidechains');
     if (sidechainsBox) {
-      sidechainsBox.addEventListener('change', () => {
-        state.sidechains = sidechainsBox.checked;
-        applyStructureStyles(state);
-      });
+      if (!hasSidechains) {
+        // Backbone-only model: nothing for the toggle to draw. Disable it and
+        // explain why so the dead control doesn't read as a bug.
+        sidechainsBox.checked = false;
+        sidechainsBox.disabled = true;
+        state.sidechains = false;
+        const lbl = sidechainsBox.closest('label');
+        if (lbl) {
+          lbl.classList.add('structure-control-disabled');
+          lbl.title = 'Backbone-only structure — no sidechain atoms were '
+                    + 'generated for this model, so there is nothing to show.';
+        }
+      } else {
+        sidechainsBox.addEventListener('change', () => {
+          state.sidechains = sidechainsBox.checked;
+          applyStructureStyles(state);
+        });
+      }
     }
     const fullscreenBtn = section.querySelector('.structure-fullscreen-btn');
     if (fullscreenBtn) {
@@ -11826,9 +12461,12 @@ def _js() -> str:
     v.setStyle({ resn: 'WAT' }, {});
 
     if (state.sidechains) {
+      // Keep CA in the selection so each side chain stick stays bonded to the
+      // backbone (excluding CA leaves the sticks floating); exclude only the
+      // peptide N/C/O. radius 0.13 was effectively invisible over the cartoon.
       v.addStyle(
-        { hetflag: false, not: { atom: ['N', 'CA', 'C', 'O'] } },
-        { stick: { radius: 0.13 } }
+        { hetflag: false, not: { atom: ['N', 'C', 'O'] } },
+        { stick: { radius: 0.2 } }
       );
     }
 

@@ -400,26 +400,21 @@ def test_report_surfaces_bounded_candidate_availability_events(
     model = collect_report_model(tmp_workspace, wf_id)
     html = render_report_html(model)
 
+    # The collect layer still records all availability events on the model …
     assert model.empty_candidate_events[0]["label"] == "epimerase intent"
     assert model.candidate_capability_filter_events[0]["status"] == "partitioned"
     assert len(model.candidate_capability_filter_events[0]["filtered_candidates"]) == 5
-    assert "Candidate Availability" in html
     assert model.satisfied_semantic_facets[0]["label"] == "dehydratase intent"
     assert model.satisfied_semantic_facets[0]["candidate_count"] == 1
-    assert "Satisfied facets" in html
-    assert "dehydratase intent" in html
-    assert "seq_hit_1" in html
-    assert "epimerase intent" in html
-    assert "partitioned" in html
-    assert "cand_4" in html
-    assert "source go_sequences:seq_0" in html
-    assert "caps has_candidate_scores" in html
     assert model.parameter_resolution_events[0]["field"] == "pdb_path"
     assert model.graph.nodes[1].parameter_resolution_summary["derived_count"] == 1
     assert model.graph.nodes[1].parameter_resolution_summary["adapter_default_count"] == 1
-    assert "Parameter resolution" in html
-    assert "planner_literal -&gt; upstream_candidate" in html
-    assert "adapter schema default will be used" in html
+    # … but the "Candidate Availability" report section is intentionally
+    # suppressed in the HTML render (per user request): it was mostly no-op
+    # parameter-default audit noise and added little to the report.
+    assert "Candidate Availability" not in html
+    assert "Satisfied facets" not in html
+    assert "Parameter resolution" not in html
 
 
 def test_report_surfaces_parameter_conflict_events(
@@ -463,10 +458,14 @@ def test_report_surfaces_parameter_conflict_events(
     model = collect_report_model(tmp_workspace, wf_id)
     html = render_report_html(model)
 
+    # The collect layer still records the parameter-conflict event …
     assert model.parameter_resolution_events[0]["field"] == "candidates"
     assert model.graph.nodes[0].parameter_resolution_summary["conflict_count"] == 1
-    assert "Parameter resolution" in html
-    assert "failed_planner_literal_not_allowed" in html
+    # … but the "Candidate Availability" / "Parameter resolution" report
+    # section is intentionally suppressed in the HTML render (per user request).
+    # (The raw event payload may still live in the embedded data blob, so we
+    # only assert the visible section header is gone.)
+    assert "Parameter resolution" not in html
 
 
 def test_report_candidate_dedupe_preserves_scores_qc_liabilities_and_artifacts(

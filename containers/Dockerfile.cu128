@@ -25,7 +25,9 @@ RUN curl -Ls "https://micro.mamba.pm/api/micromamba/linux-64/${MAMBA_VERSION}" \
 
 WORKDIR /opt/VibeProteinAgent
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md CONTRIBUTING.md CITATION.cff ./
+COPY bin ./bin
 COPY src ./src
+COPY scripts ./scripts
 COPY docs ./docs
 COPY containers ./containers
 

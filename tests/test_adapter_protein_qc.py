@@ -66,6 +66,25 @@ def test_selected_metrics_only(tmp_path):
     assert "plddt" not in out.metrics
 
 
+def test_plddt_from_unit_interval_bfactor_is_persisted_on_percent_scale(tmp_path):
+    pdb_path = tmp_path / "unit_plddt.pdb"
+    pdb_path.write_text(
+        "ATOM      1  CA  ALA A   1      11.104  13.207   2.100  1.00  0.98           C\n"
+        "TER\n"
+        "END\n"
+    )
+    a = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = a.run(
+        ProteinQCInput(pdb_path=str(pdb_path), metrics=["plddt"]),
+        null_context(tmp_path),
+    )
+
+    assert out.metrics["plddt"] == pytest.approx(98.0)
+    assert "low_plddt" not in out.flags
+    assert out.candidates[0]["scores"]["protein_qc"]["plddt"] == pytest.approx(98.0)
+
+
 @pytest.mark.skipif(not _PDB_FIXTURE.exists(), reason="6MRR fixture missing")
 def test_pdb_path_extracts_plddt(tmp_path):
     a = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))

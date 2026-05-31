@@ -16,12 +16,15 @@ class InstallWeight:
     path: str
     env_var: str | None = None
     env_value: str | None = None
+    artifact_ref: str | None = None
     url: str | None = None
     sha256: str | None = None
+    size_bytes: int | None = None
     source_path: str | None = None
     unpack: str | None = None
     hf_repo_id: str | None = None
     hf_repo_type: str | None = None
+    hf_filename: str | None = None
     required: bool = True
     modes: tuple[str, ...] = ()
 
@@ -30,9 +33,11 @@ class InstallWeight:
 class InstallSource:
     name: str
     path: str
-    repo: str
+    repo: str | None = None
     ref: str | None = None
     env_var: str | None = None
+    artifact_ref: str | None = None
+    source_path: str | None = None
     markers: tuple[str, ...] = ()
     required: bool = True
 
@@ -42,12 +47,17 @@ class InstallSidecar:
     env_name: str
     path: str
     install_script: str | None = None
+    prebuilt_ref: str | None = None
 
 
 @dataclass(frozen=True)
 class InstallTool:
     name: str
     runtime: str
+    artifact_policy: str = "redistributable"
+    access_requirements: tuple[str, ...] = ()
+    license_notice: str | None = None
+    license_url: str | None = None
     required: bool = True
     depends_on: tuple[str, ...] = ()
     sources: tuple[InstallSource, ...] = ()
@@ -73,6 +83,9 @@ class ManifestDefaults:
     sidecars_root: str
     cache_dir: str
     state_db: str
+    default_profile: str = "full"
+    shared_env_ref: str | None = None
+    artifact_index_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +122,25 @@ class InstallManifest:
                         details={"profile": profile.name, "tool": tool},
                     )
         for tool in self.tools.values():
+            if tool.artifact_policy not in _ARTIFACT_POLICIES:
+                raise InvalidParamsError(
+                    f"tool '{tool.name}' has invalid artifact_policy",
+                    details={
+                        "tool": tool.name,
+                        "artifact_policy": tool.artifact_policy,
+                        "allowed": sorted(_ARTIFACT_POLICIES),
+                    },
+                )
+            bad_reqs = sorted(set(tool.access_requirements) - _ACCESS_REQUIREMENTS)
+            if bad_reqs:
+                raise InvalidParamsError(
+                    f"tool '{tool.name}' has invalid access_requirements",
+                    details={
+                        "tool": tool.name,
+                        "access_requirements": bad_reqs,
+                        "allowed": sorted(_ACCESS_REQUIREMENTS),
+                    },
+                )
             for dep in tool.depends_on:
                 if dep not in self.tools:
                     raise InvalidParamsError(
@@ -135,6 +167,12 @@ class InstallManifest:
                             "unpack": weight.unpack,
                             "allowed": ["tar", "zip"],
                         },
+                    )
+            for source in tool.sources:
+                if not (source.repo or source.artifact_ref or source.source_path):
+                    raise InvalidParamsError(
+                        f"tool '{tool.name}' source '{source.name}' has no acquisition contract",
+                        details={"tool": tool.name, "source": source.name},
                     )
 
     def validate_registry_coverage(self, registry_tool_names: set[str]) -> dict[str, list[str]]:
@@ -166,6 +204,17 @@ def _parse_manifest(raw: dict[str, Any]) -> InstallManifest:
         sidecars_root=str(defaults_raw.get("sidecars_root", "sidecars")),
         cache_dir=str(defaults_raw.get("cache_dir", "cache")),
         state_db=str(defaults_raw.get("state_db", "install/state.json")),
+        default_profile=str(defaults_raw.get("default_profile", "full")),
+        shared_env_ref=(
+            str(defaults_raw["shared_env_ref"])
+            if defaults_raw.get("shared_env_ref")
+            else None
+        ),
+        artifact_index_url=(
+            str(defaults_raw["artifact_index_url"])
+            if defaults_raw.get("artifact_index_url")
+            else None
+        ),
     )
     tool_defaults = _mapping(raw.get("tool_defaults", {}), "tool_defaults")
     tools = {
@@ -211,12 +260,17 @@ def _parse_tool(name: str, value: Any, defaults: dict[str, Any]) -> InstallTool:
             env_name=str(side["env_name"]),
             path=str(side["path"]),
             install_script=str(side["install_script"]) if side.get("install_script") else None,
+            prebuilt_ref=str(side["prebuilt_ref"]) if side.get("prebuilt_ref") else None,
         )
     weights = tuple(_parse_weight(name, item) for item in (raw.get("weights") or ()))
     sources = tuple(_parse_source(name, item) for item in (raw.get("sources") or ()))
     return InstallTool(
         name=name,
         runtime=str(raw.get("runtime", "shared")),
+        artifact_policy=str(raw.get("artifact_policy", "redistributable")),
+        access_requirements=tuple(str(item) for item in (raw.get("access_requirements") or ())),
+        license_notice=str(raw["license_notice"]) if raw.get("license_notice") else None,
+        license_url=str(raw["license_url"]) if raw.get("license_url") else None,
         required=bool(raw.get("required", True)),
         depends_on=tuple(str(item) for item in (raw.get("depends_on") or ())),
         sources=sources,
@@ -235,12 +289,15 @@ def _parse_weight(tool_name: str, value: Any) -> InstallWeight:
         path=str(raw["path"]),
         env_var=str(raw["env_var"]) if raw.get("env_var") else None,
         env_value=str(raw["env_value"]) if raw.get("env_value") else None,
+        artifact_ref=str(raw["artifact_ref"]) if raw.get("artifact_ref") else None,
         url=str(raw["url"]) if raw.get("url") else None,
         sha256=str(raw["sha256"]) if raw.get("sha256") else None,
+        size_bytes=int(raw["size_bytes"]) if raw.get("size_bytes") is not None else None,
         source_path=str(raw["source_path"]) if raw.get("source_path") else None,
         unpack=str(raw["unpack"]) if raw.get("unpack") else None,
         hf_repo_id=str(raw["hf_repo_id"]) if raw.get("hf_repo_id") else None,
         hf_repo_type=str(raw["hf_repo_type"]) if raw.get("hf_repo_type") else None,
+        hf_filename=str(raw["hf_filename"]) if raw.get("hf_filename") else None,
         required=bool(raw.get("required", True)),
         modes=tuple(str(item) for item in (raw.get("modes") or ())),
     )
@@ -251,9 +308,11 @@ def _parse_source(tool_name: str, value: Any) -> InstallSource:
     return InstallSource(
         name=str(raw["name"]),
         path=str(raw["path"]),
-        repo=str(raw["repo"]),
+        repo=str(raw["repo"]) if raw.get("repo") else None,
         ref=str(raw["ref"]) if raw.get("ref") else None,
         env_var=str(raw["env_var"]) if raw.get("env_var") else None,
+        artifact_ref=str(raw["artifact_ref"]) if raw.get("artifact_ref") else None,
+        source_path=str(raw["source_path"]) if raw.get("source_path") else None,
         markers=tuple(str(item) for item in (raw.get("markers") or ())),
         required=bool(raw.get("required", True)),
     )
@@ -263,3 +322,11 @@ def _mapping(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise InvalidParamsError(f"install manifest field '{label}' must be a mapping")
     return value
+
+
+_ARTIFACT_POLICIES = frozenset(
+    {"redistributable", "gated", "user_provided", "blocked"}
+)
+_ACCESS_REQUIREMENTS = frozenset(
+    {"hf_token", "upstream_terms", "license_key", "local_artifact"}
+)

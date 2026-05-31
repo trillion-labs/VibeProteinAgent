@@ -337,7 +337,7 @@ def _recommendations(
     if status == "fail":
         recommendations.append(
             "Use a newer NVIDIA driver, choose --cuda-profile cu126 when appropriate, "
-            "or use the Docker/Apptainer cu128 image on a compatible host."
+            "or use the Docker cu128 image on a compatible host."
         )
     if set(selected_tools).intersection(CUDA_COMPILING_TOOLS):
         recommendations.append(

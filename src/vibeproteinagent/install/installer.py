@@ -19,6 +19,11 @@ import yaml
 from vibeproteinagent.adapters.visibility import is_retired_registry_tool_name
 from vibeproteinagent.core import config as cfg
 from vibeproteinagent.core.errors import DependencyError
+from vibeproteinagent.install.artifacts import (
+    ArtifactRecord,
+    load_artifact_index,
+    materialize_artifact,
+)
 from vibeproteinagent.install.cuda import (
     GPU_HEAVY_TOOLS,
     RF_DGL_TOOLS,
@@ -51,6 +56,8 @@ class InstallOptions:
     source_root: Path | None = None
     cuda_profile: str | None = None
     use_prebuilt_sidecars: bool = False
+    build_from_source: bool = False
+    artifact_index: str | None = None
 
 
 class ManifestInstaller:
@@ -70,12 +77,18 @@ class ManifestInstaller:
 
     def plan(self, options: InstallOptions) -> dict[str, Any]:
         paths, selection = self.resolve(options)
-        return _plan_payload(paths, selection, options)
+        artifact_index = load_artifact_index(
+            options.artifact_index or self.manifest.defaults.artifact_index_url
+        )
+        return _plan_payload(paths, selection, options, artifact_index=artifact_index)
 
     def install(self, options: InstallOptions) -> dict[str, Any]:
         paths, selection = self.resolve(options)
+        artifact_index = load_artifact_index(
+            options.artifact_index or self.manifest.defaults.artifact_index_url
+        )
         if options.dry_run:
-            payload = _plan_payload(paths, selection, options)
+            payload = _plan_payload(paths, selection, options, artifact_index=artifact_index)
             payload["dry_run"] = True
             return payload
 
@@ -86,9 +99,23 @@ class ManifestInstaller:
             paths.cache_dir.mkdir(parents=True, exist_ok=True)
             state = InstallState(paths.state_db)
             results: list[dict[str, Any]] = []
-            _ensure_shared_env(paths, options, state, results)
+            _ensure_shared_env(
+                self.manifest,
+                paths,
+                options,
+                state,
+                results,
+                artifact_index=artifact_index,
+            )
             _ensure_vpa_install(paths, options, state, results)
-            _ensure_shared_runtime_deps(paths, selection, options, state, results)
+            _ensure_shared_runtime_deps(
+                paths,
+                selection,
+                options,
+                state,
+                results,
+                artifact_index=artifact_index,
+            )
             _write_env_exports(selection, paths, options, state, results)
             exports = _env_exports(selection, paths, options)
             old_env = _apply_install_env(paths, exports)
@@ -101,8 +128,11 @@ class ManifestInstaller:
                         state,
                         results,
                         required=_is_strict_tool(tool, options),
+                        artifact_index=artifact_index,
                     )
                 for tool in selection.tools:
+                    if _tool_install_was_terminally_skipped(results, tool.name):
+                        continue
                     _ensure_tool_readiness(
                         tool,
                         paths,
@@ -124,6 +154,8 @@ class ManifestInstaller:
             "sidecars_root": str(paths.sidecars_root),
             "cache_dir": str(paths.cache_dir),
             "results": results,
+            "capabilities": _capability_summary(results, selection),
+            "license_notices": _license_notices(selection),
             "next_command": _next_doctor_command(paths, selection),
         }
 
@@ -142,19 +174,13 @@ def install_readiness(
         profile=None,
         tools=tool_names,
         registry_tool_names=_registry_tool_names(),
-    ) if tool_names else None
-    names = (
-        selection.tool_names
-        if selection
-        else tuple(sorted(manifest.tool_names))
     )
+    names = selection.tool_names
+    strict_names = set(selection.tool_names)
+    if tool_names:
+        strict_names = set(selection.tool_names)
     tools: list[dict[str, Any]] = []
-    export_selection = selection or InstallSelection(
-        profile=None,
-        requested_tools=(),
-        tools=tuple(manifest.tools[name] for name in sorted(manifest.tools)),
-        registry_coverage={},
-    )
+    export_selection = selection
     readiness_exports = _env_exports(export_selection, paths)
     for key in tuple(readiness_exports):
         if os.environ.get(key):
@@ -163,9 +189,12 @@ def install_readiness(
     try:
         for name in names:
             spec = manifest.tools.get(name)
-            effective_required = bool(spec.required if spec else True)
-            if tool_names and spec is not None:
-                effective_required = True
+            effective_required = bool(
+                name in strict_names and not (
+                    spec is not None
+                    and _tool_waits_for_external_access(spec, required=True)
+                )
+            )
             runtime_status = (
                 _runtime_tool_readiness(name, python=runtime_python)
                 if runtime_probe
@@ -211,9 +240,11 @@ def install_readiness(
             tools.append(entry)
     finally:
         _restore_env(old_env)
+    capabilities = _readiness_capability_summary(tools, selection)
     return {
         "install_ready": all(item.get("ready") or item.get("required") is False for item in tools),
         "tools": tools,
+        "capabilities": capabilities,
     }
 
 
@@ -250,6 +281,192 @@ def install_preflight(
         }
     )
     return data
+
+
+def docker_install_plan(
+    *,
+    profile: str | None = None,
+    tools: tuple[str, ...] = (),
+    install_root: Path | None = None,
+    cache_dir: Path | None = None,
+    cuda_profile: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    manifest = load_manifest()
+    installer = ManifestInstaller(manifest)
+    paths, selection = installer.resolve(
+        InstallOptions(
+            profile=profile,
+            tools=tools,
+            install_root=install_root,
+            cache_dir=cache_dir,
+            cuda_profile=cuda_profile,
+            dry_run=dry_run,
+        )
+    )
+    stack = resolve_cuda_stack(cuda_profile)
+    tag = (
+        "vibeproteinagent/vpa-cu128:local"
+        if stack.name == "cu128"
+        else f"vibeproteinagent/vpa-{stack.name}:local"
+    )
+    data = {
+        "status": "docker-plan",
+        "dry_run": dry_run,
+        "profile": selection.profile,
+        "cuda_profile": stack.name,
+        "selected_tools": list(selection.tool_names),
+        "install_root": str(paths.root),
+        "cache_dir": str(paths.cache_dir),
+        "docker_image": tag,
+        "next_command": (
+            "docker run --rm --gpus all "
+            f"-e VPA_HOME=/vpa "
+            f"-v {shlex.quote(str(paths.root))}:/vpa "
+            f"-v {shlex.quote(str(paths.root))}:{shlex.quote(str(paths.root))} "
+            f"{shlex.quote(tag)} vpa install doctor --json"
+        ),
+    }
+    if dry_run:
+        return data
+    return _run_docker_install_validation(data, tag, paths, selection)
+
+
+def _run_docker_install_validation(
+    data: dict[str, Any],
+    tag: str,
+    paths: InstallPaths,
+    selection: InstallSelection,
+) -> dict[str, Any]:
+    docker = shutil.which("docker")
+    if docker is None:
+        return {
+            **data,
+            "status": "unavailable",
+            "docker_available": False,
+            "reason": "docker executable was not found on PATH",
+        }
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    checks: list[dict[str, Any]] = []
+    inspect = subprocess.run(
+        [docker, "image", "inspect", tag],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if inspect.returncode != 0:
+        source_root = _source_root()
+        dockerfile = source_root / "containers" / "Dockerfile.cu128"
+        build = subprocess.run(
+            [docker, "build", "-f", str(dockerfile), "-t", tag, str(source_root)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        checks.append(
+            {
+                "name": "docker_build",
+                "status": "ready" if build.returncode == 0 else "failed",
+                "image": tag,
+                "stdout": build.stdout[-4000:],
+                "stderr": build.stderr[-4000:],
+            }
+        )
+        if build.returncode != 0:
+            raise DependencyError(
+                "Docker image build failed",
+                details={"image": tag, "stderr": build.stderr[-4000:]},
+            )
+    else:
+        checks.append({"name": "docker_image", "status": "ready", "image": tag})
+    tools = ",".join(selection.tool_names)
+    source_root = _source_root()
+    cmd = [
+        docker,
+        "run",
+        "--rm",
+        "--gpus",
+        "all",
+        "-e",
+        "VPA_HOME=/vpa",
+        "-e",
+        f"PYTHONPATH={source_root / 'src'}",
+        "-v",
+        f"{paths.root}:/vpa",
+        "-v",
+        f"{paths.root}:{paths.root}",
+        "-v",
+        f"{source_root}:{source_root}:ro",
+        tag,
+        "vpa",
+        "install",
+        "doctor",
+        "--tools",
+        tools,
+        "--json",
+    ]
+    for env_name in (
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "VPA_HF_CREDENTIAL",
+        "VPA_ARTIFACT_INDEX",
+        "VPA_ARTIFACT_MIRROR",
+    ):
+        if os.environ.get(env_name):
+            cmd[cmd.index(tag):cmd.index(tag)] = ["-e", env_name]
+    doctor = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if doctor.returncode != 0 and "could not select device driver" in doctor.stderr:
+        no_gpu_cmd = [item for item in cmd if item not in ("--gpus", "all")]
+        doctor = subprocess.run(no_gpu_cmd, text=True, capture_output=True, check=False)
+        checks.append({"name": "docker_gpu", "status": "skipped", "reason": "GPU runtime unavailable"})
+    checks.append(
+        {
+            "name": "docker_doctor",
+            "status": "ready" if doctor.returncode == 0 else "failed",
+            "stdout": doctor.stdout[-4000:],
+            "stderr": doctor.stderr[-4000:],
+        }
+    )
+    doctor_ready = False
+    doctor_summary: dict[str, Any] = {}
+    if doctor.returncode == 0:
+        try:
+            payload = json.loads(doctor.stdout)
+            doctor_data = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(doctor_data, dict):
+                capabilities = doctor_data.get("capabilities") or {}
+                failed = capabilities.get("failed") or []
+                doctor_ready = bool(doctor_data.get("install_ready")) and not failed
+                doctor_summary = {
+                    "install_ready": bool(doctor_data.get("install_ready")),
+                    "ready_count": len(capabilities.get("ready") or []),
+                    "failed_count": len(failed),
+                    "needs_credential_count": len(capabilities.get("needs_credential") or []),
+                    "needs_acceptance_count": len(capabilities.get("needs_acceptance") or []),
+                    "needs_local_artifact_count": len(capabilities.get("needs_local_artifact") or []),
+                    "unavailable_count": len(capabilities.get("unavailable") or []),
+                }
+        except Exception as exc:
+            doctor_summary = {"parse_error": str(exc)}
+    checks[-1]["doctor_summary"] = doctor_summary
+    if doctor.returncode != 0 or not doctor_ready:
+        raise DependencyError(
+            "Docker install doctor failed",
+            details={
+                "image": tag,
+                "doctor_summary": doctor_summary,
+                "stderr": doctor.stderr[-4000:],
+                "stdout": doctor.stdout[-4000:],
+            },
+        )
+    return {
+        **data,
+        "status": "ready",
+        "dry_run": False,
+        "docker_available": True,
+        "checks": checks,
+    }
 
 
 def _registry_tool_names() -> set[str]:
@@ -295,6 +512,8 @@ def _plan_payload(
     paths: InstallPaths,
     selection: InstallSelection,
     options: InstallOptions,
+    *,
+    artifact_index: dict[str, ArtifactRecord] | None = None,
 ) -> dict[str, Any]:
     cuda_stack = resolve_cuda_stack(options.cuda_profile)
     steps = [
@@ -342,6 +561,12 @@ def _plan_payload(
         "disk_estimate_bytes": sum(tool.disk_bytes for tool in selection.tools),
         "steps": steps,
         "warnings": warnings,
+        "capabilities": _planned_capabilities(
+            selection,
+            artifact_index or {},
+            cuda_profile=options.cuda_profile,
+        ),
+        "license_notices": _license_notices(selection),
         "env_exports": exports,
         "next_command": _next_doctor_command(paths, selection),
     }
@@ -410,6 +635,285 @@ def _credential_warnings(
     return warnings
 
 
+def _planned_capabilities(
+    selection: InstallSelection,
+    artifact_index: dict[str, ArtifactRecord],
+    *,
+    cuda_profile: str | None,
+) -> dict[str, list[dict[str, Any]]]:
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "ready": [],
+        "needs_credential": [],
+        "needs_acceptance": [],
+        "needs_local_artifact": [],
+        "unavailable": [],
+        "failed": [],
+    }
+    for tool in selection.tools:
+        entry = {
+            "tool": tool.name,
+            "policy": tool.artifact_policy,
+            "install_method": _planned_install_method(
+                tool,
+                artifact_index,
+                cuda_profile=cuda_profile,
+            ),
+        }
+        reqs = set(tool.access_requirements)
+        if tool.artifact_policy == "blocked":
+            buckets["unavailable"].append({**entry, "reason": "blocked by artifact policy"})
+        elif "license_key" in reqs and not _license_credential_present(tool.name):
+            buckets["needs_credential"].append({**entry, "requirements": sorted(reqs)})
+        elif "hf_token" in reqs and not _hf_credential_present():
+            buckets["needs_credential"].append({**entry, "requirements": sorted(reqs)})
+        elif "upstream_terms" in reqs:
+            buckets["needs_acceptance"].append({**entry, "requirements": sorted(reqs)})
+        elif tool.artifact_policy == "user_provided" or "local_artifact" in reqs:
+            buckets["needs_local_artifact"].append({**entry, "requirements": sorted(reqs)})
+        else:
+            buckets["ready"].append(entry)
+    return buckets
+
+
+def _planned_install_method(
+    tool: InstallTool,
+    artifact_index: dict[str, ArtifactRecord],
+    *,
+    cuda_profile: str | None,
+) -> str:
+    if _tool_has_resolved_artifacts(tool, artifact_index, cuda_profile=cuda_profile):
+        return "prebuilt"
+    if tool.sidecar and tool.sidecar.install_script:
+        return "source_fallback"
+    if any(source.repo or source.source_path for source in tool.sources):
+        return "source_fallback"
+    if any(_weight_has_remote_fallback(weight) or weight.source_path for weight in tool.weights):
+        return "download_or_local_fallback"
+    if tool.binary:
+        return "prebuilt_required"
+    return "shared_runtime"
+
+
+def _license_notices(selection: InstallSelection) -> list[dict[str, str]]:
+    notices: list[dict[str, str]] = []
+    for tool in selection.tools:
+        if not tool.license_notice:
+            continue
+        entry = {"tool": tool.name, "notice": tool.license_notice}
+        if tool.license_url:
+            entry["url"] = tool.license_url
+        notices.append(entry)
+    return notices
+
+
+def _capability_summary(
+    results: list[dict[str, Any]],
+    selection: InstallSelection,
+) -> dict[str, list[dict[str, Any]]]:
+    result_by_tool: dict[str, list[dict[str, Any]]] = {}
+    for item in results:
+        unit = str(item.get("unit") or "")
+        if unit.startswith("tool:"):
+            _, tool = unit.split(":", 1)
+            result_by_tool.setdefault(tool, []).append(item)
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "ready": [],
+        "needs_credential": [],
+        "needs_acceptance": [],
+        "needs_local_artifact": [],
+        "unavailable": [],
+        "failed": [],
+    }
+    for tool in selection.tools:
+        tool_results = result_by_tool.get(tool.name, [])
+        last = _authoritative_tool_result(tool_results) or {}
+        status = str(last.get("status") or "")
+        reason = str(last.get("reason") or "")
+        if status == "ready":
+            buckets["ready"].append({"tool": tool.name})
+        elif "hf_token" in tool.access_requirements:
+            buckets["needs_credential"].append(
+                {"tool": tool.name, "requirements": list(tool.access_requirements)}
+            )
+        elif tool.artifact_policy == "blocked":
+            buckets["unavailable"].append({"tool": tool.name, "reason": "blocked"})
+        elif "license_key" in tool.access_requirements:
+            buckets["needs_credential"].append(
+                {"tool": tool.name, "requirements": list(tool.access_requirements)}
+            )
+        elif "upstream_terms" in tool.access_requirements:
+            buckets["needs_acceptance"].append(
+                {"tool": tool.name, "requirements": list(tool.access_requirements)}
+            )
+        elif (
+            "local_artifact" in tool.access_requirements
+            or tool.artifact_policy == "user_provided"
+        ):
+            buckets["needs_local_artifact"].append(
+                {"tool": tool.name, "requirements": list(tool.access_requirements)}
+            )
+        else:
+            buckets["failed"].append(
+                {
+                    "tool": tool.name,
+                    "reason": last.get("readiness", {}).get("reason") or last.get("reason"),
+                }
+            )
+    return buckets
+
+
+def _readiness_capability_summary(
+    tools: list[dict[str, Any]],
+    selection: InstallSelection,
+) -> dict[str, list[dict[str, Any]]]:
+    by_name = {tool.name: tool for tool in selection.tools}
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "ready": [],
+        "needs_credential": [],
+        "needs_acceptance": [],
+        "needs_local_artifact": [],
+        "unavailable": [],
+        "failed": [],
+    }
+    for item in tools:
+        name = str(item.get("name") or "")
+        spec = by_name.get(name)
+        if item.get("ready"):
+            buckets["ready"].append({"tool": name})
+            continue
+        if spec is None:
+            buckets["failed"].append({"tool": name, "reason": item.get("reason")})
+            continue
+        reqs = set(spec.access_requirements)
+        if spec.artifact_policy == "blocked":
+            buckets["unavailable"].append({"tool": name, "reason": "blocked"})
+        elif "license_key" in reqs and not _license_credential_present(name):
+            buckets["needs_credential"].append(
+                {"tool": name, "requirements": list(spec.access_requirements)}
+            )
+        elif "hf_token" in reqs and not _hf_credential_present():
+            buckets["needs_credential"].append(
+                {"tool": name, "requirements": list(spec.access_requirements)}
+            )
+        elif "upstream_terms" in reqs:
+            buckets["needs_acceptance"].append(
+                {"tool": name, "requirements": list(spec.access_requirements)}
+            )
+        elif spec.artifact_policy == "user_provided" or "local_artifact" in reqs:
+            buckets["needs_local_artifact"].append(
+                {"tool": name, "requirements": list(spec.access_requirements)}
+            )
+        else:
+            buckets["failed"].append({"tool": name, "reason": item.get("reason")})
+    return buckets
+
+
+def _authoritative_tool_result(tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for item in tool_results:
+        if item.get("status") == "ready":
+            return item
+    for item in tool_results:
+        if _is_terminal_tool_skip(item):
+            return item
+    return tool_results[-1] if tool_results else None
+
+
+def _tool_install_was_terminally_skipped(
+    results: list[dict[str, Any]],
+    tool_name: str,
+) -> bool:
+    unit = f"tool:{tool_name}"
+    return any(
+        str(item.get("unit")) == unit and _is_terminal_tool_skip(item)
+        for item in results
+    )
+
+
+def _is_terminal_tool_skip(item: dict[str, Any]) -> bool:
+    if item.get("status") != "skipped":
+        return False
+    reason = str(item.get("reason") or "")
+    return (
+        "requires HF_TOKEN" in reason
+        or "requires Hugging Face credentials" in reason
+        or "requires a license key" in reason
+        or "requires a license credential" in reason
+        or "requires upstream terms" in reason
+        or "requires user-provided local artifacts" in reason
+        or "requires a local artifact" in reason
+        or "is blocked by artifact policy" in reason
+    )
+
+
+def _has_unresolved_artifact_refs(
+    tool: InstallTool,
+    artifact_index: dict[str, ArtifactRecord],
+    *,
+    cuda_profile: str | None = None,
+) -> bool:
+    return bool(
+        set(_artifact_refs_for_tool(tool, cuda_profile=cuda_profile)) - set(artifact_index)
+    )
+
+
+def _tool_has_resolved_artifacts(
+    tool: InstallTool,
+    artifact_index: dict[str, ArtifactRecord],
+    *,
+    cuda_profile: str | None = None,
+) -> bool:
+    refs = _artifact_refs_for_tool(tool, cuda_profile=cuda_profile)
+    return bool(refs) and all(ref in artifact_index for ref in refs)
+
+
+def _artifact_refs_for_tool(
+    tool: InstallTool,
+    *,
+    cuda_profile: str | None = None,
+) -> list[str]:
+    stack = resolve_cuda_stack(cuda_profile)
+    refs: list[str] = [
+        *(
+            _format_artifact_ref(source.artifact_ref, stack)
+            for source in tool.sources
+            if source.artifact_ref and not _source_has_remote_fallback(source)
+        ),
+        *(
+            _format_artifact_ref(weight.artifact_ref, stack)
+            for weight in tool.weights
+            if weight.artifact_ref and not _weight_has_remote_fallback(weight)
+        ),
+    ]
+    if tool.sidecar and tool.sidecar.prebuilt_ref:
+        refs.append(_format_artifact_ref(tool.sidecar.prebuilt_ref, stack))
+    return refs
+
+
+def _source_has_remote_fallback(source: InstallSource) -> bool:
+    return bool(source.repo)
+
+
+def _weight_has_remote_fallback(weight: InstallWeight) -> bool:
+    return bool(weight.url or weight.hf_repo_id)
+
+
+def _format_artifact_ref(ref: str, stack: CudaStack) -> str:
+    return ref.format(
+        cuda_profile=stack.name,
+        cuda_version=stack.cuda_version or "cpu",
+        cuda_tag=stack.name,
+    )
+
+
+def _license_credential_present(tool_name: str) -> bool:
+    normalized = tool_name.upper().replace("-", "_")
+    candidates = (
+        f"VPA_{normalized}_LICENSE_KEY",
+        f"{normalized}_LICENSE_KEY",
+    )
+    return any(os.environ.get(name) for name in candidates)
+
+
 def _hf_credential_present() -> bool:
     return any(
         os.environ.get(name)
@@ -476,16 +980,45 @@ def _next_doctor_command(paths: InstallPaths, selection: InstallSelection) -> st
 
 
 def _ensure_shared_env(
+    manifest: InstallManifest,
     paths: InstallPaths,
     options: InstallOptions,
     state: InstallState,
     results: list[dict[str, Any]],
+    *,
+    artifact_index: dict[str, ArtifactRecord],
 ) -> None:
     python = paths.shared_env / "bin" / "python"
     if python.is_file() and not options.force:
         state.mark("env:vpa", "ready", {"python": str(python)})
         results.append({"unit": "env:vpa", "status": "ready", "path": str(paths.shared_env)})
         return
+    stack = resolve_cuda_stack(options.cuda_profile)
+    if manifest.defaults.shared_env_ref:
+        artifact_ref = _format_artifact_ref(manifest.defaults.shared_env_ref, stack)
+        if artifact_ref in artifact_index and not options.build_from_source:
+            materialize_artifact(artifact_index[artifact_ref], paths.shared_env)
+            python = paths.shared_env / "bin" / "python"
+            if not python.is_file():
+                raise DependencyError(
+                    "prebuilt shared VPA env did not expose a Python runtime",
+                    details={"path": str(paths.shared_env), "artifact_ref": artifact_ref},
+                )
+            _run_conda_unpack_if_present(python, paths.shared_env, results)
+            state.mark(
+                "env:vpa",
+                "ready",
+                {"python": str(python), "artifact_ref": artifact_ref},
+            )
+            results.append(
+                {
+                    "unit": "env:vpa",
+                    "status": "installed",
+                    "path": str(paths.shared_env),
+                    "artifact_ref": artifact_ref,
+                }
+            )
+            return
     micromamba = _find_micromamba()
     if micromamba is None:
         raise DependencyError(
@@ -569,6 +1102,8 @@ def _ensure_shared_runtime_deps(
     options: InstallOptions,
     state: InstallState,
     results: list[dict[str, Any]],
+    *,
+    artifact_index: dict[str, ArtifactRecord],
 ) -> None:
     selected_torch_tools = sorted(set(selection.tool_names).intersection(_TORCH_TOOLS))
     if not selected_torch_tools:
@@ -591,7 +1126,15 @@ def _ensure_shared_runtime_deps(
             "ready",
             {"version": version, "cuda_profile": cuda_stack.name},
         )
-        _ensure_selected_shared_deps(python, selection, options, state, results, paths)
+        _ensure_selected_shared_deps(
+            python,
+            selection,
+            options,
+            state,
+            results,
+            paths,
+            artifact_index=artifact_index,
+        )
         return
     if options.offline:
         raise DependencyError(
@@ -635,7 +1178,15 @@ def _ensure_shared_runtime_deps(
         }
     )
     state.mark("shared-dep:torch", "ready", {"version": version, "cuda_profile": cuda_stack.name})
-    _ensure_selected_shared_deps(python, selection, options, state, results, paths)
+    _ensure_selected_shared_deps(
+        python,
+        selection,
+        options,
+        state,
+        results,
+        paths,
+        artifact_index=artifact_index,
+    )
 
 
 def _probe_torch_install(python: Path) -> dict[str, Any]:
@@ -684,28 +1235,41 @@ def _ensure_selected_shared_deps(
     state: InstallState,
     results: list[dict[str, Any]],
     paths: InstallPaths,
+    *,
+    artifact_index: dict[str, ArtifactRecord],
 ) -> None:
-    if "boltz2_affinity" in selection.tool_names:
+    tool_by_name = {tool.name: tool for tool in selection.tools}
+
+    def should_install(tool_name: str) -> bool:
+        tool = tool_by_name.get(tool_name)
+        if tool is None:
+            return False
+        required = _is_strict_tool(tool, options)
+        if _tool_waits_for_external_access(tool, required=required):
+            return False
+        return True
+
+    if should_install("boltz2_affinity"):
         _ensure_boltz2_affinity_shared_deps(python, options, state, results)
-    if "boltzgen" in selection.tool_names:
+    if should_install("boltzgen"):
         _ensure_boltzgen_shared_deps(python, options, state, results, paths)
-    if "esm3" in selection.tool_names:
+    if should_install("esm3"):
         _ensure_esm3_shared_deps(python, options, state, results)
-    if "ligandmpnn" in selection.tool_names:
+    if should_install("ligandmpnn"):
         _ensure_ligandmpnn_shared_deps(python, options, state, results)
-    if "prodigy" in selection.tool_names:
+    if should_install("prodigy"):
         _ensure_prodigy_shared_deps(python, options, state, results)
-    if "proteina_complexa" in selection.tool_names:
+    if should_install("proteina_complexa"):
         _ensure_proteina_complexa_shared_deps(python, options, state, results)
-    if "protenix_v2" in selection.tool_names:
+    if should_install("protenix_v2"):
         _ensure_protenix_shared_deps(python, options, state, results)
-    if "pxdesign" in selection.tool_names:
+    if should_install("pxdesign"):
         _ensure_pxdesign_shared_deps(python, options, state, results)
-    if "pxmeter" in selection.tool_names:
+    if should_install("pxmeter"):
         _ensure_pxmeter_shared_deps(python, options, state, results)
-    if "pyrosetta" in selection.tool_names:
+    if should_install("pyrosetta"):
         _ensure_pyrosetta_shared_deps(python, options, state, results)
-    if {"rfdiffusion", "rfpeptides"}.intersection(selection.tool_names):
+    if should_install("rfdiffusion") or should_install("rfpeptides"):
         _ensure_rfdiffusion_shared_deps(python, options, state, results)
 
 
@@ -1148,12 +1712,6 @@ def _ensure_esm3_shared_deps(
             "esm is required for esm3 but is not installed and --offline was set",
             details={"package": "esm"},
         )
-    source = Path("/opt/vpa-data/esm")
-    if not source.is_dir():
-        raise DependencyError(
-            "could not locate local ESM3 source checkout",
-            details={"source": str(source)},
-        )
     _run(
         [
             str(python),
@@ -1161,27 +1719,9 @@ def _ensure_esm3_shared_deps(
             "pip",
             "install",
             "--no-user",
-            "anarcii",
-            "zstandard",
-            "cloudpathlib",
-            "msgpack-numpy",
-            "pygtrie",
-            "tenacity",
-            "pydssp",
-            "dna_features_viewer",
-            "py3dmol",
-            "zstd",
-            "transformers",
-            "tokenizers",
-            "einops",
-            "biotite",
-            "brotli",
+            "esm==3.2.1.post1",
         ],
         cwd=None,
-    )
-    _run(
-        [str(python), "-m", "pip", "install", "--no-user", "--no-deps", str(source)],
-        cwd=source,
     )
     verify = subprocess.run(
         [str(python), "-c", "import brotli, esm; print('ok')"],
@@ -1473,13 +2013,56 @@ def _ensure_tool_units(
     results: list[dict[str, Any]],
     *,
     required: bool,
+    artifact_index: dict[str, ArtifactRecord],
 ) -> None:
+    if _tool_waits_for_external_access(tool, required=required):
+        results.append(
+            {
+                "unit": f"tool:{tool.name}",
+                "status": "skipped",
+                "runtime": tool.runtime,
+                "required": required,
+                "reason": _external_access_reason(tool),
+            }
+        )
+        state.mark(
+            f"tool:{tool.name}",
+            "skipped",
+            {"runtime": tool.runtime, "reason": _external_access_reason(tool)},
+        )
+        return
     for source in tool.sources:
-        _ensure_source(tool, source, paths, options, state, results, required=required)
+        _ensure_source(
+            tool,
+            source,
+            paths,
+            options,
+            state,
+            results,
+            required=required,
+            artifact_index=artifact_index,
+        )
     if tool.sidecar:
-        _ensure_sidecar(tool, paths, options, state, results, required=required)
+        _ensure_sidecar(
+            tool,
+            paths,
+            options,
+            state,
+            results,
+            required=required,
+            artifact_index=artifact_index,
+        )
     for weight in tool.weights:
-        _ensure_weight(tool, weight, paths, options, state, results, required=required)
+        _ensure_weight(
+            tool,
+            weight,
+            paths,
+            options,
+            state,
+            results,
+            required=required,
+            artifact_index=artifact_index,
+        )
     if tool.binary:
         status = "ready" if shutil.which(tool.binary) else "missing"
         if status == "missing" and required:
@@ -1500,6 +2083,7 @@ def _ensure_source(
     results: list[dict[str, Any]],
     *,
     required: bool,
+    artifact_index: dict[str, ArtifactRecord],
 ) -> None:
     path = _source_path(paths, source)
     ready_path = _source_ready_path(paths, source)
@@ -1526,6 +2110,71 @@ def _ensure_source(
             }
         )
         state.mark(f"source:{tool.name}:{source.name}", "skipped", {"path": str(path)})
+        return
+    stack = resolve_cuda_stack(options.cuda_profile)
+    artifact_ref = (
+        _format_artifact_ref(source.artifact_ref, stack) if source.artifact_ref else None
+    )
+    if artifact_ref and artifact_ref in artifact_index:
+        record = artifact_index[artifact_ref]
+        materialize_artifact(record, path)
+        if not _source_ready(path, source):
+            raise DependencyError(
+                f"artifact source '{source.name}' for tool '{tool.name}' is not usable",
+                details={
+                    "tool": tool.name,
+                    "source": source.name,
+                    "path": str(path),
+                    "markers": list(source.markers),
+                },
+            )
+        results.append(
+            {
+                "unit": f"source:{tool.name}:{source.name}",
+                "status": "installed",
+                "path": str(path),
+                "artifact_ref": artifact_ref,
+            }
+        )
+        state.mark(
+            f"source:{tool.name}:{source.name}",
+            "ready",
+            {"path": str(path), "artifact_ref": artifact_ref},
+        )
+        return
+    source_local = _source_local_path(source, options)
+    if source_local is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        shutil.copytree(source_local, path, dirs_exist_ok=True)
+        if not _source_ready(path, source):
+            raise DependencyError(
+                f"copied source '{source.name}' for tool '{tool.name}' is not usable",
+                details={
+                    "tool": tool.name,
+                    "source": source.name,
+                    "path": str(path),
+                    "source_path": str(source_local),
+                    "markers": list(source.markers),
+                },
+            )
+        results.append(
+            {
+                "unit": f"source:{tool.name}:{source.name}",
+                "status": "copied",
+                "path": str(path),
+                "source": str(source_local),
+            }
+        )
+        state.mark(
+            f"source:{tool.name}:{source.name}",
+            "ready",
+            {"path": str(path), "source": str(source_local)},
+        )
         return
     if options.offline:
         raise DependencyError(
@@ -1564,6 +2213,11 @@ def _ensure_source(
                     },
                 )
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not source.repo:
+        raise DependencyError(
+            f"source checkout '{source.name}' for tool '{tool.name}' has no repo/artifact",
+            details={"tool": tool.name, "source": source.name, "path": str(path)},
+        )
     _run([git, "clone", source.repo, str(path)], cwd=None)
     if source.ref:
         _run([git, "-C", str(path), "checkout", source.ref], cwd=None)
@@ -1631,6 +2285,12 @@ def _write_env_exports(
     lines = [
         "# Generated by vibeproteinagent install. Safe to regenerate.",
         f"export {cfg.VPA_HOME_ENV}={shlex.quote(str(paths.root))}",
+        f"_vpa_bin={shlex.quote(str(paths.shared_env / 'bin'))}",
+        'case ":${PATH:-}:" in',
+        '  *:"$_vpa_bin":*) ;;',
+        '  *) export PATH="$_vpa_bin${PATH:+:$PATH}" ;;',
+        "esac",
+        "unset _vpa_bin",
     ]
     lines.extend(f"export {key}={shlex.quote(value)}" for key, value in sorted(exports.items()))
     content = "\n".join(lines) + "\n"
@@ -1794,9 +2454,12 @@ def _ensure_sidecar(
     results: list[dict[str, Any]],
     *,
     required: bool,
+    artifact_index: dict[str, ArtifactRecord] | None = None,
 ) -> None:
     assert tool.sidecar is not None
     path = paths.root / tool.sidecar.path
+    if path.exists():
+        _repair_sidecar_python_links(paths, path, results)
     python = _sidecar_python(path)
     if python.is_file() and not options.force and not options.repair:
         results.append({"unit": f"sidecar:{tool.name}", "status": "ready", "path": str(path)})
@@ -1818,6 +2481,34 @@ def _ensure_sidecar(
             {"path": str(path), "source": str(prebuilt)},
         )
         return
+    stack = resolve_cuda_stack(options.cuda_profile)
+    artifact_ref = None
+    if tool.sidecar.prebuilt_ref:
+        artifact_ref = _format_artifact_ref(tool.sidecar.prebuilt_ref, stack)
+    if artifact_ref and artifact_index and artifact_ref in artifact_index:
+        materialize_artifact(artifact_index[artifact_ref], path)
+        _repair_sidecar_python_links(paths, path, results)
+        python = _sidecar_python(path)
+        if not python.is_file():
+            raise DependencyError(
+                f"prebuilt sidecar '{tool.name}' did not expose a Python runtime",
+                details={"tool": tool.name, "path": str(path), "artifact_ref": artifact_ref},
+            )
+        _run_conda_unpack_if_present(python, path, results)
+        results.append(
+            {
+                "unit": f"sidecar:{tool.name}",
+                "status": "installed",
+                "path": str(path),
+                "artifact_ref": artifact_ref,
+            }
+        )
+        state.mark(
+            f"sidecar:{tool.name}",
+            "ready",
+            {"path": str(path), "artifact_ref": artifact_ref},
+        )
+        return
     if not tool.sidecar.install_script:
         if required:
             raise DependencyError(
@@ -1837,6 +2528,100 @@ def _ensure_sidecar(
     _run(shlex.split(command), cwd=source_root)
     results.append({"unit": f"sidecar:{tool.name}", "status": "installed", "path": str(path)})
     state.mark(f"sidecar:{tool.name}", "ready", {"path": str(path)})
+
+
+def _repair_sidecar_python_links(
+    paths: InstallPaths,
+    sidecar_path: Path,
+    results: list[dict[str, Any]],
+) -> None:
+    shared_python = paths.shared_env / "bin" / "python"
+    if not shared_python.exists():
+        return
+    repaired: list[str] = []
+    shared_bin = paths.shared_env / "bin"
+    for python_link in (
+        sidecar_path / "bin" / "python",
+        sidecar_path / ".venv" / "bin" / "python",
+    ):
+        if not python_link.is_symlink():
+            continue
+        raw_target = os.readlink(python_link)
+        target = Path(raw_target)
+        if not target.is_absolute():
+            target = python_link.parent / target
+        if target.exists() and _path_within(target, paths.root):
+            continue
+        python_link.unlink()
+        python_link.symlink_to(os.path.relpath(shared_python, python_link.parent))
+        repaired.append(str(python_link))
+    for cfg in (sidecar_path / "pyvenv.cfg", sidecar_path / ".venv" / "pyvenv.cfg"):
+        if not cfg.is_file():
+            continue
+        lines = cfg.read_text().splitlines()
+        changed = False
+        rewritten: list[str] = []
+        for line in lines:
+            if line.startswith("home = "):
+                raw_home = Path(line.split("=", 1)[1].strip()).expanduser()
+                if raw_home.exists() and _path_within(raw_home, paths.root):
+                    rewritten.append(line)
+                else:
+                    rewritten.append(f"home = {shared_bin}")
+                    changed = True
+            else:
+                rewritten.append(line)
+        if changed:
+            cfg.write_text("\n".join(rewritten) + "\n")
+            repaired.append(str(cfg))
+    if repaired:
+        results.append(
+            {
+                "unit": f"sidecar-python-links:{sidecar_path.name}",
+                "status": "repaired",
+                "links": repaired,
+                "target": str(shared_python),
+            }
+        )
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _run_conda_unpack_if_present(
+    python: Path,
+    prefix: Path,
+    results: list[dict[str, Any]],
+) -> None:
+    conda_unpack = python.parent / "conda-unpack"
+    if not conda_unpack.is_file():
+        return
+    proc = subprocess.run(
+        [str(conda_unpack)],
+        cwd=str(prefix),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    status = "ready" if proc.returncode == 0 else "failed"
+    results.append(
+        {
+            "unit": f"conda-unpack:{prefix.name}",
+            "status": status,
+            "stdout": proc.stdout[-2000:],
+            "stderr": proc.stderr[-2000:],
+        }
+    )
+    if proc.returncode != 0:
+        raise DependencyError(
+            "conda-unpack failed for prebuilt environment",
+            details={"prefix": str(prefix), "stderr": proc.stderr[-2000:]},
+        )
 
 
 def _cuda_format_values(stack: CudaStack) -> dict[str, str]:
@@ -1937,11 +2722,34 @@ def _ensure_weight(
     results: list[dict[str, Any]],
     *,
     required: bool,
+    artifact_index: dict[str, ArtifactRecord] | None = None,
 ) -> None:
     path = _weight_path(paths, weight)
     if _weight_ready(path, weight):
         results.append(
             {"unit": f"weight:{tool.name}:{weight.name}", "status": "ready", "path": str(path)}
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
+    stack = resolve_cuda_stack(options.cuda_profile)
+    artifact_ref = (
+        _format_artifact_ref(weight.artifact_ref, stack) if weight.artifact_ref else None
+    )
+    if artifact_ref and artifact_index and artifact_ref in artifact_index:
+        record = artifact_index[artifact_ref]
+        materialize_artifact(record, path)
+        if not _weight_ready(path, weight):
+            raise DependencyError(
+                f"artifact weight '{weight.name}' for tool '{tool.name}' did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {
+                "unit": f"weight:{tool.name}:{weight.name}",
+                "status": "installed",
+                "path": str(path),
+                "artifact_ref": artifact_ref,
+            }
         )
         state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
         return
@@ -2349,6 +3157,9 @@ def _source_ready_path(paths: InstallPaths, source: InstallSource) -> Path | Non
     manifest_path = _source_path(paths, source)
     if _source_ready(manifest_path, source):
         return manifest_path
+    local_path = _source_local_path(source, InstallOptions())
+    if local_path is not None and _source_ready(local_path, source):
+        return local_path
     return None
 
 
@@ -2361,16 +3172,58 @@ def _env_source_path(source: InstallSource) -> Path | None:
     return Path(raw).expanduser()
 
 
+def _source_local_path(source: InstallSource, options: InstallOptions) -> Path | None:
+    if not source.source_path:
+        return None
+    raw = Path(source.source_path).expanduser()
+    candidates = [raw] if raw.is_absolute() else [
+        (options.source_root or _source_root()) / raw,
+        _source_root() / raw,
+    ]
+    for candidate in candidates:
+        if _source_ready(candidate, source):
+            return candidate
+    return None
+
+
 def _source_ready(path: Path, source: InstallSource) -> bool:
     if not path.is_dir():
         return False
     return all((path / marker).exists() for marker in source.markers)
 
 
-def _is_strict_tool(tool: InstallTool, options: InstallOptions) -> bool:
-    if options.tools:
+def _tool_waits_for_external_access(tool: InstallTool, *, required: bool) -> bool:
+    if tool.artifact_policy in {"blocked", "user_provided"}:
         return True
-    return tool.required
+    reqs = set(tool.access_requirements)
+    if "local_artifact" in reqs or "upstream_terms" in reqs:
+        return True
+    if "hf_token" in reqs and not _hf_credential_present():
+        return True
+    if "license_key" in reqs and not _license_credential_present(tool.name):
+        return True
+    return False
+
+
+def _external_access_reason(tool: InstallTool) -> str:
+    if tool.artifact_policy == "blocked":
+        return "tool is blocked by artifact policy"
+    if tool.artifact_policy == "user_provided":
+        return "tool requires user-provided local artifacts"
+    reqs = set(tool.access_requirements)
+    if "local_artifact" in reqs:
+        return "tool requires user-provided local artifacts"
+    if "upstream_terms" in reqs:
+        return "tool requires upstream terms acceptance"
+    if "license_key" in reqs and not _license_credential_present(tool.name):
+        return "tool requires a license key"
+    if "hf_token" in reqs and not _hf_credential_present():
+        return "tool requires HF_TOKEN or VPA_HF_CREDENTIAL"
+    return "external access requirement is not satisfied"
+
+
+def _is_strict_tool(tool: InstallTool, options: InstallOptions) -> bool:
+    return True
 
 
 def _source_weight_path(weight: InstallWeight, options: InstallOptions) -> Path | None:

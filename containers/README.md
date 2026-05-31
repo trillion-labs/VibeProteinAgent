@@ -14,13 +14,6 @@ docker run --rm --gpus all -e VPA_HOME=/workspace/.vpa -v "$PWD:/workspace" \
   vibeproteinagent:cu128 vpa install preflight --profile full --cuda-profile cu128
 ```
 
-## Apptainer
-
-```bash
-apptainer build vpa-cu128.sif containers/apptainer-cu128.def
-apptainer exec --nv vpa-cu128.sif vpa install preflight --profile full --cuda-profile cu128
-```
-
 The host still needs a compatible NVIDIA driver. The image provides the CUDA
 12.8 userspace/toolkit and VPA conda env; model weights and large sidecars can
 be installed or mounted under `VPA_HOME`. For sidecar installs from a mounted

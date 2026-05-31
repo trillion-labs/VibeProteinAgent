@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from vibeproteinagent.adapters._confidence import normalize_plddt, plddt_unit_score
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
 
@@ -93,6 +94,14 @@ def _metric(row: dict[str, Any], key: str) -> float | None:
         return None
 
 
+def _aliased_metric(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _metric(row, key)
+        if value is not None:
+            return value
+    return None
+
+
 def _path(row: dict[str, Any]) -> str | None:
     for key in ("predicted_cif", "predicted_pdb", "structure_path", "pdb_path", "cif_path"):
         value = row.get(key)
@@ -161,13 +170,20 @@ def _score(
         _metric(candidate, "ranking_score"),
         candidate_score,
     )
-    plddt = _metric(prediction, "plddt")
-    iptm = _metric(prediction, "iptm")
-    ptm = _metric(prediction, "ptm")
+    plddt = _first_metric(
+        _aliased_metric(prediction, "plddt", "mean_plddt"),
+        _aliased_metric(candidate, "plddt", "mean_plddt"),
+    )
+    iptm = _first_metric(_metric(prediction, "iptm"), _metric(candidate, "iptm"))
+    ptm = _first_metric(_metric(prediction, "ptm"), _metric(candidate, "ptm"))
     candidate_qc = _score_namespace(candidate, "protein_qc")
     qc_metrics = qc.get("metrics") if isinstance(qc.get("metrics"), dict) else {}
-    qc_plddt = _metric(qc_metrics, "plddt") if isinstance(qc_metrics, dict) else None
-    candidate_qc_plddt = _metric(candidate_qc, "plddt")
+    qc_plddt = (
+        _aliased_metric(qc_metrics, "plddt", "mean_plddt")
+        if isinstance(qc_metrics, dict)
+        else None
+    )
+    candidate_qc_plddt = _aliased_metric(candidate_qc, "plddt", "mean_plddt")
     liabilities = (
         analysis.get("liabilities")
         if isinstance(analysis.get("liabilities"), list)
@@ -182,12 +198,9 @@ def _score(
     score = 0.0
     if ranking_score is not None:
         score += ranking_score
-    if plddt is not None:
-        score += plddt / 100.0
-    else:
-        fallback_plddt = _first_metric(qc_plddt, candidate_qc_plddt)
-        if fallback_plddt is not None:
-            score += fallback_plddt / 100.0
+    plddt_score = plddt_unit_score(_first_metric(plddt, qc_plddt, candidate_qc_plddt))
+    if plddt_score is not None:
+        score += plddt_score
     if iptm is not None:
         score += 0.5 * iptm
     if ptm is not None:
@@ -195,7 +208,7 @@ def _score(
     score -= 0.05 * len(liabilities)
     score -= 0.10 * len(qc_flags)
 
-    reported_plddt = _first_metric(plddt, qc_plddt, candidate_qc_plddt)
+    reported_plddt = normalize_plddt(_first_metric(plddt, qc_plddt, candidate_qc_plddt))
     details = {
         "candidate_score": candidate_score,
         "ranking_score": ranking_score,

@@ -79,12 +79,20 @@ keys are recorded; reports turn the result into something humans can inspect.
 
 ## Installation
 
-External users should use the npm/npx bootstrapper. It creates
-`~/.vibeproteinagent`, installs the VPA conda env, selected sidecars, and model
-weights. Use `VPA_HOME=/path/to/root` if you want a different install location.
-On a multi-node cluster, put `VPA_HOME` on shared storage before installing, for
+For most users, the native npm/npx installer is the only setup step you need.
+It creates `~/.vibeproteinagent` by default and installs the VPA conda env,
+sidecar tools, command-line binaries, model weights, and caches under that one
+directory. After this install, all auto-installable tools are available from the
+host without Docker. ESM3 also installs when `HF_TOKEN` is exported; without
+that credential, ESM3 is reported as needing a credential while the rest of the
+full profile can still become ready.
+
+Use `VPA_HOME=/path/to/root` if you want a different install location. On a
+multi-node cluster, put `VPA_HOME` on shared storage before installing, for
 example `export VPA_HOME=/shared/projects/vpa/.vibeproteinagent`, so every node
 reuses the same envs, sidecars, workspaces, and checkpoint/cache directories.
+
+### Recommended Native Install
 
 ```bash
 # Optional for ESM3 or other gated Hugging Face downloads.
@@ -96,9 +104,19 @@ export OPENROUTER_API_KEY=<openrouter-api-key>
 # Check the host GPU/driver/toolkit contract before a heavy install.
 npx vibeproteinagent install preflight --profile full --cuda-profile auto --json
 
-# Full agent/tool experience: non-gated tools plus gated tools when credentials/cache are available.
+# Install every auto-installable VPA tool into VPA_HOME.
 npx vibeproteinagent install --profile full --cuda-profile auto --yes
 
+# Load the installed CLI, binaries, sidecars, and model paths into this shell.
+source "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh"
+
+# Confirm that the installed tools are ready.
+vpa install doctor --profile full
+```
+
+Use a smaller install when you do not need every heavy model immediately:
+
+```bash
 # Agent mode without forcing every heavyweight model install.
 npx vibeproteinagent install --profile agent --yes
 
@@ -108,6 +126,63 @@ npx vibeproteinagent install --tools rfdiffusion,proteinmpnn,protenix_v2 --cuda-
 # Preview selected tools, disk estimate, and install steps first.
 npx vibeproteinagent install --profile full --dry-run --json
 ```
+
+### Optional Docker Runtime
+
+Docker is optional. You do not need Docker to use all VPA tools if the native
+install succeeds. Use Docker when the host Python/CUDA setup is fragile, when a
+cluster has different software on different nodes, or when you want the same
+CUDA 12.8 runtime everywhere. The Docker image contains the VPA runtime
+environment. The large tool installs and model weights stay in the mounted
+`VPA_HOME`, so Docker does not duplicate the full install inside the image.
+
+If you already ran the native install, validate that the same `VPA_HOME` works
+from the Docker runtime:
+
+```bash
+export VPA_HOME="${VPA_HOME:-$HOME/.vibeproteinagent}"
+npx vibeproteinagent install --docker --profile full --cuda-profile auto --json
+```
+
+If the host runtime is too messy but Docker is available, build the CUDA image
+and run the installer inside the container while mounting `VPA_HOME` from the
+host. This still writes the full install to the host directory you mounted.
+
+```bash
+export VPA_HOME="${VPA_HOME:-$HOME/.vibeproteinagent}"
+
+docker build -f containers/Dockerfile.cu128 -t vibeproteinagent:cu128 .
+
+docker run --rm --gpus all \
+  -e VPA_HOME=/vpa \
+  -e HF_TOKEN \
+  -v "$VPA_HOME:/vpa" \
+  vibeproteinagent:cu128 \
+  vpa install --profile full --cuda-profile cu128 --yes
+
+docker run --rm --gpus all \
+  -e VPA_HOME=/vpa \
+  -e HF_TOKEN \
+  -v "$VPA_HOME:/vpa" \
+  vibeproteinagent:cu128 \
+  vpa install doctor --profile full
+```
+
+### Expected Install Time
+
+With the prebuilt artifact path, a first clean `--profile full` install usually
+takes about 45-60 minutes on a fast GPU workstation or shared cluster filesystem.
+The latest full validation run took about 41 minutes for install, 44 minutes
+including `vpa install doctor`, and about 50 minutes including representative
+smoke tests. Slow disks, congested shared storage, or downloading artifacts over
+a slow WAN can take longer. Re-running install on an already prepared
+`VPA_HOME` is much faster and should normally take only a few minutes.
+
+The Docker path is separate from the native tool install. The CUDA Docker image
+contains the VPA runtime environment, while large sidecars, tools, and model
+weights live in the mounted `VPA_HOME`. Once the image is available, Docker
+doctor validation usually takes about 3 minutes; first-time Docker use also
+needs time to pull or build the roughly 6 GB CUDA image.
 
 ### Install Footprint
 
@@ -120,7 +195,7 @@ before a large install.
 | `--profile agent` | `base` + retrieval/template tools for LLM planning; provider credentials are only needed at runtime | conda env only; no large model weights selected |
 | `--tools rfdiffusion,proteinmpnn,protenix_v2` | Backbone generation + sequence design + structure prediction | ~10.1 GB tool artifacts, plus env/cache |
 | `--tools boltz2_affinity,rfdiffusion,proteinmpnn` | Affinity prediction + RFdiffusion + ProteinMPNN | ~14.1 GB tool artifacts, plus env/cache |
-| `--profile full` | All non-gated first-class tools, sidecars, and checkpoints; optional/gated tools become ready when their cache or credentials are available | ~240 GB tool artifacts, plus env/cache |
+| `--profile full` | All first-class tools, sidecars, and checkpoints that can be installed on the host; credential-gated tools become ready when credentials/cache are available | ~240 GB tool artifacts, plus env/cache |
 
 If you already have validated sidecar environments, pass
 `--use-prebuilt-sidecars` and export the matching path, for example
@@ -155,6 +230,15 @@ without a Hugging Face credential if the open ESM3 cache is already present, but
 first-run downloads or gated variants may require `HF_TOKEN` plus accepted model
 terms on Hugging Face.
 
+### Tool License Notices
+
+`vpa install` separates install availability from upstream usage terms. A tool
+can install without requiring a credential while still carrying a usage notice.
+For example, PyRosetta is installed directly from the current PyRosetta package
+channel without a VPA license key, but the upstream PyRosetta site states that
+commercial use requires a separate license. VPA itself remains non-commercial;
+the installer prints tool-specific license notices when they apply.
+
 ### GPU Requirements
 
 GPU memory depends on the selected model, input size, and sampling settings.
@@ -182,24 +266,9 @@ Before installation, run `vpa install preflight --profile full --cuda-profile
 auto`. After installation, run `vpa install doctor` and a small smoke job for
 the tools you plan to use.
 
-If host dependency resolution is fragile (common on shared clusters), the repo
-ships CUDA 12.8 container definitions you can build instead. The image bundles
-the CUDA 12.8 userspace + VPA conda env; mount your repo or `$VPA_HOME` to
-install large sidecars or weights.
-
-```bash
-# Docker — definition at containers/Dockerfile.cu128
-docker build -f containers/Dockerfile.cu128 -t vibeproteinagent:cu128 .
-docker run --rm --gpus all -e VPA_HOME=/workspace/.vpa -v "$PWD:/workspace" \
-  vibeproteinagent:cu128 vpa install preflight --profile full --cuda-profile cu128
-
-# Apptainer — definition at containers/apptainer-cu128.def
-apptainer build vpa-cu128.sif containers/apptainer-cu128.def
-apptainer exec --nv vpa-cu128.sif vpa install preflight --profile full --cuda-profile cu128
-```
-
-For sidecar installs from a mounted checkout, pass `--source-root /workspace`.
-See [`containers/README.md`](containers/README.md) for the full notes.
+If host dependency resolution is fragile, use the Docker commands in
+[Optional Docker Runtime](#optional-docker-runtime). See
+[`containers/README.md`](containers/README.md) for additional container notes.
 
 ## Start
 

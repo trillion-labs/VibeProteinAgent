@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -17,12 +19,17 @@ from vibeproteinagent.install.installer import (
     InstallState,
     ManifestInstaller,
     _BOLTZGEN_RUNTIME_DEPS,
+    _capability_summary,
     _ensure_weight,
     _env_exports,
+    _has_unresolved_artifact_refs,
     _link_prebuilt_sidecar,
     _manifest_readiness,
+    _repair_sidecar_python_links,
     _torch_install_matches_stack,
+    _write_env_exports,
 )
+from vibeproteinagent.install.lint import lint_manifest
 from vibeproteinagent.install.manifest import InstallTool, InstallWeight, load_manifest
 from vibeproteinagent.install.planner import resolve_selection
 
@@ -84,13 +91,113 @@ def test_full_profile_resolves_supported_first_class_tools(isolated_vpa_home: Pa
     assert "pxdesign_pipeline_multi_gpu" not in selection.tool_names
 
 
-def test_retired_and_gated_tools_do_not_block_default_doctor(
+def test_default_install_profile_is_full(isolated_vpa_home: Path) -> None:
+    manifest = load_manifest()
+    selection = resolve_selection(
+        manifest,
+        profile=None,
+        tools=(),
+        registry_tool_names=_registry_tool_names(),
+    )
+
+    assert selection.profile == "full"
+    assert "protenix_v2" in selection.tool_names
+    assert "pxdesign" in selection.tool_names
+
+
+def test_manifest_lint_rejects_no_error_contracts(isolated_vpa_home: Path) -> None:
+    result = lint_manifest(load_manifest())
+
+    assert result["ok"] is True
+
+
+def test_protenix_v2_manifest_has_source_and_checkpoint_contract(
+    isolated_vpa_home: Path,
+) -> None:
+    tool = load_manifest().tools["protenix_v2"]
+
+    assert any(source.env_var == "VPA_PROTENIX_TREE" for source in tool.sources)
+    assert any(source.repo and "bytedance/Protenix" in source.repo for source in tool.sources)
+    checkpoint = next(weight for weight in tool.weights if weight.name == "protenix_checkpoint")
+    assert checkpoint.artifact_ref
+    assert checkpoint.url
+    assert checkpoint.source_path is None
+    assert checkpoint.env_var == "VPA_PROTENIX_CKPT"
+    ccd_cache = next(weight for weight in tool.weights if weight.name == "protenix_ccd_cache")
+    assert ccd_cache.artifact_ref
+    assert ccd_cache.url
+    assert ccd_cache.unpack == "tar"
+    assert ccd_cache.source_path is None
+
+
+def test_remote_fallback_artifacts_do_not_force_prebuilt_skip(
+    isolated_vpa_home: Path,
+) -> None:
+    manifest = load_manifest()
+
+    assert _has_unresolved_artifact_refs(
+        manifest.tools["bindcraft"],
+        {},
+        cuda_profile="cu128",
+    )
+    assert not _has_unresolved_artifact_refs(
+        manifest.tools["boltz2_affinity"],
+        {},
+        cuda_profile="cu128",
+    )
+    assert not _has_unresolved_artifact_refs(
+        manifest.tools["protenix_v2"],
+        {},
+        cuda_profile="cu128",
+    )
+
+
+def test_retired_and_optional_tools_do_not_block_default_doctor(
     isolated_vpa_home: Path,
 ) -> None:
     manifest = load_manifest()
     assert manifest.tools["esm3"].required is False
     assert manifest.tools["proteina_complexa"].required is False
+    assert manifest.tools["pyrosetta"].artifact_policy == "redistributable"
+    assert "license_key" not in manifest.tools["pyrosetta"].access_requirements
     assert manifest.tools["pxdesign"].sidecar is not None
+
+
+def test_pyrosetta_install_is_not_license_or_gated_policy_blocked(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VPA_PYROSETTA_LICENSE_KEY", raising=False)
+    monkeypatch.delenv("PYROSETTA_LICENSE_KEY", raising=False)
+    installer = ManifestInstaller(load_manifest())
+
+    plan = installer.install(
+        InstallOptions(
+            tools=("pyrosetta",),
+            install_root=isolated_vpa_home,
+            dry_run=True,
+        )
+    )
+
+    assert plan["capabilities"]["needs_credential"] == []
+    assert plan["capabilities"]["ready"] == [
+        {
+            "tool": "pyrosetta",
+            "policy": "redistributable",
+            "install_method": "shared_runtime",
+        }
+    ]
+    assert plan["license_notices"] == [
+        {
+            "tool": "pyrosetta",
+            "notice": (
+                "Installs without a VPA license key; follow upstream "
+                "PyRosetta/Rosetta Commons terms. Upstream states commercial "
+                "use requires a separate license."
+            ),
+            "url": "https://www.pyrosetta.org/downloads",
+        }
+    ]
 
 
 def test_selective_tools_resolve_only_requested_runtime_closure(
@@ -145,6 +252,104 @@ def test_install_dry_run_is_deterministic_and_non_mutating(
     assert first["env_exports"]["VPA_RFDIFFUSION_WEIGHTS"].endswith("/cache/rfdiffusion")
     assert first["env_exports"]["VPA_CUDA_PROFILE"] == first["cuda_profile"]
     assert not (isolated_vpa_home / "install" / "state.json").exists()
+
+
+def test_artifact_index_resolves_local_weight_contract(
+    isolated_vpa_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.pt"
+    source.write_text("mock-checkpoint")
+    index = tmp_path / "artifacts.json"
+    index.write_text(
+        json.dumps(
+            {"artifacts": {"mock/protenix.pt": {"kind": "file", "path": str(source)}}}
+        )
+    )
+    monkeypatch.setenv("VPA_ARTIFACT_INDEX", str(index))
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+    weight = InstallWeight(
+        name="checkpoint",
+        path="cache/protenix/protenix_base_default_v1.0.0.pt",
+        artifact_ref="mock/protenix.pt",
+    )
+    state = InstallState(paths.state_db)
+    results: list[dict[str, object]] = []
+
+    _ensure_weight(
+        InstallTool(name="protenix_v2", runtime="shared"),
+        weight,
+        paths,
+        InstallOptions(install_root=paths.root),
+        state,
+        results,
+        required=True,
+        artifact_index=installer_module.load_artifact_index(),
+    )
+
+    assert (
+        paths.cache_dir / "protenix" / "protenix_base_default_v1.0.0.pt"
+    ).read_text() == "mock-checkpoint"
+    assert results[-1]["status"] == "installed"
+
+
+def test_dry_run_reports_source_fallback_as_method_not_terminal_state(
+    isolated_vpa_home: Path,
+) -> None:
+    installer = ManifestInstaller(load_manifest())
+
+    plan = installer.install(
+        InstallOptions(
+            tools=("bindcraft",),
+            install_root=isolated_vpa_home,
+            dry_run=True,
+        )
+    )
+
+    assert "will_build_from_source" not in plan["capabilities"]
+    assert plan["capabilities"]["ready"] == [
+        {
+            "tool": "bindcraft",
+            "policy": "redistributable",
+            "install_method": "source_fallback",
+        }
+    ]
+
+
+def test_capability_summary_classifies_external_access_skip_without_source_build_state(
+    isolated_vpa_home: Path,
+) -> None:
+    manifest = load_manifest()
+    selection = resolve_selection(
+        manifest,
+        profile=None,
+        tools=("esm3",),
+        registry_tool_names=_registry_tool_names(),
+    )
+    results: list[dict[str, object]] = [
+        {
+            "unit": "tool:esm3",
+            "status": "skipped",
+            "runtime": "shared",
+            "required": False,
+            "reason": "tool requires HF_TOKEN or VPA_HF_CREDENTIAL",
+        },
+    ]
+
+    summary = _capability_summary(results, selection)
+
+    assert "will_build_from_source" not in summary
+    assert summary["needs_credential"] == [
+        {"tool": "esm3", "requirements": ["hf_token"]}
+    ]
+    assert summary["failed"] == []
 
 
 def test_boltz_tools_dry_run_includes_sources_and_caches(
@@ -289,6 +494,71 @@ def test_vpa_env_file_loader_expands_installer_exports(
 
     assert Path(os.environ["VPA_BOLTZ_TREE"]) == isolated_vpa_home / "sidecars" / "boltz"
     assert os.environ["PATH"].startswith(str(isolated_vpa_home / "envs" / "vpa" / "bin"))
+
+
+def test_generated_env_file_puts_installed_cli_on_path(tmp_path: Path) -> None:
+    manifest = load_manifest()
+    paths = InstallPaths(
+        root=tmp_path / "install",
+        shared_env=tmp_path / "install" / "envs" / "vpa",
+        sidecars_root=tmp_path / "install" / "sidecars",
+        cache_dir=tmp_path / "install" / "cache",
+        state_db=tmp_path / "install" / "state.json",
+    )
+    shared_bin = paths.shared_env / "bin"
+    shared_bin.mkdir(parents=True)
+    (shared_bin / "python").write_text("")
+    vpa_bin = shared_bin / "vpa"
+    vpa_bin.write_text("#!/usr/bin/env bash\n")
+    vpa_bin.chmod(0o755)
+    selection = resolve_selection(manifest, profile=None, tools=("protein_qc",))
+    state = InstallState(paths.state_db)
+    results: list[dict[str, object]] = []
+
+    _write_env_exports(selection, paths, InstallOptions(install_root=paths.root), state, results)
+
+    probe = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"PATH=/usr/bin; source {paths.root / 'env.sh'}; command -v vpa",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert probe.stdout.strip() == str(vpa_bin)
+
+
+def test_sidecar_python_repair_removes_external_absolute_symlink(tmp_path: Path) -> None:
+    paths = InstallPaths(
+        root=tmp_path / "install",
+        shared_env=tmp_path / "install" / "envs" / "vpa",
+        sidecars_root=tmp_path / "install" / "sidecars",
+        cache_dir=tmp_path / "install" / "cache",
+        state_db=tmp_path / "install" / "state.json",
+    )
+    shared_bin = paths.shared_env / "bin"
+    shared_bin.mkdir(parents=True)
+    (shared_bin / "python").write_text("")
+    sidecar_bin = paths.sidecars_root / "tool" / ".venv" / "bin"
+    sidecar_bin.mkdir(parents=True)
+    external = tmp_path / "external" / "python"
+    external.parent.mkdir()
+    external.write_text("")
+    python_link = sidecar_bin / "python"
+    python_link.symlink_to(external)
+    pyvenv = sidecar_bin.parent / "pyvenv.cfg"
+    pyvenv.write_text(f"home = {external.parent}\ninclude-system-site-packages = false\n")
+    results: list[dict[str, object]] = []
+
+    _repair_sidecar_python_links(paths, paths.sidecars_root / "tool", results)
+
+    assert python_link.is_symlink()
+    assert not os.readlink(python_link).startswith("/")
+    assert python_link.resolve() == (shared_bin / "python").resolve()
+    assert f"home = {shared_bin}" in pyvenv.read_text()
+    assert results[-1]["status"] == "repaired"
 
 
 def test_manifest_can_export_exact_weight_file_path(isolated_vpa_home: Path) -> None:

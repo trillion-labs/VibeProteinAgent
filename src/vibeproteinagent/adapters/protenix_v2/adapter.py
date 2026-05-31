@@ -33,11 +33,14 @@ from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 # --------------------------------------------------------------------------- paths
 
 def _default_protenix_tree() -> str:
+    vpa_home = os.environ.get("VPA_HOME")
+    if vpa_home:
+        return str(Path(vpa_home).expanduser() / "sidecars" / "protenix")
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "vendor" / "protenix-pxd"
         if (candidate / "runner").is_dir() and (candidate / "protenix").is_dir():
             return str(candidate)
-    return "/opt/vpa-data/Protenix"
+    return str(Path("~/.vibeproteinagent/sidecars/protenix").expanduser())
 
 
 PROTENIX_TREE_DEFAULT = _default_protenix_tree()
@@ -46,10 +49,8 @@ PROTENIX_TREE_DEFAULT = _default_protenix_tree()
 def _default_protenix_ckpt_dir() -> str:
     vpa_home = os.environ.get("VPA_HOME")
     if vpa_home:
-        cache_dir = Path(vpa_home).expanduser() / "cache" / "protenix"
-        if cache_dir.exists():
-            return str(cache_dir)
-    return "/opt/vpa-data/protenix_ckpt"
+        return str(Path(vpa_home).expanduser() / "cache" / "protenix")
+    return str(Path("~/.vibeproteinagent/cache/protenix").expanduser())
 
 
 PROTENIX_CKPT_DEFAULT = _default_protenix_ckpt_dir()

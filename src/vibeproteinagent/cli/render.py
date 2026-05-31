@@ -740,6 +740,48 @@ def render_install_result(
             st.add_row(str(item.get("unit", "?")), str(status))
         c.print(st)
 
+    capabilities = data.get("capabilities") or {}
+    if isinstance(capabilities, dict) and capabilities and get_verbosity() != Verbosity.QUIET:
+        cap = _table("Capability summary", style)
+        cap.add_column("state")
+        cap.add_column("count", justify="right")
+        cap.add_column("tools", overflow="fold")
+        for state in (
+            "ready",
+            "needs_credential",
+            "needs_acceptance",
+            "needs_local_artifact",
+            "unavailable",
+            "failed",
+        ):
+            items = capabilities.get(state) or []
+            if not items:
+                continue
+            names = []
+            for item in items:
+                if isinstance(item, dict):
+                    name = item.get("tool") or item.get("unit") or "?"
+                    reason = item.get("reason")
+                    names.append(f"{name} ({reason})" if reason else str(name))
+                else:
+                    names.append(str(item))
+            cap.add_row(state.replace("_", " "), str(len(items)), ", ".join(names))
+        c.print(cap)
+
+    license_notices = data.get("license_notices") or []
+    if license_notices and get_verbosity() != Verbosity.QUIET:
+        lt = _table("Tool license notices", style)
+        lt.add_column("tool")
+        lt.add_column("notice", overflow="fold")
+        lt.add_column("source", overflow="fold")
+        for item in license_notices:
+            lt.add_row(
+                str(item.get("tool", "?")),
+                str(item.get("notice", "")),
+                str(item.get("url") or "-"),
+            )
+        c.print(lt)
+
     checks = data.get("checks") or []
     if checks and get_verbosity() != Verbosity.QUIET:
         ct = _table("CUDA preflight", style)

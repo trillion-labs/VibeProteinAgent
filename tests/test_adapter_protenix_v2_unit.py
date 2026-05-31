@@ -174,6 +174,25 @@ def test_env_var_overrides_default_paths(monkeypatch: pytest.MonkeyPatch) -> Non
         importlib.reload(adapter_mod)
 
 
+def test_default_paths_use_vpa_home_not_opt_data(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("VPA_PROTENIX_TREE", raising=False)
+    monkeypatch.delenv("VPA_PROTENIX_CKPT", raising=False)
+    monkeypatch.setenv("VPA_HOME", str(tmp_path))
+    import importlib
+
+    reloaded = importlib.reload(adapter_mod)
+    try:
+        assert reloaded.PROTENIX_TREE == tmp_path / "sidecars" / "protenix"
+        assert reloaded.PROTENIX_CKPT_DIR == tmp_path / "cache" / "protenix"
+        assert "/opt/vpa-data" not in str(reloaded.PROTENIX_TREE)
+        assert "/opt/vpa-data" not in str(reloaded.PROTENIX_CKPT_DIR)
+    finally:
+        monkeypatch.delenv("VPA_HOME")
+        importlib.reload(adapter_mod)
+
+
 def test_resolve_checkpoint_raises_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -6,6 +6,8 @@ defaults:
   sidecars_root: "sidecars"
   cache_dir: "cache"
   state_db: "install/state.json"
+  default_profile: full
+  shared_env_ref: "envs/vpa/{cuda_profile}"
 profiles:
   base:
     description: "Core VPA runtime plus lightweight local tools."
@@ -63,9 +65,11 @@ tool_defaults:
 tools:
   bindcraft:
     runtime: sidecar
+    required: false
     sidecar:
       env_name: BindCraft
       path: "sidecars/bindcraft"
+      prebuilt_ref: "sidecars/bindcraft/{cuda_profile}"
       install_script: "bash -lc 'cd vendor/bindcraft && bash install_bindcraft.sh --pkg_manager micromamba --env-prefix {sidecar_path} --cuda {bindcraft_cuda}'"
     disk_bytes: 120000000000
   boltz2_affinity:
@@ -84,18 +88,21 @@ tools:
       - name: boltz2_conf
         path: "cache/boltz/boltz2_conf.ckpt"
         env_var: VPA_BOLTZ_CACHE
+        artifact_ref: "boltz2/boltz2_conf.ckpt"
         url: "https://huggingface.co/boltz-community/boltz-2/resolve/main/boltz2_conf.ckpt"
         source_path: "/opt/vpa-data/boltz_cache/boltz2_conf.ckpt"
         required: true
       - name: boltz2_aff
         path: "cache/boltz/boltz2_aff.ckpt"
         env_var: VPA_BOLTZ_CACHE
+        artifact_ref: "boltz2/boltz2_aff.ckpt"
         url: "https://huggingface.co/boltz-community/boltz-2/resolve/main/boltz2_aff.ckpt"
         source_path: "/opt/vpa-data/boltz_cache/boltz2_aff.ckpt"
         required: true
       - name: boltz_mols
         path: "cache/boltz/mols"
         env_var: VPA_BOLTZ_CACHE
+        artifact_ref: "boltz2/mols"
         url: "https://huggingface.co/boltz-community/boltz-2/resolve/main/mols.tar"
         unpack: tar
         source_path: "/opt/vpa-data/boltz_cache/mols"
@@ -134,6 +141,7 @@ tools:
         path: "cache/boltzgen"
         env_var: VPA_BOLTZGEN_CACHE
         env_value: path
+        artifact_ref: "boltzgen/cache"
         source_path: "/opt/vpa-data/boltzgen_cache"
         required: false
     disk_bytes: 50000000000
@@ -144,26 +152,34 @@ tools:
     weights:
       - name: dssp_binary
         path: "envs/vpa/bin/mkdssp"
+        artifact_ref: "external_binaries/mkdssp"
         source_path: "vendor/bindcraft/functions/dssp"
         required: true
   esm2:
     runtime: shared
+    required: false
     weights:
       - name: esm2_cache
         path: "cache/huggingface"
         env_var: HF_HOME
+        artifact_ref: "huggingface/esm2_cache"
         source_path: "/opt/vpa-data/models/huggingface"
         required: false
     disk_bytes: 3000000000
   esm3:
     runtime: shared
     required: false
+    access_requirements:
+      - hf_token
     weights:
       - name: esm3_cache
         path: "cache/huggingface"
         env_var: HF_HOME
+        artifact_ref: "huggingface/esm3_cache"
+        hf_repo_id: "EvolutionaryScale/esm3-sm-open-v1"
+        hf_repo_type: model
         source_path: "/opt/vpa-data/models/huggingface"
-        required: false
+        required: true
     disk_bytes: 6000000000
   foldseek:
     runtime: external_binary
@@ -172,6 +188,7 @@ tools:
     weights:
       - name: foldseek_binary
         path: "envs/vpa/bin/foldseek"
+        artifact_ref: "external_binaries/foldseek"
         source_path: "/opt/miniconda3/envs/vpa/bin/foldseek"
         required: true
   function_term_resolver:
@@ -194,6 +211,7 @@ tools:
     weights:
       - name: ligandmpnn_weights
         path: "models/ligandmpnn_v_32_020_25.pt"
+        artifact_ref: "ligandmpnn/ligandmpnn_v_32_020_25.pt"
         source_path: "vendor/ligandmpnn/weights/ligandmpnn_v_32_020_25.pt"
         env_var: VPA_MODEL_CACHE
         required: true
@@ -212,6 +230,7 @@ tools:
     weights:
       - name: mmseqs_binary
         path: "envs/vpa/bin/mmseqs"
+        artifact_ref: "external_binaries/mmseqs"
         source_path: "/opt/vpa-data/mmseqs2-gpu/bin/mmseqs"
         required: true
   mpnn_to_protenix_input:
@@ -242,10 +261,12 @@ tools:
     sidecar:
       env_name: proteina-complexa-vpa
       path: "sidecars/proteina-complexa"
+      prebuilt_ref: "sidecars/proteina-complexa/{cuda_profile}"
       install_script: "bash vendor/proteina-complexa/env/build_uv_env.sh --root {sidecar_path} --cuda-profile {cuda_profile}"
     weights:
       - name: proteina_complexa_checkpoints
         path: "cache/proteina-complexa/checkpoints"
+        artifact_ref: "proteina_complexa/checkpoints"
         source_path: "vendor/proteina-complexa/ckpts"
         env_var: VPA_PROTEINA_COMPLEXA_CKPTS
         env_value: path
@@ -254,15 +275,27 @@ tools:
   protenix_v2:
     runtime: shared
     required: false
+    sources:
+      - name: protenix_source
+        path: "sidecars/protenix"
+        env_var: VPA_PROTENIX_TREE
+        repo: "https://github.com/bytedance/Protenix.git"
+        markers:
+          - "runner"
+          - "protenix"
+        required: true
     weights:
       - name: protenix_checkpoint
         path: "cache/protenix/protenix_base_default_v1.0.0.pt"
-        source_path: "/opt/vpa-data/protenix_ckpt/protenix_base_default_v1.0.0.pt"
+        artifact_ref: "protenix_v2/protenix_base_default_v1.0.0.pt"
+        url: "https://protenix.tos-cn-beijing.volces.com/checkpoint/protenix_base_default_v1.0.0.pt"
         env_var: VPA_PROTENIX_CKPT
         required: true
       - name: protenix_ccd_cache
         path: "cache/protenix/common"
-        source_path: "/opt/vpa-data/protenix_ckpt/common"
+        artifact_ref: "protenix_v2/common"
+        url: "https://protenix.tos-cn-beijing.volces.com/common.tar.gz"
+        unpack: tar
         env_var: VPA_PROTENIX_CKPT
         required: true
     disk_bytes: 8000000000
@@ -272,10 +305,12 @@ tools:
     sidecar:
       env_name: pxdesign-pipeline-vpa
       path: "sidecars/pxdesign-pipeline"
+      prebuilt_ref: "sidecars/pxdesign-pipeline/{cuda_profile}"
       install_script: "bash scripts/install_pxdesign_pipeline_sidecar.sh --prefix {sidecar_path} --cuda-profile {cuda_profile}"
     weights:
       - name: pxdesign_weights
         path: "cache/pxdesign"
+        artifact_ref: "pxdesign/checkpoints"
         source_path: "/opt/vpa-data/pxdesign_ckpt"
         env_var: VPA_PXDESIGN_CKPT_DIR
         env_value: path
@@ -285,6 +320,9 @@ tools:
   pyrosetta:
     runtime: shared
     required: false
+    artifact_policy: redistributable
+    license_notice: "Installs without a VPA license key; follow upstream PyRosetta/Rosetta Commons terms. Upstream states commercial use requires a separate license."
+    license_url: "https://www.pyrosetta.org/downloads"
   rank_designs:
     runtime: shared
   submit_candidate:
@@ -331,10 +369,12 @@ tools:
     sidecar:
       env_name: rfdiffusion3-vpa
       path: "sidecars/rfdiffusion3"
+      prebuilt_ref: "sidecars/rfdiffusion3/{cuda_profile}"
       install_script: "bash scripts/install_rfdiffusion3_sidecar.sh --prefix {sidecar_path} --repo-root {repo_root} --cuda-profile {cuda_profile}"
     weights:
       - name: rfdiffusion3_checkpoint
         path: "cache/rfdiffusion3/rfd3_latest.ckpt"
+        artifact_ref: "rfdiffusion3/rfd3_latest.ckpt"
         source_path: "vendor/rfdiffusion3/checkpoints/rfd3_latest.ckpt"
         env_var: VPA_RFDIFFUSION3_CKPT
         env_value: path
@@ -346,6 +386,7 @@ tools:
     weights:
       - name: rfpeptides_weights
         path: "cache/rfpeptides"
+        artifact_ref: "rfpeptides/weights"
         source_path: "vendor/rfpeptides/weights"
         env_var: VPA_RFPEPTIDES_WEIGHTS
         env_value: path
@@ -361,6 +402,7 @@ tools:
     runtime: shared
   template_select:
     runtime: shared
+    required: false
     depends_on:
       - mmseqs2_gpu
       - foldseek
@@ -371,6 +413,7 @@ tools:
     weights:
       - name: tmalign_binary
         path: "envs/vpa/bin/TMalign"
+        artifact_ref: "external_binaries/TMalign"
         source_path: "/opt/miniconda3/envs/vpa/bin/TMalign"
         required: true
   vina:
@@ -380,5 +423,6 @@ tools:
     weights:
       - name: vina_binary
         path: "envs/vpa/bin/vina"
+        artifact_ref: "external_binaries/vina"
         source_path: "/opt/miniconda3/envs/vpa/bin/vina"
         required: true

@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel, Field, model_validator
 
+from vibeproteinagent.adapters._confidence import normalize_plddt
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
@@ -128,6 +129,7 @@ class ProteinQCAdapter(ToolAdapter):
         pdb_plddt: float | None = None
         if params.pdb_path:
             pdb_seq, pdb_plddt = _extract_seq_and_plddt(Path(params.pdb_path).expanduser())
+            pdb_plddt = normalize_plddt(pdb_plddt)
             if not sequence:
                 sequence = pdb_seq
         ctx.emit_progress(0.30)
@@ -239,7 +241,15 @@ def _base_candidate(
         candidate = {
             key: value
             for key, value in upstream.items()
-            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
+            if key
+            in {
+                "schema_version",
+                "candidate_id",
+                "source",
+                "sequence",
+                "structure_path",
+                "capabilities",
+            }
         }
         candidate["scores"] = dict(upstream.get("scores") or {})
         candidate["artifacts"] = dict(upstream.get("artifacts") or {})

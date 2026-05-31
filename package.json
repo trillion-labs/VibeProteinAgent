@@ -11,7 +11,9 @@
   "files": [
     "bin/",
     "src/",
+    "scripts/",
     "vendor/",
+    "containers/",
     "pyproject.toml",
     "README.md",
     "LICENSE",
@@ -23,6 +25,6 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node bin/vibeproteinagent.js install --dry-run --profile base --json"
+    "test": "node bin/vibeproteinagent.js install --dry-run --json"
   }
 }

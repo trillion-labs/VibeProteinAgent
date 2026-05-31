@@ -70,6 +70,45 @@ def test_cli_install_full_profile_includes_all_tools(
     assert "credential_optional_for_esm3" in warning_types
 
 
+def test_cli_install_default_selects_full_profile(
+    runner: CliRunner,
+    isolated_vpa_home: Path,
+) -> None:
+    res = runner.invoke(app, ["install", "--dry-run", "--json"])
+
+    assert res.exit_code == 0, res.stdout
+    data = json.loads(res.stdout)["data"]
+    assert data["profile"] == "full"
+    assert "protenix_v2" in data["selected_tools"]
+    assert "pxdesign" in data["selected_tools"]
+    assert "capabilities" in data
+
+
+def test_cli_install_lint_manifest(
+    runner: CliRunner,
+    isolated_vpa_home: Path,
+) -> None:
+    res = runner.invoke(app, ["install", "lint-manifest", "--json"])
+
+    assert res.exit_code == 0, res.stdout
+    data = json.loads(res.stdout)["data"]
+    assert data["ok"] is True
+    assert data["error_count"] == 0
+
+
+def test_cli_install_docker_plan(
+    runner: CliRunner,
+    isolated_vpa_home: Path,
+) -> None:
+    res = runner.invoke(app, ["install", "--docker", "--dry-run", "--json"])
+
+    assert res.exit_code == 0, res.stdout
+    data = json.loads(res.stdout)["data"]
+    assert data["status"] == "docker-plan"
+    assert data["profile"] == "full"
+    assert data["docker_image"].startswith("vibeproteinagent/vpa-")
+
+
 def test_cli_install_unknown_tool_errors_with_suggestion(
     runner: CliRunner,
     isolated_vpa_home: Path,

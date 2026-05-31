@@ -83,6 +83,106 @@ def test_rank_designs_preserves_canonical_score_namespaces(tmp_path) -> None:
     assert row["scores"]["sequence_analysis"]["hydrophobic_fraction"] == 0.2
 
 
+def test_rank_designs_normalizes_esm3_plddt_and_reads_ptm_namespace(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": "cand_esm3",
+        "source": {
+            "tool": "esm3",
+            "node_id": None,
+            "job_id": None,
+            "local_id": "esm3_0000",
+            "native_id": None,
+            "index": 0,
+        },
+        "sequence": "ACDE",
+        "scores": {
+            "esm3": {"mean_plddt": 0.981, "ptm": 0.864},
+            "protein_qc": {"flags": [], "plddt": 98.1},
+        },
+        "artifacts": {},
+    }
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[candidate], top_k=1),
+        null_context(tmp_path / "job"),
+    )
+
+    row = out.ranked_candidates[0]
+    assert row["plddt"] == pytest.approx(98.1)
+    assert row["ptm"] == pytest.approx(0.864)
+    assert row["score"] == pytest.approx(0.981 + 0.25 * 0.864)
+    assert row["score"] > 0
+
+
+def test_rank_designs_applies_qc_penalty_without_double_dividing_plddt(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": "cand_esm3_flags",
+        "source": {
+            "tool": "esm3",
+            "node_id": None,
+            "job_id": None,
+            "local_id": "esm3_0000",
+            "native_id": None,
+            "index": 0,
+        },
+        "sequence": "ACDE",
+        "scores": {
+            "esm3": {"mean_plddt": 0.981, "ptm": 0.864},
+            "protein_qc": {
+                "flags": [
+                    "low_plddt",
+                    "contains_polybasic_cluster",
+                    "high_instability_index",
+                ],
+                "plddt": 98.1,
+            },
+        },
+        "artifacts": {},
+    }
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[candidate], top_k=1),
+        null_context(tmp_path / "job"),
+    )
+
+    row = out.ranked_candidates[0]
+    assert row["qc_flag_count"] == 3
+    assert row["score"] == pytest.approx(0.981 + 0.25 * 0.864 - 0.30)
+
+
+def test_rank_designs_keeps_protenix_plddt_percent_scale_semantics(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    candidate = _canonical_candidate(
+        "cand_protenix",
+        local_id="seq_0000",
+        sequence="AAAA",
+        score=0.5,
+    )
+    candidate["source"]["tool"] = "protenix_v2"
+    candidate["scores"] = {
+        "protenix_v2": {
+            "ranking_score": 0.8,
+            "plddt": 91.0,
+            "iptm": 0.6,
+            "ptm": 0.7,
+        },
+        "protein_qc": {"flags": ["high_instability_index"], "plddt": 88.0},
+    }
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[candidate], top_k=1),
+        null_context(tmp_path / "job"),
+    )
+
+    row = out.ranked_candidates[0]
+    assert row["plddt"] == pytest.approx(91.0)
+    assert row["score"] == pytest.approx(0.8 + 0.91 + 0.5 * 0.6 + 0.25 * 0.7 - 0.10)
+
+
 def test_rank_designs_legacy_candidate_path_still_works(tmp_path) -> None:
     adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
     out = adapter.run(

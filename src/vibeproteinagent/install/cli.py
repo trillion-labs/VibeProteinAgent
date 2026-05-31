@@ -15,9 +15,11 @@ from vibeproteinagent.install.cuda import CUDA_PROFILE_CHOICES
 from vibeproteinagent.install.installer import (
     InstallOptions,
     ManifestInstaller,
+    docker_install_plan,
     install_preflight,
     install_readiness,
 )
+from vibeproteinagent.install.lint import lint_manifest
 from vibeproteinagent.install.manifest import load_manifest
 
 install_app = typer.Typer(
@@ -52,6 +54,17 @@ def install_default(
             help="Prefer existing sidecar envs from VPA_*_ENV variables when present.",
         ),
     ] = False,
+    build_from_source: Annotated[
+        bool,
+        typer.Option(
+            "--build-from-source",
+            help="Bypass prebuilt artifact lookup and build/install from source.",
+        ),
+    ] = False,
+    docker: Annotated[
+        bool,
+        typer.Option("--docker", help="Plan/use the Docker-based install path."),
+    ] = False,
     json_: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Install the selected profile or tool set."""
@@ -70,6 +83,8 @@ def install_default(
         offline=offline,
         cuda_profile=cuda_profile,
         use_prebuilt_sidecars=use_prebuilt_sidecars,
+        build_from_source=build_from_source,
+        docker=docker,
         json_=json_,
     )
 
@@ -91,6 +106,13 @@ def plan(
             help="Prefer existing sidecar envs from VPA_*_ENV variables when present.",
         ),
     ] = False,
+    build_from_source: Annotated[
+        bool,
+        typer.Option(
+            "--build-from-source",
+            help="Bypass prebuilt artifact lookup and build/install from source.",
+        ),
+    ] = False,
     json_: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Show the resolved install plan without mutating the machine."""
@@ -105,6 +127,7 @@ def plan(
                     cache_dir=cache_dir,
                     cuda_profile=cuda_profile,
                     use_prebuilt_sidecars=use_prebuilt_sidecars,
+                    build_from_source=build_from_source,
                     dry_run=True,
                 )
             )
@@ -136,6 +159,17 @@ def run(
             help="Prefer existing sidecar envs from VPA_*_ENV variables when present.",
         ),
     ] = False,
+    build_from_source: Annotated[
+        bool,
+        typer.Option(
+            "--build-from-source",
+            help="Bypass prebuilt artifact lookup and build/install from source.",
+        ),
+    ] = False,
+    docker: Annotated[
+        bool,
+        typer.Option("--docker", help="Plan/use the Docker-based install path."),
+    ] = False,
     json_: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Install the selected profile or tool set."""
@@ -152,6 +186,8 @@ def run(
         offline=offline,
         cuda_profile=cuda_profile,
         use_prebuilt_sidecars=use_prebuilt_sidecars,
+        build_from_source=build_from_source,
+        docker=docker,
         json_=json_,
     )
 
@@ -170,30 +206,58 @@ def _run_install(
     offline: bool,
     cuda_profile: str,
     use_prebuilt_sidecars: bool,
+    build_from_source: bool,
+    docker: bool,
     json_: bool,
 ) -> None:
     _validate_cuda_profile(cuda_profile)
     try:
         with protect_json_stdout(json_):
-            data = ManifestInstaller(load_manifest()).install(
-                InstallOptions(
+            if docker:
+                data = docker_install_plan(
                     profile=profile,
                     tools=((tools,) if tools else ()),
                     install_root=install_root,
                     cache_dir=cache_dir,
-                    source_root=source_root,
-                    dry_run=dry_run,
-                    yes=yes,
-                    force=force,
-                    repair=repair,
-                    offline=offline,
                     cuda_profile=cuda_profile,
-                    use_prebuilt_sidecars=use_prebuilt_sidecars,
+                    dry_run=dry_run,
                 )
-            )
+            else:
+                data = ManifestInstaller(load_manifest()).install(
+                    InstallOptions(
+                        profile=profile,
+                        tools=((tools,) if tools else ()),
+                        install_root=install_root,
+                        cache_dir=cache_dir,
+                        source_root=source_root,
+                        dry_run=dry_run,
+                        yes=yes,
+                        force=force,
+                        repair=repair,
+                        offline=offline,
+                        cuda_profile=cuda_profile,
+                        use_prebuilt_sidecars=use_prebuilt_sidecars,
+                        build_from_source=build_from_source,
+                    )
+                )
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
     print_envelope_ok(data, json_mode=json_, render=render_install_result)
+
+
+@install_app.command("lint-manifest")
+def lint_manifest_command(
+    json_: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Validate release-install artifact contracts in the install manifest."""
+    try:
+        with protect_json_stdout(json_):
+            data = lint_manifest(load_manifest())
+    except Exception as exc:
+        fail_from_exception(exc, json_mode=json_)
+    print_envelope_ok(data, json_mode=json_, render=render_install_result)
+    if not data.get("ok"):
+        raise typer.Exit(1)
 
 
 @install_app.command("doctor")
