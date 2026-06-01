@@ -59,6 +59,9 @@ Notes:
 - Treat target structures and user constraints as root inputs.
 - Downstream structure/QC/ranking nodes should consume canonical candidates from
   upstream nodes, not planner-authored artifact paths.
+- PXDesign emits designed binder sequence plus binder backbone coordinates in
+  the current VPA pipeline. Add a structure-prediction/refinement step when a
+  downstream decision requires full-atom binder sidechain coordinates.
 - PXDesign preview fallback must use real chain provenance from the generated
   preview artifact; binder-only preview mode should not invent a conditioning
   chain.
@@ -110,4 +113,3 @@ Final submission is a post-round decision. Planner IR should not add
 - create a `vpa report` for successful design/retrieval runs;
 - collect PASS evidence with workflow id, provider/model, report path, and final
   candidate/answer summary.
-

@@ -24,7 +24,6 @@ These tests enforce the contract:
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -54,7 +53,6 @@ EXPECTED_REQUIRED_COUNTS: dict[str, int] = {
     "bindcraft": 0,
     "boltz2_affinity": 0,
     "boltzgen": 0,
-    "dssp": 0,
     "esm2": 0,
     "esm3": 0,
     "foldseek": 1,

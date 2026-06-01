@@ -6,6 +6,7 @@
   "properties": {
     "designs": {
       "type": "array",
+      "description": "Generated binder designs. The structure artifact should be treated as target context plus designed binder backbone coordinates; full-atom binder sidechain coordinates are not guaranteed.",
       "items": {
         "type": "object",
         "required": [
@@ -17,10 +18,19 @@
         ],
         "properties": {
           "candidate_id": {"type": ["string", "null"], "minLength": 1},
-          "pdb_path": {"type": ["string", "null"]},
-          "cif_path": {"type": "string"},
+          "pdb_path": {
+            "type": ["string", "null"],
+            "description": "Optional PDB artifact when available. Treat as backbone-level binder geometry unless a downstream refinement tool emits full sidechains."
+          },
+          "cif_path": {
+            "type": "string",
+            "description": "Primary PXDesign structure artifact containing target context and designed binder backbone coordinates."
+          },
           "score": {"type": ["number", "null"]},
-          "sequence": {"type": "string"},
+          "sequence": {
+            "type": "string",
+            "description": "Designed binder amino-acid sequence assigned after the ProteinMPNN stage."
+          },
           "binder_length": {"type": "integer", "minimum": 1}
         },
         "additionalProperties": true

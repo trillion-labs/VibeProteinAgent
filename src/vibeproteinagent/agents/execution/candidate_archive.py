@@ -3,7 +3,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field as dataclass_field
+from dataclasses import asdict, dataclass
+from dataclasses import field as dataclass_field
 from typing import Any, Literal
 
 from jsonschema.exceptions import ValidationError
@@ -16,7 +17,8 @@ from vibeproteinagent.agents.planning.candidate_merge import (
 from vibeproteinagent.workflows.store import WorkflowStore
 from vibeproteinagent.workspace import Workspace
 
-_CANDIDATE_CONTAINERS = ("candidates", "ranked_candidates", "representative_sequences")
+_CANONICAL_CANDIDATE_CONTAINERS = ("candidates", "ranked_candidates")
+_FALLBACK_CANDIDATE_CONTAINERS = ("representative_sequences",)
 _MATERIAL_CAPABILITIES = {
     "has_sequence",
     "has_backbone_structure",
@@ -162,18 +164,39 @@ class CandidateArchive:
     ) -> CandidateSnapshot:
         previous_snapshot = self._snapshot(previous_snapshot_id)
         current_snapshot = self._snapshot(current_snapshot_id)
-        previous = self.materialize(previous_snapshot_id)
-        current = self.materialize(current_snapshot_id)
-        merge = merge_candidate_records([previous, current])
+        source_records = [
+            record
+            for record in [
+                *self._records_from_snapshot(previous_snapshot),
+                *self._records_from_snapshot(current_snapshot),
+            ]
+            if record.status != "rejected"
+        ]
+        merge = merge_candidate_records(
+            [record.candidate for record in source_records],
+            strip_private_keys=False,
+            include_private_positions=True,
+        )
         survivor_refs: list[CandidateSnapshotRef] = []
         for candidate in merge.candidates:
+            representative_record = _representative_record_for_merged_candidate(
+                candidate,
+                source_records,
+            )
+            source_lineage = _source_records_for_merged_candidate(candidate, source_records)
+            saved_candidate = _strip_candidate_merge_private(candidate)
             record = self._record(
                 run_id=run_id,
                 round_index=round_index,
-                workflow_id=_candidate_workflow_id(candidate, self.records_by_version),
+                workflow_id=representative_record.workflow_id if representative_record else None,
                 status="survivor",
-                candidate=candidate,
-                raw_source={"source": "survivor_merge"},
+                candidate=saved_candidate,
+                raw_source=_survivor_raw_source(
+                    previous_snapshot=previous_snapshot,
+                    current_snapshot=current_snapshot,
+                    representative_record=representative_record,
+                    source_records=source_lineage,
+                ),
                 validation_errors=[],
             )
             self._save_record(run_id, record)
@@ -194,10 +217,7 @@ class CandidateArchive:
                 [
                     *_snapshot_workflow_ids(previous_snapshot, self.records_by_version),
                     *_snapshot_workflow_ids(current_snapshot, self.records_by_version),
-                    *(
-                        _candidate_workflow_id(candidate, self.records_by_version)
-                        for candidate in merge.candidates
-                    ),
+                    *(record.workflow_id for record in source_records),
                 ]
             ),
         )
@@ -386,6 +406,16 @@ class CandidateArchive:
                 return record
         return None
 
+    def _records_from_snapshot(self, snapshot: CandidateSnapshot | None) -> list[CandidateRecord]:
+        if snapshot is None:
+            return []
+        records: list[CandidateRecord] = []
+        for ref in snapshot.candidate_refs:
+            record = self._record_by_version(ref.version_id)
+            if record is not None:
+                records.append(record)
+        return records
+
     def _snapshot(self, snapshot_id: str | None) -> CandidateSnapshot | None:
         if not snapshot_id:
             return None
@@ -431,7 +461,7 @@ def _raw_candidate_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
         node_id = str(node.get("node_id") or "")
         job_id = str(node.get("job_id") or "")
         tool = str(node.get("tool") or "")
-        for key in _CANDIDATE_CONTAINERS:
+        for key in _candidate_container_keys(output):
             values = output.get(key)
             if not isinstance(values, list):
                 continue
@@ -458,6 +488,21 @@ def _raw_candidate_items(summary: dict[str, Any]) -> list[dict[str, Any]]:
                     }
                 )
     return items
+
+
+def _candidate_container_keys(output: dict[str, Any]) -> tuple[str, ...]:
+    canonical = tuple(
+        key
+        for key in _CANONICAL_CANDIDATE_CONTAINERS
+        if isinstance(output.get(key), list) and output.get(key)
+    )
+    if canonical:
+        return canonical
+    return tuple(
+        key
+        for key in _FALLBACK_CANDIDATE_CONTAINERS
+        if isinstance(output.get(key), list) and output.get(key)
+    )
 
 
 def _canonicalize_candidate(
@@ -574,22 +619,38 @@ def _validation_error(
 def _candidate_capabilities(candidate: dict[str, Any]) -> set[str]:
     capabilities: set[str] = set()
     raw = candidate.get("capabilities")
+    explicitly_false: set[str] = set()
     if isinstance(raw, dict):
         capabilities.update(
             str(name)
             for name, value in raw.items()
             if str(name).startswith("has_") and value is True
         )
+        explicitly_false.update(
+            str(name)
+            for name, value in raw.items()
+            if str(name).startswith("has_") and value is False
+        )
     elif isinstance(raw, list):
         capabilities.update(str(item) for item in raw if isinstance(item, str))
-    if isinstance(candidate.get("sequence"), str) and candidate["sequence"].strip():
+    if (
+        "has_sequence" not in explicitly_false
+        and isinstance(candidate.get("sequence"), str)
+        and candidate["sequence"].strip()
+    ):
         capabilities.add("has_sequence")
-    if candidate.get("structure_path") or candidate.get("backbone_path"):
+    if (
+        "has_backbone_structure" not in explicitly_false
+        and (candidate.get("structure_path") or candidate.get("backbone_path"))
+    ):
         capabilities.add("has_backbone_structure")
-    if candidate.get("full_structure_path") or candidate.get("structure_path"):
+    if (
+        "has_full_structure" not in explicitly_false
+        and (candidate.get("full_structure_path") or candidate.get("structure_path"))
+    ):
         capabilities.add("has_full_structure")
     scores = candidate.get("scores")
-    if isinstance(scores, dict) and scores:
+    if "has_candidate_scores" not in explicitly_false and isinstance(scores, dict) and scores:
         capabilities.add("has_candidate_scores")
     return capabilities
 
@@ -645,21 +706,15 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _candidate_workflow_id(
-    candidate: dict[str, Any],
-    records_by_version: dict[str, CandidateRecord],
-) -> str | None:
-    candidate_id = str(candidate.get("candidate_id") or "")
-    for record in records_by_version.values():
-        if record.candidate_id == candidate_id and record.workflow_id:
-            return record.workflow_id
-    return None
-
-
 def _workflow_ids(values: list[Any]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
-    for value in values:
+    pending = list(values)
+    while pending:
+        value = pending.pop(0)
+        if isinstance(value, (list, tuple, set)):
+            pending[0:0] = list(value)
+            continue
         if value in (None, ""):
             continue
         text = str(value)
@@ -694,6 +749,8 @@ def _record_workflow_ids(record: CandidateRecord) -> set[str]:
         [
             raw_source.get("workflow_id"),
             raw_source.get("source_workflow_id"),
+            raw_source.get("representative_workflow_id"),
+            raw_source.get("source_workflow_ids"),
         ]
     )
     candidate_source = record.candidate.get("source")
@@ -705,6 +762,87 @@ def _record_workflow_ids(record: CandidateRecord) -> set[str]:
             ]
         )
     return set(_workflow_ids(values))
+
+
+def _candidate_merge_positions(candidate: dict[str, Any]) -> list[int]:
+    positions = candidate.get("__candidate_merge_positions")
+    if not isinstance(positions, list):
+        return []
+    out: list[int] = []
+    for item in positions:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _candidate_merge_representative_position(candidate: dict[str, Any]) -> int | None:
+    try:
+        return int(candidate.get("__candidate_merge_representative_position"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _strip_candidate_merge_private(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in candidate.items() if not str(key).startswith("__")}
+
+
+def _source_records_for_merged_candidate(
+    candidate: dict[str, Any],
+    source_records: list[CandidateRecord],
+) -> list[CandidateRecord]:
+    positions = _candidate_merge_positions(candidate)
+    if not positions:
+        representative_position = _candidate_merge_representative_position(candidate)
+        positions = [representative_position] if representative_position is not None else []
+    out: list[CandidateRecord] = []
+    for position in positions:
+        if 0 <= position < len(source_records):
+            out.append(source_records[position])
+    return out
+
+
+def _representative_record_for_merged_candidate(
+    candidate: dict[str, Any],
+    source_records: list[CandidateRecord],
+) -> CandidateRecord | None:
+    representative_position = _candidate_merge_representative_position(candidate)
+    if representative_position is not None and 0 <= representative_position < len(source_records):
+        return source_records[representative_position]
+    source_lineage = _source_records_for_merged_candidate(candidate, source_records)
+    return source_lineage[0] if source_lineage else None
+
+
+def _survivor_raw_source(
+    *,
+    previous_snapshot: CandidateSnapshot | None,
+    current_snapshot: CandidateSnapshot | None,
+    representative_record: CandidateRecord | None,
+    source_records: list[CandidateRecord],
+) -> dict[str, Any]:
+    source_workflow_ids = _workflow_ids([record.workflow_id for record in source_records])
+    raw_source: dict[str, Any] = {
+        "source": "survivor_merge",
+        "previous_snapshot_id": previous_snapshot.snapshot_id if previous_snapshot else None,
+        "current_snapshot_id": current_snapshot.snapshot_id if current_snapshot else None,
+        "source_version_ids": [record.version_id for record in source_records],
+        "source_candidate_ids": [record.candidate_id for record in source_records],
+        "source_workflow_ids": source_workflow_ids,
+    }
+    if representative_record is not None:
+        raw_source.update(
+            {
+                "representative_version_id": representative_record.version_id,
+                "representative_candidate_id": representative_record.candidate_id,
+                "representative_workflow_id": representative_record.workflow_id,
+                "workflow_id": representative_record.workflow_id,
+                "node_id": representative_record.node_id,
+                "job_id": representative_record.job_id,
+                "tool": _raw_source_tool(representative_record.raw_source),
+            }
+        )
+    return {key: value for key, value in raw_source.items() if value not in (None, [], {})}
 
 
 def _raw_source_tool(raw_source: dict[str, Any]) -> str | None:

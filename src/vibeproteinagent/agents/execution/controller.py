@@ -1851,22 +1851,38 @@ def _candidate_capability_names(candidate: dict[str, Any], *, key: str) -> set[s
     del key
     capabilities: set[str] = set()
     raw = candidate.get("capabilities")
+    explicitly_false: set[str] = set()
     if isinstance(raw, dict):
         capabilities.update(
             str(name)
             for name, value in raw.items()
             if name.startswith("has_") and value is True
         )
+        explicitly_false.update(
+            str(name)
+            for name, value in raw.items()
+            if name.startswith("has_") and value is False
+        )
     elif isinstance(raw, list):
         capabilities.update(str(item) for item in raw if isinstance(item, str))
-    if isinstance(candidate.get("sequence"), str) and candidate.get("sequence").strip():
+    if (
+        "has_sequence" not in explicitly_false
+        and isinstance(candidate.get("sequence"), str)
+        and candidate.get("sequence").strip()
+    ):
         capabilities.add("has_sequence")
-    if candidate.get("structure_path") or candidate.get("backbone_path"):
+    if (
+        "has_backbone_structure" not in explicitly_false
+        and (candidate.get("structure_path") or candidate.get("backbone_path"))
+    ):
         capabilities.add("has_backbone_structure")
-    if candidate.get("full_structure_path") or candidate.get("structure_path"):
+    if (
+        "has_full_structure" not in explicitly_false
+        and (candidate.get("full_structure_path") or candidate.get("structure_path"))
+    ):
         capabilities.add("has_full_structure")
     scores = candidate.get("scores")
-    if isinstance(scores, dict) and scores:
+    if "has_candidate_scores" not in explicitly_false and isinstance(scores, dict) and scores:
         capabilities.add("has_candidate_scores")
     return capabilities
 
@@ -2305,7 +2321,7 @@ def _raw_candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict
             continue
         job_id = str(node.get("job_id") or "")
         tool = str(node.get("tool") or "")
-        for key in ("candidates", "ranked_candidates", "representative_sequences"):
+        for key in _candidate_container_keys(output):
             values = output.get(key)
             if not isinstance(values, list):
                 continue
@@ -2329,6 +2345,21 @@ def _raw_candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict
                     }
                 )
     return candidates
+
+
+def _candidate_container_keys(output: dict[str, Any]) -> tuple[str, ...]:
+    canonical = tuple(
+        key
+        for key in ("candidates", "ranked_candidates")
+        if isinstance(output.get(key), list) and output.get(key)
+    )
+    if canonical:
+        return canonical
+    return tuple(
+        key
+        for key in ("representative_sequences",)
+        if isinstance(output.get(key), list) and output.get(key)
+    )
 
 
 def _merge_candidate_pool_items(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:

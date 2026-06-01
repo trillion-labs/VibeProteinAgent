@@ -9,11 +9,18 @@ from vibeproteinagent.adapters.protein_qc.adapter import ProteinQCAdapter, Prote
 from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
 
 
-def _candidate(sequence: str = "MKKK") -> dict:
+def _candidate(sequence: str = "MKKK", candidate_id: str = "cand_qc", index: int = 0) -> dict:
     return {
         "schema_version": "candidate_v1",
-        "candidate_id": "cand_qc",
-        "source": {"tool": "upstream", "node_id": None, "job_id": None, "local_id": "seq_0000", "native_id": None, "index": 0},
+        "candidate_id": candidate_id,
+        "source": {
+            "tool": "upstream",
+            "node_id": None,
+            "job_id": None,
+            "local_id": f"seq_{index:04d}",
+            "native_id": None,
+            "index": index,
+        },
         "sequence": sequence,
         "scores": {"upstream": {"score": 1.0}},
         "artifacts": {},
@@ -48,6 +55,31 @@ def test_protein_qc_consumes_canonical_and_legacy_paths(tmp_path) -> None:
     assert canonical.candidates[0]["candidate_id"] == "cand_qc"
     assert canonical.candidates[0]["scores"]["protein_qc"]["polybasic_hits"] == 1.0
     assert legacy.metrics == canonical.metrics
+
+
+def test_protein_qc_scores_each_candidate_sequence_independently(tmp_path) -> None:
+    adapter = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        ProteinQCInput(
+            candidates=[
+                _candidate("AAAA", candidate_id="cand_a", index=0),
+                _candidate("RRRR", candidate_id="cand_r", index=1),
+            ],
+            metrics=["gravy", "pi", "instability_index", "polybasic"],
+        ),
+        null_context(tmp_path / "per_candidate"),
+    )
+
+    first = out.candidates[0]["scores"]["protein_qc"]
+    second = out.candidates[1]["scores"]["protein_qc"]
+    assert first["gravy"] != second["gravy"]
+    assert first["pi"] != second["pi"]
+    assert first["passes_filters"] is False
+    assert second["passes_filters"] is False
+    assert "high_GRAVY" in first["flags"]
+    assert "contains_polybasic_cluster" in second["flags"]
+    assert out.metrics["gravy"] == first["gravy"]
+    assert out.metrics["pi"] == first["pi"]
 
 
 def test_protein_qc_rejects_mixed_candidates() -> None:

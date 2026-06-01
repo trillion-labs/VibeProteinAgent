@@ -42,7 +42,6 @@ def test_tools_filter_by_category_misc(runner: CliRunner, isolated_vpa_home: Pat
     names = {t["name"] for t in payload["data"]["tools"]}
     # Internal benchmark/glue adapters stay out of the public catalog by default.
     expected = {
-        "dssp",
         "mmseqs2_gpu",
         "foldseek",
     }

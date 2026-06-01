@@ -31,6 +31,8 @@ def test_sequence_analysis_emits_parallel_canonical_candidates(tmp_path) -> None
         assert candidate["source"]["index"] == index
         assert representative["index"] == index + 1
         assert candidate["sequence"] == representative["sequence"]
+        assert representative.get("schema_version") != "candidate_v1"
+        assert "scores" not in representative
         scores = candidate["scores"]["sequence_analysis"]
         assert scores["gravy"] == representative["gravy"]
         assert scores["pI"] == representative["pI"]

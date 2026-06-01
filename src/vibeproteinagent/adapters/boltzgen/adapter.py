@@ -6,7 +6,7 @@ and the HuggingFace-style model + dataset cache at ``$VPA_BOLTZGEN_CACHE``
 (default ``$VPA_HOME/cache/boltzgen``).
 
 Why subprocess: BoltzGen orchestrates a multi-step pipeline (design,
-inverse_fold, folding, analyze) with non-trivial state in
+inverse_folding, folding, analysis) with non-trivial state in
 ``omegaconf`` configs and PyTorch Lightning callbacks. Driving each
 ``boltzgen run`` invocation as a subprocess gives us the strongest
 isolation (no global-state bleed between adapters, no leftover
@@ -185,7 +185,7 @@ class BoltzGenAdapter(ToolAdapter):
 
     Each ``run()`` shells out to ``python -m boltzgen.cli.boltzgen run``
     against the on-disk BoltzGen tree. Outputs are collected from
-    ``intermediate_designs_inverse_folded/refold_cif/`` after folding/analyze.
+    ``intermediate_designs_inverse_folded/refold_cif/`` after folding/analysis.
     """
 
     def __init__(self, config: dict, weights_dir: Path, device: torch.device) -> None:
@@ -426,9 +426,9 @@ def _build_cmd(
         f"sampling_steps={params.num_diffusion_steps}",
         "--steps",
         "design",
-        "inverse_fold",
+        "inverse_folding",
         "folding",
-        "analyze",
+        "analysis",
     ]
     return cmd
 
@@ -467,9 +467,15 @@ def _tail(path: Path, *, limit: int = 4000) -> str:
 
 def _detect_failure_stage(stdout_path: Path, stderr_path: Path) -> str | None:
     text = f"{_tail(stdout_path, limit=12000)}\n{_tail(stderr_path, limit=12000)}".lower()
+    stage_aliases = {
+        "design": ("design",),
+        "inverse_folding": ("inverse_folding", "inverse_fold"),
+        "folding": ("folding",),
+        "analysis": ("analysis", "analyze"),
+    }
     positions = {
-        stage: text.rfind(stage)
-        for stage in ("design", "inverse_fold", "folding", "analyze")
+        stage: max(text.rfind(alias) for alias in aliases)
+        for stage, aliases in stage_aliases.items()
     }
     stage, pos = max(positions.items(), key=lambda item: item[1])
     return stage if pos >= 0 else None
@@ -482,7 +488,7 @@ def _collect_designs(
 ) -> list[BoltzGenDesign]:
     """Walk BoltzGen's output layout and return canonical BoltzGenDesign records.
 
-    VPA runs design -> inverse_fold -> folding -> analyze and intentionally
+    VPA runs design -> inverse_folding -> folding -> analysis and intentionally
     skips BoltzGen's filter step. The primary output is therefore the refolded
     CIF set under ``intermediate_designs_inverse_folded/refold_cif``. If a
     final-ranked directory is present from a previous/upstream-compatible run,

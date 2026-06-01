@@ -6,6 +6,10 @@ from vibeproteinagent.workspace import Workspace
 
 
 def _summary(candidate: dict, *, workflow_id: str = "wf_1") -> dict:
+    return _summary_from_output({"representative_sequences": [candidate]}, workflow_id=workflow_id)
+
+
+def _summary_from_output(output: dict, *, workflow_id: str = "wf_1") -> dict:
     return {
         "workflow_id": workflow_id,
         "state": "completed",
@@ -15,7 +19,7 @@ def _summary(candidate: dict, *, workflow_id: str = "wf_1") -> dict:
                 "tool": "sequence_analysis",
                 "job_id": "job_analysis",
                 "state": "completed",
-                "output": {"representative_sequences": [candidate]},
+                "output": output,
             }
         ],
     }
@@ -114,6 +118,44 @@ def test_representative_sequences_promoted_only_with_valid_dict_fields(
     assert candidate["schema_version"] == "candidate_v1"
     assert candidate["scores"]["sequence_analysis"]["charge"] == 0
     assert candidate["artifacts"]["sequence_analysis"]["path"] == "/tmp/a.json"
+
+
+def test_archive_prefers_canonical_candidates_over_representative_sequences(
+    tmp_workspace: Workspace,
+) -> None:
+    archive = CandidateArchive(tmp_workspace)
+    snapshot = archive.ingest_workflow_round(
+        run_id="arun_1",
+        round_index=0,
+        workflow_id="wf_1",
+        raw_workflow_summary=_summary_from_output(
+            {
+                "candidates": [
+                    {
+                        "schema_version": "candidate_v1",
+                        "candidate_id": "cand_scored",
+                        "source": {
+                            "tool": "sequence_analysis",
+                            "local_id": "representative_0000",
+                        },
+                        "sequence": "ACDE",
+                        "scores": {"sequence_analysis": {"charge": 0}},
+                    }
+                ],
+                "representative_sequences": [
+                    {
+                        "candidate_id": "representative:1:abc",
+                        "sequence": "ACDE",
+                    }
+                ],
+            }
+        ),
+    )
+
+    materialized = archive.materialize(snapshot.snapshot_id)
+
+    assert [candidate["candidate_id"] for candidate in materialized] == ["cand_scored"]
+    assert materialized[0]["scores"]["sequence_analysis"]["charge"] == 0
 
 
 def test_archive_failure_cards_scope_by_run_and_workflow_not_round_only(
@@ -258,6 +300,57 @@ def test_survivor_snapshot_workflow_ids_union_previous_and_current(
     )
 
     assert merged.workflow_ids == ["wf_a", "wf_b"]
+
+
+def test_survivor_record_workflow_uses_representative_source_version(
+    tmp_workspace: Workspace,
+) -> None:
+    archive = CandidateArchive(tmp_workspace)
+    first = archive.ingest_workflow_round(
+        run_id="arun_1",
+        round_index=0,
+        workflow_id="wf_old",
+        raw_workflow_summary=_summary(
+            {"candidate_id": "cand_x", "sequence": "ACDE"},
+            workflow_id="wf_old",
+        ),
+    )
+    survivors = archive.merge_survivors(
+        run_id="arun_1",
+        round_index=0,
+        previous_snapshot_id=None,
+        current_snapshot_id=first.snapshot_id,
+    )
+    second = archive.ingest_workflow_round(
+        run_id="arun_1",
+        round_index=1,
+        workflow_id="wf_new",
+        raw_workflow_summary=_summary(
+            {
+                "candidate_id": "cand_x",
+                "sequence": "ACDE",
+                "scores": {"sequence_analysis": {"gravy": -0.1}},
+                "capabilities": {"has_sequence": True, "has_candidate_scores": True},
+            },
+            workflow_id="wf_new",
+        ),
+    )
+    merged = archive.merge_survivors(
+        run_id="arun_1",
+        round_index=1,
+        previous_snapshot_id=survivors.snapshot_id,
+        current_snapshot_id=second.snapshot_id,
+    )
+
+    materialized = archive.materialize(merged.snapshot_id)
+    record = archive.records_by_version[merged.candidate_refs[0].version_id]
+
+    assert len(materialized) == 1
+    assert materialized[0]["scores"]["sequence_analysis"]["gravy"] == -0.1
+    assert record.workflow_id == "wf_new"
+    assert record.raw_source["source_workflow_ids"] == ["wf_old", "wf_new"]
+    assert record.raw_source["representative_workflow_id"] == "wf_new"
+    assert merged.workflow_ids == ["wf_old", "wf_new"]
 
 
 def test_persisted_snapshot_round_trips_workflow_ids(

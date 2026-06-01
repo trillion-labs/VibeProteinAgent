@@ -12,7 +12,7 @@ import mimetypes
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,19 +34,24 @@ from .metrics import (
     pretty_metric_name as _pretty_metric_name,
 )
 from .models import (
-    AgentDecision,
     AgentMessage,
-    AgentStepSummary,
     AgentToolCall,
     AgentTranscript,
+    CandidateEvidenceBundle,
+    CandidateStatus,
+    EvidenceStep,
     MSABlock,
     PlotSpec,
+    Provenance,
     ReportArtifact,
     ReportCandidate,
     ReportModel,
+    ReportReviewModel,
+    ToolRole,
     WorkflowNodeSummary,
 )
 from .plots import PLDDT_HOVER_JS, build_plots
+from .review import build_review_model, classify_tool_role
 
 
 def write_report(
@@ -306,6 +311,404 @@ def _load_3dmol_min_js() -> str | None:
         return None
 
 
+# ------------------------------------------------------------- review console
+#
+# The candidate review console is the report's primary surface: a ranked board
+# of candidates (grouped by lifecycle status) on the left, and a lazily
+# activated detail dossier on the right. Each candidate's dossier lives in an
+# inert <template> so the (potentially heavy) 3D viewer and per-tab markup are
+# only materialised when the reader actually opens that candidate. All content
+# is derived from the pure ``ReportReviewModel`` built by ``reporting.review``.
+
+
+# Status → (board label, css token). Mirrors CandidateStatus; kept here so the
+# render layer owns its own display vocabulary.
+_STATUS_DISPLAY: dict[str, tuple[str, str]] = {
+    CandidateStatus.FINAL: ("Final", "final"),
+    CandidateStatus.RANKED_ALTERNATIVE: ("Ranked", "ranked"),
+    CandidateStatus.INCOMPLETE_EVIDENCE: ("Incomplete", "incomplete"),
+    CandidateStatus.FAILED_QC: ("Failed QC", "failed"),
+    CandidateStatus.REJECTED: ("Rejected", "rejected"),
+}
+
+_PROV_LABEL: dict[str, str] = {
+    Provenance.EXACT: "recorded",
+    Provenance.DERIVED: "derived",
+    Provenance.INFERRED: "inferred",
+    Provenance.NOT_RECORDED: "not recorded",
+}
+
+
+def _prov_chip(prov: str, *, title: str | None = None) -> str:
+    """A small provenance pill so a derived/inferred value never reads as fact."""
+    label = _PROV_LABEL.get(prov, prov)
+    tip = title or {
+        Provenance.EXACT: "Directly recorded in the run.",
+        Provenance.DERIVED: "Computed by the report from recorded metrics.",
+        Provenance.INFERRED: "Heuristic guess from a weak hint — treat with care.",
+        Provenance.NOT_RECORDED: "No data was recorded for this.",
+    }.get(prov, "")
+    return f'<span class="prov prov-{_h(prov)}" title="{_attr(tip)}">{_h(label)}</span>'
+
+
+def _board_headline_metric(bundle: CandidateEvidenceBundle) -> str:
+    """The single most relevant number for a board card (or empty)."""
+    cand = bundle.candidate
+    if cand.score is not None:
+        val = _fmt(cand.score)
+        if val is not None:
+            return f"score {val}"
+    # Otherwise surface the first metric of the most decision-relevant family.
+    priority = ("Interface & binding", "Structure confidence", "Sequence biophysics")
+    by_family = {g.family: g for g in bundle.score_groups}
+    for fam in priority:
+        grp = by_family.get(fam)
+        if grp and grp.metrics:
+            label, value, unit = grp.metrics[0][:3]
+            return f"{label} {value}{(' ' + unit) if unit else ''}"
+    return ""
+
+
+def _board_metric_parts(bundle: CandidateEvidenceBundle) -> tuple[str, str, str]:
+    """Headline metric for the candidate list as ``(value, label, source)``.
+
+    Prefers a confidence-family metric (which carries a producing-tool source)
+    so the list reads like a scientific result table; falls back to the
+    candidate's composite score when no scored family exists.
+    """
+    by_family = {g.family: g for g in bundle.score_groups}
+    for fam in ("Structure confidence", "Interface & binding", "Sequence biophysics", "Novelty & similarity"):
+        grp = by_family.get(fam)
+        if grp and grp.metrics:
+            label, value, unit, source = grp.metrics[0]
+            return f"{value}{(' ' + unit) if unit else ''}", label, source
+    score = bundle.candidate.score
+    if score is not None:
+        val = _fmt(score)
+        if val is not None:
+            return val, "score", ""
+    return "", "", ""
+
+
+def _board_card(bundle: CandidateEvidenceBundle) -> str:
+    """One compact candidate row in the result browser (table/list hybrid).
+
+    No cards / stars / success-green: the row is a dense ``rank · candidate ·
+    metric`` record. The final pick is marked authoritatively with a ``✓`` rank
+    glyph and a neutral ``FINAL`` label (a *semantic* state), kept visually
+    distinct from the *selection* state (a left accent bar + tint applied via
+    ``aria-selected``).
+    """
+    cand = bundle.candidate
+    dom = _structure_dom_id(cand.candidate_id)
+    status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
+    is_final = bundle.status == CandidateStatus.FINAL
+    display_rank = bundle.display_rank if bundle.display_rank is not None else cand.rank
+    if is_final:
+        rank_cell = '<span class="crow-rank-final" title="Final / submitted">&#10003;</span>'
+    elif display_rank is not None:
+        rank_cell = f'<span class="crow-rank-num">{display_rank}</span>'
+    else:
+        rank_cell = '<span class="crow-rank-num crow-rank-dash">&middot;</span>'
+    final_tag = '<span class="crow-tag">Final</span>' if is_final else ""
+    value, mlabel, source = _board_metric_parts(bundle)
+    # Metric label + source sit UNDER the id in the wide column (where they can
+    # truncate gracefully); the right column carries only the bare value, so a
+    # long "metric · source" string can never push the row past the rail.
+    meta_bits = " · ".join(b for b in (mlabel, source) if b)
+    meta_line = f'<span class="crow-meta">{_h(meta_bits)}</span>' if meta_bits else ""
+    score_cell = (
+        f'<span class="crow-score">{_h(value)}</span>'
+        if value
+        else '<span class="crow-score crow-score-empty">&mdash;</span>'
+    )
+    final_cls = " is-final" if is_final else ""
+    return (
+        f'<button type="button" class="board-card crow status-{status_cls}{final_cls}" '
+        f'data-cand="{_attr(dom)}" role="tab" aria-selected="false">'
+        f'<span class="crow-rank">{rank_cell}</span>'
+        f'<span class="crow-main">'
+        f'<span class="crow-id-line">'
+        f'<span class="crow-id" title="{_attr(cand.candidate_id)}">{_h(_short(cand.candidate_id, 22))}</span>'
+        f'{final_tag}</span>'
+        f'{meta_line}</span>'
+        f'{score_cell}'
+        f"</button>"
+    )
+
+
+def _board_html(review: ReportReviewModel) -> str:
+    groups: list[str] = []
+    for group in review.board_groups:
+        cards = "".join(_board_card(b) for b in group.bundles)
+        # Incomplete / failed / rejected groups are marked ``collapsed`` by the
+        # review layer: on a large retrieval/semantic run dozens of un-evaluated
+        # rows would otherwise bury the primary (Final / Ranked) picks. Render
+        # those as a native <details> the reader can expand on demand; keep the
+        # evaluated groups always-open.
+        if group.collapsed and group.bundles:
+            groups.append(
+                f'<details class="board-group board-group-collapsible" '
+                f'data-status="{_attr(group.status)}">'
+                f'<summary class="board-group-head">'
+                f'<span class="board-group-title">{_h(group.title)}</span>'
+                f'<span class="board-group-count">{len(group.bundles)}</span></summary>'
+                f'<div class="board-group-cards">{cards}</div>'
+                f"</details>"
+            )
+        else:
+            groups.append(
+                f'<div class="board-group" data-status="{_attr(group.status)}">'
+                f'<div class="board-group-head"><span class="board-group-title">{_h(group.title)}</span>'
+                f'<span class="board-group-count">{len(group.bundles)}</span></div>'
+                f'<div class="board-group-cards">{cards}</div>'
+                f"</div>"
+            )
+    header = (
+        '<div class="cand-list-head" aria-hidden="true">'
+        '<span class="clh-rank">Rank</span>'
+        '<span class="clh-id">Candidate</span>'
+        '<span class="clh-score">Score</span>'
+        '</div>'
+    )
+    return f'<div class="cand-list">{header}{"".join(groups)}</div>'
+
+
+def _detail_structure_tab(bundle: CandidateEvidenceBundle, *, active: bool) -> str:
+    # Structure is the default landing tab whenever the candidate has a 3D
+    # artifact: the render gets the full panel width as a hero, with the
+    # downloadable artifacts (mostly the structure file) directly beneath it.
+    cand = bundle.candidate
+    chain_context = _chain_context_for(cand)
+    body = _viewer_block(cand, chain_context) + _candidate_downloads(cand)
+    cls = "cand-tabpanel is-active" if active else "cand-tabpanel"
+    return f'<div class="{cls}" data-tab="structure">{body}</div>'
+
+
+def _detail_quality_tab(bundle: CandidateEvidenceBundle, *, active: bool) -> str:
+    # Quality analysis combines the headline score bars with the sequence
+    # track. Both are stacked full-width so there is no ragged dead space.
+    # The selection rationale lives in the Pipeline & evidence tab.
+    cand = bundle.candidate
+    chain_context = _chain_context_for(cand)
+    parts: list[str] = []
+    score_summary = _score_bars(cand)
+    if score_summary:
+        parts.append(f'<div class="cand-quality-scores">{score_summary}</div>')
+    parts.append(_candidate_sequence_block(cand, chain_context))
+    body = "".join(part for part in parts if part)
+    cls = "cand-tabpanel is-active" if active else "cand-tabpanel"
+    return f'<div class="{cls}" data-tab="quality">{body}</div>'
+
+
+def _evidence_step_chip(step: EvidenceStep) -> str:
+    summary = (
+        f'<span class="estep-summary">{_h(step.evidence_summary)}</span>'
+        if step.evidence_summary
+        else ""
+    )
+    return (
+        f'<span class="estep estep-{_h(step.role)}" title="{_attr(step.node_id)}">'
+        f'<span class="estep-tool">{_h(step.tool)}</span>{summary}'
+        f"{_prov_chip(step.provenance)}</span>"
+    )
+
+
+def _detail_evidence_tab(bundle: CandidateEvidenceBundle) -> str:
+    path = bundle.evidence_path
+    parts: list[str] = []
+    if path.producer is not None:
+        # The producer step chip already carries its own provenance pill; a
+        # second standalone ``producer_provenance`` chip here was redundant
+        # (and rendered as an empty-looking floating block).
+        parts.append(
+            f'<div class="detail-block"><p class="detail-block-title">Producer</p>'
+            f'<div class="estep-row">{_evidence_step_chip(path.producer)}</div></div>'
+        )
+    if path.evaluators:
+        chips = "".join(_evidence_step_chip(s) for s in path.evaluators)
+        parts.append(
+            f'<div class="detail-block"><p class="detail-block-title">Evaluators</p>'
+            f'<div class="estep-row">{chips}</div></div>'
+        )
+    tail: list[str] = []
+    if path.ranker is not None:
+        tail.append(_evidence_step_chip(path.ranker))
+    if path.submission is not None:
+        tail.append(_evidence_step_chip(path.submission))
+    if tail:
+        parts.append(
+            f'<div class="detail-block"><p class="detail-block-title">Selection</p>'
+            f'<div class="estep-row">{"".join(tail)}</div></div>'
+        )
+    if path.shared_pipeline:
+        chips = "".join(
+            f'<span class="pipe-step pipe-{_h(s.role)}">{_h(s.tool)}</span>'
+            for s in path.shared_pipeline
+        )
+        parts.append(
+            '<div class="detail-block"><p class="detail-block-title">Shared pipeline</p>'
+            f'<p class="detail-note">Every candidate traverses this same DAG; per-candidate attribution is shown above.</p>'
+            f'<div class="pipe-row">{chips}</div></div>'
+        )
+    body = "".join(parts) or '<p class="empty">No pipeline evidence recorded.</p>'
+    return f'<div class="cand-tabpanel" data-tab="evidence">{body}</div>'
+
+
+def _detail_scores_tab(bundle: CandidateEvidenceBundle) -> str:
+    cards: list[str] = []
+    for group in bundle.score_groups:
+        rows = "".join(
+            f'<div class="metric-row"><span class="metric-label">{_h(label)}'
+            f'{f"<span class=\"metric-src\">{_h(src)}</span>" if src else ""}</span>'
+            f'<span class="metric-value">{_h(value)}{(" " + _h(unit)) if unit else ""}</span></div>'
+            for label, value, unit, src in group.metrics
+        )
+        cards.append(
+            f'<div class="score-family"><div class="score-family-head">'
+            f'<span class="score-family-name">{_h(group.family)}</span>{_prov_chip(group.provenance)}</div>'
+            f'<div class="score-family-body">{rows}</div></div>'
+        )
+    body = "".join(cards) or '<p class="empty">No scored metrics for this candidate.</p>'
+    return f'<div class="cand-tabpanel" data-tab="scores"><div class="score-grid">{body}</div></div>'
+
+
+def _detail_msa_tab(bundle: CandidateEvidenceBundle) -> str:
+    return f'<div class="cand-tabpanel" data-tab="msa">{_msa_html(bundle.msa_blocks)}</div>'
+
+
+def _detail_tools_tab(bundle: CandidateEvidenceBundle) -> str:
+    blocks: list[str] = []
+    for tool, payload in bundle.tool_evidence.items():
+        blocks.append(
+            f'<details class="tool-evidence"><summary>{_h(tool)}</summary>'
+            f'<pre class="tool-evidence-json">{_h(json.dumps(payload, indent=2, ensure_ascii=False, default=str))}</pre>'
+            f"</details>"
+        )
+    body = "".join(blocks) or '<p class="empty">No per-tool evidence recorded.</p>'
+    return f'<div class="cand-tabpanel" data-tab="tools">{body}</div>'
+
+
+def _detail_template(bundle: CandidateEvidenceBundle) -> str:
+    cand = bundle.candidate
+    dom = _structure_dom_id(cand.candidate_id)
+    has_structure = bool((cand.structure_path or "").strip())
+    has_msa = bool(bundle.msa_blocks)
+    has_scores = bool(bundle.score_groups)
+    has_tools = bool(bundle.tool_evidence)
+
+    # (tab key, label, included). Structure leads (default/leftmost) whenever a
+    # 3D artifact exists; Quality analysis (score bars + sequence) is always
+    # present and becomes the default landing tab when there is no structure.
+    tab_specs: list[tuple[str, str, bool]] = [
+        ("structure", "Structure", has_structure),
+        ("quality", "Quality analysis", True),
+        ("evidence", "Pipeline & evidence", True),
+        ("scores", "Scores", has_scores),
+        ("msa", "MSA", has_msa),
+        ("tools", "Tool evidence", has_tools),
+    ]
+    included_keys = [key for key, _label, included in tab_specs if included]
+    active_key = included_keys[0]
+    tabs = "".join(
+        f'<button type="button" class="cand-tab{" is-active" if key == active_key else ""}" '
+        f'role="tab" aria-selected="{"true" if key == active_key else "false"}" '
+        f'data-tab="{_attr(key)}">{_h(label)}</button>'
+        for key, label, included in tab_specs
+        if included
+    )
+    panels: list[str] = []
+    if has_structure:
+        panels.append(_detail_structure_tab(bundle, active=active_key == "structure"))
+    panels.append(_detail_quality_tab(bundle, active=active_key == "quality"))
+    panels.append(_detail_evidence_tab(bundle))
+    if has_scores:
+        panels.append(_detail_scores_tab(bundle))
+    if has_msa:
+        panels.append(_detail_msa_tab(bundle))
+    if has_tools:
+        panels.append(_detail_tools_tab(bundle))
+
+    status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
+    # When the agent submitted a design the ranker did not score #1, say so once
+    # so the final pick's rank badge doesn't read as a contradiction of the
+    # Design-ranking table.
+    rank_note = (
+        f'<p class="cand-detail-ranknote">Submitted despite Design-ranking '
+        f'#{bundle.submitted_despite_rank} — see the agent\'s rationale in '
+        f'<strong>Pipeline &amp; evidence</strong>.</p>'
+        if bundle.submitted_despite_rank is not None
+        else ""
+    )
+    head = (
+        f'<div class="cand-detail-head status-{status_cls}">'
+        f'<div class="cand-detail-id"><span class="cand-detail-eyebrow">{_h(status_label)}</span>'
+        f'<h3 title="{_attr(cand.candidate_id)}">{_h(_short(cand.candidate_id, 40))}</h3>'
+        f'{rank_note}</div>'
+        f"</div>"
+    )
+    return (
+        f'<template class="cand-detail-tpl" data-cand="{_attr(dom)}">'
+        f'<div class="cand-detail-inner">{head}'
+        f'<div class="cand-tabs" role="tablist">{tabs}</div>'
+        f'<div class="cand-tabpanels">{"".join(panels)}</div>'
+        f"</div></template>"
+    )
+
+
+def _review_console_section(review: ReportReviewModel) -> str:
+    base = review.base
+    final_submission = base.final_submission or {}
+    no_pick = final_submission.get("outcome") == "no_acceptable_candidate"
+    if not review.bundles and not no_pick:
+        return ""
+
+    banner = ""
+    if no_pick:
+        reason = str(
+            final_submission.get("reasoning")
+            or "The agent completed the search without selecting a candidate."
+        )
+        banner = (
+            '<div class="console-banner">'
+            "<strong>No acceptable final candidate was submitted.</strong>"
+            f"<p>{_h(reason)}</p></div>"
+        )
+
+    counts: dict[str, int] = {}
+    for bundle in review.bundles:
+        counts[bundle.status] = counts.get(bundle.status, 0) + 1
+    meta_bits: list[str] = []
+    for status, (label, _cls) in _STATUS_DISPLAY.items():
+        if counts.get(status):
+            meta_bits.append(f"{counts[status]} {label.lower()}")
+    meta = " · ".join(meta_bits) or f"{len(review.bundles)} candidates"
+    board = _board_html(review)
+    templates = "".join(_detail_template(b) for b in review.bundles)
+
+    console_body = (
+        f"""<div class="console">
+    <div class="console-board" role="tablist" aria-label="Candidate board">{board}</div>
+    <div class="console-detail" id="cand-detail-host" aria-live="polite"></div>
+  </div>
+  {templates}"""
+        if review.bundles
+        else ""
+    )
+    return f"""<section id="candidates" class="card card-console">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Designs</p>
+      <h2 class="card-title">Candidate review</h2>
+    </div>
+    <span class="card-meta">{_h(meta)}</span>
+  </header>
+  <p class="widget-explainer">Pick a candidate on the left to open its evidence dossier — status rationale, the pipeline that produced it, score families, 3D structure, and homologs. Final picks lead; explored and incomplete records follow.</p>
+  {banner}
+  {console_body}
+</section>"""
+
+
 # ----------------------------------------------------------------- main render
 
 
@@ -327,16 +730,30 @@ def render_report_html(
     timestamp).
     """
     del share, report_format  # share/bundle behaviour handled upstream in write_report
+    # ``top_k`` no longer truncates the candidate surface: the review console's
+    # board shows the *full* candidate population grouped by status (Final /
+    # Ranked / Incomplete / Failed), so every design stays auditable rather than
+    # being silently dropped below a cut-off. The parameter is retained for CLI
+    # compatibility but is intentionally a no-op for the console layout.
+    del top_k
     # Deduplicate / enrich candidate records for display so one protein that
     # appears as both a final pick and one or more explored records doesn't
     # render as several near-empty cards. Display-only — the run record is
     # untouched.
-    model = _prepare_candidate_view(model)
+    # Deduplicate / enrich candidates with scores still NESTED, then build the
+    # review console from that nested model — its status classification and
+    # per-tool evidence read ``scores[<tool>]`` namespaces (including the
+    # non-numeric ``passes_filters`` / ``flags`` leaves). Only afterwards do we
+    # flatten to ``tool:metric`` numeric leaves for the legacy score-bar / table
+    # renderers downstream. Flattening before the review build would erase those
+    # namespaces and make every candidate read as un-evaluated.
+    deduped = _dedup_candidate_view(model)
+    # Candidate review console — the report's primary surface. Derived purely
+    # from the (already display-prepared) model; never re-executes the engine.
+    review = build_review_model(deduped)
+    model = _flatten_candidate_view(deduped)
     plots = build_plots(model)
     title = f"VPA report · {model.summary.id}"
-    final_top = model.final_candidates[:top_k]
-    explored_top = model.candidates[:top_k]
-    top = final_top or explored_top
 
     headline = _executive_headline(model)
     dashboard_html = _executive_dashboard(model)
@@ -347,47 +764,62 @@ def render_report_html(
     show_msa = bool(model.msa_blocks)
     show_candidates = bool(model.final_submission or model.final_candidates or model.candidates)
     show_conversation = model.agent_transcript is not None
-    show_merge_audit = bool(model.candidate_merge_events)
+    # The "Candidate Merge Audit" section is suppressed entirely per user
+    # request — it duplicated information already conveyed by the Candidates
+    # section and read as redundant noise.
+    show_merge_audit = False
     # The "Candidate Availability" / "Empty and Filtered Candidate Streams"
     # section is suppressed entirely per user request — its content was mostly
     # no-op parameter-default audit noise and added little to the report.
     show_availability = False
 
-    # Order top-to-bottom to follow the run's story: what ran (workflow) →
-    # what it produced (candidates) → analytics → per-tool detail → audit
-    # trails → the agent's own reasoning → how to replay. The agent
-    # conversation sits near the bottom so results lead, not chatter.
-    nav_items: list[tuple[str, str, str]] = [("summary", "Summary", "◎")]
-    if show_workflow:
-        nav_items.append(("workflow", "Workflow", "⌥"))
+    # The report leads with results: the executive Summary, then the Candidate
+    # review console (its primary surface). Everything else — the workflow DAG,
+    # analytics, per-tool widgets, the agent's own reasoning, and replay info —
+    # is supporting detail, grouped into an "Appendix" so the console isn't
+    # buried under audit trails. ``None`` anchor marks a non-clickable divider.
+    nav_items: list[tuple[str | None, str, str]] = [("summary", "Summary", "◎")]
     if show_candidates:
         nav_items.append(("candidates", "Candidates", "★"))
+    appendix_items: list[tuple[str, str, str]] = []
+    if show_workflow:
+        appendix_items.append(("workflow", "Workflow", "⌥"))
     if show_plots:
-        nav_items.append(("plots", "Plots", "▦"))
+        appendix_items.append(("plots", "Plots", "▦"))
     if show_msa:
-        nav_items.append(("msa", "MSA", "≡"))
-    nav_items.append(("details", "Per-tool results", "⊞"))
+        appendix_items.append(("msa", "MSA", "≡"))
+    appendix_items.append(("details", "Per-tool results", "⊞"))
     if show_availability:
-        nav_items.append(("availability", "Availability", "◌"))
+        appendix_items.append(("availability", "Availability", "◌"))
     if show_merge_audit:
-        nav_items.append(("merge-audit", "Merge audit", "◇"))
+        appendix_items.append(("merge-audit", "Merge audit", "◇"))
     if show_conversation:
-        nav_items.append(("conversation", "Conversation", "❝"))
-    nav_items.append(("reproducibility", "Reproducibility", "⟲"))
+        appendix_items.append(("conversation", "Conversation", "❝"))
+    appendix_items.append(("reproducibility", "Reproducibility", "⟲"))
+    if appendix_items:
+        nav_items.append((None, "Appendix", "▽"))
+        nav_items.extend(appendix_items)
 
-    nav_html = "".join(
-        f'<a href="#{anchor}" class="side-nav-item">'
-        f'<span class="side-nav-glyph">{_h(glyph)}</span>'
-        f'<span class="side-nav-label">{_h(label)}</span></a>'
-        for anchor, label, glyph in nav_items
-    )
+    def _nav_item_html(anchor: str | None, label: str, glyph: str) -> str:
+        if anchor is None:
+            return f'<span class="side-nav-divider">{_h(label)}</span>'
+        return (
+            f'<a href="#{anchor}" class="side-nav-item">'
+            f'<span class="side-nav-glyph">{_h(glyph)}</span>'
+            f'<span class="side-nav-label">{_h(label)}</span></a>'
+        )
 
-    # Load structures for every candidate we actually render — final picks
-    # *and* any surviving explored cards — so explored cards aren't left with
-    # an empty viewer. Dedup by candidate_id to avoid loading a file twice.
+    nav_html = "".join(_nav_item_html(*item) for item in nav_items)
+
+    # Load structures for every candidate the console can open — one payload per
+    # distinct candidate that carries a structure. The console activates each
+    # candidate's viewer lazily from this shared <script> block, so every board
+    # card (not just the top-k) resolves to a real viewer when clicked. Dedup by
+    # candidate_id to avoid embedding the same file twice.
     _viewer_candidates: list[ReportCandidate] = []
     _seen_viewer_ids: set[str] = set()
-    for _c in (*final_top, *explored_top):
+    for _bundle in review.bundles:
+        _c = _bundle.candidate
         if _c.candidate_id in _seen_viewer_ids:
             continue
         _seen_viewer_ids.add(_c.candidate_id)
@@ -449,64 +881,8 @@ def render_report_html(
         _candidate_merge_audit_section(model) if show_merge_audit else ""
     )
 
-    # ----- Candidates section -----
-    final_block = ""
-    final_submission = model.final_submission or {}
-    if final_submission.get("outcome") == "no_acceptable_candidate":
-        final_block = f"""
-  <div class="candidate-group candidate-group-final">
-    <div class="candidate-group-head">
-      <p class="card-eyebrow">Final outcome</p>
-      <span class="card-meta">No acceptable candidate</span>
-    </div>
-    <div class="empty-state">
-      <strong>No acceptable final candidate was submitted.</strong>
-      <p>{_h(str(final_submission.get("reasoning") or "The agent completed the search without selecting a candidate."))}</p>
-    </div>
-  </div>"""
-    elif model.final_candidates:
-        final_label = "Auto-selected" if (
-            final_submission
-        ).get("auto_selected") else "Submitted"
-        final_block = f"""
-  <div class="candidate-group candidate-group-final">
-    <div class="candidate-group-head">
-      <div class="candidate-group-title">
-        <span class="candidate-group-badge candidate-group-badge-final">★ Final picks</span>
-        <span class="candidate-group-sub">Submitted as this run's answer.</span>
-      </div>
-      <span class="card-meta">{_h(final_label)}</span>
-    </div>
-    {_candidate_cards(final_top, total_candidates=len(model.final_candidates))}
-  </div>"""
-    explored_block = ""
-    if model.candidates:
-        explored_block = f"""
-  <div class="candidate-group candidate-group-explored">
-    <div class="candidate-group-head">
-      <div class="candidate-group-title">
-        <span class="candidate-group-badge candidate-group-badge-explored">Explored candidates</span>
-        <span class="candidate-group-sub">Evaluated during the search but not submitted.</span>
-      </div>
-      <span class="card-meta">{len(model.candidates)} total</span>
-    </div>
-    {_candidate_cards(explored_top, total_candidates=len(model.candidates))}
-    {_all_designs_table(model.candidates)}
-  </div>"""
-    candidates_section = (
-        f"""<section id="candidates" class="card card-candidates">
-  <header class="card-header">
-    <div>
-      <p class="card-eyebrow">Designs</p>
-      <h2 class="card-title">Top Candidates</h2>
-    </div>
-    <span class="card-meta">{len(model.final_candidates)} final · {len(model.candidates)} explored</span>
-  </header>
-  {final_block}
-  {explored_block}
-</section>"""
-        if show_candidates else ""
-    )
+    # ----- Candidate review console (primary surface) -----
+    candidates_section = _review_console_section(review) if show_candidates else ""
 
     workflow_section = (
         f"""<section id="workflow" class="card">
@@ -570,16 +946,20 @@ def render_report_html(
   </header>
   <main class="content">
     {summary_card}
-    {workflow_section}
     {candidates_section}
+    <section id="appendix" class="appendix-divider">
+      <span class="appendix-divider-label">Appendix · full run detail</span>
+      <p class="appendix-divider-note">Supporting evidence behind the candidate review above — the workflow DAG, analytics, per-tool widgets, the agent's reasoning, and replay info.</p>
+    </section>
+    {workflow_section}
     {plots_section}
     {msa_section}
     <section id="details" class="card">
       <header class="card-header">
         <div><p class="card-eyebrow">Tool results</p><h2 class="card-title">Per-tool widgets</h2></div>
       </header>
-      <p class="widget-explainer">Each tool used in this workflow gets its own structured panel below — metrics, tables, downloadable artifacts. The raw JSON output is collapsed at the bottom of each panel for reference.</p>
-      {_node_details(model.graph.nodes)}
+      <p class="widget-explainer">These panels are organised by <strong>workflow node</strong> (one tool execution). Use the <strong>sample selector</strong> to filter every panel to a single candidate — the cards inside each block are then rebuilt from <strong>that design's own</strong> metrics, so this section tracks your candidate selection just like the review console above. A node that never processed the selected sample says so, and input / retrieval steps with no per-sample result stay visible for all. The raw JSON output is collapsed at the bottom of each panel for reference.</p>
+      {_node_details(model.graph.nodes, _per_tool_cand_order(review))}
     </section>
     {availability_section}
     {merge_audit_section}
@@ -593,7 +973,6 @@ def render_report_html(
   </main>
   {threedmol_script}
   {viewer_data_script}
-  <script id="report-data" type="application/json">{_script_json(_public_model(model))}</script>
   <script>{_js()}</script>
 </body>
 </html>
@@ -986,108 +1365,163 @@ def _lookup_candidate_metric(candidate: ReportCandidate, base_key: str) -> Any:
     return None
 
 
-def _executive_dashboard(model: ReportModel) -> str:
-    """CELLKEY-style 3-panel dashboard for the Executive Summary card.
+def _lookup_candidate_metric_source(
+    candidate: ReportCandidate, base_key: str
+) -> tuple[Any, str | None]:
+    """Like :func:`_lookup_candidate_metric` but also returns the source tool.
 
-    Replaces the previous flat KPI strip with a structured dashboard:
-
-    * **Run Vitals** (left) — KPI tile grid with status, runtime, candidate
-      count, tool count, artifact count, warning count. Each tile gets an
-      icon, value, and a colour accent driven by the underlying state /
-      quality.
-    * **Confidence at a Glance** (middle) — donut gauges for the top
-      candidate's headline confidence metrics (pLDDT / pTM / ipTM / ΔG /
-      DockQ / score). Up to three, picked deterministically by priority.
-    * **Pipeline Health** (right) — single donut breaking down the
-      workflow nodes by state (completed / running / failed / etc.) with
-      a small legend underneath. Hidden for single-tool jobs since the
-      breakdown is trivially 1-node.
-
-    The whole dashboard adapts to runs that produced no scalar metrics
-    (sequence-only adapters, info-tools) — empty panels just stay quiet.
+    Flattened scores key on ``tool:metric`` (e.g. ``esm3:mean_plddt``), so the
+    prefix names the model that produced the value. Returns ``(value, tool)``;
+    ``tool`` is ``None`` for legacy flat keys that carry no prefix.
     """
-    parts = [
-        _exec_vitals_panel(model),
-        _exec_confidence_panel(model),
-        _exec_pipeline_panel(model),
-    ]
-    panels = "".join(p for p in parts if p)
-    return f'<div class="exec-dashboard">{panels}</div>'
+    scores = candidate.scores or {}
+    aliases = _SUMMARY_METRIC_ALIASES.get(base_key, (base_key,))
+    # Prefer a ``tool:metric`` key first so the value carries a source; only
+    # fall back to an un-prefixed legacy key (no attributable tool) afterwards.
+    fallback: Any = None
+    found_fallback = False
+    for key, val in scores.items():
+        if isinstance(val, dict):
+            continue
+        parts = str(key).split(":", 1)
+        if parts[-1].lower() not in aliases:
+            continue
+        if len(parts) == 2 and parts[0]:
+            return val, parts[0]
+        if not found_fallback:
+            fallback, found_fallback = val, True
+    if found_fallback:
+        return fallback, None
+    return None, None
 
 
-def _exec_vitals_panel(model: ReportModel) -> str:
-    """Left panel — six KPI tiles covering the run's headline numbers."""
-    tiles: list[str] = []
+def _executive_dashboard(model: ReportModel) -> str:
+    """Compact, typography-driven run summary (deployment-summary style).
+
+    Replaces the old boxed three-panel dashboard with a restrained layout:
+    a single grouped *stat strip* (status / runtime / candidates / nodes /
+    artifacts / warnings), then a two-column band — top-candidate *confidence*
+    metrics (each tagged with its producing model) and *pipeline* node health.
+    No metric cards, no donuts, no decorative colour: structure and type carry
+    the hierarchy; colour appears only as a small status dot.
+    """
+    return (
+        '<div class="exec-summary">'
+        f'{_exec_stat_strip(model)}'
+        f'{_exec_signal_band(model)}'
+        '</div>'
+    )
+
+
+def _exec_stat_strip(model: ReportModel) -> str:
+    """Grouped run statistics as a single typographic strip (no boxes)."""
     state = (model.summary.state or "unknown").lower()
-    state_class = _state_class(model.summary.state)
-    state_glyph = {
-        "completed": "✓",
-        "running": "●",
-        "queued": "◔",
-        "pending": "◔",
-        "failed": "✕",
-        "cancelled": "○",
-        "skipped": "—",
-    }.get(state, "●")
-    tiles.append(_kpi_tile(state_glyph, state.title(), "Status", accent=state_class))
-    tiles.append(_kpi_tile("⏱", _duration(model.summary.runtime_ms), "Runtime"))
-
-    n_candidates = _summary_candidate_count(model)
-    cand_accent = "good" if n_candidates >= 1 else "neutral"
-    tiles.append(_kpi_tile(
-        "", str(n_candidates), "Candidates", accent=cand_accent,
-        raw_icon=vpa_logo("kpi-logo"),
-    ))
-
-    n_nodes = len(model.graph.nodes)
-    tiles.append(_kpi_tile("⚙", str(n_nodes), "Tools" if n_nodes == 1 else "Pipeline nodes"))
-
-    tiles.append(_kpi_tile("⊞", str(len(model.artifacts)), "Artifacts"))
-
+    state_cls = _state_class(model.summary.state)
     n_warn = len(model.warnings)
     n_err = sum(1 for w in model.warnings if w.level == "error")
     if n_err:
-        warn_accent = "poor"
+        warn_label, warn_val, warn_cls = "Errors", str(n_err), "poor"
     elif n_warn:
-        warn_accent = "ok"
+        warn_label, warn_val, warn_cls = "Warnings", str(n_warn), "ok"
     else:
-        warn_accent = "good"
-    warn_label = "Errors" if n_err else "Warnings" if n_warn else "Clean"
-    warn_value = str(n_err or n_warn or 0)
-    warn_glyph = "✕" if n_err else "⚠" if n_warn else "✓"
-    tiles.append(_kpi_tile(warn_glyph, warn_value, warn_label, accent=warn_accent))
+        warn_label, warn_val, warn_cls = "Warnings", "0", None
+    # (label, value, status_dot_class|None)
+    stats: list[tuple[str, str, str | None]] = [
+        ("Status", state.title(), state_cls),
+        ("Runtime", _duration(model.summary.runtime_ms), None),
+        ("Candidates", str(_summary_candidate_count(model)), None),
+        ("Pipeline nodes", str(len(model.graph.nodes)), None),
+        ("Artifacts", str(len(model.artifacts)), None),
+        (warn_label, warn_val, warn_cls),
+    ]
+    items = []
+    for label, value, dot_cls in stats:
+        dot = f'<span class="exec-stat-dot dot-{dot_cls}"></span>' if dot_cls else ""
+        items.append(
+            f'<div class="exec-stat"><div class="exec-stat-val">{dot}{_h(value)}</div>'
+            f'<div class="exec-stat-lbl">{_h(label)}</div></div>'
+        )
+    return f'<div class="exec-stats">{"".join(items)}</div>'
 
+
+def _exec_signal_band(model: ReportModel) -> str:
+    """Two columns: top-candidate confidence (with sources) + pipeline health."""
+    cols: list[str] = []
+    conf = _exec_confidence_col(model)
+    if conf:
+        cols.append(conf)
+    pipe = _exec_pipeline_col(model)
+    if pipe:
+        cols.append(pipe)
+    if not cols:
+        return ""
+    return f'<div class="exec-band">{"".join(cols)}</div>'
+
+
+def _exec_confidence_col(model: ReportModel) -> str:
+    top = _summary_top_candidate(model)
+    if top is None:
+        return ""
+    rows: list[str] = []
+    for key, label, tip, lo, hi in _EXEC_CONFIDENCE_SPECS:
+        if len(rows) >= 4:
+            break
+        src_tool: str | None = None
+        if key == "score":
+            value = top.score
+        else:
+            value, src_tool = _lookup_candidate_metric_source(top, key)
+        value = _plddt_on_100(key, value)
+        num = _num(value)
+        if num is None:
+            continue
+        quality = _quality_class(key, num)
+        src = (
+            f'<span class="exec-cm-src">&middot; {_h(_tool_display_name(src_tool))}</span>'
+            if src_tool else ""
+        )
+        rows.append(
+            f'<div class="exec-cm" title="{_attr(tip)}">'
+            f'<span class="exec-cm-dot dot-{quality}"></span>'
+            f'<span class="exec-cm-val">{_h(_fmt_donut(num))}</span>'
+            f'<span class="exec-cm-lbl">{_h(label)}{src}</span>'
+            f'</div>'
+        )
+    if not rows:
+        rows.append(
+            f'<div class="exec-cm exec-cm-empty"><span class="exec-cm-lbl">'
+            f'Top candidate <code>{_h(top.candidate_id)}</code> &middot; no scalar confidence metrics</span></div>'
+        )
     return (
-        '<section class="exec-panel exec-panel-vitals">'
-        '<header class="exec-panel-head">'
-        '<h3 class="exec-panel-title">Run vitals</h3>'
-        '<span class="exec-panel-sub">Headline numbers from this run</span>'
-        '</header>'
-        f'<div class="kpi-grid">{"".join(tiles)}</div>'
-        '</section>'
+        '<div class="exec-col">'
+        '<div class="exec-col-head">Confidence <span class="exec-col-sub">top candidate</span></div>'
+        f'<div class="exec-cm-list">{"".join(rows)}</div>'
+        '</div>'
     )
 
 
-def _kpi_tile(
-    icon: str, value: str, label: str, *, accent: str = "neutral",
-    raw_icon: str | None = None,
-) -> str:
-    """Single dashboard KPI tile (icon + value + label, with state accent).
-
-    ``raw_icon`` injects pre-built markup (e.g. the brand logo) in place of
-    the escaped glyph icon.
-    """
-    icon_html = (
-        raw_icon if raw_icon is not None
-        else f'<span class="kpi-icon" aria-hidden="true">{_h(icon)}</span>'
-    )
+def _exec_pipeline_col(model: ReportModel) -> str:
+    nodes = model.graph.nodes
+    if len(nodes) < 2:
+        return ""
+    counts: dict[str, int] = {}
+    for node in nodes:
+        counts[(node.state or "unknown").lower()] = counts.get((node.state or "unknown").lower(), 0) + 1
+    total = len(nodes)
+    n_done = counts.get("completed", 0) + counts.get("cached", 0)
+    chips: list[str] = []
+    for node in nodes:
+        state = (node.state or "unknown").lower()
+        chips.append(
+            f'<span class="exec-node" title="{_attr(state)}">'
+            f'<span class="exec-node-dot dot-{_state_class(node.state)}"></span>'
+            f'{_h(node.tool or node.node_id or "tool")}</span>'
+        )
     return (
-        f'<div class="kpi-tile kpi-{_h(accent)}">'
-        f'{icon_html}'
-        f'<div class="kpi-body">'
-        f'<div class="kpi-value">{_h(value)}</div>'
-        f'<div class="kpi-label">{_h(label)}</div>'
-        f'</div></div>'
+        '<div class="exec-col">'
+        f'<div class="exec-col-head">Pipeline <span class="exec-col-sub">{n_done}/{total} completed</span></div>'
+        f'<div class="exec-node-list">{"".join(chips)}</div>'
+        '</div>'
     )
 
 
@@ -1104,208 +1538,6 @@ _EXEC_CONFIDENCE_SPECS: tuple[tuple[str, str, str, float, float], ...] = (
     ("ranking_confidence", "Conf.", "Composite confidence head.", 0.0, 1.0),
     ("score", "Score", "Pipeline-specific composite score.", 0.0, 1.0),
 )
-
-
-def _exec_confidence_panel(model: ReportModel) -> str:
-    """Middle panel — up to three confidence donuts for the top candidate."""
-    top = _summary_top_candidate(model)
-    if top is None:
-        return ""
-    donuts: list[str] = []
-    for key, label, tip, lo, hi in _EXEC_CONFIDENCE_SPECS:
-        if len(donuts) >= 3:
-            break
-        if key == "score":
-            value = top.score
-        else:
-            value = _lookup_candidate_metric(top, key)
-        # pLDDT is always presented on [0,100]; values logged on [0,1] are
-        # scaled up so the donut fills correctly and reads "98" not "0.98".
-        value = _plddt_on_100(key, value)
-        num = _num(value)
-        if num is None:
-            continue
-        gauge_hi = hi
-        quality = _quality_class(key, num)
-        donut_html = _gauge_svg(
-            value=num, lo=lo, hi=gauge_hi, quality=quality,
-            size=96, stroke=8,
-            center_text=_fmt_donut(num),
-            sub_text=_donut_label(label),
-        )
-        donuts.append(
-            f'<div class="exec-donut">'
-            f'<div class="exec-donut-viz" title="{_attr(tip)}">{donut_html}</div>'
-            f'<div class="exec-donut-meta">'
-            f'<div class="exec-donut-label">{_h(label)}</div>'
-            f'<div class="exec-donut-tip">{_h(tip)}</div>'
-            f'</div></div>'
-        )
-    if not donuts:
-        # No confidence metrics — show the top-candidate identity and rank
-        # as a soft fallback so the middle column isn't a void.
-        rank = top.rank or 1
-        donuts.append(
-            f'<div class="exec-donut exec-donut-empty">'
-            f'<div class="exec-donut-meta">'
-            f'<div class="exec-donut-label">Top candidate</div>'
-            f'<div class="exec-donut-id"><code>{_h(top.candidate_id)}</code></div>'
-            f'<div class="exec-donut-tip">Rank #{rank} of {_summary_candidate_count(model)}</div>'
-            f'</div></div>'
-        )
-    return (
-        '<section class="exec-panel exec-panel-confidence">'
-        '<header class="exec-panel-head">'
-        '<h3 class="exec-panel-title">Confidence at a glance</h3>'
-        '<span class="exec-panel-sub">Top candidate · headline scores</span>'
-        '</header>'
-        f'<div class="exec-donut-row">{"".join(donuts)}</div>'
-        '</section>'
-    )
-
-
-def _exec_pipeline_panel(model: ReportModel) -> str:
-    """Right panel — node-state breakdown donut + stages list.
-
-    Hidden for single-tool jobs. For multi-node runs we show:
-
-    * a centred stacked-arc donut (130px) with the "% done" centre
-    * a vertical stages list (one row per node) so the panel fills its
-      vertical space instead of leaving a void below a tiny legend
-    * a compact legend strip showing the state-count breakdown
-
-    The stages list shows the tool name + a coloured state pill so the
-    user can scan the pipeline composition without leaving the summary.
-    """
-    nodes = model.graph.nodes
-    if len(nodes) < 2:
-        return ""
-    counts: dict[str, int] = {}
-    for node in nodes:
-        counts[node.state or "unknown"] = counts.get(node.state or "unknown", 0) + 1
-    total = sum(counts.values()) or 1
-
-    state_colours = {
-        # Drawn entirely from the user's brand palette — no red/green/blue.
-        # Sky=good, violet=running (lively brand accent), orange=waiting,
-        # pink=critical/cancelled, lavender-grey=skipped.
-        "completed": "#4cc4e4",   # sky (matches --good)
-        "running": "#a78bfa",     # bright violet (active — distinct from sky)
-        "queued": "#f39e3a",      # orange (warm waiting)
-        "pending": "#f39e3a",
-        "failed": "#cc0980",      # pink (matches --poor)
-        "cancelled": "#cc0980",   # pink (warning state)
-        "skipped": "#a09bbf",     # lavender-grey (deprioritised)
-    }
-    state_glyphs = {
-        "completed": "✓",
-        "running": "●",
-        "queued": "◔",
-        "pending": "◔",
-        "failed": "✕",
-        "cancelled": "○",
-        "skipped": "—",
-    }
-
-    # Donut with stacked-arc state breakdown. Sized small enough that the
-    # stages list to the right has room to show full tool names on a
-    # single line (no wrap, no ellipsis).
-    size = 108
-    stroke = 10
-    cx = cy = size / 2
-    r = size / 2 - stroke
-    circ = 2 * math.pi * r
-    arcs: list[str] = []
-    cumulative = 0.0
-    state_order = ["completed", "running", "queued", "pending", "failed", "cancelled", "skipped"]
-    for state in [*state_order, *sorted(s for s in counts if s not in state_order)]:
-        n = counts.get(state)
-        if not n:
-            continue
-        share = n / total
-        arc_len = share * circ
-        offset = -cumulative
-        colour = state_colours.get(state, "#a09bbf")
-        arcs.append(
-            f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" fill="none" '
-            f'stroke="{colour}" stroke-width="{stroke}" '
-            f'stroke-dasharray="{arc_len:.2f} {circ - arc_len:.2f}" '
-            f'stroke-dashoffset="{offset:.2f}" '
-            f'transform="rotate(-90 {cx} {cy})"/>'
-        )
-        cumulative += arc_len
-    n_done = counts.get("completed", 0)
-    pct_done = round((n_done / total) * 100)
-    # ``dominant-baseline="central"`` centres each glyph on its y. Stacking
-    # the two lines at +/-10px from the donut centre keeps the combined
-    # block visually balanced around the geometric centre — without this,
-    # the default alphabetic baseline drifts the percentage upward.
-    centre = (
-        f'<text x="{cx}" y="{cy - 10:.0f}" text-anchor="middle" '
-        f'dominant-baseline="central" class="exec-pipe-val">{pct_done}%</text>'
-        f'<text x="{cx}" y="{cy + 10:.0f}" text-anchor="middle" '
-        f'dominant-baseline="central" class="exec-pipe-sub">{n_done}/{total} done</text>'
-    )
-    donut_svg = (
-        f'<svg class="exec-pipe-donut" width="{size}" height="{size}" '
-        f'viewBox="0 0 {size} {size}" aria-hidden="true">'
-        f'<circle cx="{cx}" cy="{cy}" r="{r:.2f}" fill="none" '
-        f'stroke="#ede9fe" stroke-width="{stroke}"/>'
-        + "".join(arcs)
-        + centre
-        + "</svg>"
-    )
-
-    # Stages list — one row per node. The coloured glyph already encodes
-    # state (✓ green = completed, ✕ red = failed, ●/◔ for active/pending),
-    # so we drop the textual state badge entirely and give the tool name
-    # the full remaining width — that's the user-facing identifier that
-    # should never be ellipsis-clipped. Every node is listed; the list
-    # scrolls within the panel rather than truncating with a "+N more" row.
-    stages_rows: list[str] = []
-    for node in nodes:
-        state = (node.state or "unknown").lower()
-        colour = state_colours.get(state, "#a09bbf")
-        glyph = state_glyphs.get(state, "•")
-        tool = node.tool or node.node_id or "tool"
-        stages_rows.append(
-            f'<li class="exec-stage-row" title="{_attr(state)}">'
-            f'<span class="exec-stage-glyph" style="color:{colour}">{_h(glyph)}</span>'
-            f'<span class="exec-stage-name">{_h(tool)}</span>'
-            f'</li>'
-        )
-
-    # Compact legend strip below the donut + stages.
-    legend_chips: list[str] = []
-    for state in [*state_order, *sorted(s for s in counts if s not in state_order)]:
-        n = counts.get(state)
-        if not n:
-            continue
-        colour = state_colours.get(state, "#a09bbf")
-        legend_chips.append(
-            f'<span class="exec-pipe-legend-chip">'
-            f'<span class="exec-pipe-legend-swatch" style="background:{colour}"></span>'
-            f'<span class="exec-pipe-legend-label">{_h(state)}</span>'
-            f'<span class="exec-pipe-legend-count">{n}</span>'
-            f'</span>'
-        )
-
-    return (
-        '<section class="exec-panel exec-panel-pipeline">'
-        '<header class="exec-panel-head">'
-        '<h3 class="exec-panel-title">Pipeline health</h3>'
-        f'<span class="exec-panel-sub">{total} node{"s" if total != 1 else ""} · '
-        f'{n_done} completed</span>'
-        '</header>'
-        '<div class="exec-pipe-body">'
-        f'<div class="exec-pipe-donut-wrap">{donut_svg}</div>'
-        '<ul class="exec-stage-list">'
-        f'{"".join(stages_rows)}'
-        '</ul>'
-        '</div>'
-        f'<div class="exec-pipe-legend">{"".join(legend_chips)}</div>'
-        '</section>'
-    )
 
 
 def _exec_verdict_callout(model: ReportModel) -> str:
@@ -1481,16 +1713,318 @@ def _collect_viewer_payloads(candidates: list[ReportCandidate]) -> list[dict[str
             continue
         if len(content) > 2_000_000:  # 2 MB hard cap to avoid blowing up the report
             content = content[:2_000_000]
+        fmt = path.suffix.lower().lstrip(".")
+        # Mark standard-AA atoms as ATOM so 3Dmol cartoons the protein and the
+        # Sidechains toggle works even for PXDesign/Protenix HETATM-only CIFs.
+        content = _normalize_structure_for_viewer(content, fmt)
         payloads.append(
             {
                 "id": _structure_dom_id(candidate.candidate_id),
                 "candidate_id": candidate.candidate_id,
-                "format": path.suffix.lower().lstrip("."),
+                "format": fmt,
                 "filename": path.name,
                 "content": content,
+                # Authoritative sidechain check done here in Python by scanning
+                # the atom records — more reliable than the browser-side 3Dmol
+                # atom scan, which silently misses sidechains for some CIF
+                # inputs. PXDesign binder outputs may legitimately be
+                # backbone-only, so this flag reflects the actual atom records
+                # in the rendered structure rather than the producing tool.
+                "has_sidechains": _structure_has_sidechains(content, fmt),
+                # Whether the B-factor column carries real per-residue pLDDT.
+                # Coordinate-only generators (PXDesign / rfdiffusion) leave it
+                # flat-zero, so pLDDT colouring would paint one flat colour —
+                # the viewer disables that mode and falls back to a spectrum.
+                "has_plddt": _structure_has_plddt(content, fmt),
             }
         )
     return payloads
+
+
+# Heavy backbone atoms present in every residue. Anything outside this set
+# (CB, CG, OD1, NE2, …) proves real sidechain geometry was written out.
+_BACKBONE_ATOMS = frozenset({"N", "CA", "C", "O", "OXT"})
+
+
+def _chain_sidechain_flags(content: str, fmt: str) -> list[tuple[str, bool]]:
+    """Per-chain ``(chain_id, has_sidechain_atoms)`` in source order.
+
+    A chain counts as carrying sidechains if any *standard amino-acid* residue
+    in it has a non-backbone heavy atom (CB, CG, …). The check is keyed off the
+    residue (comp) name, not the PDB record type: some writers (PXDesign's
+    mmCIF) mark every protein atom as ``HETATM``, so filtering on ``ATOM`` would
+    wrongly call a full-atom complex backbone-only, and keying off comp_id also
+    avoids counting ligand / cofactor atoms as "sidechains". Hydrogens ignored.
+
+    This is the single primitive behind both the whole-structure
+    :func:`_structure_has_sidechains` flag and the per-chain coverage note.
+    """
+    flags: dict[str, bool] = {}
+    order: list[str] = []
+
+    def _note(chain: str, sidechain: bool) -> None:
+        if chain not in flags:
+            flags[chain] = False
+            order.append(chain)
+        if sidechain:
+            flags[chain] = True
+
+    fmt = (fmt or "").lower()
+    try:
+        if fmt in {"cif", "mmcif"}:
+            lines = content.splitlines()
+            cols: list[str] = []
+            in_header = False
+            start = -1
+            for idx, raw in enumerate(lines):
+                stripped = raw.strip()
+                if stripped == "loop_":
+                    in_header, cols = True, []
+                    continue
+                if in_header and stripped.startswith("_atom_site."):
+                    cols.append(stripped.split(".", 1)[1].strip())
+                    continue
+                if in_header and stripped.startswith("_") and not stripped.startswith("_atom_site."):
+                    in_header, cols = False, []
+                    continue
+                if in_header and cols and not stripped.startswith("_"):
+                    start = idx
+                    break
+            if not (cols and start >= 0):
+                return []
+            atom_idx = cols.index("label_atom_id") if "label_atom_id" in cols else (
+                cols.index("auth_atom_id") if "auth_atom_id" in cols else -1
+            )
+            comp_idx = cols.index("label_comp_id") if "label_comp_id" in cols else (
+                cols.index("auth_comp_id") if "auth_comp_id" in cols else -1
+            )
+            chain_idx = cols.index("label_asym_id") if "label_asym_id" in cols else (
+                cols.index("auth_asym_id") if "auth_asym_id" in cols else -1
+            )
+            elem_idx = cols.index("type_symbol") if "type_symbol" in cols else -1
+            if atom_idx < 0 or comp_idx < 0:
+                return []
+            for raw in lines[start:]:
+                stripped = raw.strip()
+                if not stripped or stripped.startswith(("_", "#", "loop_")):
+                    break
+                parts = stripped.split()
+                if atom_idx >= len(parts) or comp_idx >= len(parts):
+                    continue
+                if parts[comp_idx].strip('"').upper() not in _AA3_TO_1:
+                    continue
+                if 0 <= elem_idx < len(parts) and parts[elem_idx].strip('"').upper() in {"H", "D"}:
+                    continue
+                chain = parts[chain_idx].strip('"') if 0 <= chain_idx < len(parts) else "?"
+                atom_name = parts[atom_idx].strip('"').upper()
+                _note(chain, bool(atom_name) and atom_name not in _BACKBONE_ATOMS
+                      and not atom_name.startswith(("H", "D")))
+        else:
+            # PDB / ent: fixed-column ATOM/HETATM records.
+            for line in content.splitlines():
+                if not line.startswith(("ATOM", "HETATM")) or len(line) < 20:
+                    continue
+                if line[17:20].strip().upper() not in _AA3_TO_1:
+                    continue
+                element = line[76:78].strip().upper() if len(line) >= 78 else ""
+                if element in {"H", "D"}:
+                    continue
+                chain = line[21].strip() or "?"
+                atom_name = line[12:16].strip().upper()
+                _note(chain, bool(atom_name) and atom_name not in _BACKBONE_ATOMS
+                      and not atom_name.startswith(("H", "D")))
+    except Exception:
+        # Never let a parsing hiccup break report generation.
+        return []
+    return [(chain, flags[chain]) for chain in order]
+
+
+def _structure_has_sidechains(content: str, fmt: str) -> bool:
+    """True if the structure carries any non-backbone heavy atom.
+
+    Backbone-only outputs (rfdiffusion scaffolds, some esm3 predictions, and —
+    for the binder chain — PXDesign designs) hold just N/CA/C/O per residue, so
+    the viewer's "Sidechains" toggle has nothing to draw. Decided here rather
+    than in JS so the answer is stable across 3Dmol parser quirks. An empty
+    scan (parse failure) falls back to ``True`` so the control stays usable.
+    """
+    flags = _chain_sidechain_flags(content, fmt)
+    if not flags:
+        return True
+    return any(has for _chain, has in flags)
+
+
+def _sidechain_coverage_note(content: str, fmt: str) -> str:
+    """Small caption explaining a backbone-only or partially-modelled structure.
+
+    Generalises across monomers and complexes: when one or more chains were
+    produced as backbone-only (no sidechain coordinates), a missing-sidechain
+    view can read as a rendering bug. This explains the gap. Returns "" when
+    every chain is full-atom (nothing to explain).
+    """
+    flags = _chain_sidechain_flags(content, fmt)
+    if not flags:
+        return ""
+    backbone = [chain for chain, has in flags if not has]
+    if not backbone:
+        return ""
+    full = [chain for chain, has in flags if has]
+    if not full:
+        msg = (
+            "Backbone-only model — no sidechain atoms were generated for this "
+            "structure, so the Sidechains view is unavailable."
+        )
+    elif len(flags) > 1:
+        names = ", ".join(f"chain {c}" for c in backbone)
+        msg = (
+            f"Partial atoms — {names} {'was' if len(backbone) == 1 else 'were'} "
+            "produced as backbone-only in this artifact, so sidechains can only "
+            "be shown for the rest of the model."
+        )
+    else:
+        msg = (
+            "Backbone-only model — no sidechain atoms were generated for this "
+            "structure, so the Sidechains view is unavailable."
+        )
+    return f'<p class="structure-coverage-note">{_h(msg)}</p>'
+
+
+def _ca_bfactors(content: str, fmt: str) -> list[float]:
+    """B-factor of every CA atom, in source order.
+
+    For AlphaFold / ESM / Boltz / Protenix predictions the B-factor column holds
+    per-residue pLDDT. Generators that emit only coordinates (PXDesign binder
+    CIFs, rfdiffusion scaffolds) leave it at a flat 0.0.
+    """
+    vals: list[float] = []
+    if fmt in {"pdb", "ent"}:
+        for line in content.splitlines():
+            if line[:6].strip() not in ("ATOM", "HETATM") or len(line) < 66:
+                continue
+            if line[12:16].strip() != "CA":
+                continue
+            try:
+                vals.append(float(line[60:66]))
+            except ValueError:
+                continue
+        return vals
+    if fmt == "cif":
+        cols = [
+            line.strip()
+            for line in content.splitlines()
+            if line.strip().startswith("_atom_site.")
+        ]
+        if not cols:
+            return vals
+        try:
+            ai = next(i for i, c in enumerate(cols) if c.endswith(".label_atom_id"))
+            bi = next(i for i, c in enumerate(cols) if "B_iso_or_equiv" in c)
+        except StopIteration:
+            return vals
+        ncol = len(cols)
+        for line in content.splitlines():
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            parts = line.split()
+            if len(parts) < ncol:
+                continue
+            if parts[ai].strip().strip('"') != "CA":
+                continue
+            try:
+                vals.append(float(parts[bi]))
+            except ValueError:
+                continue
+    return vals
+
+
+def _structure_has_plddt(content: str, fmt: str) -> bool:
+    """True when the structure carries usable per-residue pLDDT in its B-factors.
+
+    Mirrors the browser-side check (any CA B-factor above ~0): a flat-zero column
+    (PXDesign / rfdiffusion coordinate-only outputs) means pLDDT colouring would
+    paint the whole chain one colour, so the viewer must not offer it. A parse
+    failure falls back to ``True`` so the control stays available.
+    """
+    vals = _ca_bfactors(content, fmt)
+    if not vals:
+        return True
+    return any(v > 0.01 for v in vals)
+
+
+def _normalize_structure_for_viewer(content: str, fmt: str) -> str:
+    """Mark standard amino-acid atoms as ``ATOM`` for the embedded viewer copy.
+
+    PXDesign / Protenix mmCIF writes *every* protein atom as ``HETATM``. 3Dmol's
+    cartoon builder and our backbone / sidechain style selectors both key off
+    the het flag (``hetflag = group_PDB == "HETATM"``), so a full-atom design
+    wrongly renders as a hetero blob with a Sidechains toggle that draws
+    nothing. Flipping the record type for standard residues — keyed off the
+    residue name, so genuine ligands / waters are never touched — lets the
+    existing polymer-vs-hetero styling work (cartoon + working sidechain
+    toggle). Only the *embedded display copy* is rewritten; the artifact on
+    disk is untouched.
+    """
+    fmt = (fmt or "").lower()
+    try:
+        if fmt in {"cif", "mmcif"}:
+            return _cif_mark_protein_as_atom(content)
+        # PDB / ent: fixed-column records — group_PDB in cols 1-6, resn 18-20.
+        out: list[str] = []
+        changed = False
+        for line in content.splitlines():
+            if line.startswith("HETATM") and len(line) >= 20 and line[17:20].strip().upper() in _AA3_TO_1:
+                line = "ATOM  " + line[6:]
+                changed = True
+            out.append(line)
+        return "\n".join(out) if changed else content
+    except Exception:
+        # Never let a normalisation hiccup break report generation.
+        return content
+
+
+def _cif_mark_protein_as_atom(content: str) -> str:
+    """mmCIF variant of :func:`_normalize_structure_for_viewer`."""
+    lines = content.splitlines()
+    cols: list[str] = []
+    in_header = False
+    start = -1
+    for idx, raw in enumerate(lines):
+        stripped = raw.strip()
+        if stripped == "loop_":
+            in_header = True
+            cols = []
+            continue
+        if in_header and stripped.startswith("_atom_site."):
+            cols.append(stripped.split(".", 1)[1].strip())
+            continue
+        if in_header and stripped.startswith("_") and not stripped.startswith("_atom_site."):
+            in_header = False
+            cols = []
+            continue
+        if in_header and cols and not stripped.startswith("_"):
+            start = idx
+            break
+    if not (cols and start >= 0 and "group_PDB" in cols):
+        return content
+    g_idx = cols.index("group_PDB")
+    comp_idx = cols.index("label_comp_id") if "label_comp_id" in cols else (
+        cols.index("auth_comp_id") if "auth_comp_id" in cols else -1
+    )
+    if comp_idx < 0:
+        return content
+    changed = False
+    for i in range(start, len(lines)):
+        stripped = lines[i].strip()
+        if not stripped or stripped.startswith(("_", "#", "loop_")):
+            break
+        parts = stripped.split()
+        if g_idx >= len(parts) or comp_idx >= len(parts):
+            continue
+        if parts[g_idx] == "HETATM" and parts[comp_idx].strip('"').upper() in _AA3_TO_1:
+            parts[g_idx] = "ATOM"
+            lines[i] = " ".join(parts)
+            changed = True
+    return "\n".join(lines) if changed else content
 
 
 def _structure_dom_id(candidate_id: str) -> str:
@@ -1629,8 +2163,12 @@ def _extract_chains_from_structure(path: Path) -> list[tuple[str, str]]:
 
     Returns the chains in the order their CA atoms first appear (matches
     the natural author-ordering in the structure file). Empty list on any
-    parse failure or unsupported format. Only ATOM/CA records are read;
-    HETATM is skipped so cofactors don't pollute chain sequences.
+    parse failure or unsupported format. Standard amino-acid CA records are
+    read even when a tool marks them HETATM — pxdesign / Protenix flag the
+    target protein as a non-polymer (group_PDB=HETATM), and dropping it would
+    hide the target chain of a binder complex. Genuine heteroatoms
+    (ligands / water / ions) are still excluded so cofactors don't pollute
+    chain sequences.
     """
     if not path.is_file():
         return []
@@ -1646,9 +2184,15 @@ def _extract_chains_from_structure(path: Path) -> list[tuple[str, str]]:
 
     if suffix in {".pdb", ".ent"}:
         for line in text.splitlines():
-            if not line.startswith("ATOM") or len(line) < 27:
+            rec = line[:6].strip()
+            if rec not in ("ATOM", "HETATM") or len(line) < 27:
                 continue
             if line[12:16].strip() != "CA":
+                continue
+            resn = line[17:20].strip().upper()
+            # Keep standard amino acids even on HETATM rows (protein marked
+            # non-polymer); a non-standard HETATM residue is a real heteroatom.
+            if rec != "ATOM" and resn not in _AA3_TO_1:
                 continue
             chain = line[21:22].strip() or "?"
             try:
@@ -1660,7 +2204,6 @@ def _extract_chains_from_structure(path: Path) -> list[tuple[str, str]]:
             if key in seen:
                 continue
             seen.add(key)
-            resn = line[17:20].strip().upper()
             chains.setdefault(chain, []).append(_AA3_TO_1.get(resn, "X"))
         return [(cid, "".join(letters)) for cid, letters in chains.items()]
 
@@ -1707,9 +2250,14 @@ def _extract_chains_from_structure(path: Path) -> list[tuple[str, str]]:
             parts = row.split()
             if len(parts) < len(cols):
                 continue
-            if grp >= 0 and parts[grp] != "ATOM":
-                continue
             if parts[atom_idx].strip('"').strip("'") != "CA":
+                continue
+            resn = parts[comp_idx].strip('"').strip("'").upper()
+            # Keep standard amino acids even when group_PDB marks them HETATM
+            # (pxdesign / Protenix mark the target protein as non-polymer);
+            # genuine heteroatoms (ligands / water / ions) stay excluded.
+            is_atom = grp < 0 or parts[grp] == "ATOM"
+            if not is_atom and resn not in _AA3_TO_1:
                 continue
             chain = parts[asym_idx]
             resi = parts[seq_idx]
@@ -1717,7 +2265,6 @@ def _extract_chains_from_structure(path: Path) -> list[tuple[str, str]]:
             if key in seen:
                 continue
             seen.add(key)
-            resn = parts[comp_idx].strip('"').strip("'").upper()
             chains.setdefault(chain, []).append(_AA3_TO_1.get(resn, "X"))
         return [(cid, "".join(letters)) for cid, letters in chains.items()]
 
@@ -1939,16 +2486,40 @@ def _candidate_metric_richness(candidate: ReportCandidate) -> int:
     return n
 
 
-def _prepare_candidate_view(model: ReportModel) -> ReportModel:
-    """Return a model with deduplicated / enriched candidate lists.
+def _merge_score_namespaces(
+    base: dict[str, Any] | None, extra: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Union two candidate ``scores`` maps, nested tool dicts merged, extra wins.
+
+    Used when enriching a final pick with the matching explored record's
+    fuller evaluation suite. Nested tool namespaces (``{"protein_qc": {...}}``)
+    are merged key-by-key rather than wholesale-replaced so a partial QC block
+    on the final record doesn't shadow extra metrics carried by the explored
+    one. Crucially this preserves *non-numeric* leaves (``passes_filters``,
+    ``flags``, ``liability_types``) that the review layer relies on — unlike
+    :func:`_flatten_scores`, which drops them.
+    """
+    out: dict[str, Any] = dict(base or {})
+    for key, val in (extra or {}).items():
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            merged = dict(out[key])
+            merged.update(val)
+            out[key] = merged
+        else:
+            out[key] = val
+    return out
+
+
+def _dedup_candidate_view(model: ReportModel) -> ReportModel:
+    """Deduplicate / enrich candidate lists, keeping ``scores`` *nested*.
 
     Three display-only transforms (the underlying run record is untouched):
 
     1. **Enrich final picks.** A ranked/submitted record often carries only
        a couple of headline scores while the matching explored record holds
        the full evaluation suite (esm3, protein_qc, ...). We merge the
-       same-``candidate_id`` explored scores into each final pick and flatten
-       them so the final card shows the complete, richest metric set.
+       same-``candidate_id`` explored scores into each final pick so the
+       final card shows the complete, richest metric set.
     2. **Drop duplicate proteins from the explored list.** An explored entry
        whose ``candidate_id`` *or* ``sequence`` already appears among the
        final picks is the same physical protein at a different pipeline
@@ -1957,6 +2528,13 @@ def _prepare_candidate_view(model: ReportModel) -> ReportModel:
     3. **Collapse remaining duplicates.** Among the survivors, keep a single
        richest-scored representative per ``candidate_id`` and per sequence,
        then restore rank order for display.
+
+    Scores are left in their original nested ``{tool: {metric: value}}`` form
+    so the review console (which classifies status from ``passes_filters`` /
+    evaluator-tool namespaces and renders per-tool evidence) sees the full
+    record. :func:`_flatten_candidate_view` performs the numeric-leaf
+    flattening the legacy score-bar / table renderers need, as a separate
+    step.
     """
     final = list(model.final_candidates)
     explored = list(model.candidates)
@@ -1968,10 +2546,10 @@ def _prepare_candidate_view(model: ReportModel) -> ReportModel:
 
     enriched_final: list[ReportCandidate] = []
     for fc in final:
-        merged = _flatten_scores(fc.scores)
+        merged: dict[str, Any] = dict(fc.scores or {})
         for ec in explored:
             if ec.candidate_id == fc.candidate_id and ec.scores:
-                merged.update(_flatten_scores(ec.scores))
+                merged = _merge_score_namespaces(merged, ec.scores)
         enriched_final.append(replace(fc, scores=merged))
 
     rank_index = {id(ec): i for i, ec in enumerate(explored)}
@@ -1994,97 +2572,58 @@ def _prepare_candidate_view(model: ReportModel) -> ReportModel:
             seen_seqs.add(ec.sequence)
         kept.append(ec)
     kept.sort(key=lambda ec: rank_index[id(ec)])
-    explored_display = [replace(ec, scores=_flatten_scores(ec.scores)) for ec in kept]
 
-    return replace(
-        model, final_candidates=enriched_final, candidates=explored_display
-    )
+    return replace(model, final_candidates=enriched_final, candidates=kept)
 
 
-def _candidate_cards(
-    candidates: list[ReportCandidate],
-    *,
-    total_candidates: int | None = None,
-) -> str:
-    """Render top-candidate cards.
+def _flatten_candidate_view(model: ReportModel) -> ReportModel:
+    """Flatten every candidate's nested ``scores`` to numeric ``tool:metric``
+    leaves for the legacy score-bar / table renderers."""
+    final = [replace(fc, scores=_flatten_scores(fc.scores)) for fc in model.final_candidates]
+    explored = [replace(ec, scores=_flatten_scores(ec.scores)) for ec in model.candidates]
+    return replace(model, final_candidates=final, candidates=explored)
 
-    ``total_candidates`` is the full candidate population size before any
-    ``--top-k`` truncation. When the *full* run only produced one candidate
-    we use the shorter "Candidate" eyebrow; when ``--top-k`` truncated a
-    larger set down to 1, we still use "Top #N" so the contract that the
-    chosen card is one of many remains visible.
+
+def _prepare_candidate_view(model: ReportModel) -> ReportModel:
+    """Deduplicated + flattened candidate view (legacy convenience).
+
+    Equivalent to :func:`_flatten_candidate_view` applied after
+    :func:`_dedup_candidate_view`. ``_render_html`` keeps the two stages
+    separate so the review console can consume the nested (un-flattened)
+    deduplicated model; this composition is retained for any caller that
+    wants the flat view in one shot.
     """
-    if not candidates:
-        return "<p class='empty'>No candidate cards available for this run.</p>"
-    population = total_candidates if total_candidates is not None else len(candidates)
-    single = population <= 1
-    cards = []
-    for candidate in candidates:
-        eyebrow = "Candidate" if single else f"Top #{candidate.rank or '?'}"
-        score_html = _hero_candidate_score(candidate)
-        # Compute the binder/target chain context once so both the viewer
-        # block and the right-side sequence block use the same labelling.
-        chain_context = _chain_context_for(candidate)
-        info_html = f"""<div class="candidate-info-col">
-      {_score_bars(candidate)}
-      {_flag_badges(candidate)}
-      <p class="why"><strong>Why this one?</strong> {_h(_why_candidate(candidate))}</p>
-      {_candidate_sequence_block(candidate, chain_context)}
-      {_candidate_downloads(candidate)}
-    </div>"""
-        # Sequence-only tools (esm2_embedding, esm3_tiny, ligandmpnn_redesign,
-        # ...) don't emit a structure artifact. Drop the empty left viewer
-        # column for those so the card isn't half-empty; the info column
-        # expands to full width via the .candidate-grid--solo modifier.
-        # When structure_path *is* set we keep the two-column layout even if
-        # the file is missing on disk — the viewer block surfaces that error
-        # so the missing-file bug stays visible instead of getting hidden.
-        if candidate.structure_path:
-            viewer = _viewer_block(candidate, chain_context)
-            grid_html = (
-                f'<div class="candidate-grid">'
-                f'<div class="candidate-viewer-col">{viewer}</div>'
-                f'{info_html}'
-                f'</div>'
-            )
-        else:
-            grid_html = (
-                f'<div class="candidate-grid candidate-grid--solo">'
-                f'{info_html}'
-                f'</div>'
-            )
-        cards.append(
-            f"""<article class="candidate-card">
-  <div class="candidate-head">
-    <div><p class="eyebrow">{_h(eyebrow)}</p><h3>{_h(candidate.candidate_id)}</h3></div>
-    {score_html}
-  </div>
-  {grid_html}
-</article>"""
-        )
-    return "\n".join(cards)
+    return _flatten_candidate_view(_dedup_candidate_view(model))
 
 
-def _hero_candidate_score(candidate: ReportCandidate) -> str:
-    """Top-right corner of the card — show the *most relevant* score prominently."""
-    if candidate.score is not None:
-        return f'<div class="card-score"><strong>{_h(_fmt(candidate.score))}</strong><span>score</span></div>'
-    # ipTM only makes sense for complexes — skip it on monomer candidates
-    # so we don't surface an "interface" score for a single-chain output.
-    monomer = _is_monomer_candidate(candidate)
-    fallbacks = (("plddt", "pLDDT"), ("ptm", "pTM"))
-    if not monomer:
-        fallbacks = (*fallbacks, ("iptm", "ipTM"))
-    for key, label in fallbacks:
-        value = candidate.scores.get(key)
-        if value is None:
-            continue
-        quality = _quality_class(key, value)
-        return (
-            f'<div class="card-score quality-{quality}">'
-            f'<strong>{_h(_fmt(value))}</strong><span>{_h(label)}</span></div>'
-        )
-    return ""
+# Structure-folding tools whose predictions write per-residue pLDDT into the
+# B-factor column, in the order we prefer to credit them. ``protein_qc`` is
+# deliberately excluded — it reports a single chain-level pLDDT scalar, it does
+# not fold the structure, so it must never be named as the source of the
+# per-residue colouring.
+_PLDDT_SOURCE_TOOLS: tuple[str, ...] = (
+    "boltzgen",
+    "protenix_v2",
+    "boltz2_affinity",
+    "esm3",
+    "esm2",
+)
+
+
+def _structure_confidence_tool(candidate: ReportCandidate) -> str | None:
+    """Best guess at the tool that produced this structure's per-residue pLDDT.
+
+    Used only to label the pLDDT colour option honestly (we are not using
+    AlphaFold). Reads the candidate's recorded ``scores`` namespaces — the
+    folding tool always leaves a scores block — and returns the first known
+    pLDDT-source tool present, or ``None`` when none is identifiable.
+    """
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    present = {str(k).strip().lower() for k in scores}
+    for tool in _PLDDT_SOURCE_TOOLS:
+        if tool in present:
+            return tool
+    return None
 
 
 def _viewer_block(
@@ -2114,21 +2653,57 @@ def _viewer_block(
     dom_id = _structure_dom_id(candidate.candidate_id)
     fmt = path.suffix.lower().lstrip(".")
     structure_label = path.name
+    # Explain (generalisably) when some or all chains are backbone-only, so a
+    # missing-sidechain view doesn't read as a rendering bug.
+    try:
+        _struct_text = path.read_text(errors="replace")[:2_000_000]
+    except OSError:
+        _struct_text = ""
+    coverage_note = _sidechain_coverage_note(_struct_text, fmt) if _struct_text else ""
     # Prefer the candidate's declared sequence; fall back to extracting one
     # from the structure file itself so the sequence track still renders
     # for adapters (Boltz-2 etc.) that don't echo the input sequence in
     # ranked-candidates rows.
     sequence_str = candidate.sequence or _extract_sequence_from_structure(path)
     is_complex = bool(chain_context and chain_context.is_complex)
-    default_colour = "chain" if is_complex else "plddt"
+    # Does the B-factor column carry real per-residue pLDDT? Coordinate-only
+    # generators (PXDesign binder CIFs, rfdiffusion scaffolds) leave it flat
+    # zero, so pLDDT colouring would paint the whole chain one flat colour.
+    # In that case the viewer must not default to — or offer — pLDDT.
+    has_plddt = _structure_has_plddt(_struct_text, fmt) if _struct_text else True
+    # Confidence colouring is the most informative default whenever the artifact
+    # carries per-residue pLDDT — for monomers AND complexes. Fall back to the
+    # N→C spectrum (orientation cue) only when there is no per-residue
+    # confidence. ``chain`` stays a selectable option (it separates binder /
+    # target on a complex), but it is never the default: a flat grey-ish chain
+    # paint on first load reads as a broken render.
+    if has_plddt:
+        default_colour = "plddt"
+    else:
+        default_colour = "spectrum"
+    # Name the tool that produced the pLDDT so the label is honest (we are not
+    # using AlphaFold). Falls back to a generic label when the folder is unknown.
+    plddt_tool = _structure_confidence_tool(candidate)
+    plddt_label = (
+        f"pLDDT ({_tool_display_name(plddt_tool)})"
+        if plddt_tool
+        else "pLDDT (per-residue confidence)"
+    )
     # Order options so the default one is the first (and only) ``selected``.
-    plddt_option = '<option value="plddt">pLDDT (AlphaFold)</option>'
     spectrum_option = '<option value="spectrum">N to C spectrum</option>'
     chain_option = '<option value="chain">Chain</option>'
-    if default_colour == "chain":
-        chain_option = '<option value="chain" selected>Chain</option>'
+    if not has_plddt:
+        # No per-residue confidence in this artifact: keep the option visible
+        # for orientation but disabled, and relabel so the reason is explicit.
+        plddt_option = (
+            '<option value="plddt" disabled>pLDDT (not in this model)</option>'
+        )
     else:
-        plddt_option = '<option value="plddt" selected>pLDDT (AlphaFold)</option>'
+        plddt_option = f'<option value="plddt">{_h(plddt_label)}</option>'
+    if default_colour == "spectrum":
+        spectrum_option = '<option value="spectrum" selected>N to C spectrum</option>'
+    else:
+        plddt_option = f'<option value="plddt" selected>{_h(plddt_label)}</option>'
     if is_complex:
         # Explicit complex-composition hint that subsumes the generic
         # Pick-mode pointer. Reads more naturally than two separate hints.
@@ -2139,10 +2714,41 @@ def _viewer_block(
         )
     else:
         hint_text = "Turn on Pick, then hover residues for an instant residue card."
+    # For binder-design complexes the sequence strip belongs to the binder
+    # chain ONLY; expose its id so the picker restricts FASTA highlighting to
+    # that chain (hovering the target must not light up the binder strip).
+    binder_chain_attr = (
+        chain_context.binder_chain_id if is_complex and chain_context else ""
+    )
+    # When the artifact carries no per-residue confidence, say so once so the
+    # absence of a pLDDT view doesn't read as a broken viewer. A chain-level QC
+    # mean pLDDT may still be reported elsewhere in the report (protein_qc emits
+    # a single scalar), which otherwise contradicts the disabled pLDDT view —
+    # so when that scalar exists we surface it here regardless of complex/monomer
+    # to resolve the apparent "mean pLDDT shown but pLDDT colouring greyed out".
+    scalar_plddt = _as_unit(_lookup_candidate_metric(candidate, "plddt"))
+    if not has_plddt and scalar_plddt is not None:
+        plddt_note = (
+            '<p class="structure-coverage-note">This model carries no '
+            'per-residue pLDDT — only a chain-level QC mean '
+            f'(&asymp;{scalar_plddt * 100:.0f}). The 3D view colours residues '
+            "by the structure file's per-residue confidence, which is absent "
+            'here, so the pLDDT colour option is disabled.</p>'
+        )
+    elif not has_plddt and not is_complex:
+        plddt_note = (
+            '<p class="structure-coverage-note">No per-residue pLDDT in this '
+            'artifact — this structure was produced by a coordinate-only generator '
+            '(e.g. PXDesign / RFdiffusion), so it is coloured N&rarr;C spectrum '
+            'instead of by confidence.</p>'
+        )
+    else:
+        plddt_note = ""
     return f"""<section class="structure-section" data-target="{_attr(dom_id)}" data-format="{_attr(fmt)}"
          data-candidate-id="{_attr(candidate.candidate_id)}"
          data-structure-name="{_attr(structure_label)}"
          data-sequence="{_attr(sequence_str)}"
+         data-binder-chain="{_attr(binder_chain_attr)}"
          data-default-colour="{_attr(default_colour)}">
   <header class="structure-header">
     <span class="structure-title">3D structure</span>
@@ -2165,6 +2771,8 @@ def _viewer_block(
             data-target="{_attr(dom_id)}" aria-label="Toggle fullscreen"
             title="Expand (press Esc to exit)">&#x2922; Expand</button>
   </header>
+  {coverage_note}
+  {plddt_note}
   {_structure_sequence_track(sequence_str, dom_id, chain_context)}
   <div class="structure-viewer" id="{_attr(dom_id)}" data-structure-id="{_attr(dom_id)}"></div>
   <div class="structure-legend" data-legend="{_attr(default_colour)}">
@@ -2246,83 +2854,6 @@ def _candidate_downloads(candidate: ReportCandidate) -> str:
     if not links:
         return ""
     return f'<div class="downloads"><span class="downloads-label">Download:</span>{"".join(links)}</div>'
-
-
-def _all_designs_table(candidates: list[ReportCandidate]) -> str:
-    """Render the all-designs table — but only when there is meaningful info.
-
-    A single-candidate run already shows everything in the hero card. Showing
-    a 1-row table adds noise; suppress it.
-    """
-    if not candidates or len(candidates) == 1:
-        return ""
-
-    # Build column set — drop columns that are entirely empty / always zero
-    # so the table doesn't carry information-free noise.
-    has_score = any(c.score is not None for c in candidates)
-    has_plddt = any(c.scores.get("plddt") is not None for c in candidates)
-    has_iptm = any(c.scores.get("iptm") is not None for c in candidates)
-    has_ptm = any(c.scores.get("ptm") is not None for c in candidates)
-    has_liab = any(c.liabilities for c in candidates)
-    has_flags = any(c.qc_flags for c in candidates)
-
-    headers = ["Rank", "Candidate"]
-    if has_score:
-        headers.append("Score")
-    if has_plddt:
-        headers.append("pLDDT")
-    if has_iptm:
-        headers.append("ipTM")
-    if has_ptm:
-        headers.append("pTM")
-    if has_liab:
-        headers.append("Liabilities")
-    if has_flags:
-        headers.append("QC flags")
-    headers.append("Structure")
-
-    rows = []
-    for candidate in candidates:
-        cells: list[str] = [
-            f"<td>{candidate.rank or ''}</td>",
-            f"<td>{_h(candidate.candidate_id)}</td>",
-        ]
-        if has_score:
-            cells.append(f"<td>{_h(_fmt(candidate.score))}</td>")
-        if has_plddt:
-            cells.append(_score_cell(candidate.scores.get("plddt"), key="plddt"))
-        if has_iptm:
-            cells.append(_score_cell(candidate.scores.get("iptm"), key="iptm"))
-        if has_ptm:
-            cells.append(_score_cell(candidate.scores.get("ptm"), key="ptm"))
-        if has_liab:
-            cells.append(f"<td>{len(candidate.liabilities) or ''}</td>")
-        if has_flags:
-            cells.append(f"<td>{_h(', '.join(candidate.qc_flags))}</td>")
-        # Structure column: filename only, with title tooltip showing full path.
-        struct = candidate.structure_path or ""
-        struct_html = (
-            f'<td title="{_attr(struct)}"><code>{_h(Path(struct).name)}</code></td>'
-            if struct
-            else "<td></td>"
-        )
-        cells.append(struct_html)
-        rows.append("<tr>" + "".join(cells) + "</tr>")
-
-    header_html = "".join(f"<th>{_h(h)}</th>" for h in headers)
-    return (
-        '<h3>All Designs</h3>'
-        '<input id="candidate-filter" class="filter" placeholder="Filter candidates…">'
-        f'<div class="table-wrap"><table id="candidate-table"><thead><tr>{header_html}</tr></thead>'
-        f'<tbody>{"".join(rows)}</tbody></table></div>'
-    )
-
-
-def _score_cell(value: Any, *, key: str) -> str:
-    if value is None:
-        return "<td></td>"
-    value = _plddt_on_100(key, value)
-    return f'<td class="quality-{_quality_class(key, value)}">{_h(_fmt(value))}</td>'
 
 
 # ----------------------------------------------------------------- workflow
@@ -2483,13 +3014,34 @@ def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
         cc_y = y + NODE_H / 2
         parts.append(_dag_status_circle(state_class, cc_x, cc_y, step_num))
 
-        # Title + tool to the right of the circle
+        # Title + subtitle to the right of the circle. The *tool* name is the
+        # stable, human-legible label (e.g. "sequence_analysis"); the planner-
+        # assigned node_id (e.g. "nadphx_sequence_analysis" or
+        # "merge_rank_nadphx_representatives_candidates") can be long and is
+        # only useful to disambiguate repeats, so it goes underneath, truncated
+        # with a real ellipsis instead of a mid-word cut.
+        title_text = node.tool or node.node_id or "step"
+        # Text area = NODE_W - left offset - right padding. Limits are tuned to
+        # that width (13.5px sans title ≈ 7.3px/char, 11px mono subtitle ≈
+        # 6.6px/char); a clip-path below is the hard safety net so even a wide
+        # glyph run can never spill past the card edge.
+        if len(title_text) > 17:
+            title_text = title_text[:16] + "…"
+        sub_text = node.node_id or ""
+        if len(sub_text) > 19:
+            sub_text = sub_text[:18] + "…"
         title_x = x + 46
+        text_clip = f"dagtxt{idx}"
+        clip_w = NODE_W - (title_x - x) - 12
         parts.append(
+            f'<clipPath id="{text_clip}">'
+            f'<rect x="{title_x - 2}" y="{y}" width="{clip_w}" height="{NODE_H}"/></clipPath>'
+            f'<g clip-path="url(#{text_clip})">'
             f'<text x="{title_x}" y="{y + 26}" class="dag-title">'
-            f'{_svg_text(node.node_id[:18])}</text>'
+            f'{_svg_text(title_text)}</text>'
             f'<text x="{title_x}" y="{y + 44}" class="dag-tool">'
-            f'{_svg_text(node.tool[:18])}</text>'
+            f'{_svg_text(sub_text)}</text>'
+            f'</g>'
         )
         parts.append('</g>')
 
@@ -2990,6 +3542,12 @@ _TOOLS_WITHOUT_DELIVERABLE = frozenset({
     "mpnn_to_protenix_input",
     "sequence_to_protenix_input",
     "noop",
+    # Candidate-stream plumbing. ``merge_candidates`` only unions/dedupes
+    # candidate lists between steps (node ids like
+    # "merge_rank_<x>_candidates") — it carries no deliverable a reviewer
+    # needs to inspect, and the merged pool is already shown in the
+    # Candidates section. Keep it in the DAG, drop the per-tool widget.
+    "merge_candidates",
     # The explicit termination tool — its deliverable is already shown as
     # the prominent "Final picks" / "Final outcome" panel at the top of
     # the candidates section, so a second copy of the resolved-candidates
@@ -2999,10 +3557,349 @@ _TOOLS_WITHOUT_DELIVERABLE = frozenset({
 })
 
 
-def _node_details(nodes: list[WorkflowNodeSummary]) -> str:
-    """Per-tool result widgets — each node gets a structured presentation
-    chosen by tool name, with the raw JSON tucked into a collapsible
-    "Raw output" details element at the bottom for reference only.
+def _node_candidate_ids(output: dict[str, Any]) -> list[str]:
+    """Candidate ids a node's output covers, in order, de-duplicated.
+
+    Reads the standard ``ranked_candidates`` / ``candidates`` lists every tool
+    emits. This is what lets the per-tool panel say *which* samples its result
+    spans, so the reader isn't left guessing whether a widget is the final pick
+    or the whole batch.
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+    for key in ("ranked_candidates", "candidates"):
+        items = output.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                cid = item.get("candidate_id")
+                if isinstance(cid, str) and cid and cid not in seen:
+                    seen.add(cid)
+                    ids.append(cid)
+        if ids:
+            break
+    return ids
+
+
+@dataclass(frozen=True)
+class _PerToolCand:
+    """One entry in the per-tool sample selector, mirroring a board card."""
+
+    candidate_id: str
+    short_id: str
+    status_label: str
+    status_cls: str
+    is_final: bool
+    rank: int | None
+    metric: str  # headline metric line, may be empty
+
+
+def _per_tool_cand_order(review: ReportReviewModel) -> list[_PerToolCand]:
+    """Candidate selector order for the per-tool section.
+
+    Flattens the review board groups (final pick first, then ranked
+    alternatives, etc.) into :class:`_PerToolCand` entries so the per-tool
+    sample selector mirrors the candidate console's order, ranks, and headline
+    metrics, with the final pick selected by default.
+    """
+    order: list[_PerToolCand] = []
+    seen: set[str] = set()
+    for group in review.board_groups:
+        for bundle in group.bundles:
+            cid = bundle.candidate.candidate_id
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            label, cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
+            rank = bundle.display_rank if bundle.display_rank is not None else bundle.candidate.rank
+            order.append(
+                _PerToolCand(
+                    candidate_id=cid,
+                    short_id=_short(cid, 16),
+                    status_label=label,
+                    status_cls=cls,
+                    is_final=bundle.status == CandidateStatus.FINAL,
+                    rank=rank,
+                    metric=_board_headline_metric(bundle),
+                )
+            )
+    return order
+
+
+def _node_candidate_map(output: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map ``candidate_id -> candidate record`` for a node's output.
+
+    Reads the ``ranked_candidates`` / ``candidates`` lists (first non-empty
+    wins, matching :func:`_node_candidate_ids`) so each per-candidate widget
+    variant can be built from that design's own record.
+    """
+    for key in ("ranked_candidates", "candidates"):
+        items = output.get(key)
+        if not isinstance(items, list):
+            continue
+        out: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if isinstance(item, dict):
+                cid = item.get("candidate_id")
+                if isinstance(cid, str) and cid and cid not in out:
+                    out[cid] = item
+        if out:
+            return out
+    return {}
+
+
+def _slice_node_output_for_candidate(
+    output: dict[str, Any], cand: dict[str, Any]
+) -> dict[str, Any]:
+    """Project a node's output down to a single candidate's result.
+
+    Per-tool widgets read several top-level shapes — ``metrics`` / ``flags``
+    for QC, ``burial`` / ``interface`` for structure analysis, and the
+    ``candidates`` / ``ranked_candidates`` lists for the design + ranking
+    widgets. Every candidate carries its own copy of those values under
+    ``scores[<tool>]``, so lifting that copy to the top level and filtering the
+    candidate lists to this one design lets the *same* widget render a
+    candidate-specific panel — no bespoke per-tool branching, no engine change.
+
+    Artifact-derived sub-sections that are genuinely node-level (e.g. the
+    per-residue structure-analysis strip parsed from a shared TSV) are left untouched; they
+    describe the node's annotation product, not one candidate's metric.
+    """
+    sliced = dict(output)
+    cid = cand.get("candidate_id")
+    for key in ("candidates", "ranked_candidates"):
+        items = output.get(key)
+        if isinstance(items, list):
+            match = [
+                c for c in items
+                if isinstance(c, dict) and c.get("candidate_id") == cid
+            ]
+            sliced[key] = match or [cand]
+    scores = cand.get("scores") if isinstance(cand.get("scores"), dict) else {}
+    pq = scores.get("protein_qc")
+    if isinstance(pq, dict):
+        sliced["metrics"] = {
+            k: v for k, v in pq.items() if k not in ("flags", "passes_filters")
+        }
+        sliced["flags"] = pq.get("flags") or []
+    sa = scores.get("structure_analysis")
+    if isinstance(sa, dict):
+        for key in ("burial", "interface"):
+            if isinstance(sa.get(key), dict):
+                sliced[key] = sa[key]
+        # Swap the node-level artifact bundle for THIS candidate's own. The
+        # widget loads ``artifacts.summary_json`` (its burial / interface /
+        # liabilities / ligand contacts / secondary-structure) and the per-
+        # residue TSVs (its SS strip, burial strip, residue table, downloads).
+        # Crucially the loaded summary_json *wins* over the top-level shapes, so
+        # without this swap every candidate panel would re-render the node's
+        # shared aggregate regardless of the burial/interface promotion above.
+        cand_arts = cand.get("artifacts")
+        sa_arts = cand_arts.get("structure_analysis") if isinstance(cand_arts, dict) else None
+        if isinstance(sa_arts, dict):
+            sliced["artifacts"] = sa_arts
+            # The node-level liabilities list (and SS / ligand-contact
+            # aggregates) would otherwise gap-fill into this candidate's panel
+            # when its own summary_json omits a key. Drop them so the per-
+            # candidate bundle is the single source of truth.
+            for leak_key in ("liabilities", "secondary_structure", "ligand_contacts"):
+                sliced.pop(leak_key, None)
+    seq_an = scores.get("sequence_analysis")
+    if isinstance(seq_an, dict):
+        # The node stores a multi-FASTA *pool aggregate* at the top level
+        # (``sequence_length`` is the SUM across every design, the AA-composition
+        # is the pooled distribution). Re-frame the panel as this single design:
+        # use its own scored descriptors and its own residue count, and drop the
+        # pool framing so the widget renders one protein, not the batch blob.
+        per_metrics = {
+            k: v for k, v in seq_an.items()
+            if k not in ("liability_count", "liability_types")
+        }
+        per_metrics["analysis_mode"] = "single"
+        seq_str = cand.get("sequence")
+        if isinstance(seq_str, str) and seq_str:
+            per_metrics["length"] = len(seq_str)
+            sliced["sequence_length"] = len(seq_str)
+        sliced["metrics"] = per_metrics
+        liab_types = seq_an.get("liability_types")
+        sliced["liabilities"] = liab_types if isinstance(liab_types, list) else []
+        sliced.pop("representative_sequences", None)
+    struct_path = cand.get("structure_path")
+    if isinstance(struct_path, str) and struct_path:
+        sliced["structure_path"] = struct_path
+    return sliced
+
+
+# Sentinel data-cand value for a node whose result is NOT per-candidate (a
+# retrieval / input step). Its single variant stays visible for every
+# selection so the selector never blanks it out.
+_NODE_SHARED_CAND = "__shared__"
+
+
+def _node_cand_toolbar(cand_order: list[_PerToolCand]) -> str:
+    """Sample selector for the per-tool section, as segmented candidate cards.
+
+    Each card mirrors a candidate-review board card — rank badge (★ for the
+    final pick), short id, headline metric, status colour accent — so the two
+    surfaces read as one product. Rendered only when 2+ samples exist; a
+    single-sample run needs no switch. The ``.node-cand-btn`` / ``data-pt-cand``
+    contract is preserved so the existing switching JS keeps working.
+    """
+    if len(cand_order) < 2:
+        return ""
+    cards: list[str] = []
+    for idx, c in enumerate(cand_order):
+        active = " is-active" if idx == 0 else ""
+        final_cls = " is-final" if c.is_final else ""
+        # Rank token: a star medal for the final pick, a big numeral otherwise.
+        if c.is_final:
+            token = '<span class="cbc-token-final" title="Final / submitted">&#10003;</span>'
+        elif c.rank is not None:
+            token = f'<span class="cbc-token-num">{c.rank}</span>'
+        else:
+            token = '<span class="cbc-token-num cbc-token-dash">&middot;</span>'
+        eyebrow = "Final pick" if c.is_final else _h(c.status_label)
+        metric_html = (
+            f'<span class="cbc-metric">{_h(c.metric)}</span>' if c.metric else ""
+        )
+        cards.append(
+            f'<button type="button" class="node-cand-btn cbrowse-card status-{_h(c.status_cls)}{final_cls}{active}" '
+            f'data-pt-cand="{_attr(c.candidate_id)}" role="tab" '
+            f'aria-selected="{"true" if idx == 0 else "false"}" '
+            f'title="{_attr(c.candidate_id)}">'
+            f'<span class="cbc-token">{token}</span>'
+            f'<span class="cbc-body">'
+            f'<span class="cbc-eyebrow">{eyebrow}</span>'
+            f'<span class="cbc-name">{_h(c.short_id)}</span>'
+            f'{metric_html}'
+            f'</span>'
+            f'<span class="cbc-check" aria-hidden="true">&#10003;</span>'
+            f"</button>"
+        )
+    n = len(cand_order)
+    return (
+        '<div class="node-cand-toolbar" role="region" aria-label="Design selector">'
+        '<div class="cbrowse-head">'
+        '<span class="cbrowse-title">View results for design</span>'
+        f'<span class="cbrowse-count">{n} designs</span>'
+        '</div>'
+        f'<div class="node-cand-btnrow" role="tablist">{"".join(cards)}</div>'
+        '</div>'
+    )
+
+
+def _node_cand_variants(
+    node: WorkflowNodeSummary,
+    output: dict[str, Any],
+    cand_order: list[_PerToolCand],
+    cand_map: dict[str, dict[str, Any]],
+) -> str:
+    """The per-candidate widget variants for one node block.
+
+    When the node carries no candidate scope (or the run has no candidate
+    list), a single shared variant is emitted that stays visible for every
+    selection. Otherwise one variant per sample is produced by re-running the
+    tool widget on a candidate-sliced output; samples the node never processed
+    get a muted "didn't pass through this tool" note.
+    """
+    tool_lc = (node.tool or "").lower()
+    # No candidate selector, or node has no per-candidate result -> one shared
+    # variant, always shown.
+    if not cand_order or not cand_map:
+        widget = _render_tool_widget(tool_lc, output)
+        return (
+            '<div class="node-cand-variants">'
+            f'<div class="node-cand-variant is-active" data-cand="{_NODE_SHARED_CAND}">'
+            f'{widget}</div></div>'
+        )
+    variants: list[str] = []
+    for idx, c in enumerate(cand_order):
+        cid = c.candidate_id
+        active = " is-active" if idx == 0 else ""
+        cand = cand_map.get(cid)
+        if cand is not None:
+            body = _render_tool_widget(tool_lc, _slice_node_output_for_candidate(output, cand))
+        else:
+            body = (
+                '<p class="node-cand-na-note">This sample did not pass through '
+                'this tool, so it has no result here.</p>'
+            )
+        variants.append(
+            f'<div class="node-cand-variant{active}" data-cand="{_attr(cid)}">{body}</div>'
+        )
+    return f'<div class="node-cand-variants">{"".join(variants)}</div>'
+
+
+# Friendly, human-readable name for each tool, used as the prominent per-tool
+# block title. Keeps the appendix readable when the planner gives nodes opaque
+# ids (e.g. "nadphx_sequence_qc", "rank_nadphx_representatives"): the node id is
+# the planner's private label, not something a reader should have to decode.
+# Tools missing here fall back to a Title-Cased version of the tool name.
+_TOOL_DISPLAY_NAMES: dict[str, str] = {
+    "protein_qc": "Protein QC",
+    "search_sequence": "Sequence retrieval",
+    "go_sequences": "GO sequence retrieval",
+    "interpro_sequences": "InterPro sequence retrieval",
+    "literature_search": "Literature search",
+    "structure_analysis": "Structure analysis",
+    "sequence_analysis": "Sequence analysis",
+    "sequence_edit": "Sequence edit",
+    "rank_designs": "Design ranking",
+    "template_select": "Template selection",
+    "boltz2_affinity": "Boltz-2 affinity",
+    "protenix_v2": "Protenix structure prediction",
+    "pxmeter": "Structure accuracy (PXMeter)",
+    "ipsae": "ipSAE interface score",
+    "tmalign": "TM-align",
+    "mmseqs2_gpu": "MMseqs2",
+    "vina": "AutoDock Vina docking",
+    "proteinmpnn": "ProteinMPNN",
+    "ligandmpnn": "LigandMPNN",
+    "bindcraft": "BindCraft",
+    "pxdesign": "PXDesign",
+    "rfdiffusion": "RFdiffusion",
+    "rfdiffusion3": "RFdiffusion3",
+    "rfpeptides": "RFpeptides",
+    "boltzgen": "BoltzGen",
+    "proteina_complexa": "Proteina Complexa",
+    "esm2": "ESM-2",
+    "esm3": "ESM-3",
+}
+
+
+def _tool_display_name(tool: str | None) -> str:
+    """Human-readable title for a tool, for the per-tool block header.
+
+    Falls back to a Title-Cased version of the raw tool id so a tool we don't
+    have an explicit label for still reads cleanly rather than as snake_case.
+    """
+    tool_lc = (tool or "").lower()
+    explicit = _TOOL_DISPLAY_NAMES.get(tool_lc)
+    if explicit:
+        return explicit
+    if not tool_lc:
+        return "Tool"
+    return tool_lc.replace("_", " ").title()
+
+
+def _node_details(
+    nodes: list[WorkflowNodeSummary],
+    cand_order: list[_PerToolCand] | tuple = (),
+) -> str:
+    """Per-tool result widgets, candidate-filterable.
+
+    Each node gets a structured presentation chosen by tool name. A single
+    sample selector at the top filters *every* panel to one candidate's result:
+    the cards inside each block are rebuilt from that design's own
+    ``scores`` (see :func:`_slice_node_output_for_candidate`), so the section
+    mirrors the candidate review console rather than showing a node-level
+    aggregate. Samples a node never processed are called out explicitly, and
+    retrieval / input steps with no per-sample result stay visible for all.
+
+    Node-level context that isn't candidate-specific — the error banner, the
+    artifacts footer, and the raw-JSON dump — sits outside the per-candidate
+    variants so it reads once per node.
 
     Tools listed in :data:`_TOOLS_WITHOUT_DELIVERABLE` (format/input bridges)
     are omitted — their output is a derivative file the next tool consumes,
@@ -3012,7 +3909,21 @@ def _node_details(nodes: list[WorkflowNodeSummary]) -> str:
     """
     if not nodes:
         return "<p class='empty'>No node details available.</p>"
-    chunks = []
+    cand_order = list(cand_order)
+    toolbar = _node_cand_toolbar(cand_order)
+    # Two layouts can't coexist cleanly in one stream: evaluators yield one
+    # result *per design* (they track the sample selector), while generators /
+    # rankers yield a single *cohort* table covering every design at once (a
+    # BindCraft batch, a ranking) — slicing those to one candidate is wrong, so
+    # they stay invariant. Rather than let that read as a broken selector, split
+    # the section into two labelled bands: the selector scopes the per-design
+    # band only; the cohort band is rendered once and flagged "not filtered".
+    # Banding only kicks in with a real selector (2+ samples); a single-sample
+    # run keeps the original flat stream.
+    banded = len(cand_order) >= 2
+    per_design: list[str] = []
+    cohort: list[str] = []
+    flat: list[str] = []
     for node in nodes:
         tool_lc = (node.tool or "").lower()
         is_passthrough = tool_lc in _TOOLS_WITHOUT_DELIVERABLE
@@ -3022,35 +3933,111 @@ def _node_details(nodes: list[WorkflowNodeSummary]) -> str:
         # blocked the rest of the workflow.
         if is_passthrough and not node_failed:
             continue
-        widget = _per_tool_widget(node)
         output_obj = node.output if isinstance(node.output, dict) else {}
-        raw_json = _h(json.dumps(_compact(output_obj), indent=2, sort_keys=True))
-        error = (
-            f"<p class='error'><strong>{_h(node.error_code or 'error')}:</strong> "
-            f"{_h(node.error_message or '')}</p>"
-            if node.error_code or node.error_message
-            else ""
-        )
-        # Skip the generic "Artifacts" footer for tools whose own widget
-        # already surfaces those files with friendlier labels — duplicating
-        # them under both "Per-residue analyses" and "Artifacts" is just
-        # visual noise.
-        artifacts = "" if tool_lc in _WIDGETS_OWN_ARTIFACTS else _node_artifacts_list(node)
-        chunks.append(
-            f'<article class="node-block" data-tool="{_attr(node.tool)}">'
-            f'<header class="node-block-head">'
-            f'<div><span class="node-block-id">{_h(node.node_id)}</span>'
-            f'<span class="node-block-tool">{_h(node.tool)}@{_h(node.version)}</span></div>'
-            f'<span class="node-block-state state-{_state_class(node.state)}">{_h(node.state)}</span>'
-            "</header>"
-            f"{error}{widget}{artifacts}"
-            f'<details class="node-block-raw"><summary>Raw output (JSON)</summary>'
-            f"<pre>{raw_json}</pre></details>"
-            "</article>"
-        )
-    if not chunks:
+        # Evaluators carry board-keyed per-candidate scores → slice to the
+        # selected design (always, even single-sample, so the panel shows that
+        # design's own numbers and not the node-level aggregate). Everything
+        # else (generators, rankers, other) is a cohort result → rendered once.
+        is_evaluator = classify_tool_role(node.tool) == ToolRole.EVALUATOR
+        if is_evaluator:
+            cand_map = _node_candidate_map(output_obj)
+            variants = _node_cand_variants(node, output_obj, cand_order, cand_map)
+            cohort_badge = ""
+        else:
+            # Force a single shared render (empty cand_order/map → shared
+            # variant, always visible regardless of the selector).
+            variants = _node_cand_variants(node, output_obj, [], {})
+            cohort_badge = _cohort_badge(output_obj) if banded else ""
+        article = _node_block_article(node, variants, cohort_badge=cohort_badge)
+        if not banded:
+            flat.append(article)
+        elif is_evaluator:
+            per_design.append(article)
+        else:
+            cohort.append(article)
+
+    if not banded:
+        if not flat:
+            return "<p class='empty'>No tool results to display for this run.</p>"
+        return f"{toolbar}{''.join(flat)}"
+
+    if not per_design and not cohort:
         return "<p class='empty'>No tool results to display for this run.</p>"
-    return "".join(chunks)
+    sections: list[str] = []
+    if per_design:
+        sections.append(
+            '<section class="nodeband nodeband-perdesign">'
+            '<header class="nodeband-head"><span class="nb-glyph" aria-hidden="true">&#9678;</span>'
+            '<span class="nodeband-title">Per-design results</span>'
+            '<span class="nodeband-sub">Filtered to the design selected above</span></header>'
+            f"{toolbar}{''.join(per_design)}</section>"
+        )
+    if cohort:
+        sections.append(
+            '<section class="nodeband nodeband-cohort">'
+            '<header class="nodeband-head"><span class="nb-glyph" aria-hidden="true">&#9707;</span>'
+            '<span class="nodeband-title">All-designs results</span>'
+            '<span class="nodeband-sub">Generators &amp; rankers — these span every design, '
+            'so they are not filtered by the selector</span></header>'
+            f"{''.join(cohort)}</section>"
+        )
+    return "".join(sections)
+
+
+def _cohort_badge(output: dict[str, Any]) -> str:
+    """A 'shows all N designs' badge for a cohort (non-per-design) node block.
+
+    ``N`` is the node's own candidate count when it exposes one; otherwise the
+    badge drops the count and just states it spans every design.
+    """
+    n = len(_node_candidate_ids(output))
+    label = (
+        f"Shows all {n} designs · not filtered"
+        if n
+        else "Shows all designs · not filtered"
+    )
+    return f'<span class="node-block-cohort" title="This result covers every design at once and does not change with the sample selector.">{_h(label)}</span>'
+
+
+def _node_block_article(
+    node: WorkflowNodeSummary,
+    variants: str,
+    *,
+    cohort_badge: str = "",
+) -> str:
+    """One ``<article class="node-block">`` for a tool node.
+
+    ``variants`` is the per-candidate (or single shared) body produced by
+    :func:`_node_cand_variants`; ``cohort_badge`` is the optional "shows all N
+    designs" chip shown for cohort nodes in the all-designs band.
+    """
+    tool_lc = (node.tool or "").lower()
+    output_obj = node.output if isinstance(node.output, dict) else {}
+    raw_json = _h(json.dumps(_compact(output_obj), indent=2, sort_keys=True))
+    error = (
+        f"<p class='error'><strong>{_h(node.error_code or 'error')}:</strong> "
+        f"{_h(node.error_message or '')}</p>"
+        if node.error_code or node.error_message
+        else ""
+    )
+    # Skip the generic "Artifacts" footer for tools whose own widget already
+    # surfaces those files with friendlier labels — duplicating them under both
+    # "Per-residue analyses" and "Artifacts" is just visual noise.
+    artifacts = "" if tool_lc in _WIDGETS_OWN_ARTIFACTS else _node_artifacts_list(node)
+    return (
+        f'<article class="node-block" data-tool="{_attr(node.tool)}">'
+        f'<header class="node-block-head">'
+        f'<div><span class="node-block-title">{_h(_tool_display_name(node.tool))}</span>'
+        f'<span class="node-block-meta">{_h(node.tool)}@{_h(node.version)} '
+        f'· step <code>{_h(node.node_id)}</code></span></div>'
+        f'<span class="node-block-headright">{cohort_badge}'
+        f'<span class="node-block-state state-{_state_class(node.state)}">{_h(node.state)}</span></span>'
+        "</header>"
+        f"{error}{variants}{artifacts}"
+        f'<details class="node-block-raw"><summary>Raw output (JSON)</summary>'
+        f"<pre>{raw_json}</pre></details>"
+        "</article>"
+    )
 
 
 def _node_artifacts_list(node: WorkflowNodeSummary) -> str:
@@ -3253,10 +4240,18 @@ def _per_tool_widget(node: WorkflowNodeSummary) -> str:
     guarantees every node block has *something* readable, never a blank.
     """
     output = node.output if isinstance(node.output, dict) else {}
-    tool = (node.tool or "").lower()
+    return _render_tool_widget((node.tool or "").lower(), output)
+
+
+def _render_tool_widget(tool: str, output: dict[str, Any]) -> str:
+    """Render a single tool's widget from a (possibly candidate-sliced) output.
+
+    Split out from :func:`_per_tool_widget` so the per-candidate variants in
+    :func:`_node_cand_variants` can re-run the exact same dispatch on a sliced
+    output dict without needing a ``WorkflowNodeSummary`` instance.
+    """
     specialised: Callable[[dict[str, Any]], str] | None = {
         "protein_qc": _qc_widget,
-        "dssp": _dssp_widget,
         "ipsae": _metrics_only_widget,
         "mmseqs2_gpu": _metrics_only_widget,
         "tmalign": _metrics_only_widget,
@@ -3322,8 +4317,11 @@ def _qc_widget(output: dict[str, Any]) -> str:
             {"value": num, "lo": gauge_range[0], "hi": gauge_range[1]}
             if gauge_range else None
         )
+        # Tag the confidence metrics with the tool that reported them so a
+        # pLDDT / pTM / ipTM number here is traceable, not free-floating.
+        src = "Protein QC" if key in {"plddt", "ptm", "iptm"} else ""
         cards.append(
-            _score_card(name, _fmt(num), explanation, quality, gauge=gauge)
+            _score_card(name, _fmt(num), explanation, quality, gauge=gauge, source=src)
         )
     cards_html = (
         _card_grid(cards)
@@ -3639,9 +4637,12 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
     if not isinstance(empty_facets, list):
         empty_facets = summary.get("empty_facets") if isinstance(summary.get("empty_facets"), list) else []
 
+    resolved_terms = output.get("resolved_terms")
+    if not isinstance(resolved_terms, dict):
+        resolved_terms = {}
+
     status = str(output.get("retrieval_status") or summary.get("retrieval_status") or "unknown")
     query = str(output.get("query") or "")
-    source_candidate_count = _num(summary.get("source_candidate_count"))
     downstream_count = _num(summary.get("downstream_candidate_count"))
     max_downstream = _num(summary.get("max_downstream_candidates"))
     runtime = _num(output.get("runtime_ms"))
@@ -3649,67 +4650,123 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
     stats = [
         f'<span class="seqret-stat"><b>{_h(status)}</b> status</span>',
     ]
-    if source_candidate_count is not None:
-        stats.append(f'<span class="seqret-stat"><b>{int(source_candidate_count)}</b> source candidates</span>')
     if downstream_count is not None:
         cap = f" / {int(max_downstream)}" if max_downstream is not None else ""
-        stats.append(f'<span class="seqret-stat"><b>{int(downstream_count)}{cap}</b> downstream candidates</span>')
+        stats.append(
+            f'<span class="seqret-stat"><b>{int(downstream_count)}{cap}</b> sequences retrieved</span>'
+        )
     if runtime is not None:
         stats.append(f'<span class="seqret-stat"><b>{int(runtime)}</b> ms</span>')
 
-    source_rows = []
+    # ---- Resolved terms with a relevance-score bar (the "how relevant was each
+    # term the resolver picked" diagram). One row per GO / InterPro term. ----
+    term_rows: list[str] = []
+    for source_label, term_key in (("GO", "go_terms"), ("InterPro", "interpro_terms")):
+        terms = resolved_terms.get(term_key)
+        if not isinstance(terms, list):
+            continue
+        for term in terms:
+            if not isinstance(term, dict):
+                continue
+            tid = str(term.get("term_id") or term.get("id") or "?")
+            label = str(term.get("label") or "")
+            reason = str(term.get("selected_reason") or "").replace("_", " ")
+            score = _num(term.get("term_relevance_score"))
+            pct = max(0.0, min(1.0, score)) * 100 if score is not None else 0.0
+            score_txt = f"{score:.2f}" if score is not None else "—"
+            term_rows.append(
+                '<div class="seqret-term">'
+                '<div class="seqret-term-head">'
+                f'<span class="seqret-term-src">{_h(source_label)}</span>'
+                f'<span class="seqret-term-id">{_h(tid)}</span>'
+                f'<span class="seqret-term-label">{_h(label)}</span>'
+                '</div>'
+                '<div class="seqret-relrow">'
+                '<span class="seqret-relbar">'
+                f'<span class="seqret-relbar-fill" style="width:{pct:.0f}%"></span></span>'
+                f'<span class="seqret-relval">{_h(score_txt)}</span>'
+                f'<span class="seqret-term-reason">{_h(reason)}</span>'
+                '</div></div>'
+            )
+    terms_html = (
+        '<div class="seqret-align-head">Resolved terms · relevance score</div>'
+        f'<div class="seqret-terms">{"".join(term_rows)}</div>'
+        if term_rows else ""
+    )
+
+    # ---- Per-source yield: how many sequences each retrieval stream returned,
+    # drawn as proportional bars so the contribution is read at a glance. ----
+    yields: list[tuple[str, int, str, int]] = []
     for source in ("go", "interpro"):
         row = source_summaries.get(source) if isinstance(source_summaries, dict) else None
         if not isinstance(row, dict):
             continue
-        source_rows.append(
-            '<span class="seqret-stat">'
-            f'{_h(source.upper())} <b>{_h(str(row.get("status") or "unknown"))}</b>'
-            f' · {int(_num(row.get("candidate_count")) or 0)} candidates'
-            f' · {int(_num(row.get("term_count")) or 0)} terms'
-            '</span>'
+        count = int(_num(row.get("candidate_count")) or 0)
+        term_count = int(_num(row.get("term_count")) or 0)
+        yields.append((source.upper(), count, str(row.get("status") or "unknown"), term_count))
+    max_count = max((c for _, c, _, _ in yields), default=0)
+    yield_rows: list[str] = []
+    for src_label, count, src_status, term_count in yields:
+        width = (count / max_count * 100) if max_count > 0 else 0.0
+        empty_cls = " is-empty" if count == 0 else ""
+        note = (
+            f' · {src_status}' if count == 0 else f' · {term_count} term{"s" if term_count != 1 else ""}'
         )
-    sources_html = (
-        f'<div class="seqret-stats">{"".join(source_rows)}</div>'
-        if source_rows else ""
+        yield_rows.append(
+            f'<div class="seqret-yield{empty_cls}">'
+            f'<span class="seqret-yield-label">{_h(src_label)}</span>'
+            '<span class="seqret-yield-track">'
+            f'<span class="seqret-yield-fill" style="width:{width:.0f}%"></span></span>'
+            f'<span class="seqret-yield-val">{count}<span class="muted">{_h(note)}</span></span>'
+            '</div>'
+        )
+    yield_html = (
+        '<div class="seqret-align-head">Sequences retrieved per source</div>'
+        f'<div class="seqret-yields">{"".join(yield_rows)}</div>'
+        if yield_rows else ""
     )
 
-    facet_rows = []
-    for facet in empty_facets[:6]:
+    # ---- Concise note for sources that resolved no term (replaces the raw
+    # empty-facet dump). Surfaces the first resolver error so a silent
+    # InterPro/API failure is explainable, not noise. ----
+    unresolved: list[str] = []
+    for facet in empty_facets:
         if not isinstance(facet, dict):
             continue
-        label = facet.get("label") or facet.get("intent_id") or facet.get("query") or "unresolved facet"
-        facet_rows.append(
-            '<li>'
-            f'<b>{_h(str(facet.get("retrieval_status") or "empty"))}</b> '
-            f'{_h(str(label))}'
-            f' <span class="muted">{_h(str(facet.get("stage") or ""))}</span>'
-            '</li>'
+        stage = str(facet.get("stage") or "").replace("_sequences", "").upper() or "source"
+        reason = str(facet.get("selected_reason") or "no term resolved")
+        evidence = facet.get("resolver_evidence")
+        errs = evidence.get("errors") if isinstance(evidence, dict) else None
+        err_txt = ""
+        if isinstance(errs, list) and errs:
+            err_txt = f" ({_short(str(errs[0]), 140)})"
+        unresolved.append(
+            f'<li><b>{_h(stage)}</b> — {_h(reason)}{_h(err_txt)}</li>'
         )
-    facets_html = (
-        '<div class="seqret-align-head">Unresolved or empty facets</div>'
-        f'<ul class="compact-list">{"".join(facet_rows)}</ul>'
-        if facet_rows else ""
+    unresolved_html = (
+        '<div class="seqret-align-head">Unresolved sources</div>'
+        f'<ul class="seqret-unresolved">{"".join(unresolved)}</ul>'
+        if unresolved else ""
     )
 
     query_html = (
         f'<div class="seqret-query"><span class="seqret-query-id">{_h(query)}</span></div>'
         if query else ""
     )
-    used = ", ".join(str(item) for item in retrieval_sources if item) or "none"
     explainer = (
         '<p class="widget-explainer">'
-        "Resolves semantic sequence intent into GO and InterPro terms, retrieves available "
-        "source candidates, then deduplicates and bounds the downstream Candidate[] stream."
+        "Resolves the semantic sequence query into GO and InterPro terms (scored for "
+        "relevance), retrieves UniProt sequences linked to each resolved term, then "
+        "deduplicates and bounds the downstream sequence stream. The bars below show how "
+        "relevant each resolved term was and how many sequences each source contributed."
         "</p>"
     )
     return (
         '<div class="widget widget-seqret">'
-        '<h4 class="widget-title">Search sequence retrieval</h4>'
+        '<h4 class="widget-title">Sequence retrieval</h4>'
         f'{explainer}<div class="seqret-summary">{query_html}'
-        f'<div class="seqret-stats">{"".join(stats)}'
-        f'<span class="seqret-stat">sources <b>{_h(used)}</b></span></div>'
-        f'{sources_html}</div>{facets_html}</div>'
+        f'<div class="seqret-stats">{"".join(stats)}</div></div>'
+        f'{terms_html}{yield_html}{unresolved_html}</div>'
     )
 
 
@@ -4027,83 +5084,12 @@ def _template_select_widget(output: dict[str, Any]) -> str:
     )
 
 
-def _dssp_widget(output: dict[str, Any]) -> str:
-    """DSSP widget — helix / sheet / coil gauges plus a per-residue SS bar.
-
-    The SS bar colours every residue by secondary-structure type with a
-    residue ruler underneath. Multi-chain DSSP output
-    (``secondary_structure_by_chain``) renders one white sub-block per
-    chain; each strip scrolls left/right for long sequences.
-    """
-    if not output:
-        return ""
-    # Fraction gauges — kept; the bar is added alongside, not instead.
-    cards: list[str] = []
-    for key in ("helix_fraction", "sheet_fraction", "coil_fraction"):
-        if key in output:
-            card = _auto_score_card(key, output[key])
-            if card:
-                cards.append(card)
-    cards_html = _card_grid(cards)
-
-    # Context footer (residue count, runtime) — sits between the gauges and
-    # the SS bar so the bar lands directly under the headline numbers.
-    footer_rows: list[str] = []
-    for key, value in output.items():
-        if (
-            key in _FOOTER_METRIC_KEYS
-            and value is not None
-            and not isinstance(value, (list, dict, bool))
-        ):
-            footer_rows.append(_kv_row(_pretty_metric_name(key.lower()), str(value)))
-    footer_html = (
-        f'<table class="kv-table"><tbody>{"".join(footer_rows)}</tbody></table>'
-        if footer_rows else ""
-    )
-
-    # SS bar(s): one strip-block per chain when chain-resolved data exists,
-    # otherwise a single strip from the flat secondary-structure string.
-    strips: list[str] = []
-    by_chain = output.get("secondary_structure_by_chain")
-    if isinstance(by_chain, list) and by_chain:
-        for entry in by_chain:
-            if not isinstance(entry, dict):
-                continue
-            ss = str(entry.get("secondary_structure") or "")
-            if ss:
-                strips.append(_dssp_ss_strip(str(entry.get("chain_id") or "?"), 1, ss))
-    else:
-        ss_string = output.get("secondary_structure_string")
-        if isinstance(ss_string, str) and ss_string:
-            strips.append(_dssp_ss_strip("", 1, ss_string))
-
-    if not cards_html and not strips:
-        return ""
-
-    explainer = (
-        '<p class="widget-explainer">'
-        "<strong>DSSP</strong> assigns a secondary-structure state to every residue from the "
-        "backbone hydrogen-bond pattern. The cards summarise the helix / sheet / coil split; the "
-        "bar below colours each residue by SS type along the chain."
-        "</p>"
-    )
-    scope_note = _selected_positions_note(
-        output.get("annotation_scope"), output.get("warnings")
-    )
-    return (
-        '<div class="widget widget-dssp">'
-        '<h4 class="widget-title">Secondary structure (DSSP)</h4>'
-        f"{explainer}{scope_note}{cards_html}{footer_html}{''.join(strips)}"
-        "</div>"
-    )
-
-
 def _structure_analysis_widget(output: dict[str, Any]) -> str:
     """Rich Structure-analysis widget.
 
     Pulls together: burial / SS summary cards (from output.summary or output
     itself), per-residue secondary-structure + RSA strips parsed from the
-    DSSP / annotations TSV artifacts, liability markers placed on the
+    structure annotation TSV artifacts, liability markers placed on the
     sequence ruler, interface counts, and downloads at the bottom.
     """
     artifact_paths = output.get("artifacts") if isinstance(output.get("artifacts"), dict) else {}
@@ -4138,7 +5124,7 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
         if isinstance(artifact_paths, dict)
         else []
     )
-    # If annotations TSV missing, fall back to DSSP-only rows so the SS strip
+    # If annotations TSV missing, fall back to secondary-structure rows so the SS strip
     # still renders.
     if not annotations_rows:
         dssp_rows = (
@@ -4739,6 +5725,22 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
             f'{explainer}<p class="empty">No sequence metrics were emitted.</p></div>'
         )
 
+    # When the tool ran over a *multi-FASTA* (a whole pool of retrieved
+    # sequences, not one protein), ``length`` is the SUM of residues across
+    # every sequence — showing it as a single "12,859 residues" protein is
+    # misleading. Count the sequences so we can label the aggregate honestly
+    # and drop the single-protein length gauge below.
+    is_multi = str(metrics.get("analysis_mode") or "").lower() == "multi_fasta"
+    n_seqs = 0
+    if is_multi:
+        for key in ("candidates", "representative_sequences", "sequences"):
+            v = output.get(key)
+            if isinstance(v, list):
+                n_seqs = len(v)
+                break
+        if not n_seqs:
+            n_seqs = int(_num(metrics.get("sequence_count")) or 0)
+
     # ---- meta line ----
     meta_bits: list[str] = []
     if metrics.get("analysis_mode"):
@@ -4748,16 +5750,31 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
     length = metrics.get("length", output.get("sequence_length"))
     if length is not None:
         noncanon = _num(metrics.get("noncanonical_residue_count")) or 0
-        meta_bits.append(
-            f"{length} residues ({int(noncanon)} non-canonical)"
-            if noncanon else f"{length} residues"
-        )
+        if is_multi:
+            seq_part = f"{n_seqs} sequences · " if n_seqs else ""
+            meta_bits.append(
+                f"{seq_part}{int(_num(length) or 0):,} residues total"
+                + (f" ({int(noncanon)} non-canonical)" if noncanon else "")
+            )
+        else:
+            meta_bits.append(
+                f"{length} residues ({int(noncanon)} non-canonical)"
+                if noncanon else f"{length} residues"
+            )
     meta = f'<p class="note">{_h(" · ".join(meta_bits))}</p>' if meta_bits else ""
 
     # ---- key properties (gauge cards) ----
+    # For a multi-FASTA pool the per-protein gauges (length / MW / pI / charge)
+    # are aggregates over many sequences and read as nonsense for "one"
+    # protein, so we suppress the misleading single-protein length gauge.
+    prop_keys = (
+        ("molecular_weight", "pI", "gravy", "net_charge", "instability_index")
+        if is_multi
+        else ("length", "molecular_weight", "pI", "gravy", "net_charge", "instability_index")
+    )
     prop_cards = [
         card
-        for key in ("length", "molecular_weight", "pI", "gravy", "net_charge", "instability_index")
+        for key in prop_keys
         if (card := _seqana_prop_card(key, metrics.get(key))) is not None
     ]
     props_html = (
@@ -4820,35 +5837,10 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
             f'<div class="aa-logo-legend">{legend}</div>'
         )
 
-    # ---- sampled per-residue annotations ----
-    anns = output.get("top_annotations") if isinstance(output.get("top_annotations"), list) else []
+    # The "Sampled residue annotations" table was dropped per user request —
+    # it was long and largely redundant with the composition / distribution
+    # views above. The per-residue detail still lives in the raw output below.
     ann_html = ""
-    ann_rows: list[str] = []
-    for a in anns:
-        if not isinstance(a, dict):
-            continue
-        flags = a.get("caution_flags") or []
-        flag_html = "".join(
-            f'<span class="seqana-flag">{_h(str(f).replace("_", " "))}</span>' for f in flags
-        ) or '<span class="seqana-muted">—</span>'
-        res = str(a.get("residue") or "")
-        ann_rows.append(
-            "<tr>"
-            f'<td>{_h(str(a.get("position", "")))}</td>'
-            f'<td><span class="aa aa-{_aa_class(res)}">{_h(res)}</span></td>'
-            f'<td>{_h(str(a.get("biochemical_class", "")))}</td>'
-            f'<td>{_h(str(a.get("charge_class", "")))}</td>'
-            f'<td>{_h(str(a.get("hydrophobicity_class", "")))}</td>'
-            f"<td>{flag_html}</td>"
-            "</tr>"
-        )
-    if ann_rows:
-        ann_html = (
-            f'<h5 class="widget-subhead">Sampled residue annotations ({len(ann_rows)})</h5>'
-            '<div class="table-wrap"><table><thead><tr><th>Pos</th><th>Residue</th>'
-            '<th>Class</th><th>Charge</th><th>Hydrophobicity</th><th>Caution flags</th>'
-            f'</tr></thead><tbody>{"".join(ann_rows)}</tbody></table></div>'
-        )
 
     liabs = output.get("liabilities") if isinstance(output.get("liabilities"), list) else []
     liab_html = (
@@ -5119,6 +6111,15 @@ def _rank_designs_widget(output: dict[str, Any]) -> str:
         "qc_flag_count", "liability_count",
     ) if k in candidate_keys][:8]
     header = "".join(f"<th>{_h(_pretty_metric_name(k))}</th>" for k in display_keys)
+    # Sort by the tool's own rank ascending so #1 (best) leads the table and the
+    # ordering agrees with the board badges (rows are often emitted in archive
+    # order, not rank order). Rows without a numeric rank sink to the bottom.
+    def _rank_of(c: dict[str, Any]) -> float:
+        r = _num(c.get("rank")) if isinstance(c, dict) else None
+        return r if r is not None else float("inf")
+    candidates = sorted(
+        (c for c in candidates if isinstance(c, dict)), key=_rank_of
+    )
     body_rows: list[str] = []
     for c in candidates[:10]:
         if not isinstance(c, dict):
@@ -7222,6 +8223,7 @@ def _score_card(
     quality: str,
     *,
     gauge: dict[str, Any] | None = None,
+    source: str = "",
 ) -> str:
     """Donut-centric metric card.
 
@@ -7233,6 +8235,7 @@ def _score_card(
     keeps grids of cards aligned across widgets.
     """
     quality = quality if quality in {"good", "ok", "poor", "neutral"} else "neutral"
+    src_html = f'<span class="qc-card-src">{_h(source)}</span>' if source else ""
     if gauge and gauge.get("value") is not None:
         # Re-format the centre text with the donut-tuned formatter so
         # adapters that pass ``value="-0.628"`` (raw 3-sig-fig output)
@@ -7256,7 +8259,7 @@ def _score_card(
             f'<article class="qc-card has-gauge metric-{quality}">'
             f'<div class="qc-card-viz">{gauge_html}</div>'
             f'<div class="qc-card-body">'
-            f'<div class="qc-card-name">{_h(label)}</div>'
+            f'<div class="qc-card-name">{_h(label)}{src_html}</div>'
             f'<p class="qc-card-explain">{_h(explanation)}</p>'
             "</div></article>"
         )
@@ -7265,7 +8268,7 @@ def _score_card(
         f'<article class="qc-card metric-{quality}">'
         "<header>"
         f"<div class='qc-card-figure'><strong>{_h(value)}</strong>"
-        f'<span class="qc-card-name">{_h(label)}</span></div>'
+        f'<span class="qc-card-name">{_h(label)}{src_html}</span></div>'
         "</header>"
         f'<p class="qc-card-explain">{_h(explanation)}</p>'
         "</article>"
@@ -7287,9 +8290,8 @@ def _repro_html(model: ReportModel) -> str:
 
     Per the simplified report contract, the long lists of IDs / tool versions
     / params hashes / artifact SHA-256 are noisy chrome that's already
-    embedded in the per-tool widget metadata and the `report-data` JSON
-    payload at the bottom of the page. The replay command is the one piece
-    of information a human actually re-uses, so it's the only thing we
+    embedded in the per-tool widget metadata. The replay command is the one
+    piece of information a human actually re-uses, so it's the only thing we
     surface here.
     """
     repro = model.reproducibility
@@ -7366,7 +8368,12 @@ def _score_bars(candidate: ReportCandidate) -> str:
     combined: dict[str, Any] = {}
     if candidate.score is not None:
         combined["score"] = candidate.score
-    combined.update(candidate.scores)
+    # The candidate may arrive with archive-nested scores (``{tool: {metric:
+    # val}}``) when it comes straight off a review bundle, or already flat from
+    # the flattened candidate view. ``_flatten_scores`` is idempotent on flat
+    # maps, so flattening here gives the ``tool:metric`` keys this renderer's
+    # alias-collapse / dedup logic relies on, regardless of which path fed us.
+    combined.update(_flatten_scores(candidate.scores))
 
     # Alias collapse — ``mean_*`` flavours merge into the canonical key
     # when both exist. The provenance-prefixed variants (``tool:plddt``,
@@ -7536,67 +8543,6 @@ def _score_bar_row(key: str, value: Any, *, candidate_tool: str = "") -> str:
     )
 
 
-def _flag_badges(candidate: ReportCandidate) -> str:
-    """Render QC flags + structure liabilities as deduped badge chips.
-
-    Liabilities are grouped by ``type`` so multiple per-residue hits of the
-    same kind collapse into a single chip with a count and residue list
-    (``buried_polar_candidate x9 (A:15, 18, ...)``). QC flags are kept in
-    order but deduplicated up-stream in ``_attach_qc_and_analysis``.
-    """
-    chips: list[tuple[str, str]] = []  # (label, tooltip)
-    seen: set[str] = set()
-    for flag in candidate.qc_flags:
-        key = str(flag).strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        chips.append((str(flag), str(flag)))
-
-    # Group liabilities by ``type``
-    groups: dict[str, list[Any]] = {}
-    order: list[str] = []
-    for entry in candidate.liabilities:
-        if isinstance(entry, dict):
-            t = str(entry.get("type") or "liability")
-        else:
-            t = str(entry)
-        if t not in groups:
-            groups[t] = []
-            order.append(t)
-        groups[t].append(entry)
-    for t in order:
-        entries = groups[t]
-        positions: list[str] = []
-        for e in entries:
-            if isinstance(e, dict):
-                chain = e.get("chain_id") or e.get("chain") or ""
-                pos = e.get("positions") or e.get("position")
-                if isinstance(pos, list):
-                    pos_label = ",".join(str(p) for p in pos)
-                else:
-                    pos_label = str(pos) if pos is not None else ""
-                if pos_label:
-                    positions.append(f"{chain}:{pos_label}" if chain else pos_label)
-        count = len(entries)
-        label = f"{t} x{count}" if count > 1 else t
-        tooltip = (
-            f"{t} at " + ", ".join(positions) if positions else t
-        )
-        chips.append((label, tooltip))
-
-    if not chips:
-        return ""  # Don't take screen real-estate for "no flags".
-    return (
-        "<div class='badges'>"
-        + "".join(
-            f"<span class='badge-warn' title='{_attr(tooltip)}'>{_h(label)}</span>"
-            for label, tooltip in chips[:12]
-        )
-        + "</div>"
-    )
-
-
 def _warning_list(model: ReportModel) -> str:
     if not model.warnings:
         return ""
@@ -7638,24 +8584,20 @@ def _agent_transcript_section(transcript: AgentTranscript) -> str:
       2. **You** — the user's original natural-language query.
       3. **Agent plan** — the plan response (structured + prose).
       4. **Final response** — the agent's wrap-up answer.
-      5. **Execution timeline** — agent_summaries, one card per
-         completed job/workflow, in chronological order. Only rendered
-         when there's at least one step summary.
-      6. **Decision audit** — agent_decisions, one row per round, only
-         rendered for multi-round runs (≥1 decision recorded).
-      7. **Full transcript** — collapsed ``<details>`` with every
-         message AND tool call interleaved chronologically.
+      5. **Full transcript** — collapsed ``<details>`` with every
+         message AND tool call interleaved chronologically. This single
+         chronological view replaced the older standalone execution
+         timeline and decision-audit sections (they duplicated what the
+         transcript already shows step by step).
     """
     user_html = _agent_user_block(transcript.user_query)
     plan_html = _agent_plan_block(transcript)
     final_html = _agent_final_block(transcript.final_response)
-    timeline_html = _agent_step_timeline_block(transcript.step_summaries)
     # ``submit_candidate`` is a terminal action, not a per-round verdict —
-    # keep it out of the round-by-round decision audit (and the round count).
+    # keep it out of the round count chip below.
     round_decisions = [
         d for d in transcript.decisions if not _is_submit_candidate(d.decision_label)
     ]
-    decisions_html = _agent_decisions_block(round_decisions)
     transcript_html = _agent_full_transcript_block(
         transcript.messages, transcript.tool_calls,
     )
@@ -7700,12 +8642,10 @@ def _agent_transcript_section(transcript: AgentTranscript) -> str:
     </div>
     {meta_html}
   </header>
-  <p class="widget-explainer">This run was orchestrated by an LLM agent — the prompt below was translated into the workflow you see in the rest of the report. The plan and final response are the agent's own narrative; the timeline, decision audit, and full transcript expose every step the agent took along the way.</p>
+  <p class="widget-explainer">This run was orchestrated by an LLM agent — the prompt below was translated into the workflow you see in the rest of the report. The plan and final response are the agent's own narrative; the full transcript exposes every step the agent took along the way.</p>
   {user_html}
   {plan_html}
   {final_html}
-  {timeline_html}
-  {decisions_html}
   {transcript_html}
 </section>"""
 
@@ -8352,189 +9292,6 @@ def _is_submit_candidate(name: str | None) -> bool:
     return (name or "").strip().lower() == _SUBMIT_CANDIDATE_TOOL
 
 
-def _agent_step_timeline_block(steps: list[AgentStepSummary]) -> str:
-    """Vertical execution timeline — one card per step the agent ran.
-
-    Built from ``agent_summaries``; rendered as a left-rail timeline
-    with an icon per step state (completed / failed / running) and a
-    compact body showing the tool/workflow name + state pill + key
-    metrics. The whole section is omitted when the agent didn't
-    record any per-step summary (e.g. a single-shot tool call).
-
-    ``submit_candidate`` steps are dropped — the submission decision is
-    shown once in the Candidates section, not as a pipeline step.
-    """
-    steps = [s for s in steps if not _is_submit_candidate(s.tool)]
-    if not steps:
-        return ""
-    cards: list[str] = []
-    for idx, step in enumerate(steps, 1):
-        state = (step.state or "unknown").lower()
-        state_class = _state_class(state)
-        title_parts: list[str] = []
-        if step.kind == "workflow":
-            title_parts.append("Workflow")
-            if step.name:
-                title_parts.append(_h(step.name))
-            elif step.workflow_id:
-                title_parts.append(f'<code>{_h(_short(step.workflow_id, 14))}</code>')
-        else:
-            title_parts.append("Job")
-            if step.tool:
-                title_parts.append(_h(step.tool))
-            elif step.job_id:
-                title_parts.append(f'<code>{_h(_short(step.job_id, 14))}</code>')
-        title_html = " · ".join(title_parts)
-        meta_bits: list[str] = []
-        if step.state:
-            meta_bits.append(
-                f'<span class="conv-timeline-state state-{state_class}">{_h(step.state)}</span>'
-            )
-        if step.metrics_used:
-            shown = ", ".join(step.metrics_used[:6])
-            extra = ""
-            if len(step.metrics_used) > 6:
-                extra = f' <span class="conv-timeline-meta-extra">(+{len(step.metrics_used) - 6})</span>'
-            meta_bits.append(
-                f'<span class="conv-timeline-metrics">metrics: {_h(shown)}{extra}</span>'
-            )
-        if step.workflow_id and step.kind != "workflow":
-            meta_bits.append(
-                f'<span class="conv-timeline-meta-id">in <code>{_h(_short(step.workflow_id, 14))}</code></span>'
-            )
-        meta_html = (
-            f'<div class="conv-timeline-meta">{"  ·  ".join(meta_bits)}</div>'
-            if meta_bits else ""
-        )
-        error_html = ""
-        if step.error_message:
-            error_html = (
-                f'<div class="conv-timeline-error">'
-                f'<strong>Error</strong> {_h(step.error_message)}'
-                f'</div>'
-            )
-        cards.append(
-            f'<li class="conv-timeline-row conv-timeline-row-{state_class}">'
-            f'<div class="conv-timeline-marker"><span class="conv-timeline-bullet"></span>'
-            f'<span class="conv-timeline-index">{idx}</span></div>'
-            f'<div class="conv-timeline-card">'
-            f'<div class="conv-timeline-title">{title_html}</div>'
-            f'{meta_html}{error_html}'
-            '</div>'
-            '</li>'
-        )
-    return f"""<div class="conv-block conv-block-timeline">
-  <div class="conv-block-head">
-    <span class="conv-role-badge conv-role-badge-timeline">⏳ Execution timeline</span>
-    <span class="conv-meta-chip">{len(steps)} step{"s" if len(steps) != 1 else ""}</span>
-  </div>
-  <ol class="conv-timeline">
-    {"".join(cards)}
-  </ol>
-</div>"""
-
-
-def _agent_decisions_block(decisions: list[AgentDecision]) -> str:
-    """Per-round decision audit for multi-round agent runs.
-
-    Each round renders as a compact card: round index, humanised verdict
-    label, continue/stop pill, reason prose, and a *collapsed* detail
-    drawer for the raw decision string + metrics + notes. The visible
-    surface keeps the eye on "did the agent decide to keep going and
-    why" without dumping every audit row inline.
-    """
-    if not decisions:
-        return ""
-    rows: list[str] = []
-    for d in decisions:
-        verdict_cls = "go" if d.next_round_recommended else "stop"
-        verdict_label = "Continue → next round" if d.next_round_recommended else "Stop"
-        human_label = _humanize_decision_label(d.decision_label) or d.decision_label
-
-        # Collapsed details: raw label + metrics + notes. Only build when
-        # there's at least one chunk to put inside; otherwise we skip the
-        # drawer entirely and the row stays as a clean two-line summary.
-        detail_chunks: list[str] = []
-        if d.decision_label and d.decision_label != human_label:
-            detail_chunks.append(
-                '<div class="conv-decision-detail-row">'
-                '<span class="conv-decision-detail-label">Raw label</span>'
-                f'<code class="conv-decision-raw">{_h(d.decision_label)}</code>'
-                '</div>'
-            )
-        if d.metrics_used:
-            shown = ", ".join(d.metrics_used[:8])
-            more = f" (+{len(d.metrics_used) - 8} more)" if len(d.metrics_used) > 8 else ""
-            detail_chunks.append(
-                '<div class="conv-decision-detail-row">'
-                '<span class="conv-decision-detail-label">Metrics weighed</span>'
-                f'<span class="conv-decision-metrics-list">{_h(shown)}{_h(more)}</span>'
-                '</div>'
-            )
-        if d.notes:
-            note_items: list[str] = []
-            for entry in d.notes:
-                if isinstance(entry, dict):
-                    level = str(entry.get("level") or "note").lower()
-                    msg = str(entry.get("message") or "").strip()
-                    code = entry.get("code")
-                    if not msg:
-                        continue
-                    code_html = (
-                        f' <code class="conv-decision-note-code">{_h(str(code))}</code>'
-                        if code else ""
-                    )
-                    note_items.append(
-                        f'<li class="conv-decision-note conv-decision-note-{_h(level)}">'
-                        f'<strong>{_h(level)}</strong> {_render_agent_prose(msg)}{code_html}</li>'
-                    )
-                else:
-                    s = _stringify_final_item(entry)
-                    if s:
-                        note_items.append(
-                            f'<li class="conv-decision-note">{_render_agent_prose(s)}</li>'
-                        )
-            if note_items:
-                detail_chunks.append(
-                    '<div class="conv-decision-detail-row">'
-                    '<span class="conv-decision-detail-label">Notes</span>'
-                    f'<ul class="conv-decision-notes">{"".join(note_items)}</ul>'
-                    '</div>'
-                )
-        details_html = ""
-        if detail_chunks:
-            details_html = (
-                '<details class="conv-decision-details">'
-                '<summary class="conv-decision-details-summary">More detail</summary>'
-                f'<div class="conv-decision-details-body">{"".join(detail_chunks)}</div>'
-                '</details>'
-            )
-
-        rows.append(
-            f'<li class="conv-decision-row">'
-            f'<div class="conv-decision-head">'
-            f'<span class="conv-decision-round">Round {d.round_index + 1}</span>'
-            f'<span class="conv-decision-label conv-decision-label-friendly" title="{_attr(d.decision_label)}">{_h(human_label)}</span>'
-            f'<span class="conv-decision-verdict conv-decision-verdict-{verdict_cls}">{verdict_label}</span>'
-            '</div>'
-            + (
-                f'<p class="conv-decision-reason">{_render_agent_prose(d.reason)}</p>'
-                if d.reason else ""
-            )
-            + details_html
-            + '</li>'
-        )
-    return f"""<div class="conv-block conv-block-decisions">
-  <div class="conv-block-head">
-    <span class="conv-role-badge conv-role-badge-decisions">⚖ Decision audit</span>
-    <span class="conv-meta-chip">{len(decisions)} round{"s" if len(decisions) != 1 else ""}</span>
-  </div>
-  <ol class="conv-decisions">
-    {"".join(rows)}
-  </ol>
-</div>"""
-
-
 def _pretty_json(value: Any, *, max_len: int = 2_000) -> str:
     """Pretty-print arbitrary JSON-compatible data with a length cap.
 
@@ -8997,12 +9754,6 @@ def _script_json(value: Any) -> str:
         .replace(">", "\\u003e")
         .replace("&", "\\u0026")
     )
-
-
-def _public_model(model: ReportModel) -> dict[str, Any]:
-    data = asdict(model)
-    data["raw_summary"] = _compact(data.get("raw_summary"))
-    return data
 
 
 # ----------------------------------------------------------------- CSS
@@ -9891,7 +10642,7 @@ body {
 
 /* Headings */
 h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
-.widget-title { margin:0 0 10px; font-size:16px; font-weight:600; color:var(--ink); }
+.widget-title { margin:0 0 9px; font-size:13px; font-weight:650; color:var(--ink); }
 .widget-subhead { margin:16px 0 8px; font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }
 .widget-explainer { margin:0 0 14px; font-size:14px; color:var(--muted); line-height:1.6; max-width:880px; }
 .widget-explainer code { font-size:12.5px; background:var(--accent-soft); padding:1px 5px; border-radius:3px; }
@@ -9956,199 +10707,64 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
    Each panel is its own bordered tile with title + sub + content body.
    Collapses to a single column on narrow viewports.
    ======================================================================== */
-.exec-dashboard {
-  display:grid;
-  /* Pipeline panel needs extra width to fit long underscored tool names
-     like ``structure_analysis`` on a single line next to its donut. */
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.95fr) minmax(0, 1.25fr);
-  gap:12px; margin:6px 0 14px;
+/* ── Executive summary — compact, typography-driven (no metric cards) ──────── */
+.exec-summary { margin:10px 0 4px; }
+/* Status dots — the only colour in the summary, reserved for state signalling. */
+.exec-stat-dot, .exec-cm-dot, .exec-node-dot {
+  display:inline-block; width:7px; height:7px; border-radius:50%; flex:0 0 auto;
+  background:var(--line-strong);
 }
-.exec-panel {
-  background:var(--panel); border:1px solid var(--line); border-radius:12px;
-  padding:16px 18px;
-  display:flex; flex-direction:column; gap:12px;
-  box-shadow:var(--shadow-tile);
+.dot-good, .dot-completed, .dot-cached { background:var(--good); }
+.dot-ok, .dot-queued, .dot-pending, .dot-running { background:var(--ok); }
+.dot-poor, .dot-failed, .dot-cancelled { background:var(--poor); }
+.dot-neutral, .dot-skipped { background:var(--subtle); }
+/* Grouped stat strip — values lead, labels sit quietly beneath; thin dividers. */
+.exec-stats {
+  display:flex; flex-wrap:wrap; gap:0;
+  border-top:1px solid var(--line); border-bottom:1px solid var(--line);
+  padding:14px 0; margin-bottom:18px;
 }
-.exec-panel-head { display:flex; flex-direction:column; gap:2px; }
-.exec-panel-title {
-  margin:0; font-size:15px; color:var(--ink); font-weight:600;
-  letter-spacing:-0.005em;
+.exec-stat { padding:0 22px; border-left:1px solid var(--line); }
+.exec-stat:first-child { padding-left:2px; border-left:none; }
+.exec-stat-val {
+  display:flex; align-items:center; gap:7px;
+  font-size:19px; font-weight:600; color:var(--ink); letter-spacing:-.01em;
+  font-variant-numeric:tabular-nums;
 }
-.exec-panel-sub {
-  font-size:12.5px; color:var(--muted); letter-spacing:0.02em;
+.exec-stat-lbl {
+  font-size:11px; color:var(--muted); margin-top:3px;
+  letter-spacing:.02em;
 }
-
-/* KPI tile grid (Run vitals panel). 2 cols x 3 rows: each tile gets a
-   generous width budget so multi-character state labels ("Completed",
-   "Cancelled") never overflow. */
-.kpi-grid {
-  display:grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap:9px;
+/* Two-column signal band — confidence | pipeline, divider not boxes. */
+.exec-band {
+  display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:32px;
 }
-.kpi-tile {
-  display:flex; align-items:center; gap:11px;
-  padding:13px 14px;
-  background:#ffffff; border:1px solid var(--line); border-radius:10px;
-  position:relative; overflow:visible;
-  box-shadow:var(--shadow-tile);
-  transition:border-color 0.15s, box-shadow 0.15s;
+.exec-band .exec-col + .exec-col,
+.exec-band > .exec-col:nth-child(2) { }
+.exec-col { min-width:0; }
+.exec-col-head {
+  font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--muted); padding-bottom:9px; margin-bottom:10px;
+  border-bottom:1px solid var(--line);
 }
-.kpi-tile:hover { border-color:var(--line-strong); box-shadow:var(--shadow-card); }
-.kpi-icon {
-  flex-shrink:0;
-  width:34px; height:34px; border-radius:8px;
-  display:flex; align-items:center; justify-content:center;
-  font-size:17px; font-weight:600;
-  background:#ffffff; border:1px solid var(--line);
-  color:var(--ink);
+.exec-col-sub { font-weight:500; text-transform:none; letter-spacing:0; color:var(--subtle); margin-left:6px; }
+.exec-cm-list { display:flex; flex-direction:column; gap:11px; }
+.exec-cm { display:flex; align-items:baseline; gap:9px; }
+.exec-cm-dot { align-self:center; }
+.exec-cm-val {
+  font-size:17px; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums;
+  min-width:46px;
 }
-.kpi-logo {
-  flex-shrink:0; width:34px; height:34px; border-radius:8px; display:block;
+.exec-cm-lbl { font-size:13px; color:var(--ink); }
+.exec-cm-src { color:var(--muted); font-weight:500; }
+.exec-cm-empty .exec-cm-lbl { color:var(--muted); font-size:12.5px; }
+.exec-cm-empty code { font-family:ui-monospace,monospace; font-size:11.5px; }
+.exec-node-list { display:flex; flex-direction:column; gap:8px; }
+.exec-node {
+  display:flex; align-items:center; gap:8px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; color:var(--ink);
 }
-.kpi-body { min-width:0; flex:1; }
-.kpi-value {
-  /* 17px / 700 — comfortably readable; with the 2-col grid this fits
-     "Completed", "Cancelled" etc. on a single line. */
-  font-size:17px; font-weight:700; color:var(--ink);
-  font-variant-numeric:tabular-nums; letter-spacing:-0.01em;
-  line-height:1.2;
-  white-space:nowrap;
-}
-.kpi-label {
-  font-size:11px; color:var(--muted);
-  text-transform:uppercase; letter-spacing:0.06em;
-  font-weight:600; margin-top:3px;
-}
-/* Accent colours per state/quality */
-.kpi-tile.kpi-good   .kpi-icon { background:var(--good-soft);   color:var(--good);   border-color:var(--good-line); }
-.kpi-tile.kpi-ok     .kpi-icon { background:var(--ok-soft);     color:var(--ok);     border-color:var(--ok-line); }
-.kpi-tile.kpi-poor   .kpi-icon { background:var(--poor-soft);   color:var(--poor);   border-color:var(--poor-line); }
-.kpi-tile.kpi-neutral .kpi-icon { background:var(--accent-soft); color:var(--accent); border-color:var(--accent); }
-.kpi-tile.kpi-completed .kpi-icon { background:var(--good-soft); color:var(--good); border-color:var(--good-line); }
-.kpi-tile.kpi-running .kpi-icon { background:var(--accent-soft); color:var(--accent); border-color:var(--accent); }
-.kpi-tile.kpi-failed .kpi-icon { background:var(--poor-soft); color:var(--poor); border-color:var(--poor-line); }
-.kpi-tile.kpi-queued .kpi-icon,
-.kpi-tile.kpi-pending .kpi-icon { background:var(--bg); color:var(--muted); }
-
-/* Confidence cards (middle panel) -------------------------------------- */
-/* Stacked vertically (one card per row), each card laid out as
-   [donut | label + explainer]. The list scrolls within the panel so the
-   donuts never crowd each other or blow out the dashboard height. */
-.exec-donut-row {
-  display:flex; flex-direction:column; gap:10px;
-  max-height:250px; overflow-y:auto;
-  padding-right:4px;
-}
-.exec-donut-row::-webkit-scrollbar { width:10px; }
-.exec-donut-row::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
-.exec-donut-row::-webkit-scrollbar-thumb {
-  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
-}
-.exec-donut-row::-webkit-scrollbar-thumb:hover { background:#8574c0; }
-.exec-donut {
-  flex-shrink:0;
-  display:flex; flex-direction:row; align-items:center; gap:14px;
-  padding:12px 14px;
-  background:#ffffff; border:1px solid var(--line); border-radius:10px;
-  text-align:left;
-  box-shadow:var(--shadow-tile);
-}
-.exec-donut-viz { line-height:0; flex-shrink:0; }
-.exec-donut-viz svg { width:86px; height:86px; }
-.exec-donut-meta { flex:1; min-width:0; }
-.exec-donut-label {
-  font-size:13px; color:var(--ink); font-weight:600; letter-spacing:0;
-}
-.exec-donut-tip {
-  font-size:11.5px; color:var(--muted); line-height:1.45; margin-top:3px;
-}
-.exec-donut-empty { justify-content:flex-start; }
-.exec-donut-id code {
-  font-size:12px; font-family:ui-monospace, monospace;
-  background:var(--panel); padding:2px 6px; border-radius:5px;
-}
-
-/* Pipeline health (right panel) — donut + stages list + legend chips.
-   The donut sits centred on the left, the stages list fills the rest of
-   the panel's horizontal space, and the legend strip lands underneath
-   both so the whole panel feels "full" rather than airy. */
-.exec-pipe-body {
-  display:flex; gap:14px; align-items:flex-start;
-  flex:1;
-}
-.exec-pipe-donut-wrap {
-  flex-shrink:0;
-  display:flex; align-items:center; justify-content:center;
-}
-.exec-pipe-donut { display:block; }
-.exec-pipe-val {
-  font-family: Inter, system-ui, sans-serif;
-  font-weight:700; font-size:22px; fill:var(--ink);
-  font-variant-numeric:tabular-nums; letter-spacing:-0.02em;
-}
-.exec-pipe-sub {
-  font-family: Inter, system-ui, sans-serif;
-  font-weight:500; font-size:11px; fill:var(--muted);
-  letter-spacing:0.04em;
-}
-/* Stages list — one row per workflow node; every node is listed and the
-   list scrolls within the panel with an always-visible scrollbar. */
-.exec-stage-list {
-  list-style:none; padding:0; margin:0;
-  display:flex; flex-direction:column; gap:3px;
-  flex:1; min-width:0;
-  max-height:230px; overflow-y:auto;
-  padding-right:4px;
-}
-.exec-stage-list::-webkit-scrollbar { width:10px; }
-.exec-stage-list::-webkit-scrollbar-track { background:#e7e3f3; border-radius:999px; }
-.exec-stage-list::-webkit-scrollbar-thumb {
-  background:#a99cd6; border:2px solid #e7e3f3; border-radius:999px;
-}
-.exec-stage-list::-webkit-scrollbar-thumb:hover { background:#8574c0; }
-.exec-stage-row {
-  flex-shrink:0;
-  display:flex; align-items:center; gap:9px;
-  padding:6px 10px; border-radius:7px;
-  font-size:12px; line-height:1.4;
-  background:#ffffff; border:1px solid var(--line);
-  box-shadow:var(--shadow-tile);
-}
-.exec-stage-glyph {
-  flex-shrink:0; width:14px; text-align:center;
-  font-weight:700; font-size:13px;
-}
-.exec-stage-name {
-  flex:1; min-width:0;
-  color:var(--ink); font-weight:500;
-  font-family:ui-monospace, monospace;
-  /* Single-line: tool names like ``structure_analysis`` stay on one row
-     inside the pipeline panel. The panel column width is sized to fit
-     the longest typical name; truly oversized ones still get a graceful
-     hover tooltip (the row already has a ``title`` attribute). */
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-}
-/* Compact legend chip strip below the donut + stages */
-.exec-pipe-legend {
-  display:flex; flex-wrap:wrap; gap:6px;
-  padding-top:10px; margin-top:auto;
-  border-top:1px solid var(--line);
-}
-.exec-pipe-legend-chip {
-  display:inline-flex; align-items:center; gap:7px;
-  padding:4px 11px;
-  background:#ffffff; border:1px solid var(--line); border-radius:999px;
-  font-size:12.5px; color:var(--ink);
-  box-shadow:var(--shadow-tile);
-}
-.exec-pipe-legend-swatch {
-  width:8px; height:8px; border-radius:50%; flex-shrink:0;
-}
-.exec-pipe-legend-label { text-transform:capitalize; }
-.exec-pipe-legend-count {
-  color:var(--muted); font-variant-numeric:tabular-nums;
-  font-weight:600;
-}
+@media (max-width: 900px) { .exec-band { grid-template-columns:1fr; gap:18px; } }
 
 /* Verdict callout — high-signal "should I trust this run?" cue --------- */
 .exec-verdict {
@@ -10195,18 +10811,6 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 }
 .exec-verdict-neutral .exec-verdict-icon {
   background:var(--accent-soft); color:var(--accent); border-color:var(--accent);
-}
-
-@media (max-width: 1100px) {
-  .exec-dashboard { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .exec-panel-pipeline { grid-column: span 2; }
-  .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
-@media (max-width: 720px) {
-  .exec-dashboard { grid-template-columns: 1fr; }
-  .exec-panel-pipeline { grid-column: span 1; }
-  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .exec-pipe-wrap { flex-direction:column; align-items:flex-start; gap:10px; }
 }
 
 /* HERO SEQUENCE */
@@ -10414,7 +11018,7 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   background:var(--panel);
   box-shadow:var(--shadow-tile);
 }
-/* Small uppercase eyebrow ("Top #N", "Candidate", "Candidate sequence ...").
+/* Small uppercase eyebrow ("Candidate sequence · N residues", ...).
    Without an explicit rule the <p class="eyebrow"> inherits browser <p>
    defaults — that's why the "Candidate" subtitle was floating with a
    weird gap above the heading. Match the rest of the report's eyebrow
@@ -10487,6 +11091,14 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
   text-align:right;
   font-size:11px; color:var(--muted);
   margin-top:2px;
+}
+/* Caption explaining a backbone-only or partially-modelled structure. Sits as
+   a slim banner between the controls and the sequence track. */
+.structure-coverage-note {
+  margin:6px 0 0; padding:6px 10px;
+  font-size:11.5px; line-height:1.4; color:var(--muted);
+  background:var(--accent-soft); border:1px solid var(--line);
+  border-left:3px solid var(--accent); border-radius:4px;
 }
 .structure-control {
   display:inline-flex; align-items:center; gap:6px;
@@ -10681,6 +11293,10 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 .structure-legend[data-legend="spectrum"] .legend-gradient {
   background:linear-gradient(to right, #2647e3, #1ea7e0, #1ec19a, #9fc23a, #f0d537, #f08a2b, #d62e2e);
 }
+/* The legend reads "Very low → Very high", i.e. a confidence scale — it is only
+   meaningful in pLDDT mode. N→C spectrum encodes chain direction (not
+   confidence) and Chain encodes identity, so the legend is hidden for both. */
+.structure-legend[data-legend="spectrum"],
 .structure-legend[data-legend="chain"] { display:none; }
 
 .viewer-empty {
@@ -10731,13 +11347,6 @@ h1, h2, h3, h4, h5 { letter-spacing:-0.005em; }
 .score-row.quality-poor > b { color:var(--poor); }
 
 .why { color:#312e81; line-height:1.6; font-size:15px; margin:12px 0; }
-
-/* Badges (flags) */
-.badges { display:flex; flex-wrap:wrap; gap:7px; margin:12px 0; }
-.badges span.badge-warn {
-  background:var(--ok-soft); color:var(--warn); border:1px solid var(--ok-line);
-  border-radius:999px; padding:5px 12px; font-size:13px;
-}
 
 /* Sequence block */
 .sequence-block { margin:10px 0; }
@@ -11001,38 +11610,149 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 .msa-residue[data-aa=""], .msa-residue[data-aa="X"] { background:transparent !important; }
 
 /* PER-TOOL WIDGETS (in Details section) */
+/* Per-tool node = a divider-separated section, not a nested card. */
 .node-block {
-  background:#ffffff; border:1px solid var(--line); border-radius:12px;
-  padding:20px 22px; margin:14px 0;
-  box-shadow:var(--shadow-tile);
+  background:transparent; border:none; border-radius:0;
+  padding:18px 0 4px; margin:0; box-shadow:none;
+  border-top:1px solid var(--line);
 }
+.node-block:first-of-type { border-top:none; padding-top:6px; }
 .node-block-head {
   display:flex; justify-content:space-between; align-items:center;
-  gap:12px; margin-bottom:14px; padding-bottom:12px;
-  border-bottom:1px solid var(--line);
+  gap:12px; margin-bottom:14px;
 }
-.node-block-id {
-  font-weight:600; font-size:15.5px; color:var(--ink);
-  margin-right:10px;
+.node-block-title {
+  display:block; font-weight:650; font-size:14.5px; color:var(--ink);
 }
-.node-block-tool {
-  font-family:ui-monospace, monospace; font-size:12.5px;
-  color:var(--accent); background:var(--accent-soft);
-  padding:3px 9px; border-radius:5px; border:1px solid var(--line);
+.node-block-meta {
+  display:block; margin-top:3px; font-size:11.5px; color:var(--muted);
 }
+.node-block-meta code {
+  font-family:ui-monospace, monospace; font-size:11px; color:var(--muted);
+}
+/* State = a quiet text label with a status dot; no coloured pill. */
 .node-block-state {
-  font-size:12.5px; font-weight:600; padding:4px 11px;
-  border-radius:var(--radius-pill); border:1px solid var(--line); background:var(--panel);
+  font-size:11.5px; font-weight:600; color:var(--muted);
+  display:inline-flex; align-items:center; gap:6px;
 }
-.node-block-state.state-completed, .node-block-state.state-cached {
-  border-color:var(--good-line); background:var(--good-soft); color:var(--good);
+.node-block-state::before {
+  content:""; width:7px; height:7px; border-radius:50%; background:var(--subtle);
 }
-.node-block-state.state-failed { border-color:var(--poor-line); background:var(--poor-soft); color:var(--poor); }
+.node-block-state.state-completed::before, .node-block-state.state-cached::before { background:var(--good); }
+.node-block-state.state-failed { color:var(--poor); }
+.node-block-state.state-failed::before { background:var(--poor); }
+.node-block-headright { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+.node-block-cohort {
+  font-size:11px; font-weight:500; color:var(--muted);
+}
+.node-block-cohort::before { content:""; }
 
-.widget {
-  background:#ffffff; border:1px solid var(--line); border-radius:10px;
-  padding:16px 18px; margin:0 0 12px;
+/* ── Two bands: per-design vs all-designs — neutral section headers, no tints,
+   distinguished by label + sub-text (and the cohort "shows all" note). */
+.nodeband { margin:8px 0 0; padding:0; border:none; background:none; }
+.nodeband + .nodeband { margin-top:30px; padding-top:22px; border-top:1px solid var(--line); }
+.nodeband-head {
+  display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; padding:0 0 4px;
+}
+.nodeband-title {
+  font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink);
+}
+.nodeband-sub { font-size:12px; color:var(--muted); }
+.nodeband-head .nb-glyph { display:none; }
+
+/* ── Candidate browser: the per-design sample selector ──────────────────────
+   A polished horizontal rail of candidate cards. Each card has a prominent
+   rank token, a clear name, and a headline metric; the selected card is
+   unmistakable (accent ring + tint + check), and the Final pick is special. */
+.node-cand-toolbar {
+  position:sticky; top:0; z-index:5;
+  display:flex; flex-direction:column; gap:12px;
+  padding:15px 16px; margin:0 0 18px;
+  background:var(--panel);
+  border:1px solid var(--line); border-radius:14px;
   box-shadow:var(--shadow-tile);
+}
+.cbrowse-head { display:flex; align-items:baseline; gap:10px; }
+.cbrowse-title {
+  font-size:11px; font-weight:750; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--muted);
+}
+.cbrowse-count {
+  font-size:11px; font-weight:600; color:var(--subtle);
+  background:var(--bg); border:1px solid var(--line); border-radius:var(--radius-pill);
+  padding:2px 9px;
+}
+/* Cards scroll horizontally so a 30+ design run stays one compact rail with
+   the final / ranked picks (ordered first) visible up front. */
+.node-cand-btnrow {
+  flex:1 1 auto; min-width:0;
+  display:flex; flex-wrap:nowrap; align-items:stretch; gap:10px;
+  overflow-x:auto; padding:2px 2px 8px; scrollbar-width:thin;
+}
+.node-cand-btnrow::-webkit-scrollbar { height:8px; }
+.node-cand-btnrow::-webkit-scrollbar-thumb { background:var(--line-strong); border-radius:4px; }
+.node-cand-btnrow::-webkit-scrollbar-track { background:transparent; }
+.cbrowse-card {
+  position:relative; flex:0 0 auto; min-width:176px; max-width:220px;
+  display:flex; align-items:center; gap:11px; text-align:left;
+  background:var(--panel); border:1.5px solid var(--line);
+  padding:10px 12px; border-radius:12px; cursor:pointer;
+  transition:border-color .14s, box-shadow .14s, transform .14s, background .14s;
+}
+.cbrowse-card:hover { border-color:var(--line-strong); box-shadow:var(--shadow-card-hover); }
+.cbrowse-card.is-active {
+  border-color:var(--accent); background:#faf8ff;
+  box-shadow:0 0 0 3px rgba(107,30,168,.14), 0 6px 18px rgba(45,4,110,.12);
+  transform:translateY(-1px);
+}
+/* Rank token — big numeral chip on the left; medal star for the final pick. */
+.cbc-token {
+  flex:0 0 auto; width:38px; height:38px; border-radius:10px;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--bg); border:1px solid var(--line);
+}
+.cbc-token-num { font-size:15px; font-weight:650; color:var(--muted); letter-spacing:-.01em; font-variant-numeric:tabular-nums; }
+.cbc-token-num::before { content:"#"; font-size:10px; font-weight:600; opacity:.5; margin-right:1px; }
+.cbc-token-dash::before { content:""; }
+.cbc-token-final { font-size:15px; font-weight:700; color:var(--ink); }
+.cbc-body { display:flex; flex-direction:column; gap:1px; min-width:0; }
+.cbc-eyebrow {
+  font-size:9px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--subtle);
+}
+.cbc-name {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; font-weight:550;
+  color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.cbc-metric { font-size:11px; font-weight:550; color:var(--muted); margin-top:2px; }
+.cbc-check {
+  position:absolute; top:7px; right:8px; width:15px; height:15px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--accent); color:#fff; font-size:9px; font-weight:700;
+  opacity:0; transform:scale(.6); transition:opacity .14s, transform .14s;
+}
+.cbrowse-card.is-active .cbc-check { opacity:1; transform:scale(1); }
+/* Status: the final pick carries a neutral, authoritative treatment (ink ✓ +
+   ink eyebrow) — no medal, no colour. Selection (is-active) owns the accent. */
+.cbrowse-card.status-failed .cbc-token-num { color:var(--poor); }
+.cbrowse-card.is-final .cbc-eyebrow { color:var(--ink); }
+
+/* One variant per sample inside each node block — only the selected one
+   shows; the shared sentinel (retrieval/input nodes) is always visible. */
+.node-cand-variant { display:none; }
+.node-cand-variant.is-active,
+.node-cand-variant[data-cand="__shared__"] { display:block; }
+.node-cand-na-note {
+  margin:6px 0; padding:12px 14px; font-size:13px; color:var(--muted);
+  background:var(--panel); border:1px dashed var(--line); border-radius:8px;
+}
+
+/* Widget = an open section inside a node block (no nested card chrome); its
+   leaf tiles (QC cards, tables) carry whatever structure they need. */
+.widget {
+  background:transparent; border:none; border-radius:0;
+  padding:0; margin:0 0 4px; box-shadow:none;
 }
 .widget:last-child { margin-bottom:0; }
 
@@ -11094,7 +11814,7 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 .artifact-name { font-weight:500; }
 .artifact-meta { color:var(--muted); font-size:12px; }
 
-/* Per-residue strips (structure_analysis + DSSP widgets). One white card
+/* Per-residue strips (structure_analysis widgets). One white card
    per chain; all rows live in a single horizontally-scrolling container so
    the SS / burial / liability / ruler tracks always stay aligned. */
 .strip-block { margin:16px 0 18px; background:#ffffff; border:1px solid var(--line); border-radius:10px; padding:12px 16px; box-shadow:var(--shadow-tile); }
@@ -11160,6 +11880,64 @@ td.quality-poor { color:var(--poor); font-weight:600; }
 .seqret-stat b {
   color:var(--ink); font-weight:700; font-variant-numeric:tabular-nums;
 }
+/* Resolved-term relevance rows */
+.seqret-terms { display:flex; flex-direction:column; gap:9px; margin-bottom:14px; }
+.seqret-term {
+  background:#fbfafe; border:1px solid var(--line); border-radius:9px;
+  padding:9px 12px;
+}
+.seqret-term-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:7px; }
+.seqret-term-src {
+  font-size:10px; font-weight:700; letter-spacing:0.04em; color:#fff;
+  background:var(--accent); border-radius:4px; padding:1px 6px;
+}
+.seqret-term-id {
+  font-family:ui-monospace, monospace; font-size:12px; font-weight:700; color:var(--ink);
+}
+.seqret-term-label { font-size:12px; color:var(--muted); }
+.seqret-relrow { display:flex; align-items:center; gap:10px; margin-top:7px; }
+.seqret-relbar {
+  position:relative; flex:1; height:9px; min-width:80px;
+  background:#e7e3f3; border-radius:999px; overflow:hidden;
+}
+.seqret-relbar-fill {
+  position:absolute; left:0; top:0; bottom:0;
+  background:linear-gradient(90deg, #8574c0, #5a45a8); border-radius:999px;
+}
+.seqret-relval {
+  font-variant-numeric:tabular-nums; font-size:12px; font-weight:700;
+  color:var(--ink); min-width:34px; text-align:right;
+}
+.seqret-term-reason { font-size:11px; color:var(--subtle); }
+/* Per-source yield bars */
+.seqret-yields { display:flex; flex-direction:column; gap:7px; margin-bottom:14px; }
+.seqret-yield { display:flex; align-items:center; gap:10px; }
+.seqret-yield-label {
+  flex-shrink:0; width:64px; font-size:11.5px; font-weight:700; color:var(--ink);
+}
+.seqret-yield-track {
+  position:relative; flex:1; height:18px; min-width:80px;
+  background:#f0eef8; border-radius:5px; overflow:hidden;
+}
+.seqret-yield-fill {
+  position:absolute; left:0; top:0; bottom:0;
+  background:linear-gradient(90deg, #65CBF3, #0053D6); border-radius:5px;
+}
+.seqret-yield.is-empty .seqret-yield-fill { background:#d6d0e6; }
+.seqret-yield-val {
+  flex-shrink:0; font-variant-numeric:tabular-nums; font-size:12px;
+  font-weight:700; color:var(--ink);
+}
+.seqret-yield-val .muted { font-weight:400; font-size:11px; color:var(--muted); }
+.seqret-unresolved {
+  list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:5px;
+}
+.seqret-unresolved li {
+  font-size:11.5px; color:var(--muted);
+  background:#fbfafe; border:1px solid var(--line); border-radius:7px;
+  padding:6px 10px;
+}
+.seqret-unresolved b { color:var(--ink); }
 .seqret-align-head {
   font-size:11.5px; color:var(--subtle); margin:2px 0 7px;
   text-transform:uppercase; letter-spacing:0.04em; font-weight:600;
@@ -11380,6 +12158,12 @@ a.lit-title:hover { color:var(--accent); text-decoration:underline; }
   margin:6px 0 0; color:var(--muted); font-size:12px; line-height:1.5;
 }
 .qc-card.has-gauge .qc-card-explain { margin:0; }
+/* Source-tool tag on a metric card (e.g. confidence reported by Protein QC). */
+.qc-card-src {
+  display:inline; margin-left:5px; vertical-align:baseline;
+  font-size:11px; font-weight:550; color:var(--muted);
+}
+.qc-card-src::before { content:"\00b7 "; color:var(--subtle); }
 .metric-gauge { flex-shrink:0; }
 .gauge-value {
   font-family: Inter, system-ui, sans-serif;
@@ -11980,7 +12764,205 @@ code {
   .metric-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
   .conservation { margin-left:0; max-width:none; }
   .qc-card-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .console { grid-template-columns:1fr; }
+  .console-board { max-height:none; }
 }
+
+/* ---- Candidate review console ---- */
+.side-nav-divider {
+  margin:14px 0 4px; padding:0 12px;
+  font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--subtle);
+}
+.appendix-divider {
+  margin:34px 0 6px; padding:14px 4px 0; border-top:1px solid var(--line-strong);
+}
+.appendix-divider-label {
+  display:inline-block; font-size:12px; font-weight:700; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--muted);
+}
+.appendix-divider-note { margin:4px 0 0; color:var(--subtle); font-size:13px; max-width:64ch; }
+
+.console-banner {
+  margin:0 0 16px; padding:14px 16px; border-radius:12px;
+  background:#fff7ed; border:1px solid #fed7aa; color:#7c2d12;
+}
+.console-banner p { margin:4px 0 0; color:#9a3412; font-size:13px; }
+
+.console {
+  display:grid; grid-template-columns:minmax(240px, 320px) 1fr; gap:18px; align-items:start;
+}
+.console-board {
+  max-height:760px; overflow-y:auto; padding-right:2px;
+}
+/* ── Candidate result browser — a dense table/list hybrid ────────────────────
+   Shared 3-column grid (rank · candidate · score). No per-row cards, no stars,
+   no success-green: structure and a single hairline divider carry the records.
+   Accent appears only on the *selected* row (a left bar + faint tint). */
+.cand-list { --crow-grid: 34px minmax(0,1fr) auto; }
+.cand-list-head {
+  display:grid; grid-template-columns:var(--crow-grid); align-items:center;
+  gap:10px; padding:0 12px 7px; border-bottom:1px solid var(--line);
+  font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--subtle);
+}
+.cand-list-head .clh-rank { text-align:center; }
+.cand-list-head .clh-score { text-align:right; }
+.board-group { margin-top:14px; }
+.board-group:first-of-type { margin-top:10px; }
+.board-group-head {
+  display:flex; align-items:center; gap:8px; padding:4px 12px;
+}
+.board-group-title { font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); }
+.board-group-count { font-size:10.5px; font-weight:600; color:var(--subtle); }
+.board-group-count::before { content:"·"; margin-right:5px; color:var(--line-strong); }
+.board-group-cards { display:flex; flex-direction:column; }
+/* Collapsed groups (incomplete / failed / rejected) — expand on demand. */
+.board-group-collapsible > summary.board-group-head {
+  cursor:pointer; list-style:none;
+}
+.board-group-collapsible > summary.board-group-head::-webkit-details-marker { display:none; }
+.board-group-collapsible > summary.board-group-head::before {
+  content:"\25B8"; margin-right:2px; color:var(--subtle); font-size:9px;
+  transition:transform .12s ease; display:inline-block;
+}
+.board-group-collapsible[open] > summary.board-group-head::before { transform:rotate(90deg); }
+
+.crow {
+  display:grid; grid-template-columns:var(--crow-grid); align-items:center; gap:10px;
+  width:100%; text-align:left; cursor:pointer;
+  padding:8px 12px; background:transparent; border:none;
+  border-left:2px solid transparent; border-bottom:1px solid var(--line);
+  transition:background .12s;
+}
+.crow:hover { background:var(--bg); }
+.crow[aria-selected="true"] {
+  background:rgba(107,30,168,.055); border-left-color:var(--accent);
+}
+.crow-rank { text-align:center; }
+.crow-rank-num { font-size:13px; font-weight:600; color:var(--subtle); font-variant-numeric:tabular-nums; }
+.crow-rank-dash { color:var(--line-strong); }
+.crow-rank-final { font-size:14px; font-weight:700; color:var(--ink); }
+/* Main column: id line + metric/source meta line, both truncating in the
+   flexible 1fr column so a long "metric · source" can never overrun the row. */
+.crow-main { display:flex; flex-direction:column; gap:1px; min-width:0; }
+.crow-id-line { display:flex; align-items:center; gap:7px; min-width:0; }
+.crow-id {
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; font-weight:550; color:var(--ink);
+}
+.crow[aria-selected="true"] .crow-id { font-weight:650; }
+.crow-meta {
+  font-size:10.5px; color:var(--subtle);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* Final = a neutral, authoritative label (NOT a celebratory badge). */
+.crow-tag {
+  flex:0 0 auto;
+  font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--ink); background:var(--bg);
+  border:1px solid var(--line-strong); border-radius:4px; padding:1px 5px;
+}
+.crow-score {
+  justify-self:end; text-align:right; padding-left:8px;
+  font-size:13.5px; font-weight:650; color:var(--ink); font-variant-numeric:tabular-nums;
+}
+.crow-score-empty { color:var(--line-strong); font-weight:400; }
+
+.console-detail {
+  min-height:420px; border:1px solid var(--line); border-radius:14px;
+  background:var(--panel); padding:18px; overflow:hidden;
+}
+.console-empty { color:var(--subtle); font-size:14px; padding:24px 4px; }
+.cand-detail-head { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+/* Status label — a restrained outline chip; the candidate id (h3) carries the
+   emphasis. Final is authoritative (solid ink), not celebratory. */
+.cand-detail-eyebrow {
+  font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  padding:2px 8px; border-radius:5px; background:var(--bg);
+  border:1px solid var(--line-strong); color:var(--muted);
+}
+.cand-detail-head.status-final .cand-detail-eyebrow {
+  background:var(--ink); border-color:var(--ink); color:#fff;
+}
+.cand-detail-head.status-failed .cand-detail-eyebrow {
+  background:var(--poor-soft); border-color:var(--poor-line); color:#991b1b;
+}
+.cand-detail-id h3 { margin:6px 0 0; font-size:19px; font-weight:650; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--ink); }
+.cand-detail-ranknote {
+  margin:7px 0 0; font-size:12px; color:var(--muted);
+  border-left:2px solid var(--line-strong); padding:2px 0 2px 10px;
+}
+.cand-detail-ranknote strong { color:var(--ink); font-weight:650; }
+.cand-tabs {
+  display:flex; flex-wrap:wrap; gap:4px; border-bottom:1px solid var(--line); margin-bottom:14px;
+}
+.cand-tab {
+  padding:8px 13px; border:none; background:none; cursor:pointer;
+  font-size:13px; font-weight:600; color:var(--muted);
+  border-bottom:2px solid transparent; margin-bottom:-1px;
+}
+.cand-tab:hover { color:var(--ink); }
+.cand-tab.is-active { color:var(--accent); border-bottom-color:var(--accent); }
+.cand-tabpanel { display:none; }
+.cand-tabpanel.is-active { display:block; animation:fadeIn .15s ease; }
+@keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+
+/* Quality analysis tab: a compact full-width metrics strip (score bars flow
+   into as many columns as fit, so there is no ragged empty column) above the
+   full-width sequence track. The 3D render lives in its own Structure tab. */
+.cand-quality-scores { margin-bottom:18px; }
+.cand-quality-scores .score-bars {
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(360px, 1fr));
+  gap:2px 36px; margin-bottom:0;
+}
+.cand-quality-scores .score-row { margin:5px 0; }
+
+.detail-block { margin-bottom:16px; }
+.detail-block-title { margin:0 0 7px; font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); }
+.detail-note { margin:0 0 8px; font-size:12px; color:var(--subtle); }
+
+.prov {
+  font-size:9.5px; font-weight:700; letter-spacing:.03em; text-transform:uppercase;
+  padding:1px 6px; border-radius:999px; white-space:nowrap;
+}
+.prov-exact { background:#dcfce7; color:#166534; }
+.prov-derived { background:var(--accent-soft); color:var(--accent); }
+.prov-inferred { background:#fef3c7; color:#92400e; }
+.prov-not_recorded { background:#f1f1f5; color:#9ca3af; }
+
+.estep-row { display:flex; flex-wrap:wrap; gap:8px; }
+.estep {
+  display:inline-flex; align-items:center; gap:7px;
+  padding:6px 10px; border-radius:9px; background:#faf9fe; border:1px solid var(--line);
+}
+.estep-tool { font-size:12px; font-weight:700; color:var(--ink); }
+.estep-summary { font-size:11px; color:var(--muted); }
+.estep-generator { border-left:3px solid #16a34a; }
+.estep-evaluator { border-left:3px solid #6b1ea8; }
+.estep-ranker { border-left:3px solid #d97706; }
+.estep-submission { border-left:3px solid #2563eb; }
+.pipe-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.pipe-step {
+  font-size:11px; font-weight:600; color:var(--muted);
+  padding:3px 9px; border-radius:999px; background:#f3f1f9; border:1px solid var(--line);
+}
+.pipe-generator { color:#166534; background:#dcfce7; }
+.pipe-evaluator { color:var(--accent); background:var(--accent-soft); }
+
+.score-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+.score-family { border:1px solid var(--line); border-radius:11px; padding:12px 14px; background:var(--panel); }
+.score-family-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+.score-family-name { font-size:13px; font-weight:700; color:var(--ink); }
+.metric-row { display:flex; align-items:baseline; justify-content:space-between; gap:10px; padding:4px 0; border-top:1px solid var(--line); }
+.metric-row:first-child { border-top:none; }
+.metric-label { font-size:12px; color:var(--ink); display:flex; align-items:baseline; gap:5px; flex-wrap:wrap; }
+/* Provenance — restrained inline "· Tool" text naming the source model. */
+.metric-src { font-size:11px; font-weight:550; color:var(--muted); }
+.metric-src::before { content:"\00b7 "; color:var(--subtle); }
+.metric-value { font-size:13px; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; }
+.tool-evidence { margin-bottom:8px; border:1px solid var(--line); border-radius:9px; padding:8px 12px; }
+.tool-evidence summary { font-size:13px; font-weight:600; cursor:pointer; color:var(--ink); }
+.tool-evidence-json { margin:8px 0 0; font-size:11px; max-height:320px; overflow:auto; background:#faf9fe; padding:10px; border-radius:7px; }
 """
 
 
@@ -12036,17 +13018,6 @@ def _js() -> str:
       th.dataset.dir = dir === 1 ? 'asc' : 'desc';
     });
   });
-
-  // ----- Candidate filter -----
-  const filter = document.getElementById('candidate-filter');
-  if (filter) {
-    filter.addEventListener('input', () => {
-      const q = filter.value.toLowerCase();
-      document.querySelectorAll('#candidate-table tbody tr').forEach((row) => {
-        row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
-      });
-    });
-  }
 
   // ----- Copy buttons -----
   document.querySelectorAll('.copy-btn').forEach((btn) => {
@@ -12109,8 +13080,22 @@ def _js() -> str:
   let structurePayloads;
   try { structurePayloads = JSON.parse(dataEl.textContent); } catch (e) { return; }
   if (!Array.isArray(structurePayloads)) return;
+
+  // Expose an id→payload map so the candidate console can paint a viewer the
+  // moment its detail template is cloned into the live DOM. Every viewer lives
+  // inside an inert <template> until its board card is selected, so eager
+  // getElementById can't reach them — the console drives initialisation lazily.
+  const payloadMap = {};
+  for (const payload of structurePayloads) payloadMap[payload.id] = payload;
+  window.__vpaPayloadMap = payloadMap;
+
   if (typeof $3Dmol === 'undefined') {
-    // Vendor not present — degrade gracefully per spec §1 guard.
+    // Vendor not present — degrade gracefully per spec §1 guard. Surface the
+    // same notice for lazily-activated viewers so the console stays honest.
+    window.__vpaSetupViewer = function (payload) {
+      const el = payload && document.getElementById(payload.id);
+      if (el) el.innerHTML = '<div class="structure-status">3D viewer unavailable (3Dmol.js asset missing)</div>';
+    };
     for (const payload of structurePayloads) {
       const el = document.getElementById(payload.id);
       if (el) el.innerHTML = '<div class="structure-status">3D viewer unavailable (3Dmol.js asset missing)</div>';
@@ -12137,10 +13122,13 @@ def _js() -> str:
     return '#FF7D45';
   }
 
-  // Build one viewer per candidate-structure payload. Each viewer is
-  // self-contained: its container, its selection map, its style applier.
+  // Each viewer is self-contained: its container, its selection map, its style
+  // applier. Expose the initialiser so the candidate console controller can
+  // paint a viewer lazily when a detail panel is activated, then init only the
+  // viewers already present in the live DOM (templates are inert and skipped).
+  window.__vpaSetupViewer = setupViewer;
   for (const payload of structurePayloads) {
-    setupViewer(payload);
+    if (document.getElementById(payload.id)) setupViewer(payload);
   }
 
   function setupViewer(payload) {
@@ -12164,13 +13152,21 @@ def _js() -> str:
 
     // Detect whether B-factor (== pLDDT for AF/Protenix/Boltz outputs) is
     // populated. Some PDBs leave it at 0 — fall back to spectrum colouring.
-    let hasPlddt = false;
-    try {
-      const atoms = viewer.selectedAtoms({ atom: 'CA' });
-      for (const a of atoms) {
-        if (typeof a.b === 'number' && a.b > 0.01) { hasPlddt = true; break; }
-      }
-    } catch (e) { /* selectedAtoms may not be available in some versions */ }
+    // Prefer the authoritative flag computed in Python (scans the raw atom
+    // records) so the runtime gate agrees with the disabled pLDDT <option>;
+    // fall back to a live 3Dmol scan only when the flag is absent.
+    let hasPlddt;
+    if (typeof payload.has_plddt === 'boolean') {
+      hasPlddt = payload.has_plddt;
+    } else {
+      hasPlddt = false;
+      try {
+        const atoms = viewer.selectedAtoms({ atom: 'CA' });
+        for (const a of atoms) {
+          if (typeof a.b === 'number' && a.b > 0.01) { hasPlddt = true; break; }
+        }
+      } catch (e) { /* selectedAtoms may not be available in some versions */ }
+    }
 
     // Detect whether the model carries any sidechain atoms at all. Backbone-
     // only outputs (rfdiffusion scaffolds, esm3 backbone predictions, ...)
@@ -12178,24 +13174,33 @@ def _js() -> str:
     // literally nothing to draw. We disable + explain it rather than letting
     // the user click a dead control. Any non-hydrogen protein atom outside
     // the backbone set proves sidechains exist.
-    let hasSidechains = false;
-    try {
-      const BACKBONE = { N: 1, CA: 1, C: 1, O: 1, OXT: 1 };
-      const allAtoms = viewer.selectedAtoms({});
-      for (const a of allAtoms) {
-        if (a.hetflag) continue;                       // ligands / waters
-        const el = (a.elem || '').toUpperCase();
-        if (el === 'H' || el === 'D') continue;        // sticks show heavy atoms
-        const name = (a.atom || '').toUpperCase().trim();
-        if (!BACKBONE[name]) { hasSidechains = true; break; }
-      }
-    } catch (e) { /* selectedAtoms may not be available in some versions */ }
+    // Prefer the authoritative flag computed in Python (scans the raw atom
+    // records) — the browser-side 3Dmol scan below misses sidechains for some
+    // mmCIF inputs. Fall back to the runtime scan only when the flag is absent.
+    let hasSidechains;
+    if (typeof payload.has_sidechains === 'boolean') {
+      hasSidechains = payload.has_sidechains;
+    } else {
+      hasSidechains = false;
+      try {
+        const BACKBONE = { N: 1, CA: 1, C: 1, O: 1, OXT: 1 };
+        const allAtoms = viewer.selectedAtoms({});
+        for (const a of allAtoms) {
+          if (a.hetflag) continue;                       // ligands / waters
+          const el = (a.elem || '').toUpperCase();
+          if (el === 'H' || el === 'D') continue;        // sticks show heavy atoms
+          const name = (a.atom || '').toUpperCase().trim();
+          if (!BACKBONE[name]) { hasSidechains = true; break; }
+        }
+      } catch (e) { /* selectedAtoms may not be available in some versions */ }
+    }
 
-    // Honour a per-section default colour (set by the Python renderer for
-    // binder-design complexes — defaults binder/target to chain colouring so
-    // the two are visually distinct from the first paint). Falls back to the
-    // pLDDT-detection heuristic otherwise. pLDDT default is still gated on
-    // having real B-factor data so a placeholder zero column stays muted.
+    // Honour the per-section default colour set by the Python renderer
+    // (pLDDT when the artifact carries per-residue confidence, else N→C
+    // spectrum — for monomers and complexes alike; Chain stays selectable but
+    // is never the default). Falls back to the pLDDT-detection heuristic when
+    // no default is set. pLDDT is still gated on real B-factor data so a
+    // placeholder zero column stays muted.
     const sectionEarly = container.closest('.structure-section');
     const defaultColour = (sectionEarly && sectionEarly.dataset.defaultColour) || '';
     let initialColour;
@@ -12279,6 +13284,9 @@ def _js() -> str:
     state.section = section;
     state.infoPanel = infoPanel;
     state.seqStrip = seqStrip;
+    // For a binder-design complex the FASTA strip is the binder chain only.
+    // Empty string => monomer (strip applies to the single chain).
+    state.binderChain = section.getAttribute('data-binder-chain') || '';
     if (pickerBtn && infoPanel) {
       pickerBtn.addEventListener('click', () => togglePicker(state, section));
     }
@@ -12397,13 +13405,21 @@ def _js() -> str:
       resiEl.innerHTML = '<strong>' + resn + ' ' + atom.resi + '</strong>' + oneTxt;
       resiEl.classList.remove('sri-placeholder');
     }
+    // The FASTA strip belongs to the binder chain only on a complex; a
+    // residue on the target (or any non-binder chain) has no cell to map to,
+    // so we must NOT translate its resi into a binder sequence position.
+    const onSeqChain = !state.binderChain
+      || (atom.chain || '') === state.binderChain;
     if (seqEl) {
       // Align with the candidate's FASTA — atom.resi is 1-indexed in the
       // PDB. When the design's sequence is shorter than the structure
       // (e.g. an unmodelled tail) we still show the position but fall
       // back to "seq N/A" when out of range.
       const idx = (atom.resi | 0) - 1;
-      if (state.sequence && idx >= 0 && idx < state.sequence.length) {
+      if (!onSeqChain) {
+        seqEl.textContent = 'target chain — no binder seq';
+        seqEl.classList.add('sri-placeholder');
+      } else if (state.sequence && idx >= 0 && idx < state.sequence.length) {
         const ch = state.sequence.charAt(idx);
         seqEl.textContent = 'seq ' + (idx + 1) + ' (' + ch + ')';
         seqEl.classList.remove('sri-placeholder');
@@ -12412,7 +13428,7 @@ def _js() -> str:
         seqEl.classList.remove('sri-placeholder');
       }
     }
-    highlightSequenceCell(state, atom.resi);
+    highlightSequenceCell(state, onSeqChain ? atom.resi : null);
   }
 
   function highlightSequenceCell(state, resi) {
@@ -12508,6 +13524,111 @@ def _js() -> str:
       section.requestFullscreen().catch((e) => console.warn('fullscreen denied', e));
     }
   }
+})();
+
+// ----- Candidate review console (board → detail, lazy <template> panels) -----
+// Runs as its own IIFE *after* the viewer IIFE so window.__vpaSetupViewer and
+// window.__vpaPayloadMap are already populated. Selecting a board card clones
+// the matching detail <template> into the live host, wires its tab strip, and
+// paints any structure viewers it carries on demand — keeping the page light
+// (one cloned detail at a time) and the 3D viewers genuinely lazy.
+(function () {
+  const host = document.getElementById('cand-detail-host');
+  if (!host) return;
+  const cards = Array.from(document.querySelectorAll('.board-card'));
+  if (!cards.length) return;
+
+  const templates = {};
+  document.querySelectorAll('template.cand-detail-tpl').forEach((tpl) => {
+    templates[tpl.dataset.cand] = tpl;
+  });
+
+  function wireDetailTabs(root) {
+    const tabs = Array.from(root.querySelectorAll('.cand-tab'));
+    const panels = Array.from(root.querySelectorAll('.cand-tabpanel'));
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.tab;
+        tabs.forEach((t) => {
+          const on = t === tab;
+          t.classList.toggle('is-active', on);
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        panels.forEach((p) => p.classList.toggle('is-active', p.dataset.tab === target));
+      });
+    });
+  }
+
+  function paintViewers(root) {
+    const setup = window.__vpaSetupViewer;
+    if (typeof setup !== 'function') return;
+    const map = window.__vpaPayloadMap || {};
+    root.querySelectorAll('.structure-viewer').forEach((el) => {
+      const payload = map[el.id];
+      if (payload) setup(payload);
+    });
+  }
+
+  function activate(card) {
+    cards.forEach((c) => c.setAttribute('aria-selected', c === card ? 'true' : 'false'));
+    // If the selected card lives inside a collapsed status group, open that
+    // group so the highlighted selection is actually visible in the board
+    // column — otherwise the detail pane shows a card the reader can't see.
+    const group = card.closest('details.board-group-collapsible');
+    if (group && !group.open) group.open = true;
+    host.innerHTML = '';
+    const tpl = templates[card.dataset.cand];
+    if (!tpl) {
+      host.innerHTML = '<div class="console-empty">No detail recorded for this candidate.</div>';
+      return;
+    }
+    host.appendChild(tpl.content.cloneNode(true));
+    wireDetailTabs(host);
+    paintViewers(host);
+  }
+
+  cards.forEach((card) => {
+    card.addEventListener('click', () => activate(card));
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(card); }
+    });
+  });
+
+  // Auto-open the first card so the detail pane is never empty on load.
+  // Prefer a card that's already visible (in an expanded group); only fall
+  // back to a collapsed card — which ``activate`` then reveals — when every
+  // candidate is collapsed (e.g. an all-incomplete retrieval run).
+  const firstVisible = cards.find(
+    (c) => !c.closest('details.board-group-collapsible:not([open])'));
+  activate(firstVisible || cards[0]);
+})();
+
+// Per-tool section sample selector: filters every node block to one
+// candidate's result. Runs independently of the candidate console above so
+// the appendix stays self-contained (its own selector, own default).
+(function () {
+  const section = document.getElementById('details');
+  if (!section) return;
+  const toolbar = section.querySelector('.node-cand-toolbar');
+  if (!toolbar) return;  // single / no candidate sample — nothing to switch
+  const buttons = Array.prototype.slice.call(
+    toolbar.querySelectorAll('.node-cand-btn'));
+  const variants = Array.prototype.slice.call(
+    section.querySelectorAll('.node-cand-variant'));
+  function select(cid) {
+    buttons.forEach((b) => {
+      const on = b.dataset.ptCand === cid;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    variants.forEach((v) => {
+      const c = v.dataset.cand;
+      v.classList.toggle('is-active', c === cid || c === '__shared__');
+    });
+  }
+  buttons.forEach((b) => {
+    b.addEventListener('click', () => select(b.dataset.ptCand));
+  });
 })();
 """ + PLDDT_HOVER_JS
 

@@ -23,8 +23,16 @@ def test_pxdesign_emits_canonical_candidates() -> None:
     assert candidate["source"]["tool"] == "pxdesign"
     assert candidate["source"]["native_id"] == "legacy"
     assert candidate["structure_path"] == "/tmp/d.cif"
-    assert candidate["full_structure_path"] == "/tmp/d.cif"
+    assert candidate["backbone_path"] == "/tmp/d.cif"
+    assert "full_structure_path" not in candidate
+    assert candidate["capabilities"]["has_sequence"] is True
+    assert candidate["capabilities"]["has_backbone_structure"] is True
+    assert candidate["capabilities"]["has_full_structure"] is False
     assert candidate["scores"]["pxdesign"]["pipeline"] == "diffusion_af2_initial_guess_proteinmpnn"
+    assert (
+        candidate["scores"]["pxdesign"]["structure_detail"]
+        == "binder_backbone_with_target_context"
+    )
 
 
 def test_pxdesign_candidate_ids_are_deterministic() -> None:

@@ -123,6 +123,22 @@ def test_structure_identity_merges_across_path_field_names() -> None:
     assert result.candidates[0]["candidate_id"] == "cand_full_path"
 
 
+def test_structure_identity_does_not_merge_conflicting_sequences() -> None:
+    first = _candidate("cand_first", sequence="AAAA", index=0)
+    first["structure_path"] = "/tmp/model.pdb"
+    second = _candidate("cand_second", sequence="GGGG", index=1)
+    second["structure_path"] = "/tmp/model.pdb"
+
+    result = merge_candidate_records([first, second])
+
+    assert len(result.candidates) == 2
+    assert [candidate["candidate_id"] for candidate in result.candidates] == [
+        "cand_first",
+        "cand_second",
+    ]
+    assert result.audit["duplicates_removed"] == 0
+
+
 def test_private_merge_positions_are_internal_only_by_default() -> None:
     source = _candidate("cand_x", index=0)
     enriched = _candidate("cand_x", index=1)

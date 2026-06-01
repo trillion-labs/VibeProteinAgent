@@ -371,7 +371,7 @@ def test_pxdesign_defaulted_inputs_are_recorded_in_plan_metadata() -> None:
             deliverable_contract={
                 "version": "deliverable_contract_v1",
                 "answer_type": "candidate_submission",
-                "required_candidate_capabilities": ["has_sequence", "has_full_structure"],
+                "required_candidate_capabilities": ["has_sequence", "has_backbone_structure"],
                 "terminal_submission_allowed": True,
             },
         )
@@ -397,6 +397,20 @@ def test_pxdesign_defaulted_inputs_are_recorded_in_plan_metadata() -> None:
         },
     ]
     assert plan["metadata"]["deliverable_contract"]["answer_type"] == "candidate_submission"
+    planner_prompt = json.loads(provider.messages[1][1].content)
+    pxdesign_schema = next(
+        tool for tool in planner_prompt["tool_catalog"]
+        if tool["name"] == "pxdesign"
+    )
+    assert pxdesign_schema["candidate_contract"]["produces"] == [
+        "has_backbone_structure",
+        "has_candidate_scores",
+        "has_sequence",
+    ]
+    profile = pxdesign_schema["candidate_capability_profiles"][0]
+    assert "has_full_structure" in profile["consumes"]
+    assert "has_full_structure" not in profile["produces"]
+    assert "binder backbone coordinates" in profile["description"]
 
 
 def test_pxdesign_known_inputs_take_precedence_over_defaults() -> None:

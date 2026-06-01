@@ -165,6 +165,46 @@ def test_sequence_representative_sequences_are_candidate_pool() -> None:
     assert _first_submit_candidate_ref(summary) is not None
 
 
+def test_canonical_candidates_take_precedence_over_representative_sequences() -> None:
+    summary = {
+        "nodes": [
+            {
+                "node_id": "analyze",
+                "tool": "sequence_analysis",
+                "state": "completed",
+                "job_id": "job_seq",
+                "output": {
+                    "candidates": [
+                        {
+                            "schema_version": "candidate_v1",
+                            "candidate_id": "cand_scored",
+                            "source": {
+                                "tool": "sequence_analysis",
+                                "local_id": "representative_0000",
+                            },
+                            "sequence": "ACDEFGHIK",
+                            "scores": {"sequence_analysis": {"pI": 6.74}},
+                        }
+                    ],
+                    "representative_sequences": [
+                        {
+                            "candidate_id": "representative:1:abc",
+                            "sequence": "ACDEFGHIK",
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+    items = _candidate_pool_items_from_summary(summary)
+    ref = _first_submit_candidate_ref(summary)
+
+    assert [item["candidate"]["candidate_id"] for item in items] == ["cand_scored"]
+    assert ref is not None
+    assert ref["candidate_id"] == "cand_scored"
+
+
 def test_legacy_candidate_materialization_drops_non_schema_metadata() -> None:
     summary = {
         "nodes": [

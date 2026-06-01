@@ -30,7 +30,6 @@ profiles:
       - bindcraft
       - boltz2_affinity
       - boltzgen
-      - dssp
       - esm2
       - esm3
       - foldseek
@@ -145,16 +144,6 @@ tools:
         source_path: "/opt/vpa-data/boltzgen_cache"
         required: false
     disk_bytes: 50000000000
-  dssp:
-    runtime: external_binary
-    required: false
-    binary: mkdssp
-    weights:
-      - name: dssp_binary
-        path: "envs/vpa/bin/mkdssp"
-        artifact_ref: "external_binaries/mkdssp"
-        source_path: "vendor/bindcraft/functions/dssp"
-        required: true
   esm2:
     runtime: shared
     required: false

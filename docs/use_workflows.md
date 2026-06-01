@@ -1,35 +1,42 @@
-# Use A Workflow
+# Use YAML Workflows
 
-Use this path when you want VPA to run several tools in order, pass outputs between them, and produce one workflow record.
+Use a workflow when outputs from one tool should feed later tools automatically.
+A workflow creates one durable workflow record, submits the node jobs in order,
+tracks cache keys, and lets you report the full run.
 
 Demo notebook: [`demo/use_workflows_demo.ipynb`](../demo/use_workflows_demo.ipynb)
-builds a generation-to-ranking workflow with RFdiffusion, ProteinMPNN,
-Protenix-v2, structure analysis, protein QC, and ranking.
-It is smoke-safe by default: it validates GPU/CLI access and prints the heavy
-workflow command unless you set `VPA_DEMO_RUN_HEAVY=1`.
+writes and runs the lightweight workflow below.
 
-## 1. Write A Simple Workflow YAML
+## 1. Start Workers
 
-A workflow YAML has two main parts:
+This guide uses CPU-safe tools:
 
-- `params`: values you provide when you run the workflow.
-- `nodes`: tool steps VPA runs in order.
+```bash
+vpa daemon start --cpu-workers 1 --workspace workflow_demo
+```
 
-Inside a node, use `${params.name}` to read a workflow parameter, and
-`${outputs.step_id.field}` to use a result from an earlier step.
-For expensive candidate generators, prefer `foreach` fan-out over one large
-single-GPU node. Add `max_parallel` to cap active shards so the plan matches
-your GPU budget.
+For mixed GPU/CPU design workflows, start both:
 
-Example `my_sequence_workflow.yaml`:
+```bash
+vpa daemon start --workers 1 --cpu-workers 2 --workspace design_round
+```
+
+## 2. Write A Minimal Workflow
+
+Save this as `sequence_triage.yaml`:
 
 ```yaml
-name: my_sequence_workflow
-description: "Mutate a sequence, then analyze the mutated result."
+name: sequence_triage
+version: "1.0.0"
+description: "Mutate a sequence, analyze the mutant, run QC, and rank it."
 
 params:
-  sequence: {type: str, required: true}
-  mapping: {type: dict, required: true}
+  sequence:
+    type: str
+    required: true
+  mapping:
+    type: dict
+    default: {"3": "A"}
 
 nodes:
   - id: mutate
@@ -38,115 +45,112 @@ nodes:
       operation: mutate_residues
       sequence: ${params.sequence}
       mapping: ${params.mapping}
-      output_name: repaired
+      output_name: demo_mutant
     cache: true
 
-  - id: analyze_mutant
+  - id: analyze
     tool: sequence_analysis
     inputs:
       sequence: ${outputs.mutate.mutant_sequence}
     cache: true
+
+  - id: qc
+    tool: protein_qc
+    inputs:
+      sequence: ${outputs.mutate.mutant_sequence}
+      metrics: ["gravy", "instability_index", "pi", "polybasic"]
+    cache: true
+
+  - id: rank
+    tool: rank_designs
+    inputs:
+      candidates: ${outputs.qc.candidates}
+      qc_results: ${outputs.qc}
+      top_k: 1
+      output_prefix: sequence_triage_ranked
+    cache: true
 ```
 
-Run it like this:
+Workflow basics:
+
+- `params` declares user-supplied values.
+- `${params.sequence}` reads a workflow parameter.
+- `${outputs.mutate.mutant_sequence}` reads a field from an earlier node.
+- `cache: true` lets VPA reuse matching node outputs in the same environment.
+- `rank_designs` can consume canonical candidates emitted by upstream tools.
+
+## 3. Inspect And Run
 
 ```bash
-vpa workflow run my_sequence_workflow.yaml \
-  --workspace design_round \
+vpa workflow inspect sequence_triage.yaml
+
+vpa workflow run sequence_triage.yaml \
+  --workspace workflow_demo \
   --param sequence=ACDEFGHIKLMNPQRSTVWY \
-  --param mapping='{"3":"A"}' \
+  --param mapping='{"3":"A","9":"Q"}' \
   --follow
 ```
 
-Use `vpa tool <tool_name>` to see which input fields each tool accepts.
-Shardable heavy tools advertise planner metadata in `vpa tool <tool_name>`:
-`shardable_fields`, `recommended_shard_size`, and `default_max_parallel`.
+The command prints a `workflow_id` and each node state. If the daemon is not
+running, VPA records the workflow but cannot execute the nodes.
 
-Cf. You do not need to write `version` in a simple workflow; VPA uses the installed
-tool version by default. Add a version only when you intentionally want to pin a
-specific tool range.
-
-## 2. Install The Tools Used By The Workflow
-
-For full workflow capability:
+## 4. Monitor, Resume, And Report
 
 ```bash
-# `--yes` skips confirmation prompts and starts the install right away.
-npx vibeproteinagent install preflight --profile full --cuda-profile auto
-npx vibeproteinagent install --profile full --cuda-profile auto --yes
+vpa workflow status <workflow_id> --workspace workflow_demo
+
+vpa workflow run sequence_triage.yaml \
+  --workspace workflow_demo \
+  --resume <workflow_id> \
+  --max-wait-s 3600
+
+vpa report <workflow_id> \
+  --workspace workflow_demo \
+  --out workflow_report.html \
+  --open
 ```
 
-`--profile full` includes ESM3. If the open ESM3 cache is not already present,
-or if you plan to use gated Hugging Face variants, export a credential first:
+Use `--params-file params.yaml` when parameters are easier to maintain in a
+file:
 
-```bash
-export HF_TOKEN=<huggingface-access-token>
+```yaml
+sequence: ACDEFGHIKLMNPQRSTVWY
+mapping:
+  "3": A
+  "9": Q
 ```
 
-Or install only the tools you need:
-
 ```bash
-npx vibeproteinagent install preflight --tools rfdiffusion,proteinmpnn,protenix_v2,structure_analysis,protein_qc,rank_designs --cuda-profile auto
-npx vibeproteinagent install --tools rfdiffusion,proteinmpnn,protenix_v2,structure_analysis,protein_qc,rank_designs --cuda-profile auto --yes
+vpa workflow run sequence_triage.yaml \
+  --workspace workflow_demo \
+  --params-file params.yaml \
+  --follow
 ```
 
-## 3. Create A Workspace And Start Workers
+## Optional Heavy Design Pattern
 
-A workspace keeps related jobs, logs, artifacts, and reports together. Use the
-same workspace name for commands that belong to the same run. Starting the daemon
-creates the workspace if needed and launches local workers that execute queued
-tool jobs.
+A heavier de novo or binder workflow follows the same shape:
+
+```text
+rfdiffusion or pxdesign
+-> proteinmpnn or ligandmpnn
+-> protenix_v2 or boltz2_affinity
+-> protein_qc and structure_analysis
+-> rank_designs
+-> report
+```
+
+PXDesign already assigns binder sequence and emits binder backbone coordinates.
+Add a structure-prediction/refinement step such as `protenix_v2` when the final
+deliverable needs full-atom binder sidechain coordinates.
+
+Before running heavyweight workflows:
 
 ```bash
+vpa install doctor --tools rfdiffusion,proteinmpnn,protenix_v2,protein_qc,rank_designs
 vpa daemon start --workers 1 --cpu-workers 2 --workspace design_round
-vpa daemon status --workspace design_round
 ```
 
-`--workers` counts GPU workers. `--cpu-workers` adds separate CPU-only workers
-for retrieval, sequence analysis, QC, and other jobs that do not need a GPU.
-GPU-heavy tools stay single-GPU per job by default; use workflow `foreach`
-with `max_parallel` to fan out independent seed/candidate shards across GPU
-workers.
-
-## 4. See Available Workflows
-
-```bash
-vpa workflow list
-vpa workflow inspect my_sequence_workflow.yaml
-```
-
-## 5. Run A Workflow
-
-Run with inline parameters:
-
-```bash
-vpa workflow run my_sequence_workflow.yaml \
-  --workspace design_round \
-  --param sequence=ACDEFGHIKLMNPQRSTVWY \
-  --follow
-```
-
-Run with a YAML params file:
-
-```bash
-# Wait up to 7200 seconds (2 hours) for the workflow to finish before the CLI gives up waiting.
-vpa workflow run my_sequence_workflow.yaml \
-  --workspace design_round \
-  --params-file workflow_params.yaml \
-  --max-wait-s 7200 
-```
-
-## 6. Monitor And Share Results
-
-```bash
-vpa workflow status <workflow_id> --workspace design_round
-vpa report <workflow_id> --workspace design_round --out report.html --open
-```
-
-If a run is interrupted, resume it:
-
-```bash
-vpa workflow run my_sequence_workflow.yaml \
-  --workspace design_round \
-  --resume <workflow_id>
-```
+For broad candidate generation, prefer workflow fan-out with `foreach` and
+`max_parallel` so independent seeds/candidates use your GPU budget explicitly.
+User-authored YAML is executed as written; VPA does not silently rewrite it.

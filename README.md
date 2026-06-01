@@ -4,542 +4,365 @@
 [![Use: Non-commercial](https://img.shields.io/badge/use-non--commercial-cc0980.svg)](#license)
 [![Python: 3.11+](https://img.shields.io/badge/python-3.11%2B-1a1535.svg)](pyproject.toml)
 
-**VibeProteinAgent (VPA)** is a non-commercial, local-first protein design framework that lets
-you run individual tools, reusable workflows, or an LLM agent that chooses tools
-for you. It is built for GPU-backed deep-learning protein design, structure
-prediction, sequence/structure search, literature evidence gathering,
-GO/InterPro-based sequence retrieval, QC, ranking, visualization, and
+**VibeProteinAgent (VPA)** is a local-first, GPU-ready protein design
+framework. It gives researchers one command surface for protein design tools,
+workflow orchestration, LLM-assisted planning, artifact tracking, and
 human-readable reports.
 
-<!-- ![VibeProteinAgent hero](assets/readme/vpa-hero.png) -->
 ![VPA report snapshot](assets/readme/vpa-report-snapshot.svg)
 
-## Agent Training Research Report
-
-This checkout includes a self-contained research report on budget-aware LLM
-agent training and protein/scientific-agent design:
-
-- [`agent_training_report.html`](agent_training_report.html) is the full report.
-- [`sources.md`](sources.md) lists papers, repositories, documentation, and local
-  files used while preparing it.
-
-Open the report directly in a browser:
-
-```bash
-xdg-open agent_training_report.html
-```
-
-> [!IMPORTANT]
-> **Non-commercial use only.** VibeProteinAgent is licensed under the
-> [PolyForm Noncommercial License 1.0.0](LICENSE) — free for academic research,
-> education, personal projects, and other non-commercial purposes. Commercial
-> use (paid services that wrap VPA, internal use at a for-profit company beyond
-> evaluation, or redistribution as part of a commercial product) requires a
-> separate license; please [open an issue](../../issues) to inquire. Third-party
-> tools and model weights bundled by `vpa install` keep their own licenses —
-> see [`vendor/*/LICENSE`](vendor/) and `vendor/*/UPSTREAM.md` before
-> redistributing or running them.
+VPA is built for practical design rounds: generate or retrieve candidates,
+score and filter them, keep every intermediate artifact in a durable workspace,
+then produce a report that another scientist can inspect.
 
 ## Why Use VPA?
 
-- **One interface for many protein tools:** generation, inverse folding,
-  structure prediction, retrieval, QC, scoring, docking, visualization, and
-  reporting all run through `vpa`.
-- **Free local runs when you have GPUs:** run local open-source tools on your
-  own GPU without per-job API fees or required paid model subscriptions.
-- **Use it your way:** call one tool directly, chain tools in a workflow, or let
-  an LLM agent plan tool use from a natural-language request.
-- **Not locked to one LLM:** agent mode supports multiple providers, including
-  Codex, Claude Code, and OpenRouter models, so teams can choose the planner
-  that fits their account, policy, and task.
-- **Local-first execution:** jobs, artifacts, cache metadata, and reports live in
-  your workspace instead of disappearing into a remote black box.
-- **Heavy-tool friendly:** persistent workers and sidecars are designed for
-  model-backed tools that are expensive to cold-start.
-- **Built for throughput:** seed/candidate sharding, `max_parallel`, and
-  separate CPU/GPU workers keep broad design rounds moving without forcing
-  fragile multi-GPU model internals.
+- **One interface for many tools.** Run protein design, structure prediction, analysis, docking, and sequence retrieval from
+  the same `vpa` CLI.
+- **Free, local-first execution.** Workspaces, logs, candidate records, artifacts,
+  caches, and reports stay on your machine or cluster storage. You can run VPA
+  for free without a separate model API subscription.
+- **Heavy-tool friendly.** Persistent workers and sidecars reduce cold starts
+  for GPU-backed protein models.
+- **Run tools and get structured reports.** VPA executes the underlying protein
+  tools, tracks the resulting artifacts, and turns completed runs into
+  inspection-ready HTML reports.
+- **Provider-flexible.** Agent mode can use Codex, Claude Code, or OpenRouter
+  without changing the underlying VPA runtime.
 
-## How VPA Works
+> [!IMPORTANT]
+> **Non-commercial use only.** VPA first-party code is licensed under the
+> [PolyForm Noncommercial License 1.0.0](LICENSE). Third-party tools, model
+> weights, sidecars, and vendored or pointer-vendored upstream components keep
+> their own licenses and terms. Review [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
+> and the relevant `vendor/*/LICENSE` / `vendor/*/UPSTREAM.md` files before
+> redistribution or production use.
 
-VPA gives every run a durable workspace. The CLI submits jobs, workflows, or
-agent plans into that workspace; warm workers execute tools; artifacts and cache
-keys are recorded; reports turn the result into something humans can inspect.
+## Install
 
-![VPA framework overview](assets/readme/vpa-framework.svg)
-
-| Layer | What it does |
-|---|---|
-| `vpa run` | Run one tool directly with explicit parameters. |
-| `vpa workflow run` | Connect several tools with a YAML workflow. |
-| `vpa agent run` | Let an LLM planner select tools/workflows from the public tool surface. |
-| Workspace | Stores jobs, logs, artifacts, workflow state, cache metadata, and reports. |
-| Workers | Persistent local processes that run tools from the shared VPA env or sidecars. |
-| Reports | Read-only HTML output with summaries, structures, plots, QC, MSA context, and replay metadata. |
-
-## Installation
-
-For most users, the native npm/npx installer is the only setup step you need.
-It creates `~/.vibeproteinagent` by default and installs the VPA conda env,
-sidecar tools, command-line binaries, model weights, and caches under that one
-directory. After this install, all auto-installable tools are available from the
-host without Docker. ESM3 also installs when `HF_TOKEN` is exported; without
-that credential, ESM3 is reported as needing a credential while the rest of the
-full profile can still become ready.
-
-Use `VPA_HOME=/path/to/root` if you want a different install location. On a
-multi-node cluster, put `VPA_HOME` on shared storage before installing, for
-example `export VPA_HOME=/shared/projects/vpa/.vibeproteinagent`, so every node
-reuses the same envs, sidecars, workspaces, and checkpoint/cache directories.
-
-### Recommended Native Install
+The simplest setup is a full native install. It creates one VPA root,
+`~/.vibeproteinagent` by default, with the Python environment, sidecars, tool
+checkouts, model caches, workspaces, and `env.sh`. On a cluster, set
+`VPA_HOME` to shared storage before installing.
 
 ```bash
-# Optional for ESM3 or other gated Hugging Face downloads.
+export VPA_HOME="$HOME/.vibeproteinagent"
+
+# Optional: needed for gated Hugging Face downloads such as ESM3.
 export HF_TOKEN=<huggingface-access-token>
 
-# Optional; only needed when running `vpa agent ... --provider openrouter`.
-export OPENROUTER_API_KEY=<openrouter-api-key>
-
-# Check the host GPU/driver/toolkit contract before a heavy install.
-npx vibeproteinagent install preflight --profile full --cuda-profile auto --json
-
-# Install every auto-installable VPA tool into VPA_HOME.
 npx vibeproteinagent install --profile full --cuda-profile auto --yes
-
-# Load the installed CLI, binaries, sidecars, and model paths into this shell.
-source "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh"
-
-# Confirm that the installed tools are ready.
+source "$VPA_HOME/env.sh"
 vpa install doctor --profile full
 ```
 
-Use a smaller install when you do not need every heavy model immediately:
+Docker is optional. Use it when you want the same CUDA runtime everywhere or the
+host Python/CUDA stack is fragile. The large install still lives in the mounted
+`VPA_HOME`.
 
 ```bash
-# Agent mode without forcing every heavyweight model install.
-npx vibeproteinagent install --profile agent --yes
-
-# Select only the heavyweight tools you need.
-npx vibeproteinagent install --tools rfdiffusion,proteinmpnn,protenix_v2 --cuda-profile auto --yes
-
-# Preview selected tools, disk estimate, and install steps first.
-npx vibeproteinagent install --profile full --dry-run --json
-```
-
-### Optional Docker Runtime
-
-Docker is optional. You do not need Docker to use all VPA tools if the native
-install succeeds. Use Docker when the host Python/CUDA setup is fragile, when a
-cluster has different software on different nodes, or when you want the same
-CUDA 12.8 runtime everywhere. The Docker image contains the VPA runtime
-environment. The large tool installs and model weights stay in the mounted
-`VPA_HOME`, so Docker does not duplicate the full install inside the image.
-
-If you already ran the native install, validate that the same `VPA_HOME` works
-from the Docker runtime:
-
-```bash
-export VPA_HOME="${VPA_HOME:-$HOME/.vibeproteinagent}"
-npx vibeproteinagent install --docker --profile full --cuda-profile auto --json
-```
-
-If the host runtime is too messy but Docker is available, build the CUDA image
-and run the installer inside the container while mounting `VPA_HOME` from the
-host. This still writes the full install to the host directory you mounted.
-
-```bash
-export VPA_HOME="${VPA_HOME:-$HOME/.vibeproteinagent}"
+export VPA_HOME="$HOME/.vibeproteinagent"
 
 docker build -f containers/Dockerfile.cu128 -t vibeproteinagent:cu128 .
 
 docker run --rm --gpus all \
   -e VPA_HOME=/vpa \
   -e HF_TOKEN \
-  -v "$VPA_HOME:/vpa" \
+  -v "${VPA_HOME:-$HOME/.vibeproteinagent}:/vpa" \
   vibeproteinagent:cu128 \
   vpa install --profile full --cuda-profile cu128 --yes
 
 docker run --rm --gpus all \
   -e VPA_HOME=/vpa \
-  -e HF_TOKEN \
-  -v "$VPA_HOME:/vpa" \
+  -v "${VPA_HOME:-$HOME/.vibeproteinagent}:/vpa" \
   vibeproteinagent:cu128 \
   vpa install doctor --profile full
 ```
 
-### Expected Install Time
+See [`containers/README.md`](containers/README.md) for container-specific
+notes.
 
-With the prebuilt artifact path, a first clean `--profile full` install usually
-takes about 45-60 minutes on a fast GPU workstation or shared cluster filesystem.
-The latest full validation run took about 41 minutes for install, 44 minutes
-including `vpa install doctor`, and about 50 minutes including representative
-smoke tests. Slow disks, congested shared storage, or downloading artifacts over
-a slow WAN can take longer. Re-running install on an already prepared
-`VPA_HOME` is much faster and should normally take only a few minutes.
+## Quick Start
 
-The Docker path is separate from the native tool install. The CUDA Docker image
-contains the VPA runtime environment, while large sidecars, tools, and model
-weights live in the mounted `VPA_HOME`. Once the image is available, Docker
-doctor validation usually takes about 3 minutes; first-time Docker use also
-needs time to pull or build the roughly 6 GB CUDA image.
+VPA's primary workflow is an LLM-agent-driven, end-to-end protein design run.
+The repository-level instructions in [`skills.md`](skills.md) and
+[`docs/agent_workflows/`](docs/agent_workflows/) tell Codex, Claude Code, and
+other coding agents how to turn a design request into canonical VPA planning,
+execution, ranking, submission, and report generation.
 
-### Install Footprint
-
-These are practical planning numbers. Run `--dry-run --json` on your machine
-before a large install.
-
-| Install choice | What it includes | Approximate footprint |
-|---|---|---:|
-| `--profile base` | Core VPA runtime + lightweight analysis/QC/ranking tools | conda env only; no large model weights selected |
-| `--profile agent` | `base` + retrieval/template tools for LLM planning; provider credentials are only needed at runtime | conda env only; no large model weights selected |
-| `--tools rfdiffusion,proteinmpnn,protenix_v2` | Backbone generation + sequence design + structure prediction | ~10.1 GB tool artifacts, plus env/cache |
-| `--tools boltz2_affinity,rfdiffusion,proteinmpnn` | Affinity prediction + RFdiffusion + ProteinMPNN | ~14.1 GB tool artifacts, plus env/cache |
-| `--profile full` | All first-class tools, sidecars, and checkpoints that can be installed on the host; credential-gated tools become ready when credentials/cache are available | ~240 GB tool artifacts, plus env/cache |
-
-If you already have validated sidecar environments, pass
-`--use-prebuilt-sidecars` and export the matching path, for example
-`VPA_BINDCRAFT_ENV_PATH`, `VPA_PROTEINA_COMPLEXA_VENV`,
-`VPA_PXDESIGN_PIPELINE_ENV`, or `VPA_RFDIFFUSION3_ENV`. VPA will link/reuse
-those envs instead of resolving a fresh fragile sidecar when possible.
-
-Boltz-2 affinity and BoltzGen are not vendored into this repository. When
-selected, `vpa install` fetches their source checkouts into
-`$VPA_HOME/sidecars/` and their public checkpoint/cache artifacts into
-`$VPA_HOME/cache/`, then writes the matching `VPA_BOLTZ_*` and
-`VPA_BOLTZGEN_*` exports into `$VPA_HOME/env.sh`.
-
-### Credentials
-
-VPA never needs you to store credential values in the repository. Export them in
-your shell or CI secret store only when the selected install/run path needs
-them:
+Start workers for the design workspace, then ask the agent for a full binder
+round:
 
 ```bash
-# ESM3 first-run downloads or gated Hugging Face model variants.
-export HF_TOKEN=<huggingface-access-token>
+# One GPU worker and 2 CPU workers.
+vpa daemon start --workers 1 --cpu-workers 2 --workspace binder_round
 
-# OpenRouter-backed agent planning.
-export OPENROUTER_API_KEY=<openrouter-api-key>
+# Execute the end-to-end run.
+vpa agent run \
+  "Design 50-80 aa soluble mini-protein binders to chain A of target.pdb. Avoid cysteines and long polybasic patches. Return the top 5 designs with structures, QC, ranking, and a report." \
+  --provider codex \
+  --model gpt-5.2 \
+  --target target.pdb \
+  --workspace binder_round \
+  --max-rounds 8 \
+  --max-entries 3 \
+  --max-wait-s 7200
+
+# Inspect the agent run.
+vpa agent runs --workspace binder_round
+vpa agent show <agent_run_id> --workspace binder_round
+# Render the workflow report.
+vpa report <workflow_id> --workspace binder_round --out binder_round_report.html --open
 ```
 
-`VPA_HF_CREDENTIAL` and `VPA_OPENROUTER_CREDENTIAL` are also accepted aliases.
-`--profile agent` installs without an OpenRouter key because the default agent
-provider is the local Codex CLI. `--profile full` includes ESM3; it can install
-without a Hugging Face credential if the open ESM3 cache is already present, but
-first-run downloads or gated variants may require `HF_TOKEN` plus accepted model
-terms on Hugging Face.
-
-### Tool License Notices
-
-`vpa install` separates install availability from upstream usage terms. A tool
-can install without requiring a credential while still carrying a usage notice.
-For example, PyRosetta is installed directly from the current PyRosetta package
-channel without a VPA license key, but the upstream PyRosetta site states that
-commercial use requires a separate license. VPA itself remains non-commercial;
-the installer prints tool-specific license notices when they apply.
-
-### GPU Requirements
-
-GPU memory depends on the selected model, input size, and sampling settings.
-VPA's tested GPU stack currently targets CUDA 12.8-era packages, including
-PyTorch 2.7.1+cu128 and CUDA 12.x sidecar dependencies. We recommend NVIDIA
-driver 570+ on Linux for CUDA 12.8 workflows.
-
-`--cuda-profile auto` is the default. It selects the primary `cu128` stack on
-compatible hosts and can fall back to `cu126` for older CUDA 12.6-era drivers.
-Use `--cuda-profile cpu` only for base/agent/lightweight checks; GPU-heavy tools
-will not become fully ready under the CPU profile.
-
-VPA is primarily validated on NVIDIA B200 GPUs. H100/H200, RTX 4090, and
-RTX 3090 are CUDA 12.8-capable, and most cu128 sidecars should install on them
-when a recent driver is present. Workflow success still depends on VRAM and on
-whether CUDA-compiling tools can find a matching nvcc/CUDA toolkit. H100/H200
-class GPUs are expected to work for most workflows; older or smaller GPUs such
-as RTX 3090 can run many tools, especially base/agent tools and smaller model
-settings, but heavyweight workflows may require reduced lengths, batch sizes,
-diffusion steps, or samples. Proteina-Complexa and RFdiffusion/RFpeptides are
-more environment-sensitive because they combine PyTorch/JAX/PyG/DGL/tmol/
-PyRosetta-style dependencies.
-
-Before installation, run `vpa install preflight --profile full --cuda-profile
-auto`. After installation, run `vpa install doctor` and a small smoke job for
-the tools you plan to use.
-
-If host dependency resolution is fragile, use the Docker commands in
-[Optional Docker Runtime](#optional-docker-runtime). See
-[`containers/README.md`](containers/README.md) for additional container notes.
-
-## Start
+For Claude Code or OpenRouter, switch only the provider/model:
 
 ```bash
-# Check the installed runtime and tool readiness.
-vpa version
-vpa install doctor --tools rfdiffusion,proteinmpnn,protenix_v2
+vpa agent run "Design 50-80 aa binders to chain A of target.pdb, avoid cysteines, and report the top 5." \
+  --provider claude-code --model sonnet --target target.pdb --workspace binder_round --plan-only
 
-# Create a workspace and start one GPU worker.
-vpa workspace create my_run
-vpa daemon start --workers 1 --workspace my_run
-
-# Run one direct tool job.
-vpa run proteinmpnn \
-  pdb_path=tests/fixtures/6MRR.pdb \
-  num_designs=2 \
-  seed=17 \
-  --workspace my_run \
-  --follow
-
-# Inspect the job output.
-vpa status <job_id> --workspace my_run
-vpa results <job_id> --workspace my_run
-vpa artifacts <job_id> --workspace my_run
+vpa agent run "Design 50-80 aa binders to chain A of target.pdb, avoid cysteines, and report the top 5." \
+  --provider openrouter --model openai/gpt-5.1 --target target.pdb --workspace binder_round --plan-only
 ```
 
-`--workers` is the GPU worker count. Add `--cpu-workers M` when workflows have
-CPU-only analysis or retrieval nodes that should not occupy GPU workers. Heavy
-models remain single-GPU per job by default; VPA accelerates broad design
-rounds by sharding independent seed/candidate jobs across workers.
+If you are driving VPA from Codex or Claude Code directly, give the assistant
+the same request in this repository. `AGENTS.md` points protein workflow tasks
+to `skills.md`, which in turn routes executable design/ranking/reporting work
+through the VPA operating protocol.
+
+For a lightweight CPU-only sanity check before launching model-backed design,
+see [`docs/use_tools.md`](docs/use_tools.md).
+
+## High-Level Structure
+
+VPA gives every run a durable workspace. The CLI submits tool jobs, workflows,
+or agent plans into that workspace; workers execute jobs; artifacts and cache
+metadata are recorded; reports turn stored results into inspectable HTML.
+
+![VPA framework overview](assets/readme/vpa-framework.svg)
+
+| Layer | Role |
+|---|---|
+| `vpa run` | Submit one explicit tool job with typed parameters. |
+| `vpa workflow run` | Execute a YAML graph that wires tool outputs into later tool inputs. |
+| `vpa agent run` | Ask an LLM provider to plan, validate, execute, and decide from the VPA tool surface. |
+| Workspace | Durable jobs, workflow state, logs, artifacts, candidate archives, and reports. |
+| Workers | Local persistent CPU/GPU processes that run adapters and sidecars. |
+| Reports | Read-only HTML or bundle output for review, sharing, and replay. |
 
 ## Tools
 
-Check your local tool surface at any time:
+List the tool surface available in your install:
 
 ```bash
 vpa tools
 vpa tools --json
-vpa tool info rfdiffusion
-vpa install doctor --tools rfdiffusion,proteinmpnn,protenix_v2
+vpa tool info proteinmpnn
+vpa tool info protenix_v2 --json
 ```
 
-VPA can also discover custom tools. Add a drop-in adapter under
-`~/.vibeproteinagent/tools/<tool>/`, or ship one from a Python package through
-the `vibeproteinagent.tools` entry point, and it can appear in the same `vpa
-tools` surface. If there is a tool you would like VPA to support, please open a
-GitHub issue with the request, or a PR if you already have an adapter. I will
-add requested tools as time allows.
+Common public tools include:
 
-| Tool | Category | Use |
-|---|---|---|
-| `rfdiffusion` | protein design | RFdiffusion backbone generation: unconditional, motif, partial diffusion, binder, fold-conditioned, and symmetric designs. |
-| `proteinmpnn` | inverse folding | Fast sequence design for fixed protein backbones, often used after backbone generation. |
-| `protenix_v2` | structure prediction | AlphaFold3-like protein/complex structure prediction for refolding and candidate validation. |
-| `boltz2_affinity` | structure prediction | Boltz-2 structure prediction plus calibrated binding affinity for protein-ligand or complex assessment. |
-| `bindcraft` | protein design | AF2-backprop binder trajectory generation with ProteinMPNN redesign and emitted scores when available. |
-| `boltzgen` | protein design | Binder generation pipeline with diffusion, inverse folding, refolding, and analysis. |
-| `proteina_complexa` | protein design | Unified Proteina-Complexa modes for protein binders, ligand binders, and motif scaffolding; VPA runs generate + evaluate. |
-| `pxdesign` | protein design | Target-conditioned binder design using diffusion, AF2 initial guess, and ProteinMPNN sequence generation. |
-| `rfdiffusion3` | protein design | RFdiffusion3 binder backbone generation for modern de novo and target-conditioned design runs. |
-| `rfpeptides` | protein design | RFdiffusion-based macrocyclic peptide backbone generation for constrained peptide binders. |
-| `esm3` | embedding/design | ESM3 sequence/structure co-generation, embeddings, and functional keyword conditioning. |
-| `esm2` | protein design | Protein language model that supports unconditional and masked partial-sequence generation and representation extraction. |
-| `ligandmpnn` | inverse folding | Ligand-aware sequence design over fixed backbones while considering nearby small molecules. |
-| `rank_designs` | analysis | Deterministic ranking of candidates from prediction metrics, structure analysis, and QC flags. |
-| `submit_candidate` | analysis | Explicit final-submission tool for agent workflows to select final candidates or report that no acceptable candidate was found. |
-| `sequence_analysis` | analysis | CPU sequence metrics, residue annotations, composition, charge, and simple liabilities. |
-| `structure_analysis` | analysis | Local structure checks for contacts, exposure, residue environment, and mutation liabilities. |
-| `protein_qc` | scoring/QC | pLDDT, GRAVY, instability, pI, and sequence/structure quality control (QC) flags. |
-| `ipsae` | scoring | Interface-confidence re-scoring from structure prediction outputs; useful as an in silico binder-design filter. |
-| `prodigy` | scoring | Structure-based protein-protein binding affinity and interface assessment. |
-| `pxmeter` | scoring | Structural accuracy assessment with metrics such as lDDT and DockQ for predicted designs. |
-| `pyrosetta` | scoring | Energy scoring, interface metrics, relaxation, and packing for structure-level triage. |
-| `tmalign` | scoring | Pairwise protein structure alignment with TM-score style similarity comparison. |
-| `vina` | docking | AutoDock Vina molecular docking for small-molecule pose and affinity-style screening. |
-| `dssp` | structure annotation | Secondary-structure assignment and backbone annotation from PDB/mmCIF structures. |
-| `foldseek` | search | Fast structural similarity search against local structure databases. |
-| `mmseqs2_gpu` | search | GPU-accelerated sequence similarity search for large FASTA/database queries. |
-| `template_select` | retrieval | Local FASTA template selection for choosing sequence templates before design or prediction. |
-| `literature_search` | retrieval | Europe PMC literature search that creates lightweight evidence artifacts for design context. |
-| `interpro_sequences` | retrieval | UniProt sequence retrieval for InterPro accessions or domain-family driven searches. |
-| `go_sequences` | retrieval | UniProt sequence retrieval for GO terms, useful for function-guided sequence collection. |
-| `sequence_edit` | sequence engineering | Deterministic residue substitutions, sequence edits, and wild-type consistency checks. |
+| Area | Examples |
+|---|---|
+| Backbone generation | `rfdiffusion`, `rfdiffusion3`, `rfpeptides` |
+| Inverse folding | `proteinmpnn`, `ligandmpnn` |
+| Structure prediction | `boltz2_affinity`, `protenix_v2` |
+| Binder design | `pxdesign`, `bindcraft`, `boltzgen`, `proteina_complexa` |
+| Docking | `vina` |
+| Protein language models | `esm2`, `esm3` |
+| Scoring and QC | `protein_qc`, `rank_designs`, `ipsae`, `prodigy`, `pxmeter`, `pyrosetta`, `tmalign` |
+| Retrieval | `search_sequence`, `literature_search`, `template_select`, `foldseek`, `mmseqs2_gpu` |
+| Analysis | `sequence_analysis`, `structure_analysis` |
+| Sequence engineering | `sequence_edit` |
 
-## Three Ways To Use VPA
+VPA can also discover custom tools from `~/.vibeproteinagent/tools/<tool>/` or
+Python package entry points under `vibeproteinagent.tools`.
 
-### 1. Run One Or A Few Tools Yourself
+## How To Use VPA
 
-Use this when you know exactly which tool you want and prefer to decide the next
-step manually.
+### 1. Use An LLM Agent With VPA Skills
+
+This is the main VPA experience. Describe the scientific goal and constraints;
+the agent uses [`skills.md`](skills.md) and [`docs/agent_workflows/`](docs/agent_workflows/)
+to choose a canonical design/retrieval/evaluation workflow, run tools, rank
+outputs, submit a final answer or candidate, and generate report-ready evidence.
 
 ```bash
-vpa run proteinmpnn pdb_path=target.pdb num_designs=8 --workspace my_run --follow
-vpa run protein_qc sequence=ACDEFGHIKLMNPQRSTVWY --workspace my_run
-vpa report <job_id> --workspace my_run --open
-```
-
-Guide: [docs/use_tools.md](docs/use_tools.md)
-Notebook: [demo/use_tools_demo.ipynb](demo/use_tools_demo.ipynb)
-
-### 2. Run A Workflow
-
-Use this when outputs from one tool should feed the next tool automatically.
-
-```bash
-vpa workflow run <your_workflow.yaml> \
-  --param target_pdb=target.pdb \
-  --workspace binder_round \
-  --follow
-```
-
-A workflow YAML declares inputs once under `params`, then lists ordered `nodes`
-that call VPA tools. Later nodes can reuse earlier outputs, so users do not have
-to manually find intermediate FASTA/PDB/CIF paths.
-
-```yaml
-name: binder_refold_qc
-params:
-  backbone_pdb: {type: str, required: true}
-  num_designs: {type: int, default: 4}
-nodes:
-  - id: design_sequences
-    tool: proteinmpnn
-    inputs:
-      pdb_path: ${params.backbone_pdb}
-      num_designs: ${params.num_designs}
-
-  - id: qc_sequences
-    tool: protein_qc
-    foreach: ${outputs.design_sequences.designs}
-    inputs:
-      sequence: ${item.sequence}
-```
-
-The full workflow guide shows how to extend this pattern into generation →
-sequence design → structure prediction → QC → ranking.
-
-For expensive generators, prefer `foreach` fan-out over one large node and set
-`max_parallel` to the number of GPU slots you want that fan-out to occupy.
-Tools such as RFdiffusion/RFpeptides/RFdiffusion3, PXDesign, BindCraft,
-Protenix-v2, Boltz2 affinity, BoltzGen, Proteina-Complexa, ProteinMPNN, and
-LigandMPNN advertise sharding guidance for planner-generated workflows; user-authored
-workflow YAML is never silently rewritten.
-
-Guide: [docs/use_workflows.md](docs/use_workflows.md)
-Notebook: [demo/use_workflows_demo.ipynb](demo/use_workflows_demo.ipynb)
-
-### 3. Use The LLM Agent
-
-Use this when you want to describe the scientific goal in natural language and
-let an LLM planner choose tools and write an explicit workflow plan from the
-public VPA tool list. VPA is
-provider-flexible: you can use Codex, Claude Code, or OpenRouter-backed models
-without changing the underlying tool/workflow runtime.
-
-The agent supports two output modes from the same `vpa agent run` interface:
-**design / retrieval** (returns submitted candidates with structures, sequences,
-and scores) and **understanding / Q&A** (returns a free-form text answer with
-optional citations to workflow nodes). The agent decides which mode fits the
-request based on the user's verb — "design / generate / find me a binder /
-retrieve" maps to candidate submission, while "what is / compare / explain /
-how does" maps to a text answer.
-
-```bash
+# Run the request end to end:
 vpa agent run \
-  "Design binder backbones for target.pdb, design sequences, refold candidates, run QC, and rank the best designs." \
+  "Design 50-80 aa soluble binders to chain A of target.pdb. Avoid cysteines and long polybasic patches. Return the top 5 with structures, QC, ranking, and a report." \
   --provider codex \
   --model gpt-5.2 \
-  --workspace agent_round \
+  --target target.pdb \
+  --workspace binder_round \
   --max-rounds 8 \
   --max-entries 3 \
   --max-wait-s 7200
 ```
+Add `--plan-only` when you want to inspect the proposed workflow before launching expensive jobs.
 
-`--max-rounds` defaults to `8`; `--max-entries` defaults to `3` and fails fast
-after repeated timeout or invalid LLM planning/decision entries.
-
-For local CLI providers, log in once on the machine where `vpa agent run` will
-execute. VPA does not store these credentials in the repository:
-
-```bash
-# Codex CLI provider
-codex login
-
-# Claude Code CLI provider
-claude /login
-```
-
-Switch providers per run:
-
-```bash
-vpa agent run "Plan a binder design round for target.pdb" --provider claude-code --model sonnet --plan-only
-vpa agent run "Plan a binder design round for target.pdb" --provider openrouter --model openai/gpt-5.1 --plan-only
-```
-
-Use `--plan-only` when you want to inspect the proposed plan without running
-tools.
-
-For an understanding / Q&A query, the same command returns a text answer
-once the agent has run the supporting workflow:
+The same agent interface also handles retrieval and Q&A style requests:
 
 ```bash
 vpa agent run \
-  "What is the pI of UniProt P44612, and does it carry any common sequence liabilities?" \
-  --provider codex --model gpt-5.2 \
+  "Find proteins related to this GO term, screen for liabilities, and report the strongest candidates." \
+  --provider codex \
+  --model gpt-5.2 \
+  --workspace retrieval_round
+
+vpa agent run \
+  "What are the likely developability risks in this sequence?" \
+  --provider codex \
+  --model gpt-5.2 \
+  --param sequence=ACDEFGHIKLMNPQRSTVWY \
   --workspace qa_round
 ```
 
-Guide: [docs/use_llm_agent.md](docs/use_llm_agent.md)
-Notebook: [demo/use_llm_agent_demo.ipynb](demo/use_llm_agent_demo.ipynb)
+Guide: [`docs/use_llm_agent.md`](docs/use_llm_agent.md)
+Notebook: [`demo/use_llm_agent_demo.ipynb`](demo/use_llm_agent_demo.ipynb)
 
-## Human Reports
+### 2. Run A YAML Workflow Manually
 
-`vpa report` creates a human-facing HTML report from a completed job or
-workflow. It is read-only: it summarizes existing artifacts and never launches
-new scientific jobs.
+Use YAML workflows when you want deterministic orchestration without an LLM, or
+when you want to save a reusable protocol for a known tool chain.
 
-<!-- ![VPA report snapshot](assets/readme/vpa-report-snapshot.svg) -->
+```yaml
+name: sequence_triage
+params:
+  sequence: {type: str, required: true}
+  mapping: {type: dict, default: {"3": "A"}}
+nodes:
+  - id: mutate
+    tool: sequence_edit
+    inputs:
+      operation: mutate_residues
+      sequence: ${params.sequence}
+      mapping: ${params.mapping}
 
-```bash
-# Self-contained HTML report.
-vpa report <job_or_workflow_id> --workspace my_run --viewer offline --out report.html --open
+  - id: qc
+    tool: protein_qc
+    inputs:
+      sequence: ${outputs.mutate.mutant_sequence}
+      metrics: ["gravy", "instability_index", "pi", "polybasic"]
 
-# Bundle mode for larger outputs.
-vpa report <job_or_workflow_id> --workspace my_run --format bundle --out report_bundle
+  - id: rank
+    tool: rank_designs
+    inputs:
+      candidates: ${outputs.qc.candidates}
+      qc_results: ${outputs.qc}
+      top_k: 1
 ```
 
-Reports include:
+```bash
+vpa workflow inspect sequence_triage.yaml
+vpa workflow run sequence_triage.yaml \
+  --workspace workflow_demo \
+  --param sequence=ACDEFGHIKLMNPQRSTVWY \
+  --follow
 
-| Section | What you see |
+vpa report <workflow_id> --workspace workflow_demo --open
+```
+
+Guide: [`docs/use_workflows.md`](docs/use_workflows.md)
+Notebook: [`demo/use_workflows_demo.ipynb`](demo/use_workflows_demo.ipynb)
+
+### 3. Run Tools Directly
+
+Use direct runs when you know the exact tool and parameters, or when you want a
+quick sanity check before launching an agent workflow.
+
+```bash
+vpa run protein_qc \
+  sequence=ACDEFGHIKLMNPQRSTVWY \
+  metrics='["gravy","instability_index","pi","polybasic"]' \
+  --workspace quickstart \
+  --follow
+
+vpa report <job_id> --workspace quickstart --open
+```
+
+Guide: [`docs/use_tools.md`](docs/use_tools.md)
+Notebook: [`demo/use_tools_demo.ipynb`](demo/use_tools_demo.ipynb)
+
+## Agent Skills
+
+This repository includes agent-facing operating instructions:
+
+- [`skills.md`](skills.md) defines when ordinary protein discussion becomes an
+  executable VPA workflow.
+- [`docs/agent_workflows/protein_design_skill.md`](docs/agent_workflows/protein_design_skill.md)
+  gives Codex, Claude Code, and similar agents canonical retrieval, binder
+  design, de novo design, ranking, submission, and reporting trajectories.
+- [`docs/agent_workflows/vpa_contracts.md`](docs/agent_workflows/vpa_contracts.md)
+  documents candidate archive, prompt-context, planner/compiler, and decision
+  contracts.
+- [`docs/agent_workflows/live_matrix_validation.md`](docs/agent_workflows/live_matrix_validation.md)
+  is the live provider validation runbook.
+
+These files are for agents and operators. External users normally read the
+public guides in `README.md` and `docs/use_*.md`; agents use
+`docs/agent_workflows/` to run VPA without relying on brittle prompt-only
+candidate wiring.
+
+## Reports
+
+`vpa report` creates a read-only human report from a completed job or workflow.
+
+```bash
+# Single self-contained HTML file.
+vpa report <job_or_workflow_id> \
+  --workspace design_round \
+  --viewer offline \
+  --out report.html \
+  --open
+
+# Bundle mode for larger structure/artifact sets.
+vpa report <job_or_workflow_id> \
+  --workspace design_round \
+  --format bundle \
+  --out report_bundle
+```
+
+Reports can include:
+
+| Section | What it shows |
 |---|---|
-| Executive summary | Natural-language result summary and next suggested action. |
-| Workflow DAG | Completed, cached, failed, skipped, or partial nodes. |
-| Top candidates | Structure viewer, score bars, sequence/QC context, and "why this one" text. |
-| All designs | Sortable candidate table. |
-| Plots and MSA | Score plots, QC plots, and MSA/FASTA visualization when artifacts exist. |
-| Reproducibility | Tool versions, IDs, params hashes, artifact hashes, and replay commands. |
+| Summary | Source id, state, top-level outcome, warnings, and replay hints. |
+| Workflow DAG | Node/job state, cached/skipped/failed status, and execution provenance. |
+| Candidates | Ranked candidates, sequences, structures, metrics, QC flags, and merge audit context. |
+| Plots and viewers | Score plots, sequence/QC plots, MSA/FASTA context, and offline structure viewers when artifacts exist. |
+| Reproducibility | Tool versions, parameters, artifact paths/hashes, workspace id, and report command. |
 
-You can also open structures directly:
+You can also generate standalone structure viewers:
 
 ```bash
-# Rich report-style 3D viewer.
-vpa visualize design.pdb --viewer online --out design_viewer.html
-
-# Network-free lightweight viewer.
-vpa visualize --job-id <job_id> --workspace my_run --viewer offline --out job_viewer.html
+vpa visualize design.pdb --viewer offline --out design_viewer.html
+vpa visualize --job-id <job_id> --workspace design_round --viewer offline --out job_viewer.html
 ```
 
-## Demo Notebooks And Short Guides
+## Demo Notebooks
 
-The notebooks are smoke-safe by default: they validate GPU/CLI access and print
-long model or LLM commands unless you explicitly opt in with
-`VPA_DEMO_RUN_HEAVY=1` and/or `VPA_DEMO_RUN_LLM=1`.
+The notebooks are safe by default. They run lightweight CLI checks and CPU-safe
+examples, then print heavyweight or LLM commands unless you opt in.
 
-| Intent | Markdown guide | Notebook |
+| Intent | Guide | Notebook |
 |---|---|---|
-| Run one or a few tools manually | [docs/use_tools.md](docs/use_tools.md) | [demo/use_tools_demo.ipynb](demo/use_tools_demo.ipynb) |
-| Run a multi-step workflow | [docs/use_workflows.md](docs/use_workflows.md) | [demo/use_workflows_demo.ipynb](demo/use_workflows_demo.ipynb) |
-| Use the LLM agent | [docs/use_llm_agent.md](docs/use_llm_agent.md) | [demo/use_llm_agent_demo.ipynb](demo/use_llm_agent_demo.ipynb) |
+| Direct tool runs | [`docs/use_tools.md`](docs/use_tools.md) | [`demo/use_tools_demo.ipynb`](demo/use_tools_demo.ipynb) |
+| YAML workflows | [`docs/use_workflows.md`](docs/use_workflows.md) | [`demo/use_workflows_demo.ipynb`](demo/use_workflows_demo.ipynb) |
+| LLM agent | [`docs/use_llm_agent.md`](docs/use_llm_agent.md) | [`demo/use_llm_agent_demo.ipynb`](demo/use_llm_agent_demo.ipynb) |
 
-## License
+Environment flags:
 
-VibeProteinAgent first-party code is released for non-commercial use under the
-[PolyForm Noncommercial License 1.0.0](LICENSE). Third-party tools, model
-weights, and vendored or pointer-vendored upstream components remain under
-their own licenses and terms; see the relevant `vendor/*/LICENSE` and
-`vendor/*/UPSTREAM.md` files before redistributing or running them.
+```bash
+export VPA_DEMO_RUN_INSTALL=1  # run optional install cells
+export VPA_DEMO_RUN_HEAVY=1    # run heavyweight GPU/model examples
+export VPA_DEMO_RUN_LLM=1      # run live LLM agent execution
+```
 
 ## Cite
 
-If you use VibeProteinAgent in your research, please cite:
+If you use VPA in research, cite:
 
 ```bibtex
 @software{vpa2026vibeproteinagent,
@@ -551,4 +374,10 @@ If you use VibeProteinAgent in your research, please cite:
 }
 ```
 
-Citation metadata is also available in [CITATION.cff](CITATION.cff).
+Citation metadata is also available in [`CITATION.cff`](CITATION.cff).
+
+## License
+
+VPA first-party code is released for non-commercial use under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires a
+separate license. Third-party components remain under their own upstream terms.

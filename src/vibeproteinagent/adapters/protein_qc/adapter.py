@@ -108,6 +108,63 @@ def _extract_seq_and_plddt(pdb_path: Path) -> tuple[str, float | None]:
     return seq, mean_b
 
 
+def _score_sequence(
+    sequence: str | None,
+    pdb_path: str | None,
+    requested: set[str],
+) -> tuple[dict[str, float | str | None], list[str]]:
+    sequence = sequence or ""
+    pdb_plddt: float | None = None
+    if pdb_path:
+        pdb_seq, pdb_plddt = _extract_seq_and_plddt(Path(pdb_path).expanduser())
+        pdb_plddt = normalize_plddt(pdb_plddt)
+        if not sequence:
+            sequence = pdb_seq
+
+    metrics: dict[str, float | str | None] = {}
+    flags: list[str] = []
+
+    from Bio.SeqUtils.ProtParam import ProteinAnalysis
+
+    if "plddt" in requested:
+        metrics["plddt"] = pdb_plddt
+        if pdb_plddt is not None and pdb_plddt < _PLDDT_LOW:
+            flags.append("low_plddt")
+
+    if "polybasic" in requested:
+        hits = _polybasic_hits(sequence, run=_POLYBASIC_RUN) if sequence else []
+        metrics["polybasic_hits"] = float(len(hits))
+        if hits:
+            flags.append("contains_polybasic_cluster")
+
+    if sequence:
+        try:
+            pa = ProteinAnalysis(sequence)
+            if "gravy" in requested:
+                gravy = float(pa.gravy())
+                metrics["gravy"] = gravy
+                if gravy > _GRAVY_HIGH:
+                    flags.append("high_GRAVY")
+            if "instability_index" in requested:
+                ii = float(pa.instability_index())
+                metrics["instability_index"] = ii
+                if ii > _INSTABILITY_HIGH:
+                    flags.append("high_instability_index")
+            if "pi" in requested:
+                metrics["pi"] = float(pa.isoelectric_point())
+        except Exception as exc:  # malformed sequence — surface as a flag.
+            metrics.setdefault("gravy", None)
+            metrics.setdefault("instability_index", None)
+            metrics.setdefault("pi", None)
+            flags.append(f"protparam_error:{type(exc).__name__}")
+    else:
+        for metric_name in ("gravy", "instability_index", "pi"):
+            if metric_name in requested:
+                metrics[metric_name] = None
+
+    return metrics, flags
+
+
 @register_adapter("descriptor.yaml")
 class ProteinQCAdapter(ToolAdapter):
     """Curated protein-design QC metrics.
@@ -125,64 +182,16 @@ class ProteinQCAdapter(ToolAdapter):
         t0 = time.time()
         ctx.emit_progress(0.05)
 
-        sequence = params.sequence or ""
-        pdb_plddt: float | None = None
-        if params.pdb_path:
-            pdb_seq, pdb_plddt = _extract_seq_and_plddt(Path(params.pdb_path).expanduser())
-            pdb_plddt = normalize_plddt(pdb_plddt)
-            if not sequence:
-                sequence = pdb_seq
-        ctx.emit_progress(0.30)
-
-        metrics: dict[str, float | str | None] = {}
-        flags: list[str] = []
-
-        from Bio.SeqUtils.ProtParam import ProteinAnalysis
-
         requested = set(params.metrics or _DEFAULT_METRICS)
-
-        if "plddt" in requested:
-            metrics["plddt"] = pdb_plddt
-            if pdb_plddt is not None and pdb_plddt < _PLDDT_LOW:
-                flags.append("low_plddt")
-
-        if "polybasic" in requested:
-            hits = _polybasic_hits(sequence, run=_POLYBASIC_RUN) if sequence else []
-            metrics["polybasic_hits"] = float(len(hits))
-            if hits:
-                flags.append("contains_polybasic_cluster")
-
-        if sequence:
-            try:
-                pa = ProteinAnalysis(sequence)
-                if "gravy" in requested:
-                    gravy = float(pa.gravy())
-                    metrics["gravy"] = gravy
-                    if gravy > _GRAVY_HIGH:
-                        flags.append("high_GRAVY")
-                if "instability_index" in requested:
-                    ii = float(pa.instability_index())
-                    metrics["instability_index"] = ii
-                    if ii > _INSTABILITY_HIGH:
-                        flags.append("high_instability_index")
-                if "pi" in requested:
-                    metrics["pi"] = float(pa.isoelectric_point())
-            except Exception as exc:  # malformed sequence — surface as a flag.
-                metrics.setdefault("gravy", None)
-                metrics.setdefault("instability_index", None)
-                metrics.setdefault("pi", None)
-                flags.append(f"protparam_error:{type(exc).__name__}")
-        else:
-            for m in ("gravy", "instability_index", "pi"):
-                if m in requested:
-                    metrics[m] = None
+        metrics, flags = _score_sequence(params.sequence, params.pdb_path, requested)
+        ctx.emit_progress(0.30)
 
         ctx.emit_progress(1.0)
         runtime_ms = int((time.time() - t0) * 1000)
         return ProteinQCOutput(
             metrics=metrics,
             flags=flags,
-            candidates=_protein_qc_candidates(params, metrics, flags),
+            candidates=_protein_qc_candidates(params, requested),
             runtime_ms=runtime_ms,
         )
 
@@ -202,8 +211,7 @@ def _is_canonical_candidate(item: Any) -> bool:
 
 def _protein_qc_candidates(
     params: ProteinQCInput,
-    metrics: dict[str, float | str | None],
-    flags: list[str],
+    requested: set[str],
 ) -> list[dict[str, Any]]:
     upstream = params.candidates if params.candidates else [{}]
     candidates: list[dict[str, Any]] = []
@@ -219,6 +227,7 @@ def _protein_qc_candidates(
             structure_path=structure_path,
             upstream=source_candidate if _is_canonical_candidate(source_candidate) else None,
         )
+        metrics, flags = _score_sequence(sequence, structure_path, requested)
         candidate.setdefault("scores", {})["protein_qc"] = {
             **metrics,
             "passes_filters": not flags,

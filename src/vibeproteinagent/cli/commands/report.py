@@ -13,7 +13,17 @@ from vibeproteinagent.workspace import Workspace
 def report(
     id: str = typer.Argument(..., help="Job id (job_*) or workflow id (wf_*) to report."),
     out: str | None = typer.Option(None, "--out", "-o", help="Output HTML path or bundle dir."),
-    top_k: int = typer.Option(5, "--top-k", min=1, max=100, help="Top candidates to show."),
+    top_k: int = typer.Option(
+        5,
+        "--top-k",
+        min=1,
+        max=100,
+        help=(
+            "Deprecated / no-op. The review console shows the full candidate "
+            "population grouped by status, so nothing is truncated. Retained "
+            "for backward compatibility."
+        ),
+    ),
     viewer: str = typer.Option(
         "offline",
         "--viewer",

@@ -237,6 +237,184 @@ class AgentTranscript:
     finished_at_ms: int | None = None
 
 
+# --------------------------------------------------------------------------- #
+# Candidate review console (review layer)
+#
+# A pure, additive presentation model derived from ``ReportModel`` by
+# ``reporting.review.build_review_model``. The report UI is re-framed as a
+# *candidate review surface*: a ranked board of candidates, each backed by an
+# evidence dossier. ``ReportModel`` itself is left untouched so the collection
+# layer and its tests are unaffected.
+#
+# Honesty contract: every evidence atom carries a ``Provenance`` tag so the UI
+# never presents a derived/inferred value as if it were recorded fact.
+# --------------------------------------------------------------------------- #
+
+
+class Provenance:
+    """Provenance vocabulary for a single evidence atom (string constants).
+
+    ``EXACT``        directly recorded (artifact link, final_submission ref,
+                     resolved source_node_id).
+    ``DERIVED``      deterministically computed by the report from recorded
+                     metrics (QC pulled from candidate.scores, a rejection
+                     reason composed from rank + flags).
+    ``INFERRED``     a heuristic guess from a weak hint (native_id parse, role
+                     classification). Must be visually distinct; never a default.
+    ``NOT_RECORDED`` no data — render an empty slot, never fabricate.
+    """
+
+    EXACT = "exact"
+    DERIVED = "derived"
+    INFERRED = "inferred"
+    NOT_RECORDED = "not_recorded"
+
+
+class CandidateStatus:
+    """Lifecycle bucket a candidate falls into on the board (string constants)."""
+
+    FINAL = "final"  # referenced by final_submission
+    RANKED_ALTERNATIVE = "ranked_alternative"  # ranked, not submitted, evidence ok
+    INCOMPLETE_EVIDENCE = "incomplete_evidence"  # missing key evidence (shards land here)
+    FAILED_QC = "failed_qc"  # protein_qc passes_filters is False / severe flags
+    REJECTED = "rejected"  # explicitly dropped (capability filter / merge)
+
+
+class ToolRole:
+    """Role a tool plays in the candidate pipeline (string constants)."""
+
+    GENERATOR = "generator"
+    EVALUATOR = "evaluator"
+    RANKER = "ranker"
+    SUBMISSION = "submission"
+    PLUMBING = "plumbing"  # merge / format bridge / msa-prep — not evidence
+    OTHER = "other"  # unknown tool — surfaced as "Other evidence", never mis-roled
+
+
+class WorkflowType:
+    """Coarse workflow shape, used to pick board fields + detail tabs."""
+
+    BINDER = "binder"
+    DENOVO = "denovo"
+    RETRIEVAL = "retrieval"
+    GENERIC = "generic"
+
+
+@dataclass(frozen=True)
+class EvidenceStep:
+    """One node of the shared pipeline, with this candidate's evidence overlay.
+
+    The DAG is a *shared* pipeline that every candidate traverses, so the node
+    topology is workflow-level truth (``Provenance.EXACT`` at node granularity).
+    Per-candidate attribution onto a node (``produced this candidate``,
+    ``this candidate's metrics``) is often partial in the recorded data, so each
+    step carries its own provenance and may be ``NOT_RECORDED``.
+    """
+
+    node_id: str
+    tool: str
+    role: str  # ToolRole.*
+    state: str | None = None
+    job_id: str | None = None
+    # Short, candidate-scoped evidence line (e.g. "pLDDT 97.3 · pTM 0.83"),
+    # empty when nothing is attributable to this candidate at this node.
+    evidence_summary: str = ""
+    provenance: str = Provenance.NOT_RECORDED
+
+
+@dataclass(frozen=True)
+class EvidencePath:
+    """The candidate's path through the pipeline, grouped by role.
+
+    ``producer`` is the single generator node credited with producing the
+    candidate (``None`` + provenance NOT_RECORDED when attribution is missing).
+    ``evaluators`` / ``ranker`` / ``submission`` capture the rest of the lineage.
+    ``shared_pipeline`` is the full ordered node list (workflow-level truth)
+    rendered as the backdrop the overlay sits on.
+    """
+
+    shared_pipeline: list[EvidenceStep] = field(default_factory=list)
+    producer: EvidenceStep | None = None
+    producer_provenance: str = Provenance.NOT_RECORDED
+    evaluators: list[EvidenceStep] = field(default_factory=list)
+    ranker: EvidenceStep | None = None
+    submission: EvidenceStep | None = None
+
+
+@dataclass(frozen=True)
+class ScoreGroup:
+    """A metric family (not a tool dump): e.g. "Structure confidence".
+
+    ``metrics`` are ``(label, value, unit|None, source)`` tuples already coerced
+    for display, where ``source`` is the short producing-tool name (e.g.
+    "ESM-3", "Boltz-2", "Protein QC") or ``""`` when no single tool owns it.
+    Empty groups are dropped by the builder so the UI never shows a blank card.
+    """
+
+    family: str
+    metrics: list[tuple[str, str, str | None, str]] = field(default_factory=list)
+    provenance: str = Provenance.DERIVED
+
+
+@dataclass(frozen=True)
+class CandidateEvidenceBundle:
+    """Everything needed to render one candidate's dossier + board card."""
+
+    candidate: ReportCandidate
+    workflow_type: str  # WorkflowType.*
+    status: str  # CandidateStatus.*
+    status_basis: str = Provenance.DERIVED
+    # Authoritative display rank: the design's rank from the ranking tool
+    # (``rank_designs``) when available, else the recorded ``candidate.rank``.
+    # Drives both the board badge and the per-tool selector card so they agree
+    # with the Design-ranking widget (which reads the same node output).
+    display_rank: int | None = None
+    # When this is the FINAL pick but the ranking tool scored a *different*
+    # design #1, this carries this pick's own (worse) scoring rank so the UI can
+    # surface a "submitted despite Design-ranking #N" divergence note. ``None``
+    # when the final pick is also the #1-ranked design (or no ranking exists).
+    submitted_despite_rank: int | None = None
+    # Structured, deterministic rule inputs behind the verdict (not prose).
+    selection_basis: dict[str, Any] = field(default_factory=dict)
+    non_selection_basis: dict[str, Any] = field(default_factory=dict)
+    evidence_path: EvidencePath = field(default_factory=EvidencePath)
+    score_groups: list[ScoreGroup] = field(default_factory=list)
+    # Zero or more structures for the same design (alternate predictions kept
+    # as variants rather than collapsed).
+    structure_variants: list[ReportArtifact] = field(default_factory=list)
+    msa_blocks: list[MSABlock] = field(default_factory=list)
+    # Tool-keyed per-candidate evidence pulled from candidate.scores (the join
+    # is free here); node.output filtering is layered on only where reliable.
+    tool_evidence: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[ReportArtifact] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class BoardGroup:
+    """A titled, ordered cluster of candidates on the board."""
+
+    status: str  # CandidateStatus.*
+    title: str
+    bundles: list[CandidateEvidenceBundle] = field(default_factory=list)
+    collapsed: bool = False  # failed/rejected default-collapsed
+
+
+@dataclass(frozen=True)
+class ReportReviewModel:
+    """Candidate-centric presentation model derived from ``ReportModel``.
+
+    ``grouping_policy`` is a forward hook: ``"raw"`` (MVP) keeps one bundle per
+    recorded candidate; a future ``"design_family"`` can roll shards of one
+    design into a single bundle without changing this contract or the UI.
+    """
+
+    base: ReportModel
+    workflow_type: str  # WorkflowType.*
+    board_groups: list[BoardGroup] = field(default_factory=list)
+    bundles: list[CandidateEvidenceBundle] = field(default_factory=list)
+    grouping_policy: str = "raw"
+
+
 @dataclass(frozen=True)
 class ReportModel:
     summary: RunSummary
@@ -265,14 +443,24 @@ __all__ = [
     "AgentStepSummary",
     "AgentToolCall",
     "AgentTranscript",
+    "BoardGroup",
+    "CandidateEvidenceBundle",
+    "CandidateStatus",
+    "EvidencePath",
+    "EvidenceStep",
     "MSABlock",
     "PlotSpec",
+    "Provenance",
     "ReportArtifact",
     "ReportCandidate",
     "ReportModel",
+    "ReportReviewModel",
     "ReportWarning",
     "ReproducibilityBlock",
     "RunSummary",
+    "ScoreGroup",
+    "ToolRole",
     "WorkflowGraph",
     "WorkflowNodeSummary",
+    "WorkflowType",
 ]

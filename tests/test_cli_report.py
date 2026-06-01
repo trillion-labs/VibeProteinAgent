@@ -110,6 +110,7 @@ def _insert_agent_candidate_record(
     status: str,
     candidate: dict,
     created_at: int,
+    raw_source: dict | None = None,
 ) -> None:
     conn = workspace.connect()
     try:
@@ -131,7 +132,11 @@ def _insert_agent_candidate_record(
                 job_id,
                 status,
                 json.dumps(candidate),
-                json.dumps({"workflow_id": workflow_id, "node_id": node_id, "job_id": job_id}),
+                json.dumps(
+                    raw_source
+                    if raw_source is not None
+                    else {"workflow_id": workflow_id, "node_id": node_id, "job_id": job_id}
+                ),
                 "[]",
                 created_at,
             ),
@@ -180,7 +185,7 @@ def test_report_structure_only_job_generates_offline_html(
     assert data["candidate_count"] == 1
     html = out.read_text()
     assert "Executive Summary" in html
-    assert "Top Candidates" in html
+    assert "Candidate review" in html
     assert "VPA_OFFLINE_VIEWER" in html
     assert "https://3Dmol.org/build/3Dmol-min.js" not in html
 
@@ -273,9 +278,16 @@ def test_report_workflow_uses_ranked_candidates_qc_and_msa(
     html = out.read_text()
     assert "design_1" in html
     assert "design_2" in html
-    assert "Top #1" in html
-    assert "Top #2" not in html
-    assert registered.pool_path in html
+    # The review console shows the *full* candidate population grouped by
+    # status, so both designs appear in the result-browser list with their rank
+    # cells — ``--top-k`` no longer silently truncates the candidate surface.
+    assert 'crow-rank-num">1' in html
+    assert 'crow-rank-num">2' in html
+    # The ranked structure is embedded self-contained: its coordinates are
+    # inlined into the offline viewer rather than referenced by absolute path,
+    # so shared reports no longer leak the workspace artifact-pool location.
+    assert registered.pool_path not in html
+    assert "11.104" in html
     assert "pLDDT" in html or "plddt" in html
     assert "VPA_OFFLINE_VIEWER" in html
     # Per the updated MSA policy: the MSA section only renders when an
@@ -283,7 +295,7 @@ def test_report_workflow_uses_ranked_candidates_qc_and_msa(
     # foldseek / boltzgen / protenix_v2) is part of the workflow. This
     # fixture's rank_designs run produces a designs FASTA (a sequence
     # collection, not a homolog alignment), so the section stays hidden —
-    # the candidate cards and the All Designs table cover those sequences.
+    # the candidate board's per-design sequence track covers those sequences.
     assert "MSA / Sequence Context" not in html
     assert "Reproducibility" in html
 
@@ -618,9 +630,11 @@ def test_report_collects_and_renders_candidate_merge_audit(
         "go_sequences",
         "sequence_analysis",
     ]
-    assert "Candidate Merge Audit" in html
-    assert "Duplicate Enrichment Merges" in html
-    assert "design_1: type candidate_id; versions 2" in html
+    # Merge-audit data is still collected into the model, but the dedicated
+    # "Candidate Merge Audit" section is intentionally suppressed in the HTML
+    # (too redundant for readers). Assert the section does not render.
+    assert "Candidate Merge Audit" not in html
+    assert "Duplicate Enrichment Merges" not in html
     assert "versions" not in str(model.candidates[0].source)
 
 
@@ -847,7 +861,12 @@ def test_bundle_report_rewrites_final_candidate_structure_paths(
     html = report_path.read_text()
 
     assert str(pdb) not in html
-    assert "structures/final_candidate_" in html
+    # The bundle copies the final candidate structure into its local
+    # ``structures/`` directory under a rewritten name and inlines the
+    # coordinates, so the report is self-contained without the source path.
+    bundle_structures = report_path.parent / "structures"
+    assert list(bundle_structures.glob("final_candidate_*.pdb"))
+    assert "11.104" in html
 
 
 def test_report_uses_agent_standalone_submit_candidate_decision(
@@ -1374,6 +1393,335 @@ def test_report_filters_snapshot_records_to_requested_workflow_scope(
     model = collect_report_model(tmp_workspace, wf_1)
 
     assert [candidate.candidate_id for candidate in model.candidates] == ["scoped_1"]
+
+
+def test_report_skips_newer_snapshot_with_unrelated_workflow_lineage(
+    tmp_workspace: Workspace,
+) -> None:
+    wf_target, job_target = _workflow_with_raw_candidate(tmp_workspace, candidate_id="raw_target")
+    wf_other, job_other = _workflow_with_raw_candidate(tmp_workspace, candidate_id="raw_other")
+    session = AgentSessionStore(tmp_workspace)
+    run = session.create_run("snapshot lineage report")
+    _ensure_candidate_refs_column(tmp_workspace)
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="target_survivor",
+        version_id="cver_target_survivor",
+        round_index=0,
+        workflow_id=wf_target,
+        node_id="retrieve",
+        job_id=job_target,
+        status="survivor",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "target_survivor",
+            "sequence": "TARGET",
+            "scores": {"go_sequences": {"score": 0.8}},
+        },
+        created_at=1,
+    )
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="other_survivor",
+        version_id="cver_other_survivor",
+        round_index=1,
+        workflow_id=wf_other,
+        node_id="retrieve",
+        job_id=job_other,
+        status="survivor",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "other_survivor",
+            "sequence": "OTHER",
+            "scores": {"go_sequences": {"score": 0.1}},
+        },
+        created_at=2,
+    )
+    conn = tmp_workspace.connect()
+    try:
+        for snapshot_id, round_index, wf_id, candidate_id, version_id, created_at in (
+            ("csnap_target", 0, wf_target, "target_survivor", "cver_target_survivor", 10),
+            ("csnap_other", 1, wf_other, "other_survivor", "cver_other_survivor", 20),
+        ):
+            conn.execute(
+                """
+                INSERT INTO agent_candidate_snapshots (
+                  run_id, snapshot_id, round_index, kind, candidate_ids_json,
+                  candidate_refs_json, workflow_ids_json, merge_audit_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.run_id,
+                    snapshot_id,
+                    round_index,
+                    "survivor",
+                    "[]",
+                    json.dumps([{"candidate_id": candidate_id, "version_id": version_id}]),
+                    json.dumps([wf_id]),
+                    "{}",
+                    created_at,
+                ),
+            )
+    finally:
+        conn.close()
+
+    model = collect_report_model(tmp_workspace, wf_target)
+
+    assert [candidate.candidate_id for candidate in model.candidates] == ["target_survivor"]
+
+
+def test_report_legacy_candidate_ids_hydrate_within_snapshot_run(
+    tmp_workspace: Workspace,
+) -> None:
+    wf_id, _job_id = _workflow_with_raw_candidate(tmp_workspace)
+    session = AgentSessionStore(tmp_workspace)
+    first_run = session.create_run("legacy ids first run")
+    second_run = session.create_run("legacy ids second run")
+    _ensure_candidate_refs_column(tmp_workspace)
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=first_run.run_id,
+        candidate_id="legacy_cross_run",
+        version_id="cver_legacy_first",
+        round_index=0,
+        workflow_id=wf_id,
+        node_id="retrieve",
+        job_id="job_first",
+        status="current",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "legacy_cross_run",
+            "sequence": "FIRST",
+        },
+        created_at=1,
+    )
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=second_run.run_id,
+        candidate_id="legacy_cross_run",
+        version_id="cver_legacy_second",
+        round_index=1,
+        workflow_id=wf_id,
+        node_id="retrieve",
+        job_id="job_second",
+        status="current",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "legacy_cross_run",
+            "sequence": "SECOND",
+        },
+        created_at=2,
+    )
+    conn = tmp_workspace.connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO agent_candidate_snapshots (
+              run_id, snapshot_id, round_index, kind, candidate_ids_json,
+              candidate_refs_json, workflow_ids_json, merge_audit_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                first_run.run_id,
+                "csnap_legacy_cross_run",
+                0,
+                "current_round",
+                json.dumps(["legacy_cross_run"]),
+                "[]",
+                json.dumps([wf_id]),
+                "{}",
+                10,
+            ),
+        )
+    finally:
+        conn.close()
+
+    model = collect_report_model(tmp_workspace, wf_id)
+
+    assert [candidate.candidate_id for candidate in model.candidates] == ["legacy_cross_run"]
+    assert model.candidates[0].sequence == "FIRST"
+
+
+def test_report_uses_scored_current_round_for_legacy_scoreless_survivor(
+    tmp_workspace: Workspace,
+) -> None:
+    wf_id, job_id = _workflow_with_raw_candidate(tmp_workspace)
+    session = AgentSessionStore(tmp_workspace)
+    run = session.create_run("legacy scoreless survivor")
+    _ensure_candidate_refs_column(tmp_workspace)
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="cand_scored",
+        version_id="cver_current_scored",
+        round_index=1,
+        workflow_id=wf_id,
+        node_id="retrieve",
+        job_id=job_id,
+        status="current",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "cand_scored",
+            "sequence": "ACDE",
+            "scores": {"go_sequences": {"score": 0.9}},
+        },
+        created_at=1,
+    )
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="representative:1:abc",
+        version_id="cver_survivor_sparse",
+        round_index=1,
+        workflow_id=wf_id,
+        node_id="analyze",
+        job_id="job_analysis",
+        status="survivor",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "representative:1:abc",
+            "sequence": "ACDE",
+        },
+        created_at=2,
+    )
+    conn = tmp_workspace.connect()
+    try:
+        for snapshot_id, kind, candidate_id, version_id, created_at in (
+            ("csnap_current_scored", "current_round", "cand_scored", "cver_current_scored", 10),
+            (
+                "csnap_survivor_sparse",
+                "survivor",
+                "representative:1:abc",
+                "cver_survivor_sparse",
+                20,
+            ),
+        ):
+            conn.execute(
+                """
+                INSERT INTO agent_candidate_snapshots (
+                  run_id, snapshot_id, round_index, kind, candidate_ids_json,
+                  candidate_refs_json, workflow_ids_json, merge_audit_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.run_id,
+                    snapshot_id,
+                    1,
+                    kind,
+                    "[]",
+                    json.dumps([{"candidate_id": candidate_id, "version_id": version_id}]),
+                    json.dumps([wf_id]),
+                    "{}",
+                    created_at,
+                ),
+            )
+    finally:
+        conn.close()
+
+    model = collect_report_model(tmp_workspace, wf_id)
+
+    assert [candidate.candidate_id for candidate in model.candidates] == ["cand_scored"]
+    assert model.candidates[0].scores["go_sequences"]["score"] == 0.9
+
+
+def test_report_snapshot_scope_uses_source_workflow_lineage(
+    tmp_workspace: Workspace,
+) -> None:
+    wf_target, job_target = _workflow_with_raw_candidate(tmp_workspace, candidate_id="raw_target")
+    wf_other, job_other = _workflow_with_raw_candidate(tmp_workspace, candidate_id="raw_other")
+    session = AgentSessionStore(tmp_workspace)
+    run = session.create_run("source workflow lineage report")
+    _ensure_candidate_refs_column(tmp_workspace)
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="lineage_target",
+        version_id="cver_lineage_target",
+        round_index=1,
+        workflow_id=wf_other,
+        node_id="retrieve",
+        job_id=job_target,
+        status="survivor",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "lineage_target",
+            "sequence": "TARGET",
+            "scores": {"go_sequences": {"score": 0.8}},
+        },
+        raw_source={
+            "source": "survivor_merge",
+            "source_workflow_ids": [wf_other, wf_target],
+            "representative_workflow_id": wf_other,
+            "node_id": "retrieve",
+            "job_id": job_target,
+        },
+        created_at=1,
+    )
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="lineage_other",
+        version_id="cver_lineage_other",
+        round_index=1,
+        workflow_id=wf_other,
+        node_id="retrieve",
+        job_id=job_other,
+        status="survivor",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "lineage_other",
+            "sequence": "OTHER",
+            "scores": {"go_sequences": {"score": 0.1}},
+        },
+        raw_source={
+            "source": "survivor_merge",
+            "source_workflow_ids": [wf_other],
+            "representative_workflow_id": wf_other,
+            "node_id": "retrieve",
+            "job_id": job_other,
+        },
+        created_at=2,
+    )
+    conn = tmp_workspace.connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO agent_candidate_snapshots (
+              run_id, snapshot_id, round_index, kind, candidate_ids_json,
+              candidate_refs_json, workflow_ids_json, merge_audit_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run.run_id,
+                "csnap_lineage",
+                1,
+                "survivor",
+                "[]",
+                json.dumps(
+                    [
+                        {"candidate_id": "lineage_target", "version_id": "cver_lineage_target"},
+                        {"candidate_id": "lineage_other", "version_id": "cver_lineage_other"},
+                    ]
+                ),
+                json.dumps([wf_other, wf_target]),
+                "{}",
+                20,
+            ),
+        )
+    finally:
+        conn.close()
+
+    records = _read_candidate_archive_snapshot(
+        tmp_workspace,
+        workflow_id=wf_target,
+        job_ids=[],
+        node_ids=[],
+        kind="survivor",
+    )
+
+    assert [record["candidate_id"] for record in records] == ["lineage_target"]
 
 
 def test_report_candidate_ids_legacy_fallback_is_report_only(
@@ -2019,7 +2367,14 @@ def test_report_bundle_writes_directory(
     assert (out / "structures").is_dir()
     copied = list((out / "structures").glob("predicted_pdb_*.pdb"))
     assert len(copied) == 1
-    assert str(copied[0]) in (out / "report.html").read_text()
+    html = (out / "report.html").read_text()
+    # Bundle mode rewrites structure references into the bundle-local
+    # ``structures/`` directory and inlines the structure content, so the
+    # report renders self-contained from the original source file's new home.
+    assert str(out / "structures") in html
+    assert str(pdb) not in html
+    # The structure coordinates are inlined into the offline viewer payload.
+    assert "11.104" in html
 
 
 def test_collect_report_model_rejects_bad_id(tmp_workspace: Workspace) -> None:

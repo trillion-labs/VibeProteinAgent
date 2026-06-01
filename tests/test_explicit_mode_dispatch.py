@@ -24,7 +24,6 @@ from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse
 from vibeproteinagent.agents.tools.schemas import compact_tool_schema
 from vibeproteinagent.workspace import Workspace
 
-
 RFDIFFUSION_MODES = EXPLICIT_MODE_TOOLS["rfdiffusion"]
 
 
@@ -235,26 +234,26 @@ def test_tool_catalog_exposes_allowed_modes_only_for_explicit_mode_tools() -> No
             "input_schema": {"type": "object", "properties": {}},
         }
     )
-    compact_dssp = compact_tool_schema(
+    compact_structure_analysis = compact_tool_schema(
         {
-            "name": "dssp",
-            "description": "Secondary structure annotation.",
+            "name": "structure_analysis",
+            "description": "Structure annotation.",
             "input_schema": {"type": "object", "properties": {}},
         }
     )
     assert compact_rfdiffusion["allowed_modes"] == RFDIFFUSION_MODES
-    assert "allowed_modes" not in compact_dssp
+    assert "allowed_modes" not in compact_structure_analysis
 
     planner = WorkflowPlanner(ToolRegistry())
     catalog = planner._planner_ir_tool_catalog(
         [
             {"name": "rfdiffusion", "description": "Backbone generation."},
-            {"name": "dssp", "description": "Secondary structure annotation."},
+            {"name": "structure_analysis", "description": "Structure annotation."},
         ]
     )
     by_name = {entry["name"]: entry for entry in catalog}
     assert by_name["rfdiffusion"]["allowed_modes"] == RFDIFFUSION_MODES
-    assert "allowed_modes" not in by_name["dssp"]
+    assert "allowed_modes" not in by_name["structure_analysis"]
 
 
 def test_planner_prompt_content_sanity_for_multi_mode_guidance() -> None:

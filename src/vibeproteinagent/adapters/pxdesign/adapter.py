@@ -1370,19 +1370,20 @@ def _pxdesign_candidates(
             },
             "sequence": design.sequence,
             "structure_path": structure_path,
-            "full_structure_path": structure_path,
+            "backbone_path": structure_path,
             "scores": {
                 "pxdesign": {
                     "score": design.score,
                     "binder_length": design.binder_length,
                     "pipeline": "diffusion_af2_initial_guess_proteinmpnn",
+                    "structure_detail": "binder_backbone_with_target_context",
                 }
             },
             "artifacts": {"pxdesign": {"cif_path": design.cif_path, "pdb_path": design.pdb_path}},
             "capabilities": candidate_capability_flags(
                 has_sequence=bool(design.sequence),
                 has_backbone_structure=bool(structure_path),
-                has_full_structure=bool(structure_path),
+                has_full_structure=False,
                 has_candidate_scores=True,
             ),
         }

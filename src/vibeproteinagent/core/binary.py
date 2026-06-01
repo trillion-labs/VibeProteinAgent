@@ -1,8 +1,7 @@
 """Single source of truth for binary-wrapper adapters' `$PATH` probing.
 
-DSSP introduced this pattern in Phase 12; Phase 13's MMseqs2-gpu / Foldseek /
-TM-align / Vina adapters share it. Extracted here so every binary adapter
-resolves its executable the same way: env-var override first, then `$PATH`.
+Binary-backed adapters share this helper so each executable is resolved the
+same way: env-var override first, then `$PATH`.
 """
 from __future__ import annotations
 

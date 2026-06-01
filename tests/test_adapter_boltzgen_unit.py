@@ -191,9 +191,9 @@ def test_build_cmd_runs_generation_pipeline_without_filter(tmp_path):
     step_idx = cmd.index("--steps")
     assert cmd[step_idx + 1: step_idx + 5] == [
         "design",
-        "inverse_fold",
+        "inverse_folding",
         "folding",
-        "analyze",
+        "analysis",
     ]
     assert "filter" not in cmd
     assert "--protocol" in cmd
@@ -215,8 +215,16 @@ def test_detect_failure_stage_from_logs(tmp_path):
     stdout = tmp_path / "stdout.log"
     stderr = tmp_path / "stderr.log"
     stdout.write_text("running design\n")
+    stderr.write_text("hydra failed in analysis stage\n")
+    assert _detect_failure_stage(stdout, stderr) == "analysis"
+
+
+def test_detect_failure_stage_accepts_legacy_boltzgen_log_names(tmp_path):
+    stdout = tmp_path / "stdout.log"
+    stderr = tmp_path / "stderr.log"
+    stdout.write_text("running inverse_fold\n")
     stderr.write_text("hydra failed in analyze stage\n")
-    assert _detect_failure_stage(stdout, stderr) == "analyze"
+    assert _detect_failure_stage(stdout, stderr) == "analysis"
 
 
 def test_boltzgen_subprocess_failure_records_artifact_paths(monkeypatch, tmp_path):
@@ -230,7 +238,7 @@ def test_boltzgen_subprocess_failure_records_artifact_paths(monkeypatch, tmp_pat
 
     def fake_run(cmd, **kwargs):
         kwargs["stdout"].write("design complete\n")
-        kwargs["stderr"].write("ModuleNotFoundError: No module named 'hydride' during analyze\n")
+        kwargs["stderr"].write("ModuleNotFoundError: No module named 'hydride' during analysis\n")
         raise subprocess.CalledProcessError(1, cmd)
 
     monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.subprocess.run", fake_run)
@@ -245,7 +253,7 @@ def test_boltzgen_subprocess_failure_records_artifact_paths(monkeypatch, tmp_pat
 
     details = exc_info.value.details
     assert details["returncode"] == 1
-    assert details["stage"] == "analyze"
+    assert details["stage"] == "analysis"
     assert details["stdout_path"].endswith("boltzgen.stdout.log")
     assert details["stderr_path"].endswith("boltzgen.stderr.log")
     assert "hydride" in details["stderr_tail"]

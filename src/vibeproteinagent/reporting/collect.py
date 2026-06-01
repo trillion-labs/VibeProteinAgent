@@ -148,7 +148,14 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
         )
     submissions = _submission_outputs([node])
     final_submission = _latest_final_submission(submissions)
-    final_candidates = _candidates_from_submission(final_submission)
+    final_candidates = _enrich_final_candidates_from_records(
+        workspace,
+        workflow_id=job.workflow_id,
+        job_ids=[job.job_id],
+        node_ids=[node.node_id],
+        final_candidates=_candidates_from_submission(final_submission),
+        artifacts=artifacts,
+    )
     if not candidates:
         candidates = _structure_candidates(
             artifacts,
@@ -279,7 +286,14 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
         *_agent_submission_outputs(workspace, workflow_id=wf.workflow_id, job_id=None),
     ]
     final_submission = _latest_final_submission(submissions)
-    final_candidates = _candidates_from_submission(final_submission)
+    final_candidates = _enrich_final_candidates_from_records(
+        workspace,
+        workflow_id=wf.workflow_id,
+        job_ids=[n.job_id for n in report_nodes if n.job_id],
+        node_ids=[n.node_id for n in report_nodes],
+        final_candidates=_candidates_from_submission(final_submission),
+        artifacts=all_artifacts,
+    )
     if not candidates:
         candidates = _structure_candidates(
             all_artifacts, source={"kind": "workflow", "workflow_id": wf.workflow_id}
@@ -945,6 +959,22 @@ def _candidate_archive_candidates(
         kind="survivor",
     )
     if survivor_snapshot_records:
+        current_snapshot_records = _read_candidate_archive_snapshot(
+            workspace,
+            workflow_id=workflow_id,
+            job_ids=job_ids,
+            node_ids=node_ids,
+            kind="current_round",
+        )
+        if _should_use_current_round_archive_fallback(
+            survivor_snapshot_records,
+            current_snapshot_records,
+        ):
+            return _report_candidates_from_candidate_records(
+                current_snapshot_records,
+                artifacts,
+                source_kind="candidate_archive_snapshot",
+            )
         return _report_candidates_from_candidate_records(
             survivor_snapshot_records,
             artifacts,
@@ -1056,6 +1086,13 @@ def _read_candidate_archive_snapshot(
             for row in rows:
                 if kind and "kind" in columns and str(row["kind"]) != kind:
                     continue
+                if not _snapshot_row_matches_archive_scope(
+                    conn,
+                    row,
+                    columns,
+                    workflow_id=workflow_id,
+                ):
+                    continue
                 records = _candidate_records_from_snapshot_row(conn, row, columns)
                 records = [
                     record for record in records
@@ -1086,6 +1123,46 @@ def _existing_tables(conn: sqlite3.Connection, names: tuple[str, ...]) -> list[s
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _snapshot_row_matches_archive_scope(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    columns: set[str],
+    *,
+    workflow_id: str | None,
+) -> bool:
+    if not workflow_id:
+        return True
+    if "workflow_ids_json" in columns and row["workflow_ids_json"] is not None:
+        workflow_ids = _json_load(row["workflow_ids_json"], default=[])
+        if isinstance(workflow_ids, list) and workflow_ids:
+            return workflow_id in {str(value) for value in workflow_ids}
+    run_id = str(row["run_id"]) if "run_id" in columns and row["run_id"] else None
+    if run_id:
+        run_workflow_ids = _agent_run_workflow_ids(conn, run_id)
+        if run_workflow_ids:
+            return workflow_id in run_workflow_ids
+    return True
+
+
+def _agent_run_workflow_ids(conn: sqlite3.Connection, run_id: str) -> set[str]:
+    tables = _existing_tables(conn, ("agent_runs",))
+    if not tables:
+        return set()
+    columns = _table_columns(conn, "agent_runs")
+    if "workflow_ids_json" not in columns:
+        return set()
+    row = conn.execute(
+        "SELECT workflow_ids_json FROM agent_runs WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return set()
+    workflow_ids = _json_load(row["workflow_ids_json"], default=[])
+    if not isinstance(workflow_ids, list):
+        return set()
+    return {str(value) for value in workflow_ids if value not in (None, "")}
 
 
 def _archive_predicates(
@@ -1231,8 +1308,14 @@ def _candidate_records_from_snapshot_refs(
         return []
 
     record_columns = _table_columns(conn, "agent_candidate_records")
+    snapshot_run_id = str(row["run_id"]) if "run_id" in columns and row["run_id"] else None
     if not exact_version_refs:
-        return _hydrate_legacy_candidate_ids_for_report_only(conn, refs, record_columns)
+        return _hydrate_legacy_candidate_ids_for_report_only(
+            conn,
+            refs,
+            record_columns,
+            snapshot_run_id=snapshot_run_id,
+        )
 
     records: list[dict[str, Any]] = []
     for ref in refs:
@@ -1241,6 +1324,7 @@ def _candidate_records_from_snapshot_refs(
             ref,
             record_columns,
             exact_version_only=True,
+            snapshot_run_id=snapshot_run_id,
         )
         if row_record is None:
             continue
@@ -1254,6 +1338,8 @@ def _hydrate_legacy_candidate_ids_for_report_only(
     conn: sqlite3.Connection,
     refs: list[Any],
     columns: set[str],
+    *,
+    snapshot_run_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Hydrate old ``candidate_ids_json`` snapshots for reports only.
 
@@ -1266,6 +1352,7 @@ def _hydrate_legacy_candidate_ids_for_report_only(
             ref,
             columns,
             exact_version_only=False,
+            snapshot_run_id=snapshot_run_id,
         )
         if row_record is None:
             continue
@@ -1281,6 +1368,7 @@ def _candidate_record_row_for_snapshot_ref(
     columns: set[str],
     *,
     exact_version_only: bool = False,
+    snapshot_run_id: str | None = None,
 ) -> sqlite3.Row | None:
     if isinstance(ref, dict):
         version_id = _clean_ref_value(
@@ -1289,9 +1377,14 @@ def _candidate_record_row_for_snapshot_ref(
             or ref.get("ref")
         )
         if version_id and "version_id" in columns:
+            clauses = ["version_id = ?"]
+            args: list[Any] = [version_id]
+            if snapshot_run_id and "run_id" in columns:
+                clauses.append("run_id = ?")
+                args.append(snapshot_run_id)
             row = conn.execute(
-                "SELECT * FROM agent_candidate_records WHERE version_id = ?",
-                (version_id,),
+                f"SELECT * FROM agent_candidate_records WHERE {' AND '.join(clauses)}",
+                args,
             ).fetchone()
             return row
         if exact_version_only:
@@ -1303,14 +1396,19 @@ def _candidate_record_row_for_snapshot_ref(
         candidate_id = _clean_ref_value(ref)
     if not candidate_id or "candidate_id" not in columns:
         return None
+    clauses = ["candidate_id = ?", "lower(status) != 'rejected'"]
+    args = [candidate_id]
+    if snapshot_run_id and "run_id" in columns:
+        clauses.append("run_id = ?")
+        args.append(snapshot_run_id)
     return conn.execute(
-        """
+        f"""
         SELECT * FROM agent_candidate_records
-        WHERE candidate_id = ? AND lower(status) != 'rejected'
+        WHERE {' AND '.join(clauses)}
         ORDER BY round_index DESC, created_at DESC
         LIMIT 1
         """,
-        (candidate_id,),
+        args,
     ).fetchone()
 
 
@@ -1414,16 +1512,7 @@ def _archive_record_matches_scope(
     source = record.get("source") if isinstance(record.get("source"), dict) else {}
     raw_source = record.get("raw_source") if isinstance(record.get("raw_source"), dict) else {}
     if workflow_id:
-        workflow_values = {
-            str(value)
-            for value in (
-                record.get("workflow_id"),
-                record.get("source_workflow_id"),
-                source.get("workflow_id"),
-                raw_source.get("workflow_id"),
-            )
-            if value not in (None, "")
-        }
+        workflow_values = _archive_workflow_scope_values(record, source, raw_source)
         if workflow_values:
             return workflow_id in workflow_values
     job_values = {
@@ -1454,6 +1543,71 @@ def _archive_record_matches_scope(
     if node_values.intersection(str(node_id) for node_id in node_ids):
         return True
     return False
+
+
+def _should_use_current_round_archive_fallback(
+    survivor_records: list[dict[str, Any]],
+    current_records: list[dict[str, Any]],
+) -> bool:
+    if not survivor_records or not current_records:
+        return False
+    survivor_run_ids = _archive_record_run_ids(survivor_records)
+    current_run_ids = _archive_record_run_ids(current_records)
+    if not survivor_run_ids or survivor_run_ids != current_run_ids:
+        return False
+    return not any(_record_has_scores(record) for record in survivor_records) and any(
+        _record_has_scores(record) for record in current_records
+    )
+
+
+def _archive_record_run_ids(records: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(value)
+        for record in records
+        for value in (record.get("archive_snapshot_run_id"), record.get("run_id"))
+        if value not in (None, "")
+    }
+
+
+def _record_has_scores(record: dict[str, Any]) -> bool:
+    scores = record.get("scores")
+    if isinstance(scores, dict) and scores:
+        return True
+    candidate_scores = _candidate_score_map(record)
+    return bool(candidate_scores)
+
+
+def _archive_workflow_scope_values(
+    record: dict[str, Any],
+    source: dict[str, Any],
+    raw_source: dict[str, Any],
+) -> set[str]:
+    values: list[Any] = []
+    for payload in (record, source, raw_source):
+        values.extend(
+            [
+                payload.get("workflow_id"),
+                payload.get("source_workflow_id"),
+                payload.get("representative_workflow_id"),
+                payload.get("workflow_ids"),
+                payload.get("source_workflow_ids"),
+            ]
+        )
+    return set(_string_values(values))
+
+
+def _string_values(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    pending = list(values)
+    while pending:
+        value = pending.pop(0)
+        if isinstance(value, (list, tuple, set)):
+            pending[0:0] = list(value)
+            continue
+        if value in (None, ""):
+            continue
+        out.append(str(value))
+    return out
 
 
 def _report_candidates_from_candidate_records(
@@ -1754,6 +1908,59 @@ def _candidates_from_submission(
             )
         )
     return out
+
+
+def _enrich_final_candidates_from_records(
+    workspace: Workspace,
+    *,
+    workflow_id: str | None,
+    job_ids: list[str],
+    node_ids: list[str],
+    final_candidates: list[ReportCandidate],
+    artifacts: list[ReportArtifact],
+) -> list[ReportCandidate]:
+    """Backfill final picks with their full recorded per-candidate evidence.
+
+    ``submit_candidate`` persists a lossy candidate row (often just ``score`` +
+    ``plddt``), so a final pick reconstructed from the submission can be missing
+    the protein-QC / structure-analysis metrics the engine *did* record on the
+    same design's ``agent_candidate_records`` row. Join by ``candidate_id`` and
+    merge the richer record's scores, flags, liabilities, and artifacts back in
+    — never overriding the submission's own values, and never touching the
+    candidate's ``source`` (so it stays recognised as the final pick). The
+    result: a final pick surfaces the same evidence as any survivor from the
+    run, instead of looking like it skipped the evaluators that actually ran.
+    """
+    if not final_candidates:
+        return final_candidates
+    records = _read_candidate_archive_records(
+        workspace, workflow_id=workflow_id, job_ids=job_ids, node_ids=node_ids,
+    )
+    if not records:
+        return final_candidates
+    by_id: dict[str, ReportCandidate] = {}
+    for rich in _report_candidates_from_candidate_records(
+        records, artifacts, source_kind="candidate_archive_record",
+    ):
+        by_id.setdefault(rich.candidate_id, rich)
+    enriched: list[ReportCandidate] = []
+    for candidate in final_candidates:
+        rich = by_id.get(candidate.candidate_id)
+        if rich is None:
+            enriched.append(candidate)
+            continue
+        enriched.append(
+            replace(
+                candidate,
+                scores={**(rich.scores or {}), **(candidate.scores or {})},
+                sequence=candidate.sequence or rich.sequence,
+                structure_path=candidate.structure_path or rich.structure_path,
+                qc_flags=candidate.qc_flags or rich.qc_flags,
+                liabilities=candidate.liabilities or rich.liabilities,
+                artifacts=candidate.artifacts or rich.artifacts,
+            )
+        )
+    return enriched
 
 
 def _auto_submission_from_candidates(

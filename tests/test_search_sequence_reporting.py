@@ -61,9 +61,13 @@ def test_search_sequence_report_shows_source_summaries_and_empty_facets() -> Non
 
     html = render_report_html(model)
 
-    assert "Search sequence retrieval" in html
+    assert "Sequence retrieval" in html
     assert "NAD(P)HX repair proteins" in html
-    assert "GO <b>completed</b>" in html
-    assert "INTERPRO <b>no_terms</b>" in html
+    # Per-source yield bars: GO contributed (1 resolved term), InterPro is marked
+    # empty / unresolved rather than hidden.
+    assert 'seqret-yield-label">GO' in html
+    assert "1 term" in html
+    assert "is-empty" in html
+    assert "no_terms" in html
     assert "20 / 40" in html
     assert "InterPro family" in html

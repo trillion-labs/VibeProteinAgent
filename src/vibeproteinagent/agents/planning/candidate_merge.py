@@ -104,13 +104,19 @@ def _identity_groups(entries: list[_Entry]) -> list[list[_Entry]]:
             key = key_fn(entry.candidate)
             if key:
                 buckets.setdefault(key, []).append(entry)
+        mergeable_buckets: list[list[_Entry]] = []
+        for bucket in buckets.values():
+            if len(bucket) <= 1:
+                continue
+            mergeable_buckets.extend(
+                group for group in _split_material_compatible_groups(bucket) if len(group) > 1
+            )
         grouped_positions = {
             entry.position
-            for bucket in buckets.values()
-            if len(bucket) > 1
+            for bucket in mergeable_buckets
             for entry in bucket
         }
-        groups.extend(bucket for bucket in buckets.values() if len(bucket) > 1)
+        groups.extend(mergeable_buckets)
         remaining = [entry for entry in remaining if entry.position not in grouped_positions]
 
     groups.extend([entry] for entry in remaining)
@@ -136,6 +142,30 @@ def _structure_key(candidate: dict[str, Any]) -> str | None:
         if value:
             return f"structure:{value}"
     return None
+
+
+def _split_material_compatible_groups(entries: list[_Entry]) -> list[list[_Entry]]:
+    groups: list[list[_Entry]] = []
+    for entry in entries:
+        for group in groups:
+            if _material_compatible([*group, entry]):
+                group.append(entry)
+                break
+        else:
+            groups.append([entry])
+    return groups
+
+
+def _material_compatible(entries: list[_Entry]) -> bool:
+    for field in _MATERIAL_FIELDS:
+        values = {
+            str(entry.candidate.get(field))
+            for entry in entries
+            if entry.candidate.get(field) not in (None, "")
+        }
+        if len(values) > 1:
+            return False
+    return True
 
 
 def _merge_group(entries: list[_Entry]) -> tuple[dict[str, Any], dict[str, Any] | None]:

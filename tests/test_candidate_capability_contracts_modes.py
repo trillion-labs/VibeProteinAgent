@@ -85,6 +85,42 @@ def test_esm3_tracks_control_produced_structure_capabilities() -> None:
     )
 
 
+def test_pxdesign_produces_sequence_and_backbone_not_full_structure() -> None:
+    contract = candidate_contract_for_inputs("pxdesign", {"target_pdb": "/tmp/target.cif"})
+
+    assert {"has_sequence", "has_backbone_structure", "has_candidate_scores"} <= set(
+        contract.produces
+    )
+    assert "has_full_structure" not in contract.produces
+    assert "has_full_structure" in contract.consumes
+
+
+def test_pxdesign_output_can_feed_backbone_consumers_but_not_full_structure_consumers() -> None:
+    good = compile_planner_ir(
+        _ir(
+            [
+                _node("pxd", "pxdesign", {"target_pdb": "/tmp/target.cif"}),
+                _node("seq", "proteinmpnn", {}, [_candidate_source("pxd")]),
+            ]
+        )
+    )
+    assert good["workflow_plan"]["nodes"][1]["inputs"]["candidates"] == "${outputs.pxd.candidates}"
+
+    with pytest.raises(StructuredFixup) as exc_info:
+        compile_planner_ir(
+            _ir(
+                [
+                    _node("pxd", "pxdesign", {"target_pdb": "/tmp/target.cif"}),
+                    _node("analyze", "structure_analysis", {}, [_candidate_source("pxd")]),
+                ]
+            )
+        )
+
+    payload = exc_info.value.payload
+    assert payload["error_kind"] == "candidate_capability_mismatch"
+    assert "has_full_structure" in payload["missing_capabilities"]
+
+
 def test_backbone_only_generator_can_feed_proteinmpnn_but_not_target_structure_binder() -> None:
     good = compile_planner_ir(
         _ir(

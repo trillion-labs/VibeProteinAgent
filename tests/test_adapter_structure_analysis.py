@@ -6,9 +6,11 @@ import pytest
 
 from vibeproteinagent.adapters import null_context
 from vibeproteinagent.adapters.base import torch
+from vibeproteinagent.adapters.structure_analysis import adapter as structure_adapter
 from vibeproteinagent.adapters.structure_analysis.adapter import (
     StructureAnalysisAdapter,
     StructureAnalysisInput,
+    _parse_structure,
 )
 from vibeproteinagent.core.binary import find_binary
 
@@ -29,6 +31,38 @@ def _dssp_available() -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def _hetatm_standard_aa_cif(tmp_path: Path) -> Path:
+    path = tmp_path / "hetatm_standard_aa.cif"
+    path.write_text(
+        "\n".join(
+            [
+                "data_hetatm_standard_aa",
+                "loop_",
+                "_atom_site.group_PDB",
+                "_atom_site.label_atom_id",
+                "_atom_site.label_comp_id",
+                "_atom_site.label_asym_id",
+                "_atom_site.label_seq_id",
+                "_atom_site.Cartn_x",
+                "_atom_site.Cartn_y",
+                "_atom_site.Cartn_z",
+                "HETATM N ALA A 1 0.0 0.0 0.0",
+                "HETATM CA ALA A 1 1.0 0.0 0.0",
+                "HETATM C ALA A 1 2.0 0.0 0.0",
+                "HETATM O ALA A 1 3.0 0.0 0.0",
+                "HETATM N GLY A 2 4.0 0.0 0.0",
+                "HETATM CA GLY A 2 5.0 0.0 0.0",
+                "HETATM C GLY A 2 6.0 0.0 0.0",
+                "HETATM O GLY A 2 7.0 0.0 0.0",
+                "HETATM C1 LIG L 1 5.0 1.0 0.0",
+                "#",
+            ]
+        )
+        + "\n"
+    )
+    return path
 
 
 def test_structure_analysis_pdb_fixture(tmp_path):
@@ -139,6 +173,59 @@ def test_structure_analysis_mmcif_fixture(tmp_path):
     assert out.chains == ["A"]
     assert out.residue_counts["A"] > 30
     assert Path(out.artifacts["dssp_tsv"]).exists()
+
+
+def test_structure_analysis_mmcif_standard_aa_hetatm_is_residue_not_ligand(tmp_path):
+    cif = _hetatm_standard_aa_cif(tmp_path)
+    residues, ligands = _parse_structure(cif)
+
+    assert [(res.chain_id, res.resseq, res.resname) for res in residues] == [
+        ("A", 1, "ALA"),
+        ("A", 2, "GLY"),
+    ]
+    assert [lig.resname for lig in ligands] == ["LIG"]
+
+
+def test_structure_analysis_falls_back_after_mkdssp_failure_for_hetatm_standard_aa(
+    monkeypatch,
+    tmp_path,
+):
+    cif = _hetatm_standard_aa_cif(tmp_path)
+
+    def fail_dssp(*_args, **_kwargs):
+        return None, None, "DSSP execution failed: mocked exit 1"
+
+    def fake_pydssp(residues):
+        return {residue.key: "loop" for residue in residues}, None
+
+    monkeypatch.setattr(structure_adapter, "_run_dssp", fail_dssp)
+    monkeypatch.setattr(structure_adapter, "_run_pydssp", fake_pydssp)
+
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        StructureAnalysisInput(structure_path=str(cif), run_dssp=True),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.chains == ["A"]
+    assert out.residue_counts == {"A": 2}
+    assert out.ligand_contacts["contact_count"] == 2
+    assert out.secondary_structure["loop"] == 2
+    assert any("used pydssp" in warning for warning in out.warnings)
+
+
+def test_structure_analysis_dssp_input_sanitizes_standard_aa_hetatm(tmp_path):
+    cif = _hetatm_standard_aa_cif(tmp_path)
+    residues, _ligands = _parse_structure(cif)
+
+    sanitized = structure_adapter._write_dssp_input_pdb(residues, tmp_path, "sanitized")
+    text = sanitized.read_text()
+
+    assert "HETATM" not in text
+    assert "ATOM" in text
+    assert " ALA " in text
+    assert " GLY " in text
+    assert " LIG " not in text
 
 
 @pytest.mark.slow

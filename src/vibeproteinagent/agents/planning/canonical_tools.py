@@ -15,7 +15,6 @@ CANONICAL_PRODUCERS: set[str] = {
     "ipsae",
     "prodigy",
     "protein_qc",
-    "dssp",
     "tmalign",
     "pxmeter",
     "boltz2_affinity",
@@ -36,7 +35,6 @@ CANONICAL_CONSUMERS: dict[str, str] = {
     "ipsae": "candidates",
     "prodigy": "candidates",
     "protein_qc": "candidates",
-    "dssp": "candidates",
     "tmalign": "candidates",
     "pxmeter": "candidates",
     "boltz2_affinity": "candidates",
@@ -165,6 +163,7 @@ _FULL_STRUCTURE = frozenset({"has_backbone_structure", "has_full_structure"})
 _SCORES = frozenset({"has_candidate_scores"})
 _SEQUENCE_SCORES = _SEQUENCE | _SCORES
 _BACKBONE_SCORES = _BACKBONE | _SCORES
+_BACKBONE_SEQUENCE_SCORES = _BACKBONE | _SEQUENCE | _SCORES
 _FULL_SEQUENCE_SCORES = _FULL_STRUCTURE | _SEQUENCE | _SCORES
 
 
@@ -198,11 +197,11 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "rfdiffusion3": _contract(consumes=_FULL_STRUCTURE, produces=_BACKBONE, preserves_upstream=False),
     "rfpeptides": _contract(produces=_BACKBONE, preserves_upstream=False),
     "boltzgen": _contract(produces=_FULL_SEQUENCE_SCORES),
-    # Sequence design or full-structure producers.
+    # Sequence design, backbone-design, or full-structure producers.
     "proteinmpnn": _contract(consumes=_BACKBONE, produces=_SEQUENCE),
     "ligandmpnn": _contract(consumes=_BACKBONE, produces=_SEQUENCE),
     "bindcraft": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
-    "pxdesign": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
+    "pxdesign": _contract(consumes=_FULL_STRUCTURE, produces=_BACKBONE_SEQUENCE_SCORES),
     "proteina_complexa": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
     "protenix_v2": _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES),
     "boltz2_affinity": _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES),
@@ -210,7 +209,6 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "structure_analysis": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "foldseek": _contract(consumes=_BACKBONE, produces=_SCORES, preserves_upstream=False),
     "template_select": _contract(consumes=_BACKBONE, produces=_BACKBONE_SCORES),
-    "dssp": _contract(consumes=_BACKBONE, produces=_BACKBONE_SCORES),
     "tmalign": _contract(consumes=_BACKBONE, produces=_BACKBONE_SCORES, min_candidate_items=2),
     "ipsae": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "prodigy": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
@@ -314,11 +312,14 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "default": True,
             "inputs": {"target_pdb": "<path or canonical candidates>"},
             "consumes": sorted(_FULL_STRUCTURE),
-            "produces": sorted(_FULL_SEQUENCE_SCORES),
+            "produces": sorted(_BACKBONE_SEQUENCE_SCORES),
             "description": (
                 "Runs protein-target-conditioned diffusion, AF2 initial guess, and "
-                "ProteinMPNN sequence generation. It is not a small-molecule ligand "
-                "binder-design route; use a ligand-binder capable tool for ligand targets."
+                "ProteinMPNN sequence generation. It emits designed binder sequence, "
+                "binder backbone coordinates, and scores; it does not guarantee "
+                "full-atom binder sidechain coordinates. It is not a small-molecule "
+                "ligand binder-design route; use a ligand-binder capable tool for "
+                "ligand targets."
             ),
         },
     ],
@@ -422,7 +423,7 @@ def candidate_contract_for_inputs(
             return _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES)
         return _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES)
     if tool_name == "pxdesign":
-        return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
+        return _contract(consumes=_FULL_STRUCTURE, produces=_BACKBONE_SEQUENCE_SCORES)
     if tool_name == "proteina_complexa":
         return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
     if tool_name == "boltzgen":

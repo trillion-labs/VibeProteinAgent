@@ -38,7 +38,7 @@
             "type": "string",
             "minLength": 1,
             "description": "Short natural-language explanation for selecting this candidate (e.g. cites scores that drove the decision). Stored in submission audit log.",
-            "examples": ["Highest ipSAE among AF2-IG passing designs", "Lowest binding ΔG and best DSSP helicity"]
+            "examples": ["Highest ipSAE among AF2-IG passing designs", "Lowest binding ΔG and best structure-analysis helicity"]
           },
           "scores_to_highlight": {
             "type": "array",

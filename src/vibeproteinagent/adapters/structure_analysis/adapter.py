@@ -14,15 +14,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.adapters.dssp.adapter import _parse_dssp_ss
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     clean_sequence,
     residue_refs_from_objects,
     resolve_positions,
 )
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.core.binary import find_binary
 
 AA3 = {
@@ -36,6 +35,8 @@ BURIED_POLAR = frozenset("DENQKRHSTYC")
 _DSSP_BINARY_CANDIDATES = ("mkdssp", "dssp")
 _HELIX_LABELS = frozenset("HGI")
 _SHEET_LABELS = frozenset("EB")
+_WATER_RESNAMES = frozenset({"HOH", "WAT", "DOD"})
+_PDB_CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 @dataclass
@@ -78,8 +79,8 @@ def _parse_pdb(path: Path) -> tuple[list[Residue], list[Residue]]:
         except ValueError:
             continue
         icode = line[26:27].strip()
-        is_ligand = line.startswith("HETATM") and resname not in {"HOH", "WAT", "DOD"}
         aa = AA3.get(resname, "X")
+        is_ligand = line.startswith("HETATM") and aa == "X" and resname not in _WATER_RESNAMES
         key = (chain, resseq, icode, resname)
         bucket = ligands if is_ligand or aa == "X" else residues
         residue = bucket.setdefault(
@@ -165,7 +166,7 @@ def _parse_mmcif(path: Path) -> tuple[list[Residue], list[Residue]]:
                 continue
             icode = _cif_value(parts, index, "_atom_site.pdbx_PDB_ins_code", "")
             aa = AA3.get(resname, "X")
-            is_ligand = group == "HETATM" and resname not in {"HOH", "WAT", "DOD"}
+            is_ligand = group == "HETATM" and aa == "X" and resname not in _WATER_RESNAMES
             bucket = ligands if is_ligand or (group == "HETATM" and aa == "X") else residues
             key = (chain, resseq, icode, resname)
             residue = bucket.setdefault(
@@ -223,6 +224,71 @@ def _ss_label(code: str) -> str:
     return "loop"
 
 
+def _parse_dssp_ss(text: str) -> str:
+    lines = text.splitlines()
+    body_start: int | None = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#") and "RESIDUE" in line and "STRUCTURE" in line:
+            body_start = i + 1
+            break
+    if body_start is None:
+        return ""
+    chars: list[str] = []
+    for line in lines[body_start:]:
+        if len(line) < 17:
+            continue
+        aa = line[13:14]
+        if aa == "!":
+            continue
+        ss = line[16:17]
+        chars.append("-" if ss == " " else ss)
+    return "".join(chars)
+
+
+def _pdb_atom_name(atom: str) -> str:
+    atom = atom.strip()[:4] or "X"
+    if len(atom) < 4 and atom[0].isalpha():
+        return f" {atom:<3s}"
+    return f"{atom:<4s}"
+
+
+def _pdb_element(atom: str) -> str:
+    letters = "".join(ch for ch in atom.strip() if ch.isalpha())
+    return (letters[:2] or "X").upper()
+
+
+def _write_dssp_input_pdb(
+    residues: list[Residue],
+    out_dir: Path,
+    output_prefix: str,
+) -> Path:
+    sanitized_path = out_dir / f"{output_prefix}_dssp_input.pdb"
+    chain_ids: dict[str, str] = {}
+    lines: list[str] = []
+    serial = 1
+    last_chain: str | None = None
+    for residue in residues:
+        if residue.aa == "X":
+            continue
+        if residue.chain_id not in chain_ids:
+            chain_ids[residue.chain_id] = _PDB_CHAIN_IDS[len(chain_ids) % len(_PDB_CHAIN_IDS)]
+        chain = chain_ids[residue.chain_id]
+        if last_chain is not None and residue.chain_id != last_chain:
+            lines.append("TER\n")
+        last_chain = residue.chain_id
+        icode = (residue.icode or " ")[:1]
+        for atom, (x, y, z) in residue.atoms.items():
+            lines.append(
+                f"ATOM  {serial:5d} {_pdb_atom_name(atom)} {residue.resname:>3s} "
+                f"{chain}{residue.resseq:4d}{icode}   "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {_pdb_element(atom):>2s}\n"
+            )
+            serial += 1
+    lines.append("END\n")
+    sanitized_path.write_text("".join(lines))
+    return sanitized_path
+
+
 def _run_dssp(
     structure_path: Path,
     coords: list[tuple[Residue, tuple[float, float, float] | None]],
@@ -235,13 +301,18 @@ def _run_dssp(
         return None, None, str(exc)
 
     classic_path = out_dir / f"{output_prefix}.dssp"
+    dssp_input_path = _write_dssp_input_pdb(
+        [residue for residue, _ca in coords],
+        out_dir,
+        output_prefix,
+    )
     try:
         subprocess.run(
             [
                 str(binary),
                 "--output-format",
                 "dssp",
-                str(structure_path),
+                str(dssp_input_path),
                 str(classic_path),
             ],
             check=True,
@@ -389,6 +460,304 @@ class StructureAnalysisOutput(BaseModel):
     runtime_ms: int
 
 
+def _analyze_structure(
+    params: StructureAnalysisInput,
+    path: Path,
+    out_dir: Path,
+    output_prefix: str,
+) -> tuple[dict[str, Any], list[str]]:
+    if not path.exists():
+        raise FileNotFoundError(f"structure_analysis input not found: {path}")
+    residues, ligands = _parse_structure(path)
+    if params.chain_id:
+        residues = [r for r in residues if r.chain_id == params.chain_id]
+    if not residues:
+        raise ValueError("structure_analysis found no protein residues")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    coords = [(r, r.ca) for r in residues if r.ca is not None]
+    dssp_source_path: Path | None = None
+    ss_source = "ca_geometry"
+    warnings: list[str] = []
+    if params.run_dssp:
+        ss_by_key, dssp_source_path, dssp_warning = _run_dssp(
+            path,
+            coords,
+            out_dir,
+            output_prefix,
+        )
+        if ss_by_key is None:
+            pydssp_by_key, pydssp_warning = _run_pydssp(residues)
+            if pydssp_by_key is not None:
+                ss_by_key = pydssp_by_key
+                ss_source = "pydssp"
+                if dssp_warning:
+                    warnings.append(f"mkdssp unavailable; used pydssp: {dssp_warning}")
+            else:
+                ss_by_key = _secondary_structure(coords)
+                if dssp_warning:
+                    warnings.append(
+                        f"DSSP unavailable; used CA-geometry heuristic: {dssp_warning}"
+                    )
+                if pydssp_warning:
+                    warnings.append(pydssp_warning)
+        else:
+            ss_source = "dssp"
+            warnings.append("secondary_structure assigned from DSSP")
+    else:
+        ss_by_key = _secondary_structure(coords)
+        warnings.append("run_dssp=false; secondary_structure uses CA-geometry heuristic")
+
+    all_rows: list[dict[str, Any]] = []
+    for residue, ca in coords:
+        neighbors = 0
+        if ca is not None:
+            neighbors = sum(
+                1
+                for other, other_ca in coords
+                if other is not residue
+                and other_ca is not None
+                and _dist(ca, other_ca) <= 10.0
+            )
+        rsa, burial = _burial_from_neighbors(
+            neighbors,
+            buried_threshold=params.buried_rsa_threshold,
+            surface_threshold=params.surface_rsa_threshold,
+        )
+        ss = ss_by_key.get(residue.key, "loop")
+        all_rows.append(
+            {
+                "chain_id": residue.chain_id,
+                "resseq": residue.resseq,
+                "icode": residue.icode,
+                "aa": residue.aa,
+                "resname": residue.resname,
+                "rsa": round(rsa, 4),
+                "burial_class": burial,
+                "secondary_structure": ss,
+                "neighbor_count": neighbors,
+            }
+        )
+
+    rows_by_key = {
+        (row["chain_id"], row["resseq"], row["icode"]): row
+        for row in all_rows
+    }
+    wanted = set(params.positions) if params.positions else None
+    position_index_basis = "all_residues_after_chain_filter"
+    mapped_positions: list[dict[str, Any]] = []
+    missing_positions: list[int] = []
+    if wanted is None:
+        rows = all_rows
+    else:
+        chain_ids = {residue.chain_id for residue in residues}
+        mapping_from_sequence = bool(params.sequence or params.fasta_path)
+        if mapping_from_sequence and params.chain_id is None and len(chain_ids) > 1:
+            raise ValueError(
+                "structure_analysis sequence/fasta position mapping requires chain_id "
+                f"when the parsed structure has multiple chains: {sorted(chain_ids)}"
+            )
+        resolution = resolve_positions(
+            residues=residue_refs_from_objects(residues),
+            positions=sorted(wanted),
+            chain_id=params.chain_id or residues[0].chain_id,
+            sequence=params.sequence,
+            fasta_path=params.fasta_path,
+            position_basis=params.position_basis,
+            label="requested positions",
+        )
+        warnings.extend(resolution.warnings)
+        position_index_basis = resolution.position_index_basis
+        mapped_positions = resolution.mapped_positions
+        missing_positions = resolution.missing_positions
+        rows = []
+        seen_keys: set[tuple[str, int, str]] = set()
+        for mapping in mapped_positions:
+            key = (
+                str(mapping["chain_id"]),
+                int(mapping["resseq"]),
+                str(mapping.get("icode") or ""),
+            )
+            row = rows_by_key.get(key)
+            if row is None:
+                continue
+            if key not in seen_keys:
+                rows.append(row)
+                seen_keys.add(key)
+
+    sequence_for_check = clean_sequence(params.sequence) if params.sequence else None
+    if sequence_for_check:
+        parsed_sequence = "".join(r.aa for r in residues if r.aa != "X")
+        provided = sequence_for_check
+        if len(provided) != len(parsed_sequence):
+            warnings.append(
+                "provided sequence length does not match parsed structure residues: "
+                f"sequence={len(provided)}, structure={len(parsed_sequence)}"
+            )
+        elif provided != parsed_sequence:
+            warnings.append("provided sequence differs from parsed structure sequence")
+
+    contacts: list[dict[str, Any]] = []
+    interface_set: set[tuple[str, int, str]] = set()
+    interface_chains = set(params.interface_chain_ids)
+    for r, ca in coords:
+        if ca is None:
+            continue
+        for other, other_ca in coords:
+            if other is r or other_ca is None:
+                continue
+            if (
+                interface_chains
+                and other.chain_id not in interface_chains
+                and r.chain_id not in interface_chains
+            ):
+                continue
+            if r.chain_id == other.chain_id:
+                continue
+            d = _dist(ca, other_ca)
+            if d <= params.contact_distance_angstrom:
+                contacts.append({
+                    "chain_id": r.chain_id,
+                    "resseq": r.resseq,
+                    "other_chain_id": other.chain_id,
+                    "other_resseq": other.resseq,
+                    "distance": round(d, 3),
+                })
+                interface_set.add(r.key)
+
+    ligand_names = {x.upper() for x in params.ligand_resnames}
+    ligand_contacts = []
+    for r, ca in coords:
+        if ca is None:
+            continue
+        for lig in ligands:
+            if ligand_names and lig.resname not in ligand_names:
+                continue
+            points = list(lig.atoms.values())
+            if (
+                points
+                and min(_dist(ca, p) for p in points) <= params.contact_distance_angstrom
+            ):
+                ligand_contacts.append({
+                    "chain_id": r.chain_id,
+                    "resseq": r.resseq,
+                    "ligand_resname": lig.resname,
+                    "ligand_chain_id": lig.chain_id,
+                    "ligand_resseq": lig.resseq,
+                })
+
+    patches = _patches(all_rows)
+    liabilities: list[dict[str, Any]] = []
+    liabilities.extend(
+        {
+            "type": "exposed_hydrophobic_patch",
+            "chain_id": p["chain_id"],
+            "positions": p["positions"],
+        }
+        for p in patches
+    )
+    for row in all_rows:
+        if row["burial_class"] == "buried" and row["aa"] in BURIED_POLAR:
+            liabilities.append({
+                "type": "buried_polar_candidate",
+                "chain_id": row["chain_id"],
+                "positions": [row["resseq"]],
+            })
+
+    burial_counts = Counter(row["burial_class"] for row in all_rows)
+    chains = sorted({r.chain_id for r in residues})
+    ss_counts = Counter(row["secondary_structure"] for row in all_rows)
+    n_rows = max(1, len(all_rows))
+    annotation_scope = {
+        "summary_scope": "all_residues_after_chain_filter",
+        "annotation_scope": (
+            "requested_positions" if wanted else "all_residues_after_chain_filter"
+        ),
+        "requested_positions": sorted(wanted) if wanted else [],
+        "position_index_basis": position_index_basis,
+        "mapped_positions": mapped_positions,
+        "missing_positions": sorted(missing_positions),
+        "annotated_residue_count": len(rows),
+        "summary_residue_count": len(all_rows),
+    }
+    summary = {
+        "structure_path": str(path),
+        "chains": chains,
+        "residue_counts": dict(Counter(r.chain_id for r in residues)),
+        "secondary_structure": {
+            "helix": ss_counts["helix"],
+            "sheet": ss_counts["sheet"],
+            "loop": ss_counts["loop"],
+            "helix_fraction": ss_counts["helix"] / n_rows,
+            "sheet_fraction": ss_counts["sheet"] / n_rows,
+            "loop_fraction": ss_counts["loop"] / n_rows,
+        },
+        "burial": dict(burial_counts),
+        "interface": {
+            "contact_count": len(contacts),
+            "interface_residue_count": len(interface_set),
+            "ligand_contact_count": len(ligand_contacts),
+        },
+        "ligand_contacts": {
+            "contact_count": len(ligand_contacts),
+            "contact_residue_count": len({
+                (c["chain_id"], c["resseq"]) for c in ligand_contacts
+            }),
+        },
+        "liabilities": liabilities[: params.max_annotations],
+        "secondary_structure_source": ss_source,
+        "annotation_scope": annotation_scope,
+    }
+    summary_path = out_dir / f"{output_prefix}_summary.json"
+    residue_path = out_dir / f"{output_prefix}_residue_structure_annotations.tsv"
+    contacts_path = out_dir / f"{output_prefix}_interface_contacts.tsv"
+    patches_path = out_dir / f"{output_prefix}_surface_patches.json"
+    dssp_path = out_dir / f"{output_prefix}_dssp.tsv"
+    summary["artifacts"] = {
+        "summary_json": str(summary_path),
+        "residue_annotations_tsv": str(residue_path),
+        "interface_contacts_tsv": str(contacts_path),
+        "surface_patches_json": str(patches_path),
+        "dssp_tsv": str(dssp_path),
+    }
+    if dssp_source_path is not None and dssp_source_path != dssp_path:
+        summary["artifacts"]["raw_dssp"] = str(dssp_source_path)
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    with residue_path.open("w") as fh:
+        fh.write(
+            "chain_id\tresseq\ticode\taa\tresname\trsa\tburial_class\t"
+            "secondary_structure\tneighbor_count\n"
+        )
+        for row in rows:
+            keys = (
+                "chain_id",
+                "resseq",
+                "icode",
+                "aa",
+                "resname",
+                "rsa",
+                "burial_class",
+                "secondary_structure",
+                "neighbor_count",
+            )
+            fh.write("\t".join(str(row[k]) for k in keys) + "\n")
+    with contacts_path.open("w") as fh:
+        fh.write("chain_id\tresseq\tother_chain_id\tother_resseq\tdistance\n")
+        for c in contacts:
+            fh.write(
+                f"{c['chain_id']}\t{c['resseq']}\t{c['other_chain_id']}\t"
+                f"{c['other_resseq']}\t{c['distance']}\n"
+            )
+    patches_path.write_text(json.dumps(patches, indent=2, sort_keys=True) + "\n")
+    with dssp_path.open("w") as fh:
+        fh.write("chain_id\tresseq\ticode\taa\tsecondary_structure\n")
+        for row in rows:
+            fh.write(
+                f"{row['chain_id']}\t{row['resseq']}\t{row['icode']}\t"
+                f"{row['aa']}\t{row['secondary_structure']}\n"
+            )
+    return summary, warnings
+
+
 @register_adapter("descriptor.yaml")
 class StructureAnalysisAdapter(ToolAdapter):
     def __init__(self, config: dict, weights_dir: Path, device: torch.device) -> None:
@@ -402,302 +771,28 @@ class StructureAnalysisAdapter(ToolAdapter):
         t0 = time.time()
         assert params.structure_path is not None
         path = Path(params.structure_path).expanduser()
-        if not path.exists():
-            raise FileNotFoundError(f"structure_analysis input not found: {path}")
-        residues, ligands = _parse_structure(path)
-        if params.chain_id:
-            residues = [r for r in residues if r.chain_id == params.chain_id]
-        if not residues:
-            raise ValueError("structure_analysis found no protein residues")
         out_dir = ctx.job_dir / "outputs"
-        out_dir.mkdir(parents=True, exist_ok=True)
         ctx.emit_progress(0.25)
-        coords = [(r, r.ca) for r in residues if r.ca is not None]
-        dssp_source_path: Path | None = None
-        ss_source = "ca_geometry"
-        warnings: list[str] = []
-        if params.run_dssp:
-            ss_by_key, dssp_source_path, dssp_warning = _run_dssp(
-                path,
-                coords,
-                out_dir,
-                params.output_prefix,
-            )
-            if ss_by_key is None:
-                pydssp_by_key, pydssp_warning = _run_pydssp(residues)
-                if pydssp_by_key is not None:
-                    ss_by_key = pydssp_by_key
-                    ss_source = "pydssp"
-                    if dssp_warning:
-                        warnings.append(f"mkdssp unavailable; used pydssp: {dssp_warning}")
-                else:
-                    ss_by_key = _secondary_structure(coords)
-                    if dssp_warning:
-                        warnings.append(
-                            f"DSSP unavailable; used CA-geometry heuristic: {dssp_warning}"
-                        )
-                    if pydssp_warning:
-                        warnings.append(pydssp_warning)
-            else:
-                ss_source = "dssp"
-                warnings.append("secondary_structure assigned from DSSP")
-        else:
-            ss_by_key = _secondary_structure(coords)
-            warnings.append("run_dssp=false; secondary_structure uses CA-geometry heuristic")
-        all_rows: list[dict[str, Any]] = []
-        for residue, ca in coords:
-            neighbors = 0
-            if ca is not None:
-                neighbors = sum(
-                    1
-                    for other, other_ca in coords
-                    if other is not residue
-                    and other_ca is not None
-                    and _dist(ca, other_ca) <= 10.0
-                )
-            rsa, burial = _burial_from_neighbors(
-                neighbors,
-                buried_threshold=params.buried_rsa_threshold,
-                surface_threshold=params.surface_rsa_threshold,
-            )
-            ss = ss_by_key.get(residue.key, "loop")
-            row = {
-                "chain_id": residue.chain_id,
-                "resseq": residue.resseq,
-                "icode": residue.icode,
-                "aa": residue.aa,
-                "resname": residue.resname,
-                "rsa": round(rsa, 4),
-                "burial_class": burial,
-                "secondary_structure": ss,
-                "neighbor_count": neighbors,
-            }
-            all_rows.append(row)
-        rows_by_key = {
-            (row["chain_id"], row["resseq"], row["icode"]): row
-            for row in all_rows
-        }
-        wanted = set(params.positions) if params.positions else None
-        position_index_basis = "all_residues_after_chain_filter"
-        mapped_positions: list[dict[str, Any]] = []
-        missing_positions: list[int] = []
-        if wanted is None:
-            rows = all_rows
-        else:
-            chain_ids = {residue.chain_id for residue in residues}
-            mapping_from_sequence = bool(params.sequence or params.fasta_path)
-            if mapping_from_sequence and params.chain_id is None and len(chain_ids) > 1:
-                raise ValueError(
-                    "structure_analysis sequence/fasta position mapping requires chain_id "
-                    f"when the parsed structure has multiple chains: {sorted(chain_ids)}"
-                )
-            resolution = resolve_positions(
-                residues=residue_refs_from_objects(residues),
-                positions=sorted(wanted),
-                chain_id=params.chain_id or residues[0].chain_id,
-                sequence=params.sequence,
-                fasta_path=params.fasta_path,
-                position_basis=params.position_basis,
-                label="requested positions",
-            )
-            warnings.extend(resolution.warnings)
-            position_index_basis = resolution.position_index_basis
-            mapped_positions = resolution.mapped_positions
-            missing_positions = resolution.missing_positions
-            rows = []
-            seen_keys: set[tuple[str, int, str]] = set()
-            for mapping in mapped_positions:
-                key = (
-                    str(mapping["chain_id"]),
-                    int(mapping["resseq"]),
-                    str(mapping.get("icode") or ""),
-                )
-                row = rows_by_key.get(key)
-                if row is None:
-                    continue
-                if key not in seen_keys:
-                    rows.append(row)
-                    seen_keys.add(key)
-        sequence_for_check = clean_sequence(params.sequence) if params.sequence else None
-        if sequence_for_check:
-            parsed_sequence = "".join(r.aa for r in residues if r.aa != "X")
-            provided = sequence_for_check
-            if len(provided) != len(parsed_sequence):
-                warnings.append(
-                    "provided sequence length does not match parsed structure residues: "
-                    f"sequence={len(provided)}, structure={len(parsed_sequence)}"
-                )
-            elif provided != parsed_sequence:
-                warnings.append("provided sequence differs from parsed structure sequence")
-        ctx.emit_progress(0.55)
-        contacts: list[dict[str, Any]] = []
-        interface_set: set[tuple[str, int, str]] = set()
-        interface_chains = set(params.interface_chain_ids)
-        for r, ca in coords:
-            if ca is None:
-                continue
-            for other, other_ca in coords:
-                if other is r or other_ca is None:
-                    continue
-                if (
-                    interface_chains
-                    and other.chain_id not in interface_chains
-                    and r.chain_id not in interface_chains
-                ):
-                    continue
-                if r.chain_id == other.chain_id:
-                    continue
-                d = _dist(ca, other_ca)
-                if d <= params.contact_distance_angstrom:
-                    contacts.append({
-                        "chain_id": r.chain_id,
-                        "resseq": r.resseq,
-                        "other_chain_id": other.chain_id,
-                        "other_resseq": other.resseq,
-                        "distance": round(d, 3),
-                    })
-                    interface_set.add(r.key)
-        ligand_names = {x.upper() for x in params.ligand_resnames}
-        ligand_contacts = []
-        for r, ca in coords:
-            if ca is None:
-                continue
-            for lig in ligands:
-                if ligand_names and lig.resname not in ligand_names:
-                    continue
-                points = list(lig.atoms.values())
-                if (
-                    points
-                    and min(_dist(ca, p) for p in points) <= params.contact_distance_angstrom
-                ):
-                    ligand_contacts.append({
-                        "chain_id": r.chain_id,
-                        "resseq": r.resseq,
-                        "ligand_resname": lig.resname,
-                        "ligand_chain_id": lig.chain_id,
-                        "ligand_resseq": lig.resseq,
-                    })
-        patches = _patches(all_rows)
-        liabilities: list[dict[str, Any]] = []
-        liabilities.extend(
-            {
-                "type": "exposed_hydrophobic_patch",
-                "chain_id": p["chain_id"],
-                "positions": p["positions"],
-            }
-            for p in patches
-        )
-        for row in all_rows:
-            if row["burial_class"] == "buried" and row["aa"] in BURIED_POLAR:
-                liabilities.append({
-                    "type": "buried_polar_candidate",
-                    "chain_id": row["chain_id"],
-                    "positions": [row["resseq"]],
-                })
-        burial_counts = Counter(row["burial_class"] for row in all_rows)
-        chains = sorted({r.chain_id for r in residues})
-        ss_counts = Counter(row["secondary_structure"] for row in all_rows)
-        n_rows = max(1, len(all_rows))
-        annotation_scope = {
-            "summary_scope": "all_residues_after_chain_filter",
-            "annotation_scope": (
-                "requested_positions" if wanted else "all_residues_after_chain_filter"
-            ),
-            "requested_positions": sorted(wanted) if wanted else [],
-            "position_index_basis": position_index_basis,
-            "mapped_positions": mapped_positions,
-            "missing_positions": sorted(missing_positions),
-            "annotated_residue_count": len(rows),
-            "summary_residue_count": len(all_rows),
-        }
-        summary = {
-            "structure_path": str(path),
-            "chains": chains,
-            "residue_counts": dict(Counter(r.chain_id for r in residues)),
-            "secondary_structure": {
-                "helix": ss_counts["helix"],
-                "sheet": ss_counts["sheet"],
-                "loop": ss_counts["loop"],
-                "helix_fraction": ss_counts["helix"] / n_rows,
-                "sheet_fraction": ss_counts["sheet"] / n_rows,
-                "loop_fraction": ss_counts["loop"] / n_rows,
-            },
-            "burial": dict(burial_counts),
-            "interface": {
-                "contact_count": len(contacts),
-                "interface_residue_count": len(interface_set),
-                "ligand_contact_count": len(ligand_contacts),
-            },
-            "ligand_contacts": {
-                "contact_count": len(ligand_contacts),
-                "contact_residue_count": len({
-                    (c["chain_id"], c["resseq"]) for c in ligand_contacts
-                }),
-            },
-            "liabilities": liabilities[: params.max_annotations],
-            "secondary_structure_source": ss_source,
-            "annotation_scope": annotation_scope,
-        }
-        summary_path = out_dir / f"{params.output_prefix}_summary.json"
-        residue_path = out_dir / f"{params.output_prefix}_residue_structure_annotations.tsv"
-        contacts_path = out_dir / f"{params.output_prefix}_interface_contacts.tsv"
-        patches_path = out_dir / f"{params.output_prefix}_surface_patches.json"
-        dssp_path = out_dir / f"{params.output_prefix}_dssp.tsv"
-        summary["artifacts"] = {
-            "summary_json": str(summary_path),
-            "residue_annotations_tsv": str(residue_path),
-            "interface_contacts_tsv": str(contacts_path),
-            "surface_patches_json": str(patches_path),
-            "dssp_tsv": str(dssp_path),
-        }
-        if dssp_source_path is not None and dssp_source_path != dssp_path:
-            summary["artifacts"]["raw_dssp"] = str(dssp_source_path)
-        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
-        with residue_path.open("w") as fh:
-            fh.write("chain_id\tresseq\ticode\taa\tresname\trsa\tburial_class\tsecondary_structure\tneighbor_count\n")
-            for row in rows:
-                keys = (
-                    "chain_id",
-                    "resseq",
-                    "icode",
-                    "aa",
-                    "resname",
-                    "rsa",
-                    "burial_class",
-                    "secondary_structure",
-                    "neighbor_count",
-                )
-                fh.write("\t".join(str(row[k]) for k in keys) + "\n")
-        with contacts_path.open("w") as fh:
-            fh.write("chain_id\tresseq\tother_chain_id\tother_resseq\tdistance\n")
-            for c in contacts:
-                fh.write(f"{c['chain_id']}\t{c['resseq']}\t{c['other_chain_id']}\t{c['other_resseq']}\t{c['distance']}\n")
-        patches_path.write_text(json.dumps(patches, indent=2, sort_keys=True) + "\n")
-        with dssp_path.open("w") as fh:
-            fh.write("chain_id\tresseq\ticode\taa\tsecondary_structure\n")
-            for row in rows:
-                fh.write(
-                    f"{row['chain_id']}\t{row['resseq']}\t{row['icode']}\t"
-                    f"{row['aa']}\t{row['secondary_structure']}\n"
-                )
+        summary, warnings = _analyze_structure(params, path, out_dir, params.output_prefix)
+        ctx.emit_progress(0.85)
         ctx.emit_progress(1.0)
         return StructureAnalysisOutput(
             structure_path=str(path),
-            chains=chains,
+            chains=summary["chains"],
             residue_counts=summary["residue_counts"],
             secondary_structure=summary["secondary_structure"],
             burial={
-                "buried": burial_counts["buried"],
-                "intermediate": burial_counts["intermediate"],
-                "exposed": burial_counts["exposed"],
+                "buried": int(summary["burial"].get("buried", 0)),
+                "intermediate": int(summary["burial"].get("intermediate", 0)),
+                "exposed": int(summary["burial"].get("exposed", 0)),
             },
             interface=summary["interface"],
             ligand_contacts=summary["ligand_contacts"],
-            liabilities=liabilities[: params.max_annotations],
-            annotation_scope=annotation_scope,
+            liabilities=summary["liabilities"],
+            annotation_scope=summary["annotation_scope"],
             artifacts=summary["artifacts"],
             warnings=warnings,
-            candidates=_structure_analysis_candidates(params, summary, str(path)),
+            candidates=_structure_analysis_candidates(params, summary, str(path), out_dir),
             runtime_ms=int((time.time() - t0) * 1000),
         )
 
@@ -721,20 +816,35 @@ def _structure_analysis_candidates(
     params: StructureAnalysisInput,
     summary: dict[str, Any],
     structure_path: str,
+    out_dir: Path,
 ) -> list[dict[str, Any]]:
     upstream = params.candidates if params.candidates else [{}]
-    scores = {
-        "secondary_structure": summary["secondary_structure"],
-        "burial": summary["burial"],
-        "interface": summary["interface"],
-        "ligand_contacts": summary["ligand_contacts"],
-        "liability_count": len(summary["liabilities"]),
-        "secondary_structure_source": summary["secondary_structure_source"],
+    summary_by_input: dict[tuple[str, str | None], dict[str, Any]] = {
+        (structure_path, params.sequence): summary,
     }
     candidates: list[dict[str, Any]] = []
     for index, source_candidate in enumerate(upstream):
         local_id = _source_local_id(source_candidate, f"analysis_{index:04d}")
         candidate_structure = source_candidate.get("structure_path") or structure_path
+        candidate_sequence = source_candidate.get("sequence") or params.sequence
+        cache_key = (str(candidate_structure), candidate_sequence)
+        candidate_summary = summary_by_input.get(cache_key)
+        if candidate_summary is None:
+            candidate_params = params.model_copy(
+                update={
+                    "structure_path": candidate_structure,
+                    "sequence": candidate_sequence,
+                    "output_prefix": _candidate_output_prefix(params.output_prefix, index),
+                }
+            )
+            candidate_summary, _warnings = _analyze_structure(
+                candidate_params,
+                Path(str(candidate_structure)).expanduser(),
+                out_dir,
+                candidate_params.output_prefix,
+            )
+            summary_by_input[cache_key] = candidate_summary
+        scores = _structure_scores(candidate_summary)
         if _is_canonical_candidate(source_candidate):
             candidate = _copy_candidate(source_candidate)
         else:
@@ -759,14 +869,16 @@ def _structure_analysis_candidates(
                 "scores": {},
                 "artifacts": {},
             }
-            if params.sequence:
-                candidate["sequence"] = params.sequence
+            if candidate_sequence:
+                candidate["sequence"] = candidate_sequence
         candidate.setdefault("scores", {})["structure_analysis"] = scores
-        candidate.setdefault("artifacts", {})["structure_analysis"] = dict(summary["artifacts"])
-        candidate.setdefault(
-            "capabilities",
+        candidate.setdefault("artifacts", {})["structure_analysis"] = dict(
+            candidate_summary["artifacts"]
+        )
+        candidate["capabilities"] = _merge_capabilities(
+            candidate.get("capabilities"),
             candidate_capability_flags(
-                has_sequence=bool(candidate.get("sequence")),
+                has_sequence=bool(candidate.get("sequence") or candidate_sequence),
                 has_backbone_structure=bool(candidate_structure),
                 has_full_structure=bool(candidate_structure),
                 has_candidate_scores=True,
@@ -776,11 +888,41 @@ def _structure_analysis_candidates(
     return candidates
 
 
+def _structure_scores(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "secondary_structure": summary["secondary_structure"],
+        "burial": summary["burial"],
+        "interface": summary["interface"],
+        "ligand_contacts": summary["ligand_contacts"],
+        "liability_count": len(summary["liabilities"]),
+        "secondary_structure_source": summary["secondary_structure_source"],
+    }
+
+
+def _candidate_output_prefix(base: str, index: int) -> str:
+    return f"{base}_candidate_{index:04d}"
+
+
+def _merge_capabilities(existing: Any, updates: dict[str, bool]) -> dict[str, bool]:
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in updates.items():
+        merged[key] = bool(merged.get(key)) or bool(value)
+    return merged
+
+
 def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     out = {
         key: value
         for key, value in candidate.items()
-        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
+        if key
+        in {
+            "schema_version",
+            "candidate_id",
+            "source",
+            "sequence",
+            "structure_path",
+            "capabilities",
+        }
     }
     out["scores"] = dict(candidate.get("scores") or {})
     out["artifacts"] = dict(candidate.get("artifacts") or {})

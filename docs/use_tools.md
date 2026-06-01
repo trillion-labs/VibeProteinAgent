@@ -1,125 +1,135 @@
-# Use A Single Tool Or Manual Separate Runs
+# Use Direct Tool Runs
 
-Use this path when you want to run one tool directly, or when you prefer to run
-several tools yourself as separate commands. `vpa run` submits one tool at a
-time; if you want VPA to connect tools automatically, use a workflow instead.
+Use direct runs when you know which tool to call and want to inspect each result
+yourself. This is the fastest way to learn VPA because it exercises the same
+workspace, worker, artifact, and report system used by workflows and the agent.
 
 Demo notebook: [`demo/use_tools_demo.ipynb`](../demo/use_tools_demo.ipynb)
-walks through direct ProteinMPNN, Protenix-v2, sequence analysis, and QC runs.
-It is smoke-safe by default: it validates GPU/CLI access and prints long model
-commands unless you set `VPA_DEMO_RUN_HEAVY=1`.
+runs this guide with CPU-safe defaults.
 
-## 1. Install What You Need
+## 1. Install And Verify
 
-For a small setup:
+For lightweight direct runs:
 
 ```bash
-# `--yes` skips confirmation prompts and starts the install right away.
-npx vibeproteinagent install --profile base --yes
+npx vibeproteinagent install --profile base --cuda-profile auto --yes
+source "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh"
+vpa version
+vpa install doctor --profile base
 ```
 
-For selected heavy tools and their weights (e.g., Boltz2, RFDiffusion, ProteinMPNN):
+For selected GPU tools, preview and install only what you need:
 
 ```bash
-npx vibeproteinagent install preflight --tools boltz2_affinity,rfdiffusion,proteinmpnn --cuda-profile auto
-npx vibeproteinagent install --tools boltz2_affinity,rfdiffusion,proteinmpnn --cuda-profile auto --yes
+vpa install preflight --tools proteinmpnn,protenix_v2 --cuda-profile auto --json
+npx vibeproteinagent install --tools proteinmpnn,protenix_v2 --cuda-profile auto --yes
+vpa install doctor --tools proteinmpnn,protenix_v2
 ```
 
-Boltz-2 affinity and BoltzGen are fetched as upstream source checkouts plus
-model/cache artifacts during install. If your lab already maintains shared
-copies, point `VPA_BOLTZ_TREE`, `VPA_BOLTZ_CACHE`, `VPA_BOLTZGEN_TREE`, and
-`VPA_BOLTZGEN_CACHE` at those locations before running VPA.
+Export `HF_TOKEN` only for tools or model variants that need Hugging Face
+credentials.
 
-For ESM3 or other gated Hugging Face model downloads, export a credential before
-installing or before the first run:
+## 2. Start A Worker
+
+A workspace stores jobs, logs, artifacts, cache records, and reports. The daemon
+starts workers that execute queued jobs.
 
 ```bash
-export HF_TOKEN=<huggingface-access-token>
-npx vibeproteinagent install --tools esm3 --cuda-profile auto --yes
+vpa daemon start --cpu-workers 1 --workspace direct_demo
+vpa daemon status --workspace direct_demo
 ```
 
-`VPA_HF_CREDENTIAL` is also accepted as a VPA-specific alias.
-
-Check readiness:
+For GPU tools:
 
 ```bash
-vpa install doctor --tools boltz2_affinity,rfdiffusion,proteinmpnn
+vpa daemon start --workers 1 --cpu-workers 2 --workspace design_round
 ```
 
-## 2. Create A Workspace And Start Workers
-
-A workspace keeps related jobs, logs, artifacts, and reports together. Use the
-same workspace name for commands that belong to the same run. Starting the daemon
-creates the workspace if needed and launches local workers that execute queued
-tool jobs.
-
-```bash
-vpa daemon start --workers 1 --workspace my_run
-vpa daemon status --workspace my_run
-```
-
-`--workers` is the GPU worker count. For mixed workflows, add
-`--cpu-workers M` so CPU-only retrieval, analysis, and reporting-adjacent jobs
-do not occupy GPU workers.
-
-## 3. Find And Inspect Tools
+## 3. Inspect The Tool Surface
 
 ```bash
 vpa tools
-vpa tool boltz2_affinity
+vpa tools --json
+vpa tool info sequence_analysis
+vpa tool info protein_qc --json
 ```
 
-## 4. Run One Tool
+Tool descriptors show the accepted inputs, output schema, GPU requirement, and
+availability state.
 
-Run a lightweight analysis tool:
+## 4. Run Lightweight Tools
+
+Run sequence analysis:
 
 ```bash
-vpa run sequence_analysis sequence=ACDEFGHIKLMNPQRSTVWY --workspace my_run --json
+vpa run sequence_analysis \
+  sequence=ACDEFGHIKLMNPQRSTVWY \
+  --workspace direct_demo \
+  --follow
 ```
 
-Run a structure prediction tool with a params file:
+Run QC on the same sequence:
 
 ```bash
-# --follow shows live progress in this terminal.
-vpa run boltz2_affinity --params-file boltz_params.yaml --workspace my_run --follow
+vpa run protein_qc \
+  sequence=ACDEFGHIKLMNPQRSTVWY \
+  metrics='["gravy","instability_index","pi","polybasic"]' \
+  --workspace direct_demo \
+  --follow
 ```
 
-For manual chaining, inspect the completed job's output and pass the needed
-path into the next command yourself. If you do not want to copy job ids or file
-paths by hand, use a workflow instead.
+`--follow` streams job events until the job reaches a terminal state. Without
+`--follow`, VPA returns the `job_id` immediately and the worker continues in
+the background.
+
+## 5. Inspect Outputs
 
 ```bash
-# Print only the structure path from the first job.
-vpa results <boltz_job_id> --workspace my_run --fields predicted_cif
-
-# Copy that printed path into the next command.
-vpa run protein_qc pdb_path=<predicted_cif path> --workspace my_run --follow
+vpa status <job_id> --workspace direct_demo
+vpa wait <job_id> --workspace direct_demo
+vpa results <job_id> --workspace direct_demo --json
+vpa artifacts <job_id> --workspace direct_demo
+vpa download <job_id> --workspace direct_demo --out ./outputs
 ```
 
-Example `boltz_params.yaml`:
+Use `results` for structured adapter output and `artifacts` / `download` for
+files written by the job.
 
-```yaml
-input_yaml: target_with_ligand.yaml
-use_msa: true
-msa_backend: remote
-recycling_steps: 1
-sampling_steps: 20
-diffusion_samples: 1
-sampling_steps_affinity: 20
-diffusion_samples_affinity: 1
-```
-
-## 5. Read Results
+## 6. Generate A Report
 
 ```bash
-vpa status <job_id> --workspace my_run --json
-vpa results <job_id> --workspace my_run --json
-vpa artifacts <job_id> --workspace my_run
-vpa download <job_id> --workspace my_run --out ./outputs
+vpa report <job_id> \
+  --workspace direct_demo \
+  --viewer offline \
+  --out direct_tool_report.html \
+  --open
 ```
 
-For a human-readable result page:
+Reports summarize the stored job output and artifacts. They do not rerun the
+tool.
+
+## Optional Heavy Tool Runs
+
+After `vpa install doctor` reports the tools ready and a GPU worker is running,
+you can run heavier jobs the same way:
 
 ```bash
-vpa report <job_id> --workspace my_run --open
+vpa run proteinmpnn \
+  pdb_path=tests/fixtures/6MRR.pdb \
+  num_designs=2 \
+  seed=17 \
+  --workspace design_round \
+  --follow
+
+vpa run protenix_v2 \
+  input_json=tests/fixtures/protenix_v2_input_tiny.json \
+  --workspace design_round \
+  --follow
+```
+
+If a tool is unavailable, start with:
+
+```bash
+vpa tool info <tool>
+vpa install doctor --tools <tool> --json
 ```
