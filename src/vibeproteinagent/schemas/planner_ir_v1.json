@@ -91,7 +91,12 @@
                   "pattern": "^[a-z_][a-z0-9_]{0,63}$"
                 },
                 "relationship": {
-                  "enum": ["candidate_source", "term_source", "identifier_source"]
+                  "enum": [
+                    "candidate_source",
+                    "term_source",
+                    "identifier_source",
+                    "profile_source"
+                  ]
                 }
               },
               "additionalProperties": false

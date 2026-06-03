@@ -21,6 +21,13 @@
       "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` field into the `sequence` input when omitted.",
       "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
     },
+    "profile_guidance": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "default": null,
+      "description": "Family-profile guidance compiled from a profile_source upstream. When present, ESM2 runs sequence_generation and masks positions that disagree with conserved consensus evidence.",
+      "examples": [{"schema_version": "profile_guidance_v1", "consensus_sequence": "ACDEFG"}]
+    },
     "mode": {
       "type": "string",
       "enum": ["embedding", "sequence_generation"],

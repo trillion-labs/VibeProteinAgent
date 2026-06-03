@@ -1,1 +1,0 @@
-{"ok": true, "data": {"report_html": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/llm_submit_candidate_timeout300_fixed_20260524_163839/actual/semantic_qwen_report.html", "format": "html", "source": {"kind": "workflow", "id": "wf_0f849ffb6e6b4409a1aef20b9c9bdf96"}, "candidate_count": 4, "top_k": 5, "warnings": [], "opened": false}}

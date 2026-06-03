@@ -206,6 +206,13 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
         serialized = json.dumps(prompt_context, sort_keys=True)
         assert "ACDE" not in serialized
         assert "confidence\": 0.8" not in serialized
+        decision_brief = kwargs.get("decision_brief")
+        assert isinstance(decision_brief, dict)
+        brief_serialized = json.dumps(decision_brief, sort_keys=True)
+        assert decision_brief["version"] == "decision_brief_v1"
+        assert decision_brief["recommended_candidates"][0]["job_id"] == "job_go"
+        assert "ACDE" not in brief_serialized
+        assert "confidence\": 0.8" not in brief_serialized
         return {
             "decision": "next_round",
             "reasoning": "Rank survivors in a second round.",
@@ -299,3 +306,232 @@ def test_v1_next_round_uses_planner_ir_with_prior_round_scope(
         "${outputs.prior_round.candidates}"
     )
     assert round2_execute["scope"]["outputs"]["prior_round"]["candidates"] == [_candidate()]
+
+
+def test_v1_next_round_carry_ranked_top_k_limits_prior_round_scope(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_tool_environment(monkeypatch)
+    provider = _PlannerProvider(
+        [
+            _selection("go_sequences"),
+            _round1_ir(),
+            _selection("rank_designs"),
+            _round2_ir(),
+        ]
+    )
+    monkeypatch.setattr(controller_mod, "provider_from_config", lambda _config: provider)
+
+    async def fake_decide(self, *args, **kwargs):
+        del self, args
+        decision_brief = kwargs["decision_brief"]
+        assert [card["candidate_id"] for card in decision_brief["recommended_candidates"]] == [
+            "cand_a",
+            "cand_b",
+        ]
+        return {
+            "decision": "next_round_with_surviving_candidate",
+            "reasoning": "Carry only the top candidate.",
+            "next_round": {
+                "reason": "Rank the best survivor.",
+                "recommended": True,
+            },
+            "controller_hints": {
+                "survivor_policy": {"mode": "carry_ranked_top_k", "top_k": 1}
+            },
+            "metrics_used": ["go_sequences.confidence"],
+        }
+
+    monkeypatch.setattr(decision_mod.DecisionEngine, "decide", fake_decide)
+    captured: dict[str, Any] = {"execute_calls": []}
+
+    def fake_execute(
+        self,
+        run_id,
+        broker,
+        plan,
+        params,
+        policy,
+        prior_round_context=None,
+    ):
+        del self, run_id, broker, params, policy
+        scope = controller._build_executor_scope(prior_round=prior_round_context)
+        captured["execute_calls"].append({"plan": plan, "scope": scope})
+        if len(captured["execute_calls"]) == 1:
+            cand_a = _candidate("cand_a")
+            cand_b = _candidate("cand_b")
+            cand_b["sequence"] = "FGHI"
+            raw_summary = _workflow_summary(
+                "wf_round1",
+                "job_go",
+                [cand_a, cand_b],
+            )
+            return WorkflowExecutionOutcome(
+                "wf_round1",
+                "completed",
+                True,
+                raw_summary,
+                raw_workflow_summary=raw_summary,
+            )
+        raw_summary = {
+            "workflow_id": "wf_round2",
+            "state": "completed",
+            "job_ids": ["job_rank"],
+            "nodes": [],
+            "final_submission": {"submission_id": "sub_final"},
+            "metrics_used": ["rank_designs.score"],
+        }
+        return WorkflowExecutionOutcome(
+            "wf_round2",
+            "completed",
+            True,
+            raw_summary,
+            raw_workflow_summary=raw_summary,
+        )
+
+    monkeypatch.setattr(controller_mod.AgentController, "_execute_validated_plan", fake_execute)
+    controller = AgentController(tmp_workspace, config=AgentConfig(max_rounds=2, max_entries=3))
+
+    report = _run_controller(controller, tmp_workspace)
+
+    assert report["state"] == "completed"
+    assert captured["execute_calls"][1]["scope"]["outputs"]["prior_round"]["candidates"] == [
+        _candidate("cand_a")
+    ]
+    first_decision = report["decisions"][0]
+    assert first_decision["controller_hints"]["effective_survivor_policy"] == {
+        "mode": "carry_ranked_top_k",
+        "top_k": 1,
+        "candidate_ids": ["cand_a"],
+    }
+
+
+def test_carry_ranked_top_k_can_select_previous_only_survivor(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_tool_environment(monkeypatch)
+    provider = _PlannerProvider(
+        [
+            _selection("go_sequences"),
+            _round1_ir(),
+            _selection("rank_designs"),
+            _round2_ir(),
+            _selection("rank_designs"),
+            _round2_ir(),
+        ]
+    )
+    monkeypatch.setattr(controller_mod, "provider_from_config", lambda _config: provider)
+    decision_calls = {"count": 0}
+
+    async def fake_decide(self, *args, **kwargs):
+        del self, args
+        decision_calls["count"] += 1
+        decision_brief = kwargs["decision_brief"]
+        if decision_calls["count"] == 1:
+            assert decision_brief["recommended_candidates"][0]["candidate_id"] == "cand_a"
+            return {
+                "decision": "next_round_with_surviving_candidate",
+                "reasoning": "Carry survivors forward.",
+                "next_round": {"reason": "Try ranking survivors.", "recommended": True},
+                "metrics_used": ["go_sequences.confidence"],
+            }
+        assert decision_brief["recommended_candidates"] == [
+            {
+                "candidate_id": "cand_a",
+                "rank": 1,
+                "source_tool": "go_sequences",
+                "capabilities_satisfied": True,
+                "matched_capabilities": ["has_candidate_scores", "has_sequence"],
+                "missing_capabilities": [],
+                "evidence": [
+                    "survivor",
+                    "sequence_available",
+                    "candidate_scores_available",
+                    "scored",
+                ],
+                "warnings": [],
+                "source_surface": "survivor_summary",
+            }
+        ]
+        return {
+            "decision": "next_round_with_surviving_candidate",
+            "reasoning": "Carry only the survivor from the prior pool.",
+            "next_round": {"reason": "Retry with the previous survivor.", "recommended": True},
+            "controller_hints": {
+                "survivor_policy": {"mode": "carry_ranked_top_k", "top_k": 1}
+            },
+            "metrics_used": ["go_sequences.confidence"],
+        }
+
+    monkeypatch.setattr(decision_mod.DecisionEngine, "decide", fake_decide)
+    captured: dict[str, Any] = {"execute_calls": []}
+
+    def fake_execute(
+        self,
+        run_id,
+        broker,
+        plan,
+        params,
+        policy,
+        prior_round_context=None,
+    ):
+        del self, run_id, broker, params, policy
+        scope = controller._build_executor_scope(prior_round=prior_round_context)
+        captured["execute_calls"].append({"plan": plan, "scope": scope})
+        if len(captured["execute_calls"]) == 1:
+            raw_summary = _workflow_summary("wf_round1", "job_go", [_candidate("cand_a")])
+            return WorkflowExecutionOutcome(
+                "wf_round1",
+                "completed",
+                True,
+                raw_summary,
+                raw_workflow_summary=raw_summary,
+            )
+        if len(captured["execute_calls"]) == 2:
+            raw_summary = {
+                "workflow_id": "wf_round2",
+                "state": "completed",
+                "job_ids": ["job_empty"],
+                "nodes": [],
+                "metrics_used": [],
+            }
+            return WorkflowExecutionOutcome(
+                "wf_round2",
+                "completed",
+                True,
+                raw_summary,
+                raw_workflow_summary=raw_summary,
+            )
+        raw_summary = {
+            "workflow_id": "wf_round3",
+            "state": "completed",
+            "job_ids": ["job_rank"],
+            "nodes": [],
+            "final_submission": {"submission_id": "sub_final"},
+            "metrics_used": ["rank_designs.score"],
+        }
+        return WorkflowExecutionOutcome(
+            "wf_round3",
+            "completed",
+            True,
+            raw_summary,
+            raw_workflow_summary=raw_summary,
+        )
+
+    monkeypatch.setattr(controller_mod.AgentController, "_execute_validated_plan", fake_execute)
+    controller = AgentController(tmp_workspace, config=AgentConfig(max_rounds=3, max_entries=4))
+
+    report = _run_controller(controller, tmp_workspace)
+
+    assert report["state"] == "completed"
+    assert decision_calls["count"] == 2
+    assert captured["execute_calls"][2]["scope"]["outputs"]["prior_round"]["candidates"] == [
+        _candidate("cand_a")
+    ]
+    assert report["decisions"][1]["controller_hints"]["effective_survivor_policy"] == {
+        "mode": "carry_ranked_top_k",
+        "top_k": 1,
+        "candidate_ids": ["cand_a"],
+    }

@@ -10,6 +10,7 @@ ParameterOwnership = Literal[
     "mode",
     "source_artifact",
     "candidate_stream",
+    "profile_evidence",
     "structural_selector",
     "length_constraint",
     "scoring_policy",
@@ -71,6 +72,12 @@ def _policies(*items: ParameterPolicy) -> dict[str, ParameterPolicy]:
 TOOL_PARAMETER_POLICIES: dict[str, dict[str, ParameterPolicy]] = {
     "proteinmpnn": _policies(
         _policy("candidates", "candidate_stream", root_planner_allowed=False),
+        _policy(
+            "profile_guidance",
+            "profile_evidence",
+            root_planner_allowed=False,
+            downstream_planner_allowed=False,
+        ),
         _policy("pdb_path", "source_artifact", derive_when_upstream=True),
         _policy("chains", "structural_selector", derive_when_upstream=True),
         _policy("num_designs", "budget"),
@@ -95,6 +102,12 @@ TOOL_PARAMETER_POLICIES: dict[str, dict[str, ParameterPolicy]] = {
     ),
     "rfdiffusion": _policies(
         _policy("candidates", "candidate_stream", root_planner_allowed=False),
+        _policy(
+            "profile_guidance",
+            "profile_evidence",
+            root_planner_allowed=False,
+            downstream_planner_allowed=False,
+        ),
         _policy("target_pdb", "source_artifact", derive_when_upstream=True),
         _policy("target_chain", "structural_selector", derive_when_upstream=True),
         _policy("target_residues", "structural_selector"),
@@ -230,6 +243,35 @@ TOOL_PARAMETER_POLICIES: dict[str, dict[str, ParameterPolicy]] = {
         _policy("protocol", "intent"),
         _policy("seed", "budget"),
     ),
+    "esm2": _policies(
+        _policy("candidates", "candidate_stream", root_planner_allowed=False),
+        _policy(
+            "profile_guidance",
+            "profile_evidence",
+            root_planner_allowed=False,
+            downstream_planner_allowed=False,
+        ),
+        _policy("sequence", "source_artifact", derive_when_upstream=True),
+        _policy("mode", "mode"),
+        _policy("model_name", "environment"),
+        _policy("return_attention", "intent"),
+        _policy("mask_positions", "structural_selector"),
+        _policy("mask_indices_zero_based", "structural_selector"),
+    ),
+    "esm3": _policies(
+        _policy("candidates", "candidate_stream", root_planner_allowed=False),
+        _policy(
+            "profile_guidance",
+            "profile_evidence",
+            root_planner_allowed=False,
+            downstream_planner_allowed=False,
+        ),
+        _policy("sequence", "source_artifact", derive_when_upstream=True),
+        _policy("model_name", "environment"),
+        _policy("tracks", "mode"),
+        _policy("num_steps", "budget"),
+        _policy("temperature", "budget"),
+    ),
     "protenix_v2": _policies(
         _policy("input_json", "source_artifact", derive_when_upstream=True),
         _policy("candidates", "candidate_stream", root_planner_allowed=False),
@@ -265,6 +307,22 @@ TOOL_PARAMETER_POLICIES: dict[str, dict[str, ParameterPolicy]] = {
         _policy("qc_results", "candidate_stream", root_planner_allowed=False),
         _policy("candidates", "candidate_stream", root_planner_allowed=False),
         _policy("top_k", "budget"),
+        _policy("output_prefix", "intent"),
+    ),
+    "family_profile": _policies(
+        _policy("candidates", "candidate_stream", root_planner_allowed=False),
+        _policy(
+            "profile",
+            "profile_evidence",
+            root_planner_allowed=False,
+            downstream_planner_allowed=False,
+        ),
+        _policy("fasta_path", "source_artifact"),
+        _policy("alignment_path", "source_artifact"),
+        _policy("family_id", "intent"),
+        _policy("family_label", "intent"),
+        _policy("min_conservation", "scoring_policy"),
+        _policy("motif_window", "scoring_policy"),
         _policy("output_prefix", "intent"),
     ),
     "structure_analysis": _policies(
@@ -315,6 +373,13 @@ def fallback_policy(field: str) -> ParameterPolicy:
     lowered = field.lower()
     if lowered in {"candidates", "candidate_sets", "predictions", "analyses", "qc_results"}:
         return _policy(field, "candidate_stream", root_planner_allowed=False)
+    if lowered in {"profile", "profile_guidance"}:
+        return _policy(
+            field,
+            "profile_evidence",
+            root_planner_allowed=False,
+            downstream_planner_allowed=False,
+        )
     if (
         lowered.endswith("_path")
         or lowered.endswith("_file")

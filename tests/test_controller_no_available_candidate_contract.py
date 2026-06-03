@@ -7,7 +7,13 @@ from typing import Any
 import pytest
 
 from vibeproteinagent.agents.config import AgentConfig
-from vibeproteinagent.agents.execution.controller import AgentController, WorkflowExecutionOutcome
+from vibeproteinagent.agents.execution.controller import (
+    AgentController,
+    WorkflowExecutionOutcome,
+    _final_report,
+    _normalize_effective_survivor_policy,
+    _previous_survivor_pool_stats,
+)
 from vibeproteinagent.agents.execution.policies import ExecutionPolicy
 from vibeproteinagent.agents.planning import WorkflowPlanner
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse
@@ -71,6 +77,25 @@ def _candidate(candidate_id: str) -> dict[str, Any]:
         "capabilities": {"has_sequence": True},
         "sequence": "ACDE",
     }
+
+
+def test_previous_survivor_pool_stats_count_only_and_previous_only() -> None:
+    current = [_candidate("current"), _candidate("duplicate")]
+    ready_previous = _candidate("ready_previous")
+    ready_previous["full_structure_path"] = "/tmp/ready_previous.pdb"
+    missing_previous = _candidate("missing_previous")
+    survivor_duplicate = _candidate("duplicate")
+    survivor_duplicate["full_structure_path"] = "/tmp/duplicate.pdb"
+
+    stats = _previous_survivor_pool_stats(
+        survivor_pool=[ready_previous, missing_previous, survivor_duplicate],
+        current_round_candidates=current,
+        deliverable_contract={
+            "required_candidate_capabilities": ["has_sequence", "has_full_structure"]
+        },
+    )
+
+    assert stats == {"submit_ready_count": 1, "missing_capability_count": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +298,9 @@ def test_nonmax_empty_candidate_branches_next_round_without_decision_llm(
             assert prior is not None
             assert prior.survivor_snapshot_id is not None
             assert prior.prompt_digest["latest_round"]["branch_decision"]["action"] == "next_round"
+            assert controller._build_executor_scope(prior_round=prior)["outputs"][
+                "prior_round"
+            ]["candidates"] == []
         return {
             "mode": "agent_plan",
             "source_kind": "workflow_yaml",
@@ -364,6 +392,77 @@ def test_nonmax_empty_candidate_branches_next_round_without_decision_llm(
     assert plan_calls["count"] == 2
     assert report["decisions"][0]["decision"] == "next_round_with_no_acceptable_candidate"
     assert report["decisions"][0]["resolved_branch"]["action"] == "next_round"
+
+
+def test_requested_candidate_count_shortfall_is_report_audit_not_failure() -> None:
+    classification = ModeClassification(
+        mode="agent_plan",
+        reason="test",
+        requires_llm_planning=True,
+        deliverable_contract={"requested_candidate_count": 3},
+    )
+
+    report = _final_report(
+        mode="agent_plan",
+        classification=classification,
+        state="completed",
+        job_ids=["job_submit"],
+        workflow_ids=["wf_1"],
+        result={"state": "completed"},
+        summary={
+            "latest": {
+                "decision_brief": {
+                    "user_goal": {"requested_candidate_count": 3},
+                    "candidate_pool": {"submit_ready_count": 1},
+                },
+                "final_submission": {
+                    "submission_id": "sub_1",
+                    "outcome": "accepted",
+                    "candidates_resolved": [{"candidate_id": "cand_a"}],
+                },
+            }
+        },
+    )
+
+    assert report["state"] == "completed"
+    assert report["candidate_count_contract"] == {
+        "requested": 3,
+        "submit_ready_count": 1,
+        "submitted_count": 1,
+        "satisfied": False,
+        "shortfall_reason": "submitted_fewer_candidates_than_requested",
+    }
+
+
+def test_submit_candidate_ignores_survivor_policy_with_correction(
+    tmp_workspace: Workspace,
+) -> None:
+    del tmp_workspace
+    decision = {
+        "decision": "submit_candidate",
+        "submit_candidate": {"candidates": [{"candidate_id": "cand_a"}]},
+        "controller_hints": {"survivor_policy": {"mode": "carry_none"}},
+    }
+
+    _normalize_effective_survivor_policy(decision, {})
+
+    assert "effective_survivor_policy" not in decision["controller_hints"]
+    assert decision["controller_corrections"][0]["code"] == (
+        "survivor_policy_ignored_for_submit_candidate"
+    )
+
+
+def test_no_acceptable_always_records_effective_carry_none() -> None:
+    decision = {
+        "decision": "next_round_with_no_acceptable_candidate",
+        "next_round": {"reason": "no acceptable candidate"},
+    }
+
+    _normalize_effective_survivor_policy(decision, {})
+
+    assert decision["controller_hints"]["effective_survivor_policy"] == {
+        "mode": "carry_none"
+    }
 
 
 def test_partial_empty_event_with_current_candidates_uses_decision_llm(

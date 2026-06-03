@@ -55,6 +55,7 @@ EXPECTED_REQUIRED_COUNTS: dict[str, int] = {
     "boltzgen": 0,
     "esm2": 0,
     "esm3": 0,
+    "family_profile": 0,
     "foldseek": 1,
     "function_term_resolver": 1,
     "go_sequences": 1,

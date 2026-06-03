@@ -236,6 +236,17 @@ def test_decision_llm_receives_prompt_context_not_workflow_summary() -> None:
                     },
                 }
             },
+            decision_brief={
+                "version": "decision_brief_v1",
+                "recommended_candidates": [
+                    {
+                        "job_id": "job_rank",
+                        "candidate_id": "cand_x",
+                        "index": 0,
+                        "rank": 1,
+                    }
+                ],
+            },
             model="fake",
         )
     )
@@ -243,6 +254,8 @@ def test_decision_llm_receives_prompt_context_not_workflow_summary() -> None:
     payload = json.loads(provider.messages[0][1].content)
     serialized = json.dumps(payload, sort_keys=True)
     assert "summary" not in payload
+    assert payload["decision_brief"]["version"] == "decision_brief_v1"
+    assert payload["decision_brief"]["recommended_candidates"][0]["job_id"] == "job_rank"
     assert payload["prompt_context"]["latest_round"]["candidate_summary"]["count"] == 1
     assert "ACDEFGHIKLMNPQRSTVWY" not in serialized
     assert "ranking_score" not in serialized
@@ -289,6 +302,65 @@ def test_decision_safe_summary_is_not_decision_llm_candidate_source() -> None:
     )
 
     payload = json.loads(provider.messages[0][1].content)
+    assert payload["decision_brief"] == {}
     assert payload["prompt_context"] == {}
     assert "raw_candidate" not in json.dumps(payload)
     assert "MMMMMMMMMMMMMMMM" not in json.dumps(payload)
+
+
+def test_decision_engine_splits_top_level_survivor_policy_hint() -> None:
+    provider = _DecisionProvider(
+        [
+            {
+                "decision": "next_round_with_surviving_candidate",
+                "reasoning": "keep top survivors",
+                "next_round": {"recommended": True, "reason": "rank top survivor"},
+                "survivor_policy": {"mode": "carry_ranked_top_k", "top_k": 1},
+                "metrics_used": [],
+            }
+        ]
+    )
+
+    decision = asyncio.run(
+        DecisionEngine(provider).decide(
+            {"state": "completed"},
+            success_criteria={"review": True},
+            decision_brief={
+                "version": "decision_brief_v1",
+                "recommended_candidates": [{"candidate_id": "cand_a"}],
+            },
+            model="fake",
+        )
+    )
+
+    assert decision["decision"] == "next_round_with_surviving_candidate"
+    assert decision["controller_hints"]["survivor_policy"] == {
+        "mode": "carry_ranked_top_k",
+        "top_k": 1,
+    }
+
+
+def test_decision_engine_rejects_other_unknown_top_level_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VPA_NORMALIZE_DECISION_REASONING", "strict")
+    provider = _DecisionProvider(
+        [
+            {
+                "decision": "next_round_with_surviving_candidate",
+                "reasoning": "bad extra",
+                "next_round": {"recommended": True, "reason": "continue"},
+                "unknown_controller_field": {"mode": "carry_all_valid"},
+                "metrics_used": [],
+            }
+        ]
+    )
+
+    with pytest.raises(DecisionSchemaViolation):
+        asyncio.run(
+            DecisionEngine(provider).decide(
+                {"state": "completed"},
+                success_criteria={"review": True},
+                model="fake",
+            )
+        )

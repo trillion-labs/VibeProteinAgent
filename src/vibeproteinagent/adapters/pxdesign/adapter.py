@@ -1347,6 +1347,11 @@ def _pxdesign_candidates(
     designs: list[PXDesignDesign],
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    target_pdb = (
+        str(Path(params.target_pdb).expanduser().resolve())
+        if params.target_pdb
+        else None
+    )
     for index, design in enumerate(designs):
         local_id = f"design_{index:04d}"
         structure_path = design.pdb_path or design.cif_path
@@ -1379,7 +1384,14 @@ def _pxdesign_candidates(
                     "structure_detail": "binder_backbone_with_target_context",
                 }
             },
-            "artifacts": {"pxdesign": {"cif_path": design.cif_path, "pdb_path": design.pdb_path}},
+            "artifacts": {
+                "pxdesign": {
+                    "cif_path": design.cif_path,
+                    "pdb_path": design.pdb_path,
+                    "target_pdb": target_pdb,
+                    "target_chain": params.target_chain,
+                }
+            },
             "capabilities": candidate_capability_flags(
                 has_sequence=bool(design.sequence),
                 has_backbone_structure=bool(structure_path),

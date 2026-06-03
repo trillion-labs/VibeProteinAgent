@@ -115,7 +115,7 @@ def test_node_id_cannot_contain_brackets() -> None:
 
 
 def test_task_specific_bundled_examples_are_not_public_surface() -> None:
-    root = Path(__file__).resolve().parents[1] / "workflows" / "examples"
+    root = Path(__file__).resolve().parents[1] / "src" / "vibeproteinagent" / "workflows" / "examples"
     for name in (
         "rfdiffusion_backbone_design_round.yaml",
         "mutation_repair_round.yaml",

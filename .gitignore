@@ -18,10 +18,15 @@ vendor/*/dist/
 vendor/*/*.egg-info/
 vendor/proteinmpnn/weights/*.pt
 vendor/ligandmpnn/weights/*.pt
-.claude/
+.claude/*
+!.claude/commands/
+!.claude/commands/vpa.md
 docs_private/
 output/validation_cache/
 output/validation_runs/
+validation/
+validation_runs/
+scripts/
 
 # Runtime / validation scratch output
 job_*/
@@ -53,3 +58,6 @@ vendor/proteina-complexa/rf3_outputs/
 
 # Auto-generated showcase artifacts (regenerate with scripts/render_showcase.py)
 docs/render-showcase*
+
+# Private benchmark inference harness and generated OpenRouter/VPA outputs.
+.bench_vpa_inference/

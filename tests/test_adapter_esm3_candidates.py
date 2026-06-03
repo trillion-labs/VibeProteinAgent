@@ -50,6 +50,51 @@ def test_esm3_emits_canonical_candidate() -> None:
     assert candidate["artifacts"]["esm3"]["per_residue_embeddings_npz"] == "/tmp/esm3.npz"
 
 
+def test_esm3_profile_guidance_can_supply_consensus_sequence() -> None:
+    params = ESM3Input(
+        profile_guidance={
+            "schema_version": "family_profile_v1",
+            "consensus_sequence": "ACDE",
+            "sequence_count": 3,
+        },
+        tracks=["embedding"],
+    )
+    out = ESM3Output(
+        per_residue_embeddings_npz="/tmp/esm3.npz",
+        predicted_pdb=None,
+        confidence_scores=None,
+        num_residues=4,
+        model_name="esm3_sm_open_v1",
+        runtime_ms=1,
+    )
+    candidate = _esm3_candidates(params, out)[0]
+
+    assert params.sequence == "ACDE"
+    assert candidate["scores"]["esm3"]["profile_guidance_applied"] is True
+    assert candidate["artifacts"]["profile_guidance"]["sequence_count"] == 3
+
+
+def test_esm3_profile_guidance_keeps_explicit_sequence() -> None:
+    params = ESM3Input(
+        sequence="YYYY",
+        profile_guidance={"schema_version": "family_profile_v1", "consensus_sequence": "ACDE"},
+        tracks=["embedding"],
+    )
+    out = ESM3Output(
+        per_residue_embeddings_npz=None,
+        predicted_pdb=None,
+        confidence_scores=None,
+        num_residues=4,
+        model_name="esm3_sm_open_v1",
+        runtime_ms=1,
+    )
+    candidate = _esm3_candidates(params, out)[0]
+
+    assert candidate["sequence"] == "YYYY"
+    assert candidate["scores"]["esm3"]["profile_guidance_applied"] is False
+    assert candidate["artifacts"]["profile_guidance"]["consensus_length"] == 4
+
+
 def test_esm3_candidate_ids_are_deterministic() -> None:
     params = ESM3Input(sequence="ACDE", tracks=["embedding"])
     out = ESM3Output(

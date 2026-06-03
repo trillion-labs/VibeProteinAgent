@@ -7,13 +7,14 @@ workspace, worker, artifact, and report system used by workflows and the agent.
 Demo notebook: [`demo/use_tools_demo.ipynb`](../demo/use_tools_demo.ipynb)
 runs this guide with CPU-safe defaults.
 
-## 1. Install And Verify
+## 1. Install And Activate
 
 For lightweight direct runs:
 
 ```bash
+export VPA_HOME="${VPA_HOME:-$HOME/.vibeproteinagent}"
 npx vibeproteinagent install --profile base --cuda-profile auto --yes
-source "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh"
+source "$VPA_HOME/env.sh"
 vpa version
 vpa install doctor --profile base
 ```
@@ -45,7 +46,26 @@ For GPU tools:
 vpa daemon start --workers 1 --cpu-workers 2 --workspace design_round
 ```
 
-## 3. Inspect The Tool Surface
+## 3. Optional Prewarm
+
+Prewarm loads an adapter into the running daemon before the first real job. This
+is optional for lightweight CPU tools, but useful before expensive GPU tools.
+`vpa daemon warm` uses the currently running daemon socket, so run it in the
+same shell/runtime environment as `daemon start`.
+
+```bash
+vpa daemon warm sequence_analysis --json
+vpa daemon warm protein_qc --json
+```
+
+For GPU tools:
+
+```bash
+vpa daemon warm proteinmpnn --workers all --json
+vpa daemon warm protenix_v2 --workers all --json
+```
+
+## 4. Inspect The Tool Surface
 
 ```bash
 vpa tools
@@ -57,13 +77,22 @@ vpa tool info protein_qc --json
 Tool descriptors show the accepted inputs, output schema, GPU requirement, and
 availability state.
 
-## 4. Run Lightweight Tools
+## 5. Run Lightweight Tools
 
 Run sequence analysis:
 
 ```bash
 vpa run sequence_analysis \
   sequence=ACDEFGHIKLMNPQRSTVWY \
+  --workspace direct_demo \
+  --follow
+```
+
+Analyze a FASTA file instead of an inline sequence:
+
+```bash
+vpa run sequence_analysis \
+  fasta_path=/abs/path/sequences.fasta \
   --workspace direct_demo \
   --follow
 ```
@@ -82,23 +111,27 @@ vpa run protein_qc \
 `--follow`, VPA returns the `job_id` immediately and the worker continues in
 the background.
 
-## 5. Inspect Outputs
+Use `--params-file params.yaml` or `--params-file params.json` when inputs are
+too long for the shell. This is usually cleaner for long sequences, FASTA paths,
+or nested structures.
+
+## 6. Inspect Outputs
 
 ```bash
-vpa status <job_id> --workspace direct_demo
-vpa wait <job_id> --workspace direct_demo
-vpa results <job_id> --workspace direct_demo --json
-vpa artifacts <job_id> --workspace direct_demo
-vpa download <job_id> --workspace direct_demo --out ./outputs
+vpa status JOB_ID --workspace direct_demo
+vpa wait JOB_ID --workspace direct_demo
+vpa results JOB_ID --workspace direct_demo --json
+vpa artifacts JOB_ID --workspace direct_demo
+vpa download JOB_ID --workspace direct_demo --out ./outputs
 ```
 
 Use `results` for structured adapter output and `artifacts` / `download` for
 files written by the job.
 
-## 6. Generate A Report
+## 7. Generate A Report
 
 ```bash
-vpa report <job_id> \
+vpa report JOB_ID \
   --workspace direct_demo \
   --viewer offline \
   --out direct_tool_report.html \
@@ -130,6 +163,6 @@ vpa run protenix_v2 \
 If a tool is unavailable, start with:
 
 ```bash
-vpa tool info <tool>
-vpa install doctor --tools <tool> --json
+vpa tool info TOOL_NAME
+vpa install doctor --tools TOOL_NAME --json
 ```

@@ -21,6 +21,7 @@ CANONICAL_PRODUCERS: set[str] = {
     "esm2",
     "esm3",
     "protenix_v2",
+    "family_profile",
     # Virtual in-memory producer populated by the controller between rounds.
     "prior_round",
 }
@@ -41,9 +42,22 @@ CANONICAL_CONSUMERS: dict[str, str] = {
     "esm2": "candidates",
     "esm3": "candidates",
     "protenix_v2": "candidates",
+    "family_profile": "candidates",
 }
 
 CANONICAL_SCALAR_CONSUMERS: dict[str, dict[str, str]] = {}
+
+CANONICAL_PROFILE_PRODUCERS: dict[str, str] = {
+    "family_profile": "profile",
+}
+
+CANONICAL_PROFILE_CONSUMERS: dict[str, str] = {
+    "family_profile": "profile",
+    "esm2": "profile_guidance",
+    "esm3": "profile_guidance",
+    "rfdiffusion": "profile_guidance",
+    "proteinmpnn": "profile_guidance",
+}
 
 CANONICAL_TERM_PRODUCERS: dict[str, dict[str, str]] = {
     "go_term_search": {"go_id": "selected_go_id"},
@@ -189,6 +203,7 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "interpro_sequences": _contract(produces=_SEQUENCE),
     "mmseqs2_gpu": _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES),
     "sequence_analysis": _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES),
+    "family_profile": _contract(consumes=_SEQUENCE, preserves_upstream=False),
     "sequence_edit": _contract(consumes=_SEQUENCE, produces=_SEQUENCE),
     "esm2": _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES),
     "esm3": _contract(consumes=_SEQUENCE, produces=_FULL_STRUCTURE | _SEQUENCE | _SCORES),
@@ -224,6 +239,12 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
 
 def candidate_contract(tool_name: str) -> CandidateCapabilityContract:
     return TOOL_CANDIDATE_CONTRACTS.get(tool_name, CandidateCapabilityContract())
+
+
+def planner_facing_candidate_contract(tool_name: str) -> CandidateCapabilityContract:
+    if tool_name == "pxdesign":
+        return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES)
+    return candidate_contract(tool_name)
 
 
 TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
@@ -312,14 +333,12 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "default": True,
             "inputs": {"target_pdb": "<path or canonical candidates>"},
             "consumes": sorted(_FULL_STRUCTURE),
-            "produces": sorted(_BACKBONE_SEQUENCE_SCORES),
+            "produces": sorted(_FULL_SEQUENCE_SCORES),
             "description": (
-                "Runs protein-target-conditioned diffusion, AF2 initial guess, and "
-                "ProteinMPNN sequence generation. It emits designed binder sequence, "
-                "binder backbone coordinates, and scores; it does not guarantee "
-                "full-atom binder sidechain coordinates. It is not a small-molecule "
-                "ligand binder-design route; use a ligand-binder capable tool for "
-                "ligand targets."
+                "Designs protein binders against a protein target and returns "
+                "sequenced, scored, full-structure binder candidates for downstream "
+                "selection. It is not a small-molecule ligand binder-design route; "
+                "use a ligand-binder capable tool for ligand targets."
             ),
         },
     ],
@@ -401,6 +420,10 @@ def candidate_contract_for_inputs(
     inputs: dict[str, Any] | None,
 ) -> CandidateCapabilityContract:
     inputs = inputs if isinstance(inputs, dict) else {}
+    if tool_name == "family_profile":
+        if inputs.get("profile") is not None:
+            return _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES)
+        return _contract(consumes=_SEQUENCE, preserves_upstream=False)
     if tool_name == "rfdiffusion":
         mode = inputs.get("mode") or "unconditional"
         if mode in {
@@ -436,6 +459,34 @@ def candidate_contract_for_inputs(
             return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES)
         return _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES)
     return candidate_contract(tool_name)
+
+
+def candidate_contract_for_node(
+    tool_name: str,
+    inputs: dict[str, Any] | None,
+    upstreams: list[Any] | tuple[Any, ...] | None,
+) -> CandidateCapabilityContract:
+    if tool_name == "family_profile" and _has_profile_source_upstream(upstreams):
+        prepared = dict(inputs or {})
+        prepared.setdefault("profile", "${profile_source}")
+        return candidate_contract_for_inputs(tool_name, prepared)
+    return candidate_contract_for_inputs(tool_name, inputs)
+
+
+def profile_guided_default_inputs(
+    tool_name: str,
+    upstreams: list[Any] | tuple[Any, ...] | None,
+) -> dict[str, Any]:
+    if tool_name == "esm2" and _has_profile_source_upstream(upstreams):
+        return {"mode": "sequence_generation"}
+    return {}
+
+
+def _has_profile_source_upstream(upstreams: list[Any] | tuple[Any, ...] | None) -> bool:
+    for upstream in upstreams or []:
+        if isinstance(upstream, dict) and upstream.get("relationship") == "profile_source":
+            return True
+    return False
 
 
 def candidate_capabilities_from_record(candidate: dict[str, object]) -> set[CandidateCapability]:
@@ -527,17 +578,24 @@ def build_canonical_wiring_for_planner(
         "candidate_consumers": dict(CANONICAL_CONSUMERS),
         "term_producers": sorted(CANONICAL_TERM_PRODUCERS),
         "term_consumers": dict(CANONICAL_TERM_CONSUMERS),
+        "profile_producers": dict(CANONICAL_PROFILE_PRODUCERS),
+        "profile_consumers": dict(CANONICAL_PROFILE_CONSUMERS),
         "relationship": "candidate_source",
         "term_relationship": "term_source",
+        "profile_relationship": "profile_source",
         "candidate_capabilities": list(CANDIDATE_CAPABILITY_FIELDS),
         "candidate_contracts": {
             name: {
-                "consumes": sorted(contract.consumes),
-                "produces": sorted(contract.produces),
-                "preserves_upstream": contract.preserves_upstream,
-                "min_candidate_items": contract.min_candidate_items,
+                "consumes": sorted(planner_facing_candidate_contract(name).consumes),
+                "produces": sorted(planner_facing_candidate_contract(name).produces),
+                "preserves_upstream": planner_facing_candidate_contract(
+                    name
+                ).preserves_upstream,
+                "min_candidate_items": planner_facing_candidate_contract(
+                    name
+                ).min_candidate_items,
             }
-            for name, contract in sorted(TOOL_CANDIDATE_CONTRACTS.items())
+            for name in sorted(TOOL_CANDIDATE_CONTRACTS)
         },
         "candidate_capability_profiles": TOOL_CANDIDATE_CAPABILITY_PROFILES,
     }

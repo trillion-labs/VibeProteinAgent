@@ -1,5 +1,0 @@
-timestamp	case	mode	provider	model	event	seconds	path
-2026-05-29T10:31:00+09:00	actual_semantic_codex	actual	codex	gpt-5.4	STARTED	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_102931/codex/actual_semantic_codex.json
-2026-05-29T10:33:53+09:00	actual_semantic_codex	actual	codex	gpt-5.4	FAIL	173	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_102931/codex/actual_semantic_codex.json
-2026-05-29T10:33:53+09:00	actual_binder_codex	actual	codex	gpt-5.4	STARTED	0	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_102931/codex/actual_binder_codex.json
-2026-05-29T10:36:33+09:00	actual_binder_codex	actual	codex	gpt-5.4	FAIL	160	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260529_102931/codex/actual_binder_codex.json

@@ -1,0 +1,17 @@
+name: family_profile
+version: "1.0.0"
+category: analysis
+description: "Builds a lightweight family sequence profile from canonical candidates, FASTA, or an existing alignment, and optionally scores generated candidates against that profile without executing external similarity tools."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 10
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [family_profile, sequence_family_analysis, profile_scoring]
+input_schema: schemas/family_profile.input.json
+output_schema: schemas/family_profile.output.json
+supported_precisions: [fp32]
+supports_batching: false
+entry_point: "vibeproteinagent.adapters.family_profile.adapter:FamilyProfileAdapter"

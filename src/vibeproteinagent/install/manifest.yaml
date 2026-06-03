@@ -12,6 +12,7 @@ profiles:
   base:
     description: "Core VPA runtime plus lightweight local tools."
     tools:
+      - family_profile
       - sequence_analysis
       - sequence_edit
       - structure_analysis
@@ -32,6 +33,7 @@ profiles:
       - boltzgen
       - esm2
       - esm3
+      - family_profile
       - foldseek
       - go_sequences
       - interpro_sequences
@@ -170,6 +172,8 @@ tools:
         source_path: "/opt/vpa-data/models/huggingface"
         required: true
     disk_bytes: 6000000000
+  family_profile:
+    runtime: shared
   foldseek:
     runtime: external_binary
     required: false

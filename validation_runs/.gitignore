@@ -1,7 +1,0 @@
-local.env
-artifacts/
-logs/*
-!logs/.gitkeep
-*.out
-*.err
-*.log

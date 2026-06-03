@@ -11,7 +11,10 @@ from vibeproteinagent.workspace import Workspace
 
 
 def report(
-    id: str = typer.Argument(..., help="Job id (job_*) or workflow id (wf_*) to report."),
+    id: str = typer.Argument(
+        ...,
+        help="Agent run id (arun_*), workflow id (wf_*), or job id (job_*) to report.",
+    ),
     out: str | None = typer.Option(None, "--out", "-o", help="Output HTML path or bundle dir."),
     top_k: int = typer.Option(
         5,
@@ -39,7 +42,7 @@ def report(
     workspace: str | None = typer.Option(None, "--workspace", help="Workspace name."),
     json_: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Generate a human-readable HTML report for a job or workflow."""
+    """Generate a human-readable report for an agent run, workflow, or job."""
     try:
         ws = Workspace.resolve(workspace)
         model = collect_report_model(ws, id)

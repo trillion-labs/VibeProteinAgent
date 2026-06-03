@@ -6,6 +6,7 @@ from vibeproteinagent.agents.planning.canonical_tools import (
     annotate_candidate_capabilities,
     candidate_capabilities_from_record,
     candidate_capability_flags,
+    candidate_contract_for_node,
     candidate_contract_for_inputs,
 )
 from vibeproteinagent.agents.planning.compiler import compile_planner_ir
@@ -74,6 +75,25 @@ def test_mode_sensitive_generation_contracts() -> None:
     )
 
 
+def test_family_profile_candidate_contract_depends_on_profile_source() -> None:
+    build = candidate_contract_for_inputs("family_profile", {})
+    score_literal = candidate_contract_for_inputs(
+        "family_profile",
+        {"profile": {"schema_version": "family_profile_v1"}},
+    )
+    score_wired = candidate_contract_for_node(
+        "family_profile",
+        {},
+        [{"node": "family_ref", "relationship": "profile_source"}],
+    )
+
+    assert build.consumes == frozenset({"has_sequence"})
+    assert build.produces == frozenset()
+    assert build.preserves_upstream is False
+    assert "has_candidate_scores" in score_literal.produces
+    assert "has_candidate_scores" in score_wired.produces
+
+
 def test_esm3_tracks_control_produced_structure_capabilities() -> None:
     embedding_only = candidate_contract_for_inputs("esm3", {"tracks": ["embedding"]})
     with_structure = candidate_contract_for_inputs("esm3", {"tracks": ["sequence", "structure"]})
@@ -95,30 +115,29 @@ def test_pxdesign_produces_sequence_and_backbone_not_full_structure() -> None:
     assert "has_full_structure" in contract.consumes
 
 
-def test_pxdesign_output_can_feed_backbone_consumers_but_not_full_structure_consumers() -> None:
-    good = compile_planner_ir(
+def test_pxdesign_compiler_adds_full_structure_tail_before_downstream_consumers() -> None:
+    plan = compile_planner_ir(
         _ir(
             [
-                _node("pxd", "pxdesign", {"target_pdb": "/tmp/target.cif"}),
-                _node("seq", "proteinmpnn", {}, [_candidate_source("pxd")]),
+                _node("pxd", "pxdesign", {"target_pdb": "/tmp/target.cif", "top_k_designs": 3}),
+                _node("analyze", "structure_analysis", {}, [_candidate_source("pxd")]),
             ]
         )
     )
-    assert good["workflow_plan"]["nodes"][1]["inputs"]["candidates"] == "${outputs.pxd.candidates}"
 
-    with pytest.raises(StructuredFixup) as exc_info:
-        compile_planner_ir(
-            _ir(
-                [
-                    _node("pxd", "pxdesign", {"target_pdb": "/tmp/target.cif"}),
-                    _node("analyze", "structure_analysis", {}, [_candidate_source("pxd")]),
-                ]
-            )
-        )
-
-    payload = exc_info.value.payload
-    assert payload["error_kind"] == "candidate_capability_mismatch"
-    assert "has_full_structure" in payload["missing_capabilities"]
+    nodes = plan["workflow_plan"]["nodes"]
+    assert [node["tool"] for node in nodes] == [
+        "pxdesign",
+        "protenix_v2",
+        "protein_qc",
+        "rank_designs",
+        "structure_analysis",
+    ]
+    assert nodes[1]["inputs"]["candidates"] == "${outputs.pxd.candidates}"
+    assert nodes[2]["inputs"]["candidates"] == "${outputs.pxd_protenix.candidates}"
+    assert nodes[3]["inputs"]["candidates"] == "${outputs.pxd_qc.candidates}"
+    assert nodes[3]["inputs"]["top_k"] == 3
+    assert nodes[4]["inputs"]["candidates"] == "${outputs.pxd_qc.candidates}"
 
 
 def test_backbone_only_generator_can_feed_proteinmpnn_but_not_target_structure_binder() -> None:

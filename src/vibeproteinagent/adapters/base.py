@@ -14,6 +14,13 @@ from vibeproteinagent.adapters.descriptor import ToolDescriptor, load_descriptor
 try:
     import torch
 except ImportError:  # pragma: no cover - exercised by bootstrap envs.
+    def _no_grad():
+        def decorator(func):
+            return func
+
+        return decorator
+
+
     class _Device:
         def __init__(self, value: str) -> None:
             self.value = value
@@ -25,8 +32,11 @@ except ImportError:  # pragma: no cover - exercised by bootstrap envs.
         cuda=SimpleNamespace(
             is_available=lambda: False,
             empty_cache=lambda: None,
+            manual_seed_all=lambda *_args, **_kwargs: None,
         ),
         device=_Device,
+        manual_seed=lambda *_args, **_kwargs: None,
+        no_grad=_no_grad,
     )
 
 # Discovery path #1 sink: every @register_adapter-decorated class that gets imported

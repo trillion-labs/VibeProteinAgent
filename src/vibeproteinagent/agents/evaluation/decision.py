@@ -28,6 +28,7 @@ class DecisionEngine:
         *,
         success_criteria: dict[str, Any] | None = None,
         prompt_context: dict[str, Any] | None = None,
+        decision_brief: dict[str, Any] | None = None,
         model: str | None = None,
         idempotency_key: str | None = None,
         retry_error: dict[str, Any] | None = None,
@@ -37,6 +38,7 @@ class DecisionEngine:
         if self.provider is None:
             return local
         payload = {
+            "decision_brief": decision_brief if isinstance(decision_brief, dict) else {},
             "prompt_context": prompt_context if isinstance(prompt_context, dict) else {},
             "success_criteria": success_criteria or {},
             "local_decision": local,
@@ -64,8 +66,11 @@ class DecisionEngine:
                 "decision model must return a JSON object",
                 details={"got_type": type(decision).__name__},
             )
+        decision_for_validation, controller_hints, controller_corrections = (
+            _extract_controller_hints(decision)
+        )
         try:
-            validate_decision_v1(decision)
+            validate_decision_v1(decision_for_validation)
         except DecisionSchemaViolation as exc:
             mode = resolve_decision_normalization_mode()
             if mode == "compat":
@@ -79,7 +84,12 @@ class DecisionEngine:
                 )
             else:
                 raise
-        return self._normalize_decision(decision, local)
+        normalized = self._normalize_decision(decision_for_validation, local)
+        if controller_hints:
+            normalized["controller_hints"] = controller_hints
+        if controller_corrections:
+            normalized["controller_corrections"] = controller_corrections
+        return normalized
 
     def local_decision(
         self,
@@ -183,3 +193,24 @@ class DecisionEngine:
 def _next_round_recommended(decision: dict[str, Any]) -> bool:
     next_round = decision.get("next_round")
     return isinstance(next_round, dict) and next_round.get("recommended") is True
+
+
+def _extract_controller_hints(
+    decision: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Strip controller-only decision hints before decision_v1 validation."""
+
+    if "survivor_policy" not in decision:
+        return decision, {}, []
+    clean = dict(decision)
+    raw_policy = clean.pop("survivor_policy")
+    corrections: list[dict[str, Any]] = []
+    if not isinstance(raw_policy, dict):
+        corrections.append(
+            {
+                "code": "invalid_survivor_policy_hint_ignored",
+                "message": "top-level survivor_policy hint was not an object",
+            }
+        )
+        return clean, {}, corrections
+    return clean, {"survivor_policy": raw_policy}, corrections

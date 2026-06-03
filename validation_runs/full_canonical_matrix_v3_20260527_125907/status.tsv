@@ -1,5 +1,0 @@
-case	mode	provider	model	status	exit_code	seconds	output
-actual_semantic_codex	actual	codex	gpt-5.4	FAIL	0	152	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_125907/codex/actual_semantic_codex.json
-actual_binder_codex	actual	codex	gpt-5.4	FAIL	0	932	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_125907/codex/actual_binder_codex.json
-actual_denovo_codex	actual	codex	gpt-5.4	FAIL	0	423	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_125907/codex/actual_denovo_codex.json
-actual_semantic_claude	actual	claude-code	sonnet	FAIL	0	127	/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_125907/claude/actual_semantic_claude.json

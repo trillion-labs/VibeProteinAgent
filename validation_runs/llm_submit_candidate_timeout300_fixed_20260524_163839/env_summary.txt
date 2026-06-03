@@ -1,4 +1,0 @@
-VPA_HOME=/mnt/vast/trillion/hyunjin/.vibeproteinagent
-VPA_RUNTIME_DIR=/mnt/vast/trillion/hyunjin/.vibeproteinagent/runtime
-VPA_AGENT_TIMEOUT_S=300
-OPENROUTER_API_KEY=<runtime-only>

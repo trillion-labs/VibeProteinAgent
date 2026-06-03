@@ -29,7 +29,6 @@ workflow_app = typer.Typer(no_args_is_help=True, help="Workflow management.")
 
 
 _BUILTIN_EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "workflows" / "examples"
-_REPO_EXAMPLES_DIR = Path(__file__).resolve().parents[4] / "workflows" / "examples"
 _USER_WORKFLOWS_DIR = Path.home() / ".vibeproteinagent" / "workflows"
 
 
@@ -49,7 +48,7 @@ def _registry() -> ToolRegistry:
 def _discover_descriptors() -> dict[str, Path]:
     """Map workflow-name → descriptor path. Searches built-ins + user dir."""
     out: dict[str, Path] = {}
-    roots = (_BUILTIN_EXAMPLES_DIR, _REPO_EXAMPLES_DIR, _USER_WORKFLOWS_DIR)
+    roots = (_BUILTIN_EXAMPLES_DIR, _USER_WORKFLOWS_DIR)
     for root in roots:
         if not root.is_dir():
             continue
@@ -81,7 +80,6 @@ def _resolve_descriptor(name_or_path: str) -> Path:
         details={
             "name_or_path": name_or_path,
             "searched": [
-                str(_REPO_EXAMPLES_DIR),
                 str(_BUILTIN_EXAMPLES_DIR),
                 str(_USER_WORKFLOWS_DIR),
             ],

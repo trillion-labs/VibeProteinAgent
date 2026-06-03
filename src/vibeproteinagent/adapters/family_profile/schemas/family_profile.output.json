@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/family_profile.output.json",
+  "type": "object",
+  "required": [
+    "mode",
+    "profile",
+    "summary",
+    "candidates",
+    "artifacts",
+    "runtime_ms"
+  ],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["build", "score"]
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "candidates": {
+      "$comment": "Canonical Candidate v1 items annotated only in score mode; build mode returns an empty list so reference family sequences do not become executable design candidates.",
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "artifacts": {
+      "type": "object",
+      "required": [
+        "profile_json",
+        "summary_json",
+        "sequences_fasta",
+        "position_frequencies_json",
+        "motif_windows_json"
+      ],
+      "properties": {
+        "profile_json": {"type": "string"},
+        "summary_json": {"type": "string"},
+        "sequences_fasta": {"type": "string"},
+        "position_frequencies_json": {"type": "string"},
+        "motif_windows_json": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_ms": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}

@@ -4,13 +4,15 @@ from typing import Any
 
 from vibeproteinagent.agents.planning.canonical_tools import (
     CANONICAL_CONSUMERS,
+    CANONICAL_PROFILE_CONSUMERS,
+    CANONICAL_PROFILE_PRODUCERS,
     CANONICAL_PRODUCERS,
     CANONICAL_TERM_CONSUMERS,
     CANONICAL_TERM_PRODUCERS,
     EXPLICIT_MODE_TOOLS,
     candidate_capability_profiles,
-    candidate_contract,
     explicit_mode_input_field,
+    planner_facing_candidate_contract,
 )
 
 AGENT_TOOL_SCHEMA_VERSION = "vpa-agent-tools-v7"
@@ -83,8 +85,16 @@ def compact_input_schema_outline(schema: Any) -> dict[str, Any]:
 
 
 def tool_role(tool_name: str) -> str:
-    is_producer = tool_name in CANONICAL_PRODUCERS or tool_name in CANONICAL_TERM_PRODUCERS
-    is_consumer = tool_name in CANONICAL_CONSUMERS or tool_name in CANONICAL_TERM_CONSUMERS
+    is_producer = (
+        tool_name in CANONICAL_PRODUCERS
+        or tool_name in CANONICAL_TERM_PRODUCERS
+        or tool_name in CANONICAL_PROFILE_PRODUCERS
+    )
+    is_consumer = (
+        tool_name in CANONICAL_CONSUMERS
+        or tool_name in CANONICAL_TERM_CONSUMERS
+        or tool_name in CANONICAL_PROFILE_CONSUMERS
+    )
     if is_producer and is_consumer:
         return "both"
     if is_producer:
@@ -95,7 +105,7 @@ def tool_role(tool_name: str) -> str:
 
 
 def _compact_candidate_contract(tool_name: str) -> dict[str, Any]:
-    contract = candidate_contract(tool_name)
+    contract = planner_facing_candidate_contract(tool_name)
     out: dict[str, Any] = {}
     if contract.consumes:
         out["consumes"] = sorted(contract.consumes)

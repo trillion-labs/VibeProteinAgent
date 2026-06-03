@@ -117,6 +117,8 @@ def _tools() -> list[dict[str, str]]:
         {"name": "go_sequences", "description": "Retrieve GO sequences."},
         {"name": "rank_designs", "description": "Rank candidates."},
         {"name": "pxdesign", "description": "Design binders."},
+        {"name": "protenix_v2", "description": "Predict protein complex structures."},
+        {"name": "protein_qc", "description": "Evaluate protein structures."},
     ]
 
 
@@ -129,6 +131,15 @@ def _tools_with_submit_candidate() -> list[dict[str, str]]:
 
 
 def _pxdesign_tools() -> list[dict[str, str]]:
+    return [
+        {"name": "pxdesign", "description": "Design compact binders."},
+        {"name": "protenix_v2", "description": "Predict protein complex structures."},
+        {"name": "protein_qc", "description": "Evaluate protein structures."},
+        {"name": "rank_designs", "description": "Rank candidates."},
+    ]
+
+
+def _pxdesign_tools_missing_tail_dependency() -> list[dict[str, str]]:
     return [{"name": "pxdesign", "description": "Design compact binders."}]
 
 
@@ -159,6 +170,7 @@ def _many_tools() -> list[dict[str, str]]:
             "esm2",
             "go_sequences",
             "protein_qc",
+            "protenix_v2",
             "proteinmpnn",
             "pxdesign",
             "rank_designs",
@@ -264,6 +276,25 @@ def _boltzgen_tools() -> list[dict[str, Any]]:
     ]
 
 
+def _boltzgen_ir(inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "version": "planner_ir_v1",
+        "goal": "Generate binder design candidates.",
+        "assumptions": [],
+        "missing_inputs": [],
+        "nodes": [
+            {
+                "id": "designs",
+                "tool": "boltzgen",
+                "intent": "Generate binder candidates.",
+                "inputs": inputs or {"target_pdb": "/tmp/target.pdb"},
+                "upstream": [],
+            }
+        ],
+        "finalization": {"success_criteria": {"designs": True}},
+    }
+
+
 def _rfdiffusion_ir(mode: str | None) -> dict[str, Any]:
     inputs = {} if mode is None else {"mode": mode}
     return {
@@ -336,6 +367,117 @@ def test_initial_planner_runs_tool_selection_then_planner_ir() -> None:
     assert plan["source_kind"] == "planner_compiled"
 
 
+def test_planner_ir_prompt_includes_deliverable_count_contract() -> None:
+    provider = _Provider([_selection("go_sequences", "rank_designs"), _go_rank_ir()])
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    asyncio.run(
+        planner._plan_v1(
+            "Find GO candidates and rank 6 candidates.",
+            available_tools=_tools(),
+            deliverable_contract={
+                "version": "deliverable_contract_v1",
+                "requested_candidate_count": 6,
+            },
+        )
+    )
+
+    planner_prompt = json.loads(provider.messages[1][1].content)
+    assert planner_prompt["deliverable_contract"]["requested_candidate_count"] == 6
+
+
+def test_requested_candidate_count_bumps_rank_budget() -> None:
+    provider = _Provider([_selection("go_sequences", "rank_designs"), _go_rank_ir()])
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Find GO candidates and rank 6 candidates.",
+            available_tools=_tools(),
+            deliverable_contract={
+                "version": "deliverable_contract_v1",
+                "requested_candidate_count": 6,
+            },
+        )
+    )
+
+    rank_node = plan["workflow_plan"]["nodes"][1]
+    assert rank_node["inputs"]["top_k"] == 6
+
+
+def test_requested_candidate_count_preserves_larger_rank_budget() -> None:
+    provider = _Provider(
+        [
+            _selection("go_sequences", "rank_designs"),
+            _go_rank_ir(inputs={"go_id": "GO:0003824", "max_sequences": 20}),
+        ]
+    )
+    payload = _go_rank_ir()
+    payload["nodes"][1]["inputs"]["top_k"] = 9
+    provider.payloads[1] = payload
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Find GO candidates and rank 6 candidates.",
+            available_tools=_tools(),
+            deliverable_contract={
+                "version": "deliverable_contract_v1",
+                "requested_candidate_count": 6,
+            },
+        )
+    )
+
+    rank_node = plan["workflow_plan"]["nodes"][1]
+    assert rank_node["inputs"]["top_k"] == 9
+
+
+def test_requested_candidate_count_bumps_generator_num_designs() -> None:
+    provider = _Provider([_selection("boltzgen"), _boltzgen_ir()])
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Generate 7 binder designs against target_pdb=/tmp/target.pdb.",
+            available_tools=_boltzgen_tools(),
+            known_inputs={"target_pdb": "/tmp/target.pdb"},
+            deliverable_contract={
+                "version": "deliverable_contract_v1",
+                "requested_candidate_count": 7,
+            },
+        )
+    )
+
+    assert plan["workflow_plan"]["nodes"][0]["inputs"]["num_designs"] == 7
+
+
+def test_requested_candidate_count_clamps_pxdesign_budget_fields() -> None:
+    provider = _Provider([_selection("pxdesign"), _pxdesign_ir()])
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    plan = asyncio.run(
+        planner._plan_v1(
+            "Design 300 binder candidates against target_pdb=/tmp/target.pdb.",
+            available_tools=_pxdesign_tools(),
+            known_inputs={"target_pdb": "/tmp/target.pdb"},
+            deliverable_contract={
+                "version": "deliverable_contract_v1",
+                "requested_candidate_count": 300,
+            },
+        )
+    )
+
+    node = plan["workflow_plan"]["nodes"][0]
+    assert node["inputs"]["top_k_designs"] == 64
+    assert node["inputs"]["num_samples"] == 256
+    clamped_fields = {
+        warning["field"]
+        for warning in plan["planner_audit_warnings"]
+        if warning.get("event_type") == "requested_candidate_count_clamped"
+    }
+    assert clamped_fields == {"top_k_designs", "num_samples"}
+
+
 def test_submit_candidate_selected_tool_is_ignored_for_planner_ir_usage() -> None:
     provider = _Provider(
         [
@@ -405,12 +547,13 @@ def test_pxdesign_defaulted_inputs_are_recorded_in_plan_metadata() -> None:
     assert pxdesign_schema["candidate_contract"]["produces"] == [
         "has_backbone_structure",
         "has_candidate_scores",
+        "has_full_structure",
         "has_sequence",
     ]
     profile = pxdesign_schema["candidate_capability_profiles"][0]
     assert "has_full_structure" in profile["consumes"]
-    assert "has_full_structure" not in profile["produces"]
-    assert "binder backbone coordinates" in profile["description"]
+    assert "has_full_structure" in profile["produces"]
+    assert "full-structure binder candidates" in profile["description"]
 
 
 def test_pxdesign_known_inputs_take_precedence_over_defaults() -> None:
@@ -433,6 +576,27 @@ def test_pxdesign_known_inputs_take_precedence_over_defaults() -> None:
     assert node["inputs"]["target_chain"] == "B"
     assert node["inputs"]["binder_length"] == 85
     assert "defaulted_inputs" not in plan
+
+
+def test_pxdesign_tail_dependencies_must_be_available() -> None:
+    provider = _Provider([_selection("pxdesign"), _pxdesign_ir()])
+    planner = WorkflowPlanner(ToolRegistry(), provider)
+
+    with pytest.raises(InvalidParamsError) as exc_info:
+        asyncio.run(
+            planner._plan_v1(
+                "Design binders against target_pdb=/tmp/target.pdb.",
+                available_tools=_pxdesign_tools_missing_tail_dependency(),
+                known_inputs={"target_pdb": "/tmp/target.pdb"},
+            )
+        )
+
+    assert exc_info.value.details["issue"] == "pxdesign_tail_dependency_unavailable"
+    assert exc_info.value.details["missing_tools"] == [
+        "protenix_v2",
+        "protein_qc",
+        "rank_designs",
+    ]
 
 
 def test_pairwise_structure_tool_single_upstream_stream_is_planner_valid() -> None:

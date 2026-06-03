@@ -9,12 +9,17 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
 from pydantic import BaseModel, Field, model_validator
 
-from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
+from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.profile_guidance import (
+    normalize_profile_guidance,
+    profile_guidance_metadata,
+    proteinmpnn_bias_applicability,
+)
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.core.errors import DependencyError
 
 # Project root is parents[4] from this file:
 #   src/vibeproteinagent/adapters/proteinmpnn/adapter.py
@@ -28,13 +33,23 @@ _VENDOR_WEIGHTS_DEFAULT = _VENDOR_ROOT / "weights" / "v_48_020.pt"
 if str(_VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_VENDOR_ROOT))
 
-from proteinmpnn_vendor import (  # noqa: E402 — vendored import after sys.path tweak
-    ProteinMPNN,
-    _S_to_seq,
-    _scores,
-    parse_PDB,
-    tied_featurize,
-)
+try:
+    from proteinmpnn_vendor import (  # noqa: E402 — vendored import after sys.path tweak
+        ProteinMPNN,
+        _S_to_seq,
+        _scores,
+        parse_PDB,
+        tied_featurize,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - bootstrap env guard.
+    ProteinMPNN = None
+    _S_to_seq = None
+    _scores = None
+    parse_PDB = None
+    tied_featurize = None
+    _VENDORED_IMPORT_ERROR = exc
+else:
+    _VENDORED_IMPORT_ERROR = None
 
 # ProteinMPNN's amino-acid alphabet (21 letters; final 'X' is the unknown token).
 _ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"
@@ -43,6 +58,7 @@ _ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"
 class ProteinMPNNInput(BaseModel):
     pdb_path: str | None = Field(None, description="Absolute path to the input PDB.")
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    profile_guidance: dict[str, Any] | None = None
     chains: list[str] | None = Field(
         None, description="Chain identifiers to design; None designs every chain."
     )
@@ -76,6 +92,8 @@ class ProteinMPNNInput(BaseModel):
 
     @model_validator(mode="after")
     def _require_pdb_path(self) -> ProteinMPNNInput:
+        if self.profile_guidance is not None:
+            self.profile_guidance = normalize_profile_guidance(self.profile_guidance)
         if not self.pdb_path:
             raise ValueError("proteinmpnn requires pdb_path")
         if self.chains is None:
@@ -123,6 +141,11 @@ def _candidate_id(pdb_path: str, sample_idx: int, sequence: str) -> str:
 @register_adapter("descriptor.yaml")
 class ProteinMPNNAdapter(ToolAdapter):
     def __init__(self, config: dict, weights_dir: Path, device: torch.device) -> None:
+        if ProteinMPNN is None:
+            raise DependencyError(
+                "ProteinMPNN runtime dependencies are unavailable",
+                details={"error": str(_VENDORED_IMPORT_ERROR)},
+            )
         self.device = device
         self.weights_dir = Path(weights_dir)
         self.ckpt_path = _resolve_checkpoint(self.weights_dir)
@@ -191,6 +214,8 @@ class ProteinMPNNAdapter(ToolAdapter):
         log_probs_chunks: list[np.ndarray] = []
         sampled_sequences_chunks: list[np.ndarray] = []
         num_residues: int | None = None
+        profile_bias_applied = False
+        profile_bias_warnings: list[str] = []
 
         out_dir = ctx.job_dir / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -237,6 +262,16 @@ class ProteinMPNNAdapter(ToolAdapter):
                 # designed positions; chain_M_pos masks those not fixed).
                 designed_mask = (mask * chain_M * chain_M_pos)[0]
                 num_residues = int(designed_mask.sum().item())
+                applicability = proteinmpnn_bias_applicability(
+                    params.profile_guidance,
+                    num_residues=num_residues,
+                )
+                profile_bias_applied = bool(applicability.get("applied"))
+                profile_bias_warnings = [
+                    str(item) for item in applicability.get("warnings") or []
+                ]
+            if profile_bias_applied:
+                _apply_profile_bias_by_res(bias_by_res_all, params.profile_guidance)
 
             randn = torch.randn(chain_M.shape, device=X.device)
             sample_dict = self.model.sample(
@@ -332,6 +367,8 @@ class ProteinMPNNAdapter(ToolAdapter):
                     mpnn_input_pdb_path=(
                         str(pdb_path) if Path(pdb_path) != source_structure_path else None
                     ),
+                    profile_guidance_applied=profile_bias_applied,
+                    profile_guidance_warnings=profile_bias_warnings,
                 )
                 for index, design in enumerate(designs)
             ],
@@ -689,6 +726,8 @@ def _canonical_candidate_from_design(
     params: ProteinMPNNInput,
     structure_path: str,
     mpnn_input_pdb_path: str | None = None,
+    profile_guidance_applied: bool | None = None,
+    profile_guidance_warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     local_id = f"seq_{index:04d}"
     sequence = str(design.get("sequence") or "")
@@ -716,6 +755,8 @@ def _canonical_candidate_from_design(
             "proteinmpnn": {
                 "score": design.get("score"),
                 "seq_recovery": design.get("seq_recovery"),
+                "profile_guidance_applied": bool(profile_guidance_applied),
+                "profile_guidance_warnings": list(profile_guidance_warnings or []),
             }
         },
         "artifacts": {},
@@ -724,8 +765,47 @@ def _canonical_candidate_from_design(
         candidate["artifacts"]["proteinmpnn"] = {
             "mpnn_input_pdb_path": mpnn_input_pdb_path,
         }
+    if params.profile_guidance is not None:
+        candidate["artifacts"]["profile_guidance"] = profile_guidance_metadata(
+            params.profile_guidance
+        )
     if params.candidates and _is_canonical_candidate(params.candidates[0]):
         upstream_scores = params.candidates[0].get("scores")
         if isinstance(upstream_scores, dict):
             candidate["scores"] = {**upstream_scores, **candidate["scores"]}
     return candidate
+
+
+def _apply_profile_bias_by_res(
+    bias_by_res_all: torch.Tensor,
+    profile_guidance: dict[str, Any] | None,
+) -> None:
+    guidance = normalize_profile_guidance(profile_guidance)
+    if guidance is None:
+        return
+    preferences = guidance.get("position_preferences") or []
+    if bias_by_res_all.ndim != 3:
+        return
+    length = int(bias_by_res_all.shape[1])
+    aa_to_index = {aa: index for index, aa in enumerate(_ALPHABET)}
+    for item in preferences:
+        if not isinstance(item, dict):
+            continue
+        try:
+            position = int(item.get("position"))
+        except (TypeError, ValueError):
+            continue
+        if position < 1 or position > length:
+            continue
+        frequencies = item.get("frequencies")
+        if not isinstance(frequencies, dict):
+            continue
+        for aa, frequency in frequencies.items():
+            aa_index = aa_to_index.get(str(aa).upper())
+            if aa_index is None:
+                continue
+            try:
+                value = float(frequency)
+            except (TypeError, ValueError):
+                continue
+            bias_by_res_all[:, position - 1, aa_index] += 0.5 * value

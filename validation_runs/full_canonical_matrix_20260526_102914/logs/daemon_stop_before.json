@@ -1,1 +1,0 @@
-{"ok": false, "error": {"code": "E_DAEMON_UNAVAILABLE", "message": "supervisor is not running", "details": {"socket": "validation_runs/full_canonical_matrix_20260526_102914/runtime/supervisor.sock"}}}

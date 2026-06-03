@@ -1,1 +1,0 @@
-{"ok": false, "error": {"code": "E_INVALID_PARAMS", "message": "params for go_sequences failed validation: None is not of type 'string' at 'go_id'", "details": {"tool": "go_sequences", "field": "go_id", "errors": [{"field": "go_id", "message": "None is not of type 'string'"}, {"field": "max_sequences", "message": "None is not of type 'integer'"}]}}}

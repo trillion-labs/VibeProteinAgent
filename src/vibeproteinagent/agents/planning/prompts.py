@@ -49,8 +49,9 @@ prior_round_context is present.
 Use only tools in the provided tool_catalog. For each node, use only input
 fields shown in that tool's `input_schema_outline.properties`; if a required
 field is unknown, omit it and record it in `missing_inputs` instead of inventing
-a value. Use known_inputs for literal fields when the matching field is present
-in a selected tool schema. Multi-mode tools include `allowed_modes`; for those
+a value. Use known_inputs for matching literal fields; map
+requested_candidate_count to budget fields. Multi-mode tools include
+`allowed_modes`; for those
 nodes set the field named by `mode_input_field` to one allowed value
 (`inputs.mode` when `mode_input_field` is absent). If a selected tool entry
 includes `selected_mode`, set that node's mode input field to exactly that
@@ -66,8 +67,14 @@ protein candidate flow. Use search_sequence for semantic or GO/InterPro
 sequence retrieval; compose legacy GO/InterPro retrieval nodes only for explicit
 debug workflows. Use `relationship: "term_source"` only when a resolver/lookup
 provides an identifier for a legacy retrieval tool. Resolver outputs are not
-protein candidates. The compiler injects candidate arrays, resolved term IDs,
-and merge nodes. When prior_round_context is present, a node may use
+protein candidates. Use `relationship: "profile_source"` only to pass
+family_profile.profile evidence into profile-aware tools: family_profile for
+candidate annotation, or esm2/esm3/rfdiffusion/proteinmpnn for soft
+profile_guidance. Do not pass profile evidence directly into rank_designs.
+Profile-guided generated candidates still need a later family_profile scoring
+node with candidate_source plus profile_source before rank_designs. The
+compiler injects candidate arrays, profiles, profile_guidance, resolved term
+IDs, and merge nodes. When prior_round_context is present, a node may use
 `{"node": "prior_round", "relationship": "candidate_source"}`.
 Do not write `inputs.candidates: "prior_round"`; prior-round candidates are
 available only through that upstream candidate_source relationship.
@@ -104,8 +111,8 @@ Return one strict JSON object with this shape:
 Node ids must be lowercase stable identifiers that start with a letter or
 underscore and then contain only lowercase letters, digits, or underscores.
 Every upstream node must appear earlier in the node list. Allowed upstream
-relationships are `candidate_source`, `term_source`, and the alias
-`identifier_source`.
+relationships are `candidate_source`, `profile_source`, `term_source`, and the
+alias `identifier_source`.
 
 Example for "find GO-linked candidates and rank them":
 {
@@ -115,10 +122,10 @@ Example for "find GO-linked candidates and rank them":
   "missing_inputs": [],
   "nodes": [
     {
-      "id": "go_candidates",
-      "tool": "go_sequences",
+      "id": "retrieve_sequences",
+      "tool": "search_sequence",
       "intent": "Retrieve candidate protein sequences associated with the GO term.",
-      "inputs": {"go_id": "GO:0003824", "max_sequences": 20},
+      "inputs": {"go_term": "GO:0003824", "max_downstream_candidates": 20},
       "upstream": []
     },
     {
@@ -127,7 +134,7 @@ Example for "find GO-linked candidates and rank them":
       "intent": "Rank retrieved candidates using available canonical candidate data.",
       "inputs": {"top_k": 5},
       "upstream": [
-        {"node": "go_candidates", "relationship": "candidate_source"}
+        {"node": "retrieve_sequences", "relationship": "candidate_source"}
       ]
     }
   ],
@@ -179,10 +186,11 @@ Rules:
 
 DECISION_SYSTEM_PROMPT = """You are the VPA result critic and next-round advisor.
 
-Inspect only the provided PromptContext digest. It contains lossy candidate
-cards, capability counts, failure cards, trajectory cards, and next-move
-hints; it does not contain raw candidate objects, full sequences, raw score
-dicts, or structure paths. Emit decision
+Prefer the provided decision_brief for the decision task. Use PromptContext only
+as a fallback/audit digest when brief fields are missing. These inputs contain
+lossy candidate refs, capability counts, failure cards, trajectory cards, and
+next-move hints; they do not contain raw candidate objects, full sequences, raw
+score dicts, or structure paths. Emit decision
 intent only. The controller resolves
 that intent into the actual control-flow branch with deterministic non-LLM
 checks. Do not request remote GPU or cloud scientific inference. Do not treat

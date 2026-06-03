@@ -4,7 +4,8 @@
   "type": "object",
   "anyOf": [
     {"required": ["sequence"]},
-    {"required": ["candidates"]}
+    {"required": ["candidates"]},
+    {"required": ["profile_guidance"]}
   ],
   "properties": {
     "sequence": {
@@ -21,6 +22,13 @@
       "default": [],
       "description": "Canonical Candidate[] from an upstream tool. Promotes the first item's `sequence` into the `sequence` input when omitted.",
       "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "proteinmpnn", "local_id": "0"}, "sequence": "MKTAY..."}]]
+    },
+    "profile_guidance": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "default": null,
+      "description": "Family-profile guidance compiled from a profile_source upstream. When sequence/candidates are absent, ESM3 uses the profile consensus as the input sequence; otherwise guidance is recorded as soft evidence.",
+      "examples": [{"schema_version": "profile_guidance_v1", "consensus_sequence": "ACDEFG"}]
     },
     "model_name": {
       "type": "string",

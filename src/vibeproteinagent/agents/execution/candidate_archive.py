@@ -224,6 +224,51 @@ class CandidateArchive:
         self._save_snapshot(run_id, snapshot)
         return snapshot
 
+    def filtered_survivor_snapshot(
+        self,
+        *,
+        run_id: str,
+        round_index: int,
+        source_snapshot_id: str | None,
+        selected_candidate_ids: list[str],
+        reason: str,
+    ) -> CandidateSnapshot:
+        source_snapshot = self._snapshot(source_snapshot_id)
+        source_refs = list(source_snapshot.candidate_refs) if source_snapshot else []
+        selected_ids = _ordered_unique_candidate_ids(selected_candidate_ids)
+        selected_id_set = set(selected_ids)
+        selected_refs = [
+            CandidateSnapshotRef(candidate_id=ref.candidate_id, version_id=ref.version_id)
+            for ref in source_refs
+            if ref.candidate_id in selected_id_set
+        ]
+        source_candidate_ids = [ref.candidate_id for ref in source_refs]
+        source_candidate_id_set = set(source_candidate_ids)
+        ignored_ids = [
+            candidate_id
+            for candidate_id in selected_ids
+            if candidate_id not in source_candidate_id_set
+        ]
+        snapshot = CandidateSnapshot(
+            snapshot_id=_snapshot_id(run_id, round_index, "survivor", selected_refs),
+            round_index=round_index,
+            kind="survivor",
+            candidate_refs=selected_refs,
+            merge_audit=_filtered_survivor_merge_audit(
+                source_snapshot=source_snapshot,
+                source_candidate_ids=source_candidate_ids,
+                requested_candidate_ids=list(selected_candidate_ids),
+                selected_candidate_ids=selected_ids,
+                survivor_refs=selected_refs,
+                unknown_candidate_ids=ignored_ids,
+                reason=reason,
+            ),
+            run_id=run_id,
+            workflow_ids=_snapshot_workflow_ids(source_snapshot, self.records_by_version),
+        )
+        self._save_snapshot(run_id, snapshot)
+        return snapshot
+
     def materialize(self, snapshot_id: str | None) -> list[dict[str, Any]]:
         if not snapshot_id:
             return []
@@ -699,6 +744,56 @@ def _snapshot_id(
         "refs": [asdict(ref) for ref in refs],
     }
     return f"csnap_{_digest(payload)[:16]}"
+
+
+def _ordered_unique_candidate_ids(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _filtered_survivor_merge_audit(
+    *,
+    source_snapshot: CandidateSnapshot | None,
+    source_candidate_ids: list[str],
+    requested_candidate_ids: list[str],
+    selected_candidate_ids: list[str],
+    survivor_refs: list[CandidateSnapshotRef],
+    unknown_candidate_ids: list[str],
+    reason: str,
+) -> dict[str, Any]:
+    retained_candidate_ids = [ref.candidate_id for ref in survivor_refs]
+    return {
+        "source": "filtered_survivor_snapshot",
+        "source_snapshot_id": source_snapshot.snapshot_id if source_snapshot else None,
+        "reason": reason,
+        "requested_candidate_ids": requested_candidate_ids,
+        "selected_candidate_ids": retained_candidate_ids,
+        "ignored_candidate_ids": unknown_candidate_ids,
+        "input_count": len(source_candidate_ids),
+        "output_count": len(retained_candidate_ids),
+        "duplicates_removed": 0,
+        "duplicate_groups": [],
+        "conflicts": [],
+        "operation": "filtered_survivor_snapshot",
+        "filter_audit": {
+            "source_snapshot_id": source_snapshot.snapshot_id if source_snapshot else None,
+            "source_snapshot_kind": source_snapshot.kind if source_snapshot else None,
+            "source_candidate_ids": source_candidate_ids,
+            "selected_candidate_ids": selected_candidate_ids,
+            "retained_candidate_ids": retained_candidate_ids,
+            "unknown_candidate_ids": unknown_candidate_ids,
+            "ignored_unknown_candidate_ids": unknown_candidate_ids,
+        },
+    }
 
 
 def _digest(value: Any) -> str:

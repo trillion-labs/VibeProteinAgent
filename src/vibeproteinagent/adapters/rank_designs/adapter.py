@@ -177,6 +177,12 @@ def _score(
     iptm = _first_metric(_metric(prediction, "iptm"), _metric(candidate, "iptm"))
     ptm = _first_metric(_metric(prediction, "ptm"), _metric(candidate, "ptm"))
     candidate_qc = _score_namespace(candidate, "protein_qc")
+    candidate_family = _score_namespace(candidate, "family_profile")
+    family_profile_score = _aliased_metric(
+        candidate_family,
+        "ranking_score",
+        "family_similarity_score",
+    )
     qc_metrics = qc.get("metrics") if isinstance(qc.get("metrics"), dict) else {}
     qc_plddt = (
         _aliased_metric(qc_metrics, "plddt", "mean_plddt")
@@ -205,6 +211,8 @@ def _score(
         score += 0.5 * iptm
     if ptm is not None:
         score += 0.25 * ptm
+    if family_profile_score is not None:
+        score += 0.25 * family_profile_score
     score -= 0.05 * len(liabilities)
     score -= 0.10 * len(qc_flags)
 
@@ -215,6 +223,7 @@ def _score(
         "plddt": reported_plddt,
         "iptm": iptm,
         "ptm": ptm,
+        "family_profile_score": family_profile_score,
         "liability_count": len(liabilities),
         "qc_flag_count": len(qc_flags),
         "qc_flags": qc_flags,

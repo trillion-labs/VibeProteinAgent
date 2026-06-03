@@ -1,8 +1,0 @@
-{
-  "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260528_083409/claude",
-  "duration_seconds": 1248.0,
-  "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent planning stopped on terminal missing executable inputs\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 1, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"planner payload failed planner_ir_v1 schema validation\", \"details\": {\"structured_error\": {\"error_kind\": \"planner_ir_schema_violation\", \"violations\": [{\"path\": \"/missing_inputs\", \"issue\": \"required_mi",
-  "provider": "claude",
-  "reason": "planner_ir_schema_violation_exhausted",
-  "status": "FAIL"
-}

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/family_profile.input.json",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": [],
+      "description": "Canonical Candidate[] used either as reference family sequences when `profile` is absent or as generated designs to score when `profile` is supplied.",
+      "examples": [[{"schema_version": "candidate_v1", "candidate_id": "cand_a", "source": {"tool": "search_sequence", "local_id": "seq_0"}, "sequence": "ACDEFG"}]]
+    },
+    "fasta_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "Optional FASTA file containing unaligned family sequences for lightweight profile construction.",
+      "examples": ["/abs/path/family.fasta", null],
+      "vpa:digest": "sha256-if-path"
+    },
+    "alignment_path": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "Optional aligned FASTA file. When provided, conserved positions and consensus are computed over alignment columns.",
+      "examples": ["/abs/path/family_aligned.fasta", null],
+      "vpa:digest": "sha256-if-path"
+    },
+    "profile": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "default": null,
+      "description": "Existing family profile evidence, normally compiled from a `profile_source` upstream. When present, candidates are scored against it.",
+      "examples": [{"schema_version": "family_profile_v1", "consensus_sequence": "ACDEFG", "length_stats": {"mean": 6}}]
+    },
+    "family_id": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional stable identifier for the family or semantic term represented by the profile.",
+      "examples": ["GO:0003824", "IPR000001", null]
+    },
+    "family_label": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional human-readable family or functional label to carry into report artifacts.",
+      "examples": ["ATP-dependent enzymes", null]
+    },
+    "min_conservation": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.7,
+      "description": "Column conservation threshold used to report conserved positions and motif windows.",
+      "examples": [0.7, 0.85]
+    },
+    "motif_window": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 51,
+      "default": 9,
+      "description": "Maximum window length used to group adjacent conserved positions into motif-like evidence windows.",
+      "examples": [7, 9, 15]
+    },
+    "output_prefix": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "default": "family_profile",
+      "description": "Filesystem-safe prefix for generated profile and summary artifacts.",
+      "examples": ["family_profile", "kinase_family_v1"]
+    }
+  },
+  "additionalProperties": false
+}

@@ -6,11 +6,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
 from pydantic import BaseModel, Field, model_validator
 
-from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
+from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.profile_guidance import (
+    consensus_sequence,
+    normalize_profile_guidance,
+    profile_guidance_metadata,
+    profile_guidance_warnings,
+)
 from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 from vibeproteinagent.core.compat import ensure_esm3_shared_hf_cache
@@ -71,6 +76,8 @@ def _looks_gated(model_name: str) -> bool:
 class ESM3Input(BaseModel):
     sequence: str = Field(..., min_length=1)
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    profile_guidance: dict[str, Any] | None = None
+    profile_guidance_sequence_applied: bool = Field(default=False, exclude=True)
     model_name: str = Field(_DEFAULT_MODEL)
     tracks: list[str] = Field(default_factory=lambda: ["sequence", "structure"])
     num_steps: int = Field(default=20, ge=1)
@@ -81,8 +88,19 @@ class ESM3Input(BaseModel):
     def _canonical_candidates_to_sequence(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        profile_guidance = normalize_profile_guidance(data.get("profile_guidance"))
+        if profile_guidance is not None:
+            data = dict(data)
+            data["profile_guidance"] = profile_guidance
         candidates = data.get("candidates")
         if not candidates:
+            if not data.get("sequence"):
+                sequence = consensus_sequence(profile_guidance)
+                if sequence:
+                    out = dict(data)
+                    out["sequence"] = sequence
+                    out["profile_guidance_sequence_applied"] = True
+                    return out
             return data
         canonical = [_is_canonical_candidate(item) for item in candidates]
         if any(canonical) and not all(canonical):
@@ -276,6 +294,15 @@ def _esm3_candidates(params: ESM3Input, output: ESM3Output) -> list[dict[str, An
     }
     if output.confidence_scores is not None:
         scores.update(output.confidence_scores)
+    artifacts: dict[str, Any] = {}
+    if params.profile_guidance is not None:
+        scores["profile_guidance_applied"] = bool(
+            params.profile_guidance_sequence_applied
+        )
+        scores["profile_guidance_warnings"] = profile_guidance_warnings(
+            params.profile_guidance
+        )
+        artifacts["profile_guidance"] = profile_guidance_metadata(params.profile_guidance)
 
     candidate: dict[str, Any] = {
         "schema_version": "candidate_v1",
@@ -296,7 +323,7 @@ def _esm3_candidates(params: ESM3Input, output: ESM3Output) -> list[dict[str, An
         },
         "sequence": params.sequence,
         "scores": {"esm3": scores},
-        "artifacts": {},
+        "artifacts": artifacts,
         "capabilities": candidate_capability_flags(
             has_sequence=bool(params.sequence),
             has_backbone_structure=bool(output.predicted_pdb),

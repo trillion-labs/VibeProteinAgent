@@ -12,6 +12,17 @@ from vibeproteinagent.workflows.loader import load_workflow
 _KV_RE = re.compile(r"(?<!\S)([A-Za-z_][A-Za-z0-9_.-]*)=(\S+)")
 _JOB_RE = re.compile(r"\bjob_[0-9a-f]{32}\b")
 _WF_RE = re.compile(r"\bwf_[0-9a-f]{32}\b")
+_COUNTED_CANDIDATE_RE = re.compile(
+    r"\b(\d[\d,]*)\s+"
+    r"(?:candidate|candidates|design|designs|sequence|sequences)\b",
+    re.IGNORECASE,
+)
+_REQUESTED_COUNT_PARAM_KEYS = (
+    "requested_candidate_count",
+    "num_candidates",
+    "candidate_count",
+    "top_k",
+)
 
 
 class ModeRouter:
@@ -364,7 +375,7 @@ def _deliverable_contract(request: str, params: dict[str, Any]) -> dict[str, Any
         rationale = "request supplies a structure target for a candidate-generating action, so terminal candidates require sequence and full structure"
     elif sequence_requested:
         rationale = "request asks for sequence, representative, ranking, enzyme, activity, or candidate evidence"
-    return {
+    contract = {
         "version": "deliverable_contract_v1",
         "source": "mode_router_local",
         "deliverable_contract_source": "fallback",
@@ -376,6 +387,38 @@ def _deliverable_contract(request: str, params: dict[str, Any]) -> dict[str, Any
         "plain_language_answer_allowed": plain_language_answer_allowed,
         "rationale": rationale,
     }
+    requested_count = _requested_candidate_count(request, params)
+    if requested_count is not None:
+        contract["requested_candidate_count"] = requested_count
+    return contract
+
+
+def _requested_candidate_count(request: str, params: dict[str, Any]) -> int | None:
+    for key in _REQUESTED_COUNT_PARAM_KEYS:
+        count = _positive_int_or_none(params.get(key))
+        if count is not None:
+            return count
+    for match in _COUNTED_CANDIDATE_RE.finditer(request):
+        count = _positive_int_or_none(match.group(1))
+        if count is not None:
+            return count
+    return None
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip().replace(",", "")
+        if not re.fullmatch(r"\d+", stripped):
+            return None
+        parsed = int(stripped)
+        return parsed if parsed > 0 else None
+    return None
 
 
 def _has_any_word(lower: str, words: tuple[str, ...]) -> bool:

@@ -10,6 +10,7 @@ from vibeproteinagent.adapters.proteinmpnn.adapter import (
     ProteinMPNNDesign,
     ProteinMPNNInput,
     ProteinMPNNOutput,
+    _apply_profile_bias_by_res,
     _canonical_candidate_from_design,
     _materialize_mpnn_pdb_input,
 )
@@ -216,3 +217,47 @@ def test_proteinmpnn_candidate_records_mpnn_input_pdb_artifact() -> None:
     assert candidate["artifacts"]["proteinmpnn"]["mpnn_input_pdb_path"] == (
         "/tmp/backbone_proteinmpnn_input.pdb"
     )
+
+
+def test_proteinmpnn_candidate_records_profile_guidance_metadata() -> None:
+    params = ProteinMPNNInput(
+        pdb_path="/tmp/backbone.pdb",
+        profile_guidance={
+            "schema_version": "family_profile_v1",
+            "consensus_sequence": "AAA",
+            "sequence_count": 4,
+        },
+    )
+    candidate = _canonical_candidate_from_design(
+        {"candidate_id": "legacy", "sequence": "AAA", "score": 0.5},
+        0,
+        params=params,
+        structure_path="/tmp/backbone.pdb",
+        profile_guidance_applied=True,
+        profile_guidance_warnings=[],
+    )
+
+    scores = candidate["scores"]["proteinmpnn"]
+    assert scores["profile_guidance_applied"] is True
+    assert scores["profile_guidance_warnings"] == []
+    assert candidate["artifacts"]["profile_guidance"]["consensus_length"] == 3
+    assert candidate["artifacts"]["profile_guidance"]["sequence_count"] == 4
+
+
+def test_proteinmpnn_profile_bias_adds_position_specific_soft_preferences() -> None:
+    torch = pytest.importorskip("torch")
+    profile = {
+        "schema_version": "family_profile_v1",
+        "consensus_sequence": "AC",
+        "position_frequencies": [
+            {"position": 1, "frequencies": {"A": 1.0}},
+            {"position": 2, "frequencies": {"C": 0.75, "D": 0.25}},
+        ],
+    }
+    bias = torch.zeros((1, 2, 21))
+
+    _apply_profile_bias_by_res(bias, profile)
+
+    assert bias[0, 0, 0].item() == pytest.approx(0.5)
+    assert bias[0, 1, 1].item() == pytest.approx(0.375)
+    assert bias[0, 1, 2].item() == pytest.approx(0.125)

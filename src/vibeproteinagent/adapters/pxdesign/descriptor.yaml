@@ -1,7 +1,7 @@
 name: pxdesign
 version: "1.0.0"
 category: protein_design
-description: "Protein target-conditioned binder backbone and sequence generation; outputs designed sequence plus backbone coordinates."
+description: "Protein target-conditioned binder design for protein targets; outputs sequenced, scored full-structure binder candidates for downstream selection."
 runtime: python
 backend: pytorch
 gpu_required: true

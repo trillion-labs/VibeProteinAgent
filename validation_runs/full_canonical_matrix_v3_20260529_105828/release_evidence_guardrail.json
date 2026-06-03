@@ -1,9 +1,0 @@
-{
-  "clean_run_directory_required": true,
-  "log_guardrail_violations": [],
-  "release_evidence_valid": true,
-  "script_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/run_live_provider_matrix_vm024.sh",
-  "script_sha_end": "8171613ee93317ce98d0808857dd53d1be043b26ac3edc0245bb632da447a5ae",
-  "script_sha_start": "8171613ee93317ce98d0808857dd53d1be043b26ac3edc0245bb632da447a5ae",
-  "script_unchanged_during_run": true
-}

@@ -4,11 +4,16 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-import torch
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
+from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.profile_guidance import (
+    derive_profile_mask_positions,
+    normalize_profile_guidance,
+    profile_guidance_metadata,
+    profile_guidance_warnings,
+)
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
 _DEFAULT_MODEL = "facebook/esm2_t12_35M_UR50D"
@@ -19,6 +24,7 @@ _MASK_CHARS = frozenset({"X", "?", "_", "-", "."})
 class ESM2Input(BaseModel):
     sequence: str = Field(..., min_length=1)
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    profile_guidance: dict[str, Any] | None = None
     mode: Literal["embedding", "sequence_generation"] = Field("embedding")
     model_name: str = Field(_DEFAULT_MODEL)
     return_attention: bool = Field(False)
@@ -56,6 +62,9 @@ class ESM2Input(BaseModel):
 
     @model_validator(mode="after")
     def _validate_design_template(self) -> ESM2Input:
+        if self.profile_guidance is not None:
+            self.profile_guidance = normalize_profile_guidance(self.profile_guidance)
+            self.mode = "sequence_generation"
         allowed = set(_AMINO_ACIDS) | {"X"}
         if self.mode == "sequence_generation":
             allowed |= set(_MASK_CHARS)
@@ -205,6 +214,8 @@ class ESM2Adapter(ToolAdapter):
             params.mask_positions,
             params.mask_indices_zero_based,
         )
+        profile_positions = derive_profile_mask_positions(params.sequence, params.profile_guidance)
+        user_positions = sorted(set(user_positions) | set(profile_positions))
         indices = [pos - 1 for pos in user_positions]
         if not indices:
             ctx.emit_progress(1.0)
@@ -319,6 +330,14 @@ def _esm2_candidates(params: ESM2Input, output: ESM2Output) -> list[dict[str, An
         else:
             scores["filled_positions"] = list(output.filled_positions)
             scores["generation_strategy"] = output.generation_strategy
+        if params.profile_guidance is not None:
+            scores["profile_guidance_applied"] = bool(output.filled_positions)
+            scores["profile_guidance_warnings"] = profile_guidance_warnings(
+                params.profile_guidance
+            )
+            artifacts["profile_guidance"] = profile_guidance_metadata(
+                params.profile_guidance
+            )
 
         candidates.append(
             {

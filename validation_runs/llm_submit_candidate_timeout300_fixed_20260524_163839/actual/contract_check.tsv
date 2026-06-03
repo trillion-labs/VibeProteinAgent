@@ -1,4 +1,0 @@
-case	ok	state	decision	has_final_submission
-semantic_claude	True	completed	submitted_final_candidate	True
-semantic_codex	True	completed	submitted_final_candidate	True
-semantic_qwen	True	completed	submitted_final_candidate	True

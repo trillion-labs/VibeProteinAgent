@@ -90,6 +90,32 @@ def test_esm2_sequence_generation_emits_canonical_candidates() -> None:
     assert out.candidates[0]["scores"]["esm2"]["filled_positions"] == [3]
 
 
+def test_esm2_profile_guidance_forces_generation_and_records_metadata() -> None:
+    profile = {
+        "schema_version": "family_profile_v1",
+        "consensus_sequence": "ACDE",
+        "conserved_positions": [
+            {"position": 2, "consensus": "C", "conservation": 1.0},
+            {"position": 4, "consensus": "E", "conservation": 1.0},
+        ],
+    }
+    params = ESM2Input(sequence="AAAA", profile_guidance=profile, mask_positions=[3])
+    out = ESM2Output(
+        generated_sequences=["ACDE"],
+        filled_positions=[2, 3, 4],
+        generation_strategy="esm2_mlm_argmax",
+        num_residues=4,
+        model_name=_DEFAULT_MODEL,
+        mode="sequence_generation",
+        runtime_ms=1,
+    )
+    candidate = _esm2_candidates(params, out)[0]
+
+    assert params.mode == "sequence_generation"
+    assert candidate["scores"]["esm2"]["profile_guidance_applied"] is True
+    assert candidate["artifacts"]["profile_guidance"]["consensus_length"] == 4
+
+
 def test_esm2_candidate_ids_are_deterministic() -> None:
     params = ESM2Input(sequence="ACDE", mode="embedding")
     out = ESM2Output(

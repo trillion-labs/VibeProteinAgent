@@ -115,13 +115,15 @@ _NESTED_SCORE_KEYS = ("confidence_scores", "metrics", "scores")
 
 def collect_report_model(workspace: Workspace, source_id: str, *, top_k: int = 5) -> ReportModel:
     del top_k  # top-k is a rendering concern; collection keeps the complete model.
+    if source_id.startswith("arun_"):
+        return _collect_agent_run(workspace, source_id)
     if source_id.startswith("wf_"):
         return _collect_workflow(workspace, source_id)
     if source_id.startswith("job_"):
         return _collect_job(workspace, source_id)
     raise InvalidParamsError(
-        "report id must start with job_ or wf_",
-        details={"id": source_id, "allowed_prefixes": ["job_", "wf_"]},
+        "report id must start with arun_, job_, or wf_",
+        details={"id": source_id, "allowed_prefixes": ["arun_", "job_", "wf_"]},
     )
 
 
@@ -136,6 +138,7 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
     candidates = _candidate_archive_candidates(
         workspace,
         workflow_id=job.workflow_id,
+        run_id=None,
         job_ids=[job.job_id],
         node_ids=[node.node_id],
         artifacts=artifacts,
@@ -151,6 +154,7 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
     final_candidates = _enrich_final_candidates_from_records(
         workspace,
         workflow_id=job.workflow_id,
+        run_id=None,
         job_ids=[job.job_id],
         node_ids=[node.node_id],
         final_candidates=_candidates_from_submission(final_submission),
@@ -208,71 +212,16 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
 
 def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
     wf = _read_workflow_readonly(workspace, workflow_id)
-    nodes = _read_workflow_nodes_readonly(workspace, workflow_id)
-    report_nodes: list[WorkflowNodeSummary] = []
-    all_artifacts: list[ReportArtifact] = []
-    warnings: list[ReportWarning] = []
-
-    params_by_node: dict[str, dict[str, Any]] = {}
-    for node in nodes:
-        artifacts: list[ReportArtifact] = []
-        job: JobRecord | None = None
-        if node.job_id:
-            try:
-                job = _read_job_readonly(workspace, node.job_id)
-                artifacts = _artifact_list(
-                    _read_artifacts_for_job_readonly(workspace, job.job_id),
-                    job_id=job.job_id,
-                )
-                warnings.extend(_warnings_from_job(job, source=node.node_id))
-                if isinstance(job.params, dict):
-                    params_by_node[node.node_id] = job.params
-            except Exception as exc:
-                warnings.append(
-                    ReportWarning(
-                        level="warning",
-                        message=f"Could not load job {node.job_id}: {exc}",
-                        source=node.node_id,
-                    )
-                )
-        report_node = WorkflowNodeSummary(
-            node_id=node.node_id,
-            tool=node.tool_name,
-            version=node.tool_version,
-            state=node.state,
-            job_id=node.job_id,
-            upstream=node.upstream,
-            params_hash=node.params_hash,
-            params=params_by_node.get(node.node_id, {}),
-            cache_key=node.cache_key,
-            output=node.output,
-            parameter_resolution_events=_parameter_resolution_events_from_node_payload(
-                node.output,
-                node.error_details,
-            ),
-            parameter_resolution_summary=_parameter_resolution_summary_from_node_payload(
-                node.output,
-                node.error_details,
-            ),
-            artifacts=artifacts,
-            error_code=node.error_code,
-            error_message=node.error_message,
-            error_details=node.error_details,
-        )
-        report_nodes.append(report_node)
-        all_artifacts.extend(artifacts)
-        if node.state in {"failed", "skipped"}:
-            warnings.append(
-                ReportWarning(
-                    level="error" if node.state == "failed" else "warning",
-                    message=f"Workflow node {node.node_id} is {node.state}",
-                    source=node.node_id,
-                )
-            )
+    report_nodes, all_artifacts, warnings, params_by_node = _workflow_report_nodes(
+        workspace,
+        wf,
+        round_index=None,
+    )
 
     candidates = _candidate_archive_candidates(
         workspace,
         workflow_id=wf.workflow_id,
+        run_id=None,
         job_ids=[node.job_id for node in report_nodes if node.job_id],
         node_ids=[node.node_id for node in report_nodes],
         artifacts=all_artifacts,
@@ -283,12 +232,15 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
         )
     submissions = [
         *_submission_outputs(report_nodes),
-        *_agent_submission_outputs(workspace, workflow_id=wf.workflow_id, job_id=None),
+        *_agent_submission_outputs(
+            workspace, workflow_id=wf.workflow_id, job_id=None, run_id=None,
+        ),
     ]
     final_submission = _latest_final_submission(submissions)
     final_candidates = _enrich_final_candidates_from_records(
         workspace,
         workflow_id=wf.workflow_id,
+        run_id=None,
         job_ids=[n.job_id for n in report_nodes if n.job_id],
         node_ids=[n.node_id for n in report_nodes],
         final_candidates=_candidates_from_submission(final_submission),
@@ -363,6 +315,245 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
             artifacts=all_artifacts,
         ),
     )
+
+
+def _collect_agent_run(workspace: Workspace, run_id: str) -> ReportModel:
+    try:
+        from vibeproteinagent.agents.session.store import AgentSessionStore
+
+        store = AgentSessionStore(workspace)
+        details = store.get_run_details(run_id)
+    except KeyError as exc:
+        raise NotFoundError("agent run not found", details={"run_id": run_id}) from exc
+    except Exception as exc:
+        raise WorkspaceError(
+            "could not load agent run for report",
+            details={"run_id": run_id, "error": str(exc)},
+        ) from exc
+
+    run = details.get("run") if isinstance(details.get("run"), dict) else {}
+    workflow_ids = [
+        str(value)
+        for value in (run.get("workflow_ids") or [])
+        if value not in (None, "")
+    ]
+    report_nodes: list[WorkflowNodeSummary] = []
+    all_artifacts: list[ReportArtifact] = []
+    warnings: list[ReportWarning] = []
+    params_by_node: dict[str, dict[str, Any]] = {}
+    workflows: list[WorkflowRecord] = []
+    for round_index, workflow_id in enumerate(workflow_ids):
+        try:
+            wf = _read_workflow_readonly(workspace, workflow_id)
+        except Exception as exc:
+            warnings.append(
+                ReportWarning(
+                    level="warning",
+                    message=f"Could not load workflow {workflow_id}: {exc}",
+                    source=workflow_id,
+                )
+            )
+            continue
+        workflows.append(wf)
+        nodes, artifacts, node_warnings, node_params = _workflow_report_nodes(
+            workspace,
+            wf,
+            round_index=round_index,
+        )
+        report_nodes.extend(nodes)
+        all_artifacts.extend(artifacts)
+        warnings.extend(node_warnings)
+        params_by_node.update(
+            {
+                f"{workflow_id}:{node_id}": params
+                for node_id, params in node_params.items()
+            }
+        )
+
+    job_ids = [node.job_id for node in report_nodes if node.job_id]
+    node_ids = [node.node_id for node in report_nodes]
+    candidates = _candidate_archive_candidates(
+        workspace,
+        workflow_id=None,
+        run_id=run_id,
+        job_ids=job_ids,
+        node_ids=node_ids,
+        artifacts=all_artifacts,
+    )
+    if not candidates:
+        candidates = _normalize_candidates(
+            report_nodes,
+            all_artifacts,
+            node_params={
+                node.node_id: params
+                for key, params in params_by_node.items()
+                for node_id in [key.rsplit(":", 1)[-1]]
+            },
+        )
+    submissions = [
+        *_submission_outputs(report_nodes),
+        *_agent_submission_outputs(
+            workspace, workflow_id=None, job_id=None, run_id=run_id,
+        ),
+    ]
+    final_submission = _latest_final_submission(submissions)
+    final_candidates = _enrich_final_candidates_from_records(
+        workspace,
+        workflow_id=None,
+        run_id=run_id,
+        job_ids=job_ids,
+        node_ids=node_ids,
+        final_candidates=_candidates_from_submission(final_submission),
+        artifacts=all_artifacts,
+    )
+    if not candidates:
+        candidates = _structure_candidates(
+            all_artifacts, source={"kind": "agent_run", "run_id": run_id}
+        )
+    workflow_tools = {(n.tool or "").lower() for n in report_nodes}
+    tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
+    started = _as_int(run.get("created_at"))
+    finished = _as_int(run.get("updated_at"))
+    return ReportModel(
+        summary=RunSummary(
+            kind="agent_run",
+            id=run_id,
+            workspace=workspace.name,
+            state=str(run.get("state") or "unknown"),
+            name=str(run.get("user_request") or "Agent run")[:96],
+            version=str(run.get("model") or "") or None,
+            submitted_at=started,
+            finished_at=finished,
+            runtime_ms=_duration_ms(started, finished),
+        ),
+        graph=WorkflowGraph(workflow_id=run_id, nodes=report_nodes),
+        candidates=candidates,
+        final_candidates=final_candidates,
+        final_submission=final_submission,
+        submissions=submissions,
+        artifacts=all_artifacts,
+        msa_blocks=_collect_msa_blocks(
+            all_artifacts, workflow_tools=workflow_tools, tool_by_job=tool_by_job,
+        ),
+        warnings=warnings,
+        reproducibility=_reproducibility(
+            source_id=run_id,
+            nodes=report_nodes,
+            artifacts=all_artifacts,
+            workspace=workspace.name,
+        ),
+        agent_transcript=_collect_agent_transcript(workspace, run_id=run_id),
+        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes(report_nodes),
+        empty_candidate_events=_empty_candidate_events_from_nodes(report_nodes),
+        candidate_capability_filter_events=(
+            _candidate_capability_filter_events_from_nodes(report_nodes)
+        ),
+        candidate_merge_events=_candidate_merge_events_from_nodes(report_nodes),
+        parameter_resolution_events=_parameter_resolution_events_from_nodes(report_nodes),
+        raw_summary={
+            "kind": "agent_run",
+            "run_id": run_id,
+            "workflow_ids": workflow_ids,
+            "workflows": [
+                _raw_workflow_summary(
+                    workflow_id=wf.workflow_id,
+                    name=wf.name,
+                    version=wf.version,
+                    state=wf.state,
+                    nodes=[
+                        node for node in report_nodes
+                        if node.workflow_id == wf.workflow_id
+                    ],
+                    artifacts=[
+                        artifact for artifact in all_artifacts
+                        if any(
+                            node.job_id == artifact.job_id and node.workflow_id == wf.workflow_id
+                            for node in report_nodes
+                        )
+                    ],
+                )
+                for wf in workflows
+            ],
+        },
+    )
+
+
+def _workflow_report_nodes(
+    workspace: Workspace,
+    wf: WorkflowRecord,
+    *,
+    round_index: int | None,
+) -> tuple[
+    list[WorkflowNodeSummary],
+    list[ReportArtifact],
+    list[ReportWarning],
+    dict[str, dict[str, Any]],
+]:
+    nodes = _read_workflow_nodes_readonly(workspace, wf.workflow_id)
+    report_nodes: list[WorkflowNodeSummary] = []
+    all_artifacts: list[ReportArtifact] = []
+    warnings: list[ReportWarning] = []
+
+    params_by_node: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        artifacts: list[ReportArtifact] = []
+        job: JobRecord | None = None
+        if node.job_id:
+            try:
+                job = _read_job_readonly(workspace, node.job_id)
+                artifacts = _artifact_list(
+                    _read_artifacts_for_job_readonly(workspace, job.job_id),
+                    job_id=job.job_id,
+                )
+                warnings.extend(_warnings_from_job(job, source=node.node_id))
+                if isinstance(job.params, dict):
+                    params_by_node[node.node_id] = job.params
+            except Exception as exc:
+                warnings.append(
+                    ReportWarning(
+                        level="warning",
+                        message=f"Could not load job {node.job_id}: {exc}",
+                        source=node.node_id,
+                    )
+                )
+        report_node = WorkflowNodeSummary(
+            node_id=node.node_id,
+            tool=node.tool_name,
+            version=node.tool_version,
+            state=node.state,
+            job_id=node.job_id,
+            workflow_id=wf.workflow_id,
+            round_index=round_index,
+            upstream=node.upstream,
+            params_hash=node.params_hash,
+            params=params_by_node.get(node.node_id, {}),
+            cache_key=node.cache_key,
+            output=node.output,
+            parameter_resolution_events=_parameter_resolution_events_from_node_payload(
+                node.output,
+                node.error_details,
+            ),
+            parameter_resolution_summary=_parameter_resolution_summary_from_node_payload(
+                node.output,
+                node.error_details,
+            ),
+            artifacts=artifacts,
+            error_code=node.error_code,
+            error_message=node.error_message,
+            error_details=node.error_details,
+        )
+        report_nodes.append(report_node)
+        all_artifacts.extend(artifacts)
+        if node.state in {"failed", "skipped"}:
+            warnings.append(
+                ReportWarning(
+                    level="error" if node.state == "failed" else "warning",
+                    message=f"Workflow node {node.node_id} is {node.state}",
+                    source=node.node_id,
+                )
+            )
+
+    return report_nodes, all_artifacts, warnings, params_by_node
 
 
 def _node_from_job(job: JobRecord, artifacts: list[ReportArtifact]) -> WorkflowNodeSummary:
@@ -947,6 +1138,7 @@ def _candidate_archive_candidates(
     workspace: Workspace,
     *,
     workflow_id: str | None,
+    run_id: str | None,
     job_ids: list[str],
     node_ids: list[str],
     artifacts: list[ReportArtifact],
@@ -954,6 +1146,7 @@ def _candidate_archive_candidates(
     survivor_snapshot_records = _read_candidate_archive_snapshot(
         workspace,
         workflow_id=workflow_id,
+        run_id=run_id,
         job_ids=job_ids,
         node_ids=node_ids,
         kind="survivor",
@@ -962,6 +1155,7 @@ def _candidate_archive_candidates(
         current_snapshot_records = _read_candidate_archive_snapshot(
             workspace,
             workflow_id=workflow_id,
+            run_id=run_id,
             job_ids=job_ids,
             node_ids=node_ids,
             kind="current_round",
@@ -984,6 +1178,7 @@ def _candidate_archive_candidates(
     current_snapshot_records = _read_candidate_archive_snapshot(
         workspace,
         workflow_id=workflow_id,
+        run_id=run_id,
         job_ids=job_ids,
         node_ids=node_ids,
         kind="current_round",
@@ -998,6 +1193,7 @@ def _candidate_archive_candidates(
     records = _read_candidate_archive_records(
         workspace,
         workflow_id=workflow_id,
+        run_id=run_id,
         job_ids=job_ids,
         node_ids=node_ids,
     )
@@ -1014,6 +1210,7 @@ def _read_candidate_archive_records(
     workspace: Workspace,
     *,
     workflow_id: str | None,
+    run_id: str | None,
     job_ids: list[str],
     node_ids: list[str],
 ) -> list[dict[str, Any]]:
@@ -1028,6 +1225,7 @@ def _read_candidate_archive_records(
             predicates, args = _archive_predicates(
                 columns,
                 workflow_id=workflow_id,
+                run_id=run_id,
                 job_ids=job_ids,
                 node_ids=node_ids,
             )
@@ -1052,6 +1250,7 @@ def _read_candidate_archive_snapshot(
     workspace: Workspace,
     *,
     workflow_id: str | None,
+    run_id: str | None,
     job_ids: list[str],
     node_ids: list[str],
     kind: str | None = None,
@@ -1066,6 +1265,7 @@ def _read_candidate_archive_snapshot(
             predicates, args = _archive_predicates(
                 columns,
                 workflow_id=workflow_id,
+                run_id=run_id,
                 job_ids=job_ids,
                 node_ids=node_ids,
             )
@@ -1091,6 +1291,7 @@ def _read_candidate_archive_snapshot(
                     row,
                     columns,
                     workflow_id=workflow_id,
+                    run_id=run_id,
                 ):
                     continue
                 records = _candidate_records_from_snapshot_row(conn, row, columns)
@@ -1101,6 +1302,7 @@ def _read_candidate_archive_snapshot(
                 records = _archive_records_in_scope(
                     records,
                     workflow_id=workflow_id,
+                    run_id=run_id,
                     job_ids=job_ids,
                     node_ids=node_ids,
                 )
@@ -1131,7 +1333,10 @@ def _snapshot_row_matches_archive_scope(
     columns: set[str],
     *,
     workflow_id: str | None,
+    run_id: str | None,
 ) -> bool:
+    if run_id and "run_id" in columns and row["run_id"] not in (None, ""):
+        return str(row["run_id"]) == run_id
     if not workflow_id:
         return True
     if "workflow_ids_json" in columns and row["workflow_ids_json"] is not None:
@@ -1169,11 +1374,15 @@ def _archive_predicates(
     columns: set[str],
     *,
     workflow_id: str | None,
+    run_id: str | None,
     job_ids: list[str],
     node_ids: list[str],
 ) -> tuple[list[str], list[Any]]:
     predicates: list[str] = []
     args: list[Any] = []
+    if run_id and "run_id" in columns:
+        predicates.append("run_id = ?")
+        args.append(run_id)
     if workflow_id and "workflow_id" in columns:
         predicates.append("workflow_id = ?")
         args.append(workflow_id)
@@ -1485,6 +1694,7 @@ def _archive_records_in_scope(
     records: list[dict[str, Any]],
     *,
     workflow_id: str | None,
+    run_id: str | None,
     job_ids: list[str],
     node_ids: list[str],
 ) -> list[dict[str, Any]]:
@@ -1494,6 +1704,7 @@ def _archive_records_in_scope(
         if _archive_record_matches_scope(
             record,
             workflow_id=workflow_id,
+            run_id=run_id,
             job_ids=job_ids,
             node_ids=node_ids,
         )
@@ -1504,13 +1715,28 @@ def _archive_record_matches_scope(
     record: dict[str, Any],
     *,
     workflow_id: str | None,
+    run_id: str | None,
     job_ids: list[str],
     node_ids: list[str],
 ) -> bool:
-    if not workflow_id and not job_ids and not node_ids:
+    if not workflow_id and not run_id and not job_ids and not node_ids:
         return True
     source = record.get("source") if isinstance(record.get("source"), dict) else {}
     raw_source = record.get("raw_source") if isinstance(record.get("raw_source"), dict) else {}
+    if run_id:
+        run_values = {
+            str(value)
+            for value in (
+                record.get("run_id"),
+                record.get("archive_snapshot_run_id"),
+                source.get("run_id"),
+                source.get("archive_snapshot_run_id"),
+                raw_source.get("run_id"),
+            )
+            if value not in (None, "")
+        }
+        if run_values and run_id not in run_values:
+            return False
     if workflow_id:
         workflow_values = _archive_workflow_scope_values(record, source, raw_source)
         if workflow_values:
@@ -1914,6 +2140,7 @@ def _enrich_final_candidates_from_records(
     workspace: Workspace,
     *,
     workflow_id: str | None,
+    run_id: str | None,
     job_ids: list[str],
     node_ids: list[str],
     final_candidates: list[ReportCandidate],
@@ -1934,7 +2161,11 @@ def _enrich_final_candidates_from_records(
     if not final_candidates:
         return final_candidates
     records = _read_candidate_archive_records(
-        workspace, workflow_id=workflow_id, job_ids=job_ids, node_ids=node_ids,
+        workspace,
+        workflow_id=workflow_id,
+        run_id=run_id,
+        job_ids=job_ids,
+        node_ids=node_ids,
     )
     if not records:
         return final_candidates
@@ -2881,6 +3112,7 @@ def _compact(value: Any, *, depth: int = 0) -> Any:
 def _collect_agent_transcript(
     workspace: Workspace,
     *,
+    run_id: str | None = None,
     workflow_id: str | None = None,
     job_id: str | None = None,
 ) -> AgentTranscript | None:
@@ -2898,7 +3130,7 @@ def _collect_agent_transcript(
     Failures (DB errors, malformed rows) are swallowed and return
     ``None`` — the rest of the report still renders.
     """
-    if not workflow_id and not job_id:
+    if not run_id and not workflow_id and not job_id:
         return None
     try:
         # Local import to avoid a circular dependency at module-load time
@@ -2907,7 +3139,9 @@ def _collect_agent_transcript(
         from vibeproteinagent.agents.session.store import AgentSessionStore
 
         store = AgentSessionStore(workspace)
-        run = _find_agent_run_for(store, workflow_id=workflow_id, job_id=job_id)
+        run = store.get_run(run_id) if run_id else _find_agent_run_for(
+            store, workflow_id=workflow_id, job_id=job_id,
+        )
         if run is None:
             return None
         details = store.get_run_details(run.run_id)
@@ -3137,12 +3371,15 @@ def _agent_submission_outputs(
     *,
     workflow_id: str | None,
     job_id: str | None,
+    run_id: str | None = None,
 ) -> list[dict[str, Any]]:
     try:
         from vibeproteinagent.agents.session.store import AgentSessionStore
 
         store = AgentSessionStore(workspace)
-        run = _find_agent_run_for(store, workflow_id=workflow_id, job_id=job_id)
+        run = store.get_run(run_id) if run_id else _find_agent_run_for(
+            store, workflow_id=workflow_id, job_id=job_id,
+        )
         if run is None:
             return []
         details = store.get_run_details(run.run_id)

@@ -22,11 +22,16 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-import torch
 from pydantic import BaseModel, Field, model_validator
 
-from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
+from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.profile_guidance import (
+    normalize_profile_guidance,
+    profile_guidance_metadata,
+    profile_guidance_warnings,
+    suggested_profile_length,
+)
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_structure_residue_refs,
@@ -71,6 +76,8 @@ _SIMPLE_RF_SELECTOR = re.compile(r"^(?P<chain>[A-Za-z_]?)(?P<start>\d+)(?:-(?P<e
 class RFdiffusionInput(BaseModel):
     mode: RFdiffusionMode = "unconditional"
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    profile_guidance: dict[str, Any] | None = None
+    profile_guidance_length_applied: bool = Field(default=False, exclude=True)
     target_pdb: str | None = Field(
         default=None,
         json_schema_extra={"vpa:digest": "sha256-if-path"},
@@ -131,9 +138,14 @@ class RFdiffusionInput(BaseModel):
     def _canonical_candidates_to_target(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        out = dict(data)
+        profile_guidance = normalize_profile_guidance(out.get("profile_guidance"))
+        if profile_guidance is not None:
+            out["profile_guidance"] = profile_guidance
+            _apply_profile_length_defaults(out, profile_guidance)
         candidates = data.get("candidates")
         if not candidates:
-            return data
+            return out
         canonical = [_is_canonical_candidate(item) for item in candidates]
         if any(canonical) and not all(canonical):
             raise ValueError(
@@ -141,9 +153,8 @@ class RFdiffusionInput(BaseModel):
                 "Pass either all canonical Candidate[] or all legacy items."
             )
         if not all(canonical):
-            return data
+            return out
         first = candidates[0]
-        out = dict(data)
         if first.get("structure_path"):
             out.setdefault("target_pdb", first["structure_path"])
             if out.get("mode") in (
@@ -234,8 +245,8 @@ class RFdiffusionAdapter(ToolAdapter):
         if not torch.cuda.is_available():
             raise RuntimeError("RFdiffusion adapter requires CUDA")
 
-        run_inputs = ctx.job_dir / "inputs"
-        run_outputs = ctx.job_dir / "outputs"
+        run_inputs = (ctx.job_dir / "inputs").resolve()
+        run_outputs = (ctx.job_dir / "outputs").resolve()
         run_inputs.mkdir(parents=True, exist_ok=True)
         run_outputs.mkdir(parents=True, exist_ok=True)
 
@@ -246,6 +257,7 @@ class RFdiffusionAdapter(ToolAdapter):
         contigs, position_mappings, mapping_warnings, resolved_hotspots, resolved_selectors = (
             _build_contigs_with_mappings(params, staged_target)
         )
+        mapping_warnings.extend(_rfdiffusion_profile_warnings(params))
         checkpoint = _required_weight(params)
         if not checkpoint.is_file():
             mode = _canonical_mode(params.mode)
@@ -413,6 +425,40 @@ def availability_skip_reason() -> str | None:
     report = availability_report()
     reason = report.get("reason")
     return str(reason) if reason else None
+
+
+def _apply_profile_length_defaults(inputs: dict[str, Any], profile: dict[str, Any]) -> None:
+    mode = _canonical_mode(str(inputs.get("mode") or "unconditional"))
+    if mode not in {"unconditional", "symmetric_oligomer"}:
+        return
+    length_fields = {"length_min", "length_max", "total_length"}
+    if any(field in inputs and inputs.get(field) is not None for field in length_fields):
+        return
+    length = suggested_profile_length(profile)
+    if length is None or length < 20:
+        return
+    if mode == "symmetric_oligomer":
+        inputs["total_length"] = length
+    else:
+        inputs["length_min"] = length
+        inputs["length_max"] = length
+    inputs["profile_guidance_length_applied"] = True
+
+
+def _profile_guidance_length_applied(params: RFdiffusionInput) -> bool:
+    return bool(params.profile_guidance_length_applied)
+
+
+def _rfdiffusion_profile_warnings(params: RFdiffusionInput) -> list[str]:
+    if params.profile_guidance is None:
+        return []
+    warnings = profile_guidance_warnings(params.profile_guidance)
+    mode = _canonical_mode(params.mode)
+    if mode not in {"unconditional", "symmetric_oligomer"}:
+        warnings.append(
+            "profile guidance is advisory for target-conditioned RFdiffusion modes in v2"
+        )
+    return warnings
 
 
 def mode_readiness(params: dict[str, object] | RFdiffusionInput | str) -> dict[str, object]:
@@ -974,6 +1020,8 @@ def _canonical_candidate_from_design(
                 "score": design.get("score"),
                 "length": design.get("length"),
                 "mode": params.mode,
+                "profile_guidance_applied": _profile_guidance_length_applied(params),
+                "profile_guidance_warnings": _rfdiffusion_profile_warnings(params),
                 "num_diffusion_steps": params.num_diffusion_steps,
                 "partial_T": params.partial_T,
                 "noise_scale_ca": params.noise_scale_ca,
@@ -994,6 +1042,10 @@ def _canonical_candidate_from_design(
         candidate["structure_path"] = structure_path
     if design.get("trb_path"):
         candidate["artifacts"]["rfdiffusion"] = {"trb_path": design["trb_path"]}
+    if params.profile_guidance is not None:
+        candidate["artifacts"]["profile_guidance"] = profile_guidance_metadata(
+            params.profile_guidance
+        )
     return candidate
 
 

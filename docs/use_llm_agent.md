@@ -8,20 +8,22 @@ Demo notebook: [`demo/use_llm_agent_demo.ipynb`](../demo/use_llm_agent_demo.ipyn
 is safe by default. It inspects the local tool surface and prints execution
 commands unless `VPA_DEMO_RUN_LLM=1` is set.
 
-## 1. Install Agent Mode
+## 1. Install And Activate
+
+```bash
+export VPA_HOME="${VPA_HOME:-$HOME/.vibeproteinagent}"
+npx vibeproteinagent install --profile full --cuda-profile auto --yes
+source "$VPA_HOME/env.sh"
+vpa install doctor --profile full
+```
+
+Use the lightweight `agent` profile only when the machine cannot support a full
+install or you explicitly want planning/retrieval without heavyweight design
+tools:
 
 ```bash
 npx vibeproteinagent install --profile agent --cuda-profile auto --yes
-source "${VPA_HOME:-$HOME/.vibeproteinagent}/env.sh"
 vpa install doctor --profile agent
-```
-
-For broad design-agent runs across heavyweight tools:
-
-```bash
-export HF_TOKEN=<huggingface-access-token>  # only when selected tools need it
-npx vibeproteinagent install --profile full --cuda-profile auto --yes
-vpa install doctor --profile full
 ```
 
 ## 2. Configure A Provider
@@ -39,25 +41,25 @@ Examples:
 ```bash
 codex login
 claude /login
-export OPENROUTER_API_KEY=<openrouter-api-key>
+export OPENROUTER_API_KEY=OPENROUTER_API_KEY_VALUE
 ```
 
-Choose provider and model per run:
+Choose the provider and a model available in that provider environment:
 
 ```bash
 vpa agent run "Plan a binder design round for target.pdb" \
   --provider codex \
-  --model gpt-5.2 \
+  --model MODEL_ID \
   --plan-only
 
 vpa agent run "Plan a binder design round for target.pdb" \
   --provider claude-code \
-  --model sonnet \
+  --model MODEL_ID \
   --plan-only
 
 vpa agent run "Plan a binder design round for target.pdb" \
   --provider openrouter \
-  --model openai/gpt-5.1 \
+  --model PROVIDER/MODEL_ID \
   --plan-only
 ```
 
@@ -73,7 +75,7 @@ submit jobs, warm tools, or run models.
 vpa agent run \
   "Design binder candidates for target.pdb, run QC, rank them, and report the best designs." \
   --provider codex \
-  --model gpt-5.2 \
+  --model MODEL_ID \
   --target target.pdb \
   --workspace agent_round \
   --plan-only
@@ -91,13 +93,23 @@ Start workers for the workspace before live execution:
 vpa daemon start --workers 1 --cpu-workers 2 --workspace agent_round
 ```
 
+By default, live `vpa agent run` prewarms tools from the validated plan before
+submitting workflow work. You can also warm known tools manually after the daemon
+starts:
+
+```bash
+vpa daemon warm proteinmpnn --workers all --json
+vpa daemon warm protein_qc --json
+vpa daemon warm rank_designs --json
+```
+
 Then run the request:
 
 ```bash
 vpa agent run \
   "Design binder candidates for target.pdb, run QC, rank them, and report the best designs." \
   --provider codex \
-  --model gpt-5.2 \
+  --model MODEL_ID \
   --target target.pdb \
   --workspace agent_round \
   --max-rounds 8 \
@@ -136,7 +148,7 @@ Example Q&A request:
 vpa agent run \
   "What is the pI of UniProt P44612, and does it carry common sequence liabilities?" \
   --provider codex \
-  --model gpt-5.2 \
+  --model MODEL_ID \
   --workspace qa_round
 ```
 
@@ -144,30 +156,17 @@ vpa agent run \
 
 ```bash
 vpa agent runs --workspace agent_round
-vpa agent show <agent_run_id> --workspace agent_round
-vpa workflow status <workflow_id> --workspace agent_round
-vpa report <workflow_id> --workspace agent_round --out agent_report.html --open
+vpa agent show arun_ID --workspace agent_round
+vpa workflow status WORKFLOW_ID --workspace agent_round
+vpa report arun_ID --workspace agent_round --out agent_report.html --open
 ```
 
-Agent reports include the stored workflow evidence plus agent timeline,
-validated plan, decisions, final response, candidate context, and replay
-metadata when available.
+Reports can target `arun_...`, `wf_...`, or `job_...` ids. Agent reports should
+use the `arun_...` id by default and include the workflow rounds tied to the
+user query, plus the agent timeline, validated plans, decisions, final response,
+candidate context, and replay metadata when available.
 
-## Agent Workflow Skills
-
-The agent-facing workflow instructions live outside the public user guides:
-
-- [`../skills.md`](../skills.md) defines when protein conversation becomes an
-  executable workflow.
-- [`agent_workflows/protein_design_skill.md`](agent_workflows/protein_design_skill.md)
-  describes canonical retrieval, binder design, de novo design, ranking,
-  submission, and report trajectories.
-- [`agent_workflows/vpa_contracts.md`](agent_workflows/vpa_contracts.md)
-  records the candidate archive, prompt context, planner/compiler, and decision
-  contracts agents must preserve.
-- [`agent_workflows/live_matrix_validation.md`](agent_workflows/live_matrix_validation.md)
-  is for live provider validation.
-
-Do not edit those files for ordinary user documentation. Codex, Claude Code,
-and similar agents read them as operating protocol so they can use VPA skills
-without treating LLM summaries as executable candidate sources.
+For requests that include local files, pass paths explicitly in the prompt or
+through `--target`, `--param`, or `--params-file`. For example, use
+`--target target.pdb` for binder design and `--param fasta_path=/abs/path/input.fasta`
+for a sequence-analysis request.

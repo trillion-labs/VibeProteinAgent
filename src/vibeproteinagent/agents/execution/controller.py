@@ -17,10 +17,7 @@ from vibeproteinagent.agents.config import (
 )
 from vibeproteinagent.agents.evaluation import DecisionEngine, DecisionSchemaViolation
 from vibeproteinagent.agents.planning import WorkflowPlanner
-from vibeproteinagent.agents.planning.candidate_merge import (
-    merge_candidate_records,
-    summarize_candidate_merge_audit,
-)
+from vibeproteinagent.agents.planning.candidate_merge import summarize_candidate_merge_audit
 from vibeproteinagent.agents.planning.compiler import (
     PLANNER_COMPILED_SOURCE_KIND,
     apply_fixup_choice,
@@ -48,6 +45,14 @@ from vibeproteinagent.workflows.store import WorkflowStore
 from vibeproteinagent.workspace import Workspace
 
 from .candidate_archive import CandidateArchive
+from .candidate_pool import (
+    candidate_capability_names as _candidate_capability_names,
+    candidate_pool_items_from_summary as _candidate_pool_items_from_summary,
+    merge_candidate_pool as _merge_candidate_pool,
+    merge_candidate_pool_result as _merge_candidate_pool_result,
+    safe_candidate_pool_stats_from_candidates as _safe_candidate_pool_stats_from_candidates,
+)
+from .decision_brief import DecisionBriefBuilder
 from .memory_bank import MemoryBank
 from .memory_summarizer import MemorySummarizer
 from .policies import ExecutionPolicy
@@ -652,6 +657,13 @@ class AgentController:
             round_record["survivor_pool_summary"] = candidate_archive.candidate_summary(
                 survivor_snapshot_id
             )
+            round_record["previous_survivor_pool_stats"] = (
+                _previous_survivor_pool_stats(
+                    survivor_pool=survivor_pool,
+                    current_round_candidates=current_round_candidates,
+                    deliverable_contract=classification.deliverable_contract,
+                )
+            )
             round_record["max_round_reached"] = max_round_reached
             round_record["survivor_merge_summary"] = survivor_merge_summary
             round_record["current_round_merge_summary"] = current_round_merge_summary
@@ -680,6 +692,22 @@ class AgentController:
             ]
             outcome.summary["skipped_nodes"] = round_record["skipped_nodes"]
             outcome.summary["memory_digest"] = prompt_digest
+            decision_success_criteria = current_plan.get("success_criteria") or {}
+            local_decision_for_brief = DecisionEngine(None).local_decision(
+                outcome.summary,
+                success_criteria=decision_success_criteria,
+            )
+            decision_brief = DecisionBriefBuilder().build(
+                round_record=round_record,
+                prompt_context=prompt_digest,
+                outcome_summary=outcome.summary,
+                success_criteria=decision_success_criteria,
+                deliverable_contract=classification.deliverable_contract,
+                local_decision=local_decision_for_brief,
+                round_index=round_index,
+                max_rounds=self.config.max_rounds,
+            )
+            outcome.summary["decision_brief"] = decision_brief
             if (
                 max_round_reached
                 and not survivor_pool
@@ -782,6 +810,7 @@ class AgentController:
                             success_criteria=current_plan.get("success_criteria")
                             or {},
                             prompt_context=prompt_digest,
+                            decision_brief=decision_brief,
                             model=self.config.model_for_role("analyst"),
                             idempotency_key=f"{run_id}:decision:{round_index}:{attempt}",
                             retry_error=retry_context,
@@ -807,13 +836,13 @@ class AgentController:
                                 "details": _json_safe_decision_details(exc.details),
                             }
                         )
-            memory_bank.record_decision(
-                round_index,
-                decision,
-                run_id=run_id,
-                workflow_id=outcome.workflow_id,
-            )
             if decision.get("decision") == "answer":
+                memory_bank.record_decision(
+                    round_index,
+                    decision,
+                    run_id=run_id,
+                    workflow_id=outcome.workflow_id,
+                )
                 final_result = AgentRunResult.from_answer_decision(decision)
                 outcome.summary["answer"] = final_result.to_dict()
                 final_state = "completed"
@@ -847,6 +876,7 @@ class AgentController:
                             "deliverable_contract": classification.deliverable_contract,
                         }
                     decision.pop("next_round", None)
+            _normalize_effective_survivor_policy(decision, decision_brief)
             branch = _resolve_decision_branch(
                 decision,
                 workflow_state=outcome.state,
@@ -854,6 +884,23 @@ class AgentController:
                 max_rounds=self.config.max_rounds,
             )
             decision["resolved_branch"] = branch
+            effective_survivor_snapshot_id = None
+            if branch.get("action") == "next_round":
+                effective_survivor_snapshot_id = (
+                    _effective_survivor_snapshot_id_for_next_round(
+                        decision,
+                        candidate_archive=candidate_archive,
+                        run_id=run_id,
+                        round_index=round_index,
+                        raw_survivor_snapshot_id=survivor_snapshot_id,
+                    )
+                )
+            memory_bank.record_decision(
+                round_index,
+                decision,
+                run_id=run_id,
+                workflow_id=outcome.workflow_id,
+            )
             memory_bank.record_branch(
                 round_index,
                 branch,
@@ -1026,7 +1073,7 @@ class AgentController:
                 prior_decision_reason=_next_round_reason(decision),
                 summary=self._prior_round_summary(outcome.summary),
                 prompt_context=prompt_digest,
-                survivor_snapshot_id=survivor_snapshot_id,
+                survivor_snapshot_id=effective_survivor_snapshot_id,
             )
             try:
                 async def compile_with_fixup(
@@ -1723,7 +1770,7 @@ def _final_report(
         if isinstance(summary, dict)
         else []
     )
-    return {
+    report = {
         "mode": mode,
         "classification": classification.model_dump(),
         "state": state,
@@ -1739,6 +1786,86 @@ def _final_report(
         "next_round": (decision or {}).get("next_round") if decision else None,
         "plan": plan,
     }
+    count_contract = _candidate_count_contract_audit(
+        classification=classification,
+        summary=summary,
+        decision=decision,
+    )
+    if count_contract is not None:
+        report["candidate_count_contract"] = count_contract
+    return report
+
+
+def _candidate_count_contract_audit(
+    *,
+    classification: ModeClassification,
+    summary: Any | None,
+    decision: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    requested = _requested_count_from_contract(classification.deliverable_contract)
+    latest = summary.get("latest") if isinstance(summary, dict) else None
+    if requested is None and isinstance(latest, dict):
+        requested = _requested_count_from_decision_brief(latest.get("decision_brief"))
+    if requested is None:
+        return None
+    submit_ready_count = 0
+    if isinstance(latest, dict):
+        submit_ready_count = _submit_ready_count_from_decision_brief(
+            latest.get("decision_brief")
+        )
+    final_submission = None
+    if isinstance(latest, dict) and isinstance(latest.get("final_submission"), dict):
+        final_submission = latest["final_submission"]
+    elif isinstance(decision, dict) and isinstance(decision.get("submission"), dict):
+        final_submission = decision["submission"]
+    submitted_count = _submitted_candidate_count(final_submission)
+    satisfied = submitted_count >= requested
+    shortfall_reason = None
+    if not satisfied:
+        if not isinstance(final_submission, dict):
+            shortfall_reason = "no_final_submission_recorded"
+        elif final_submission.get("outcome") == "no_acceptable_candidate":
+            shortfall_reason = "no_acceptable_candidate_submission"
+        else:
+            shortfall_reason = "submitted_fewer_candidates_than_requested"
+    return {
+        "requested": requested,
+        "submit_ready_count": submit_ready_count,
+        "submitted_count": submitted_count,
+        "satisfied": satisfied,
+        "shortfall_reason": shortfall_reason,
+    }
+
+
+def _requested_count_from_contract(contract: dict[str, Any] | None) -> int | None:
+    if not isinstance(contract, dict):
+        return None
+    return _positive_int(contract.get("requested_candidate_count"))
+
+
+def _requested_count_from_decision_brief(value: Any) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    user_goal = value.get("user_goal")
+    if not isinstance(user_goal, dict):
+        return None
+    return _positive_int(user_goal.get("requested_candidate_count"))
+
+
+def _submit_ready_count_from_decision_brief(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+    pool = value.get("candidate_pool")
+    if not isinstance(pool, dict):
+        return 0
+    return _positive_int(pool.get("submit_ready_count")) or 0
+
+
+def _submitted_candidate_count(final_submission: Any) -> int:
+    if not isinstance(final_submission, dict):
+        return 0
+    resolved = final_submission.get("candidates_resolved")
+    return len(resolved) if isinstance(resolved, list) else 0
 
 
 def current_decision_normalization_mode() -> str:
@@ -1805,6 +1932,265 @@ def _resolve_decision_branch(
     }
 
 
+_SURVIVOR_POLICY_MODES = {
+    "carry_all_valid",
+    "carry_none",
+    "carry_ranked_top_k",
+    "carry_candidate_refs",
+}
+
+
+def _normalize_effective_survivor_policy(
+    decision: dict[str, Any],
+    decision_brief: dict[str, Any] | None,
+) -> None:
+    label = str(decision.get("decision") or "")
+    policy = _survivor_policy_hint(decision)
+    if label == "submit_candidate":
+        _clear_effective_survivor_policy(decision)
+        if policy is not None:
+            _append_controller_correction(
+                decision,
+                "survivor_policy_ignored_for_submit_candidate",
+                "submit_candidate does not carry candidates into a next round",
+            )
+        return
+    if label == "next_round_with_no_acceptable_candidate":
+        if policy is not None:
+            _append_controller_correction(
+                decision,
+                "survivor_policy_ignored_for_no_acceptable_candidate",
+                "next_round_with_no_acceptable_candidate forces an empty prior candidate set",
+            )
+        _set_effective_survivor_policy(decision, {"mode": "carry_none"})
+        return
+    if label != "next_round_with_surviving_candidate":
+        _clear_effective_survivor_policy(decision)
+        return
+    if policy is None:
+        _set_effective_survivor_policy(decision, {"mode": "carry_all_valid"})
+        return
+    normalized = _normalize_survivor_policy(policy, decision_brief)
+    if normalized is None:
+        _append_controller_correction(
+            decision,
+            "invalid_survivor_policy_fell_back_to_carry_all_valid",
+            "survivor_policy was invalid for next_round_with_surviving_candidate",
+        )
+        _set_effective_survivor_policy(decision, {"mode": "carry_all_valid"})
+        return
+    _set_effective_survivor_policy(decision, normalized)
+
+
+def _effective_survivor_snapshot_id_for_next_round(
+    decision: dict[str, Any],
+    *,
+    candidate_archive: CandidateArchive,
+    run_id: str,
+    round_index: int,
+    raw_survivor_snapshot_id: str | None,
+) -> str | None:
+    policy = _effective_survivor_policy(decision)
+    if policy is None:
+        return raw_survivor_snapshot_id
+    mode = policy.get("mode")
+    if mode == "carry_all_valid":
+        return raw_survivor_snapshot_id
+    if mode == "carry_none":
+        return _filtered_survivor_snapshot_id(
+            candidate_archive,
+            run_id=run_id,
+            round_index=round_index,
+            raw_survivor_snapshot_id=raw_survivor_snapshot_id,
+            selected_candidate_ids=[],
+            reason="carry_none",
+        )
+    selected_ids = policy.get("candidate_ids")
+    if not isinstance(selected_ids, list):
+        return raw_survivor_snapshot_id
+    return _filtered_survivor_snapshot_id(
+        candidate_archive,
+        run_id=run_id,
+        round_index=round_index,
+        raw_survivor_snapshot_id=raw_survivor_snapshot_id,
+        selected_candidate_ids=[str(candidate_id) for candidate_id in selected_ids],
+        reason=mode,
+    )
+
+
+def _survivor_policy_hint(decision: dict[str, Any]) -> dict[str, Any] | None:
+    hints = decision.get("controller_hints")
+    if isinstance(hints, dict):
+        policy = hints.get("survivor_policy")
+        if isinstance(policy, dict):
+            return policy
+        if policy is not None:
+            return {"mode": None}
+    policy = decision.get("survivor_policy")
+    return policy if isinstance(policy, dict) else None
+
+
+def _normalize_survivor_policy(
+    policy: dict[str, Any],
+    decision_brief: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    mode = policy.get("mode")
+    if not isinstance(mode, str) or mode not in _SURVIVOR_POLICY_MODES:
+        return None
+    if mode in {"carry_all_valid", "carry_none"}:
+        return {"mode": mode}
+    if mode == "carry_ranked_top_k":
+        top_k = _positive_int(policy.get("top_k"))
+        if top_k is None:
+            return None
+        candidate_ids = [
+            candidate_id
+            for card in _recommended_candidate_cards(decision_brief)[:top_k]
+            if (candidate_id := _candidate_id_from_card(card)) is not None
+        ]
+        return {"mode": mode, "top_k": top_k, "candidate_ids": candidate_ids}
+    refs = policy.get("candidates")
+    if not isinstance(refs, list):
+        refs = policy.get("candidate_refs")
+    if not isinstance(refs, list):
+        return None
+    cards = _recommended_candidate_cards(decision_brief)
+    candidate_ids = []
+    for ref in refs:
+        candidate_id = _candidate_id_from_policy_ref(ref, cards)
+        if candidate_id is not None:
+            candidate_ids.append(candidate_id)
+    return {"mode": mode, "candidate_ids": candidate_ids}
+
+
+def _filtered_survivor_snapshot_id(
+    candidate_archive: CandidateArchive,
+    *,
+    run_id: str,
+    round_index: int,
+    raw_survivor_snapshot_id: str | None,
+    selected_candidate_ids: list[str],
+    reason: str,
+) -> str:
+    return candidate_archive.filtered_survivor_snapshot(
+        run_id=run_id,
+        round_index=round_index,
+        source_snapshot_id=raw_survivor_snapshot_id,
+        selected_candidate_ids=selected_candidate_ids,
+        reason=reason,
+    ).snapshot_id
+
+
+def _recommended_candidate_cards(
+    decision_brief: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(decision_brief, dict):
+        return []
+    cards = decision_brief.get("recommended_candidates")
+    if not isinstance(cards, list):
+        return []
+    return [card for card in cards if isinstance(card, dict)]
+
+
+def _candidate_id_from_policy_ref(
+    ref: Any,
+    cards: list[dict[str, Any]],
+) -> str | None:
+    if not isinstance(ref, dict):
+        return None
+    candidate_id = ref.get("candidate_id")
+    if isinstance(candidate_id, str) and candidate_id:
+        return candidate_id
+    job_id = ref.get("job_id")
+    index = ref.get("index")
+    for card in cards:
+        if job_id is not None and card.get("job_id") != job_id:
+            continue
+        if index is not None and card.get("index") != index:
+            continue
+        return _candidate_id_from_card(card)
+    return None
+
+
+def _candidate_id_from_card(card: dict[str, Any]) -> str | None:
+    candidate_id = card.get("candidate_id")
+    return candidate_id if isinstance(candidate_id, str) and candidate_id else None
+
+
+def _set_effective_survivor_policy(
+    decision: dict[str, Any],
+    policy: dict[str, Any],
+) -> None:
+    hints = decision.setdefault("controller_hints", {})
+    if isinstance(hints, dict):
+        hints["effective_survivor_policy"] = policy
+
+
+def _effective_survivor_policy(decision: dict[str, Any]) -> dict[str, Any] | None:
+    hints = decision.get("controller_hints")
+    if not isinstance(hints, dict):
+        return None
+    policy = hints.get("effective_survivor_policy")
+    return policy if isinstance(policy, dict) else None
+
+
+def _clear_effective_survivor_policy(decision: dict[str, Any]) -> None:
+    hints = decision.get("controller_hints")
+    if isinstance(hints, dict):
+        hints.pop("effective_survivor_policy", None)
+
+
+def _append_controller_correction(
+    decision: dict[str, Any],
+    code: str,
+    message: str,
+) -> None:
+    corrections = decision.setdefault("controller_corrections", [])
+    if not isinstance(corrections, list):
+        corrections = []
+        decision["controller_corrections"] = corrections
+    corrections.append({"code": code, "message": message})
+
+
+def _previous_survivor_pool_stats(
+    *,
+    survivor_pool: list[dict[str, Any]],
+    current_round_candidates: list[dict[str, Any]],
+    deliverable_contract: dict[str, Any] | None,
+) -> dict[str, int]:
+    current_candidate_ids = {
+        candidate_id
+        for candidate in current_round_candidates
+        if (candidate_id := _candidate_id_from_candidate(candidate)) is not None
+    }
+    previous_only = [
+        candidate
+        for candidate in survivor_pool
+        if _candidate_id_from_candidate(candidate) not in current_candidate_ids
+    ]
+    return _safe_candidate_pool_stats_from_candidates(
+        previous_only,
+        deliverable_contract=deliverable_contract,
+    )
+
+
+def _candidate_id_from_candidate(candidate: Any) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    candidate_id = candidate.get("candidate_id")
+    return candidate_id if isinstance(candidate_id, str) and candidate_id else None
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 1 else None
+
+
 def _first_submit_candidate_ref(
     summary: dict[str, Any],
     *,
@@ -1845,46 +2231,6 @@ def _first_submit_candidate_ref(
         }
         return ref
     return None
-
-
-def _candidate_capability_names(candidate: dict[str, Any], *, key: str) -> set[str]:
-    del key
-    capabilities: set[str] = set()
-    raw = candidate.get("capabilities")
-    explicitly_false: set[str] = set()
-    if isinstance(raw, dict):
-        capabilities.update(
-            str(name)
-            for name, value in raw.items()
-            if name.startswith("has_") and value is True
-        )
-        explicitly_false.update(
-            str(name)
-            for name, value in raw.items()
-            if name.startswith("has_") and value is False
-        )
-    elif isinstance(raw, list):
-        capabilities.update(str(item) for item in raw if isinstance(item, str))
-    if (
-        "has_sequence" not in explicitly_false
-        and isinstance(candidate.get("sequence"), str)
-        and candidate.get("sequence").strip()
-    ):
-        capabilities.add("has_sequence")
-    if (
-        "has_backbone_structure" not in explicitly_false
-        and (candidate.get("structure_path") or candidate.get("backbone_path"))
-    ):
-        capabilities.add("has_backbone_structure")
-    if (
-        "has_full_structure" not in explicitly_false
-        and (candidate.get("full_structure_path") or candidate.get("structure_path"))
-    ):
-        capabilities.add("has_full_structure")
-    scores = candidate.get("scores")
-    if "has_candidate_scores" not in explicitly_false and isinstance(scores, dict) and scores:
-        capabilities.add("has_candidate_scores")
-    return capabilities
 
 
 def _missing_deliverable_capabilities(
@@ -2242,211 +2588,6 @@ def _negative_submission_reason(decision: dict[str, Any]) -> str:
     return "No acceptable candidate met the stated success criteria."
 
 
-def _is_candidate_v1(candidate: Any) -> bool:
-    return (
-        isinstance(candidate, dict)
-        and candidate.get("schema_version") == "candidate_v1"
-        and isinstance(candidate.get("candidate_id"), str)
-        and isinstance(candidate.get("source"), dict)
-        and isinstance(candidate["source"].get("tool"), str)
-        and isinstance(candidate["source"].get("local_id"), str)
-    )
-
-
-def _canonicalize_candidate_pool_item(
-    item: Any,
-    *,
-    container_key: str,
-    tool: str,
-    job_id: str,
-    index: int,
-) -> dict[str, Any] | None:
-    if not isinstance(item, dict):
-        return None
-    if _is_candidate_v1(item):
-        if not _material_candidate_capabilities(
-            _candidate_capability_names(item, key=container_key)
-        ):
-            return None
-        return dict(item)
-    capabilities = _candidate_capability_names(item, key=container_key)
-    if not _material_candidate_capabilities(capabilities):
-        return None
-    explicit_candidate_id = item.get("candidate_id")
-    local_id = str(explicit_candidate_id or item.get("id") or f"{container_key}:{index}")
-    source_tool = tool or str(item.get("tool") or container_key)
-    candidate_id = (
-        str(explicit_candidate_id).strip()
-        if explicit_candidate_id is not None and str(explicit_candidate_id).strip()
-        else f"{source_tool}:{job_id or 'unknown'}:{local_id}"
-    )
-    candidate = {
-        "schema_version": "candidate_v1",
-        "candidate_id": candidate_id,
-        "source": {
-            "tool": source_tool,
-            "local_id": local_id,
-        },
-        "capabilities": {cap: True for cap in sorted(capabilities)},
-    }
-    for field in (
-        "sequence",
-        "structure_path",
-        "backbone_path",
-        "full_structure_path",
-        "scores",
-        "artifacts",
-    ):
-        if item.get(field) is not None:
-            candidate[field] = item[field]
-    return candidate
-
-
-def _candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    return _merge_candidate_pool_items(_raw_candidate_pool_items_from_summary(summary))
-
-
-def _candidate_pool_merge_summary_from_summary(summary: dict[str, Any]) -> dict[str, int]:
-    result = _merge_candidate_pool_items_result(_raw_candidate_pool_items_from_summary(summary))
-    return summarize_candidate_merge_audit(result.audit)
-
-
-def _raw_candidate_pool_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for node in summary.get("nodes") or []:
-        if not isinstance(node, dict):
-            continue
-        output = node.get("output")
-        if not isinstance(output, dict):
-            continue
-        job_id = str(node.get("job_id") or "")
-        tool = str(node.get("tool") or "")
-        for key in _candidate_container_keys(output):
-            values = output.get(key)
-            if not isinstance(values, list):
-                continue
-            for index, item in enumerate(values):
-                candidate = _canonicalize_candidate_pool_item(
-                    item,
-                    container_key=key,
-                    tool=tool,
-                    job_id=job_id,
-                    index=index,
-                )
-                if candidate is None:
-                    continue
-                candidates.append(
-                    {
-                        "candidate": candidate,
-                        "job_id": job_id,
-                        "tool": tool,
-                        "container_key": key,
-                        "index": index,
-                    }
-                )
-    return candidates
-
-
-def _candidate_container_keys(output: dict[str, Any]) -> tuple[str, ...]:
-    canonical = tuple(
-        key
-        for key in ("candidates", "ranked_candidates")
-        if isinstance(output.get(key), list) and output.get(key)
-    )
-    if canonical:
-        return canonical
-    return tuple(
-        key
-        for key in ("representative_sequences",)
-        if isinstance(output.get(key), list) and output.get(key)
-    )
-
-
-def _merge_candidate_pool_items(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _merge_candidate_pool_items_result(raw_items).items
-
-
-@dataclass(frozen=True)
-class _CandidatePoolItemsMergeResult:
-    items: list[dict[str, Any]]
-    audit: dict[str, Any]
-
-
-def _merge_candidate_pool_items_result(
-    raw_items: list[dict[str, Any]],
-) -> _CandidatePoolItemsMergeResult:
-    candidates = [
-        item["candidate"]
-        for item in raw_items
-        if isinstance(item.get("candidate"), dict)
-    ]
-    result = merge_candidate_records(
-        candidates,
-        strip_private_keys=False,
-        include_private_positions=True,
-    )
-    merged_items: list[dict[str, Any]] = []
-    for merged_candidate in result.candidates:
-        representative_position = _candidate_merge_representative_position(merged_candidate)
-        representative_item = (
-            raw_items[representative_position]
-            if representative_position is not None and 0 <= representative_position < len(raw_items)
-            else None
-        )
-        if not isinstance(representative_item, dict):
-            positions = _candidate_merge_positions(merged_candidate)
-            representative_item = (
-                raw_items[positions[0]]
-                if positions and 0 <= positions[0] < len(raw_items)
-                else {}
-            )
-        merged_items.append(
-            {
-                **representative_item,
-                "candidate": _strip_candidate_merge_private(merged_candidate),
-            }
-        )
-    return _CandidatePoolItemsMergeResult(items=merged_items, audit=result.audit)
-
-
-def _candidate_merge_positions(candidate: dict[str, Any]) -> list[int]:
-    positions = candidate.get("__candidate_merge_positions")
-    if not isinstance(positions, list):
-        return []
-    out: list[int] = []
-    for item in positions:
-        try:
-            out.append(int(item))
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-def _candidate_merge_representative_position(candidate: dict[str, Any]) -> int | None:
-    try:
-        return int(candidate.get("__candidate_merge_representative_position"))
-    except (TypeError, ValueError):
-        return None
-
-
-def _strip_candidate_merge_private(candidate: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in candidate.items() if not str(key).startswith("__")}
-
-
-def _material_candidate_capabilities(capabilities: set[str]) -> set[str]:
-    return {
-        capability
-        for capability in capabilities
-        if capability
-        in {
-            "has_sequence",
-            "has_backbone_structure",
-            "has_full_structure",
-            "has_structure",
-        }
-    }
-
-
 def _next_round_reason(decision: dict[str, Any]) -> str:
     next_round = decision.get("next_round")
     if isinstance(next_round, dict):
@@ -2457,25 +2598,6 @@ def _next_round_reason(decision: dict[str, Any]) -> str:
     if isinstance(reasoning, str) and reasoning.strip():
         return reasoning.strip()
     return "Decision requested another local workflow round."
-
-
-def _merge_candidate_pool(
-    survivor_pool: list[dict[str, Any]],
-    current_round_candidates: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    return _merge_candidate_pool_result(survivor_pool, current_round_candidates).candidates
-
-
-def _merge_candidate_pool_result(
-    survivor_pool: list[dict[str, Any]],
-    current_round_candidates: list[dict[str, Any]],
-):
-    return merge_candidate_records(
-        [
-            [candidate for candidate in survivor_pool if _is_candidate_v1(candidate)],
-            [candidate for candidate in current_round_candidates if _is_candidate_v1(candidate)],
-        ]
-    )
 
 
 def _has_empty_candidate_outcome(round_record: dict[str, Any]) -> bool:

@@ -1,8 +1,0 @@
-Design a protein sequence that exhibits the desired activity and specificity.
-
-1. The presence of Mg(2+) is necessary for the protein to function in the desired environment.
-2. The AMP, (6S)-NADPHX binding site should be located in a region of the protein that is accessible to the ligand.
-3. The designed protein should have ATP binding, NADPHX epimerase activity, metal ion binding, ADP-dependent NAD(P)H-hydrate dehydratase activity to facilitate nicotinamide nucleotide metabolic process.
-4. For general function, the protein need meet that Catalyzes the epimerization of the S- and R-forms of NAD(P)HX, a damaged form of NAD(P)H that is a result of enzymatic or heat-dependent hydration
-
-Use listed tools for generation. Because no fixed scaffold or ligand-bound structure is provided, perform a de novo RF diffusion style backbone design round, then inverse-fold candidate sequences, refold the top candidate, analyze/QC it, rank the result, and return one output protein sequence.

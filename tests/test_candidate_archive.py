@@ -353,6 +353,164 @@ def test_survivor_record_workflow_uses_representative_source_version(
     assert merged.workflow_ids == ["wf_old", "wf_new"]
 
 
+def test_filtered_survivor_snapshot_materializes_subset_in_source_order(
+    tmp_workspace: Workspace,
+) -> None:
+    archive = CandidateArchive(tmp_workspace)
+    source = archive.ingest_workflow_round(
+        run_id="arun_1",
+        round_index=0,
+        workflow_id="wf_1",
+        raw_workflow_summary=_summary_from_output(
+            {
+                "representative_sequences": [
+                    {"candidate_id": "cand_a", "sequence": "AAAA"},
+                    {"candidate_id": "cand_b", "sequence": "BBBB"},
+                    {"candidate_id": "cand_c", "sequence": "CCCC"},
+                ]
+            }
+        ),
+    )
+
+    filtered = archive.filtered_survivor_snapshot(
+        run_id="arun_1",
+        round_index=0,
+        source_snapshot_id=source.snapshot_id,
+        selected_candidate_ids=["cand_c", "cand_a"],
+        reason="ranker selected subset",
+    )
+
+    assert filtered.kind == "survivor"
+    assert [
+        candidate["candidate_id"]
+        for candidate in archive.materialize(filtered.snapshot_id)
+    ] == ["cand_a", "cand_c"]
+    assert filtered.merge_audit["filter_audit"]["selected_candidate_ids"] == [
+        "cand_c",
+        "cand_a",
+    ]
+    assert filtered.merge_audit["filter_audit"]["retained_candidate_ids"] == [
+        "cand_a",
+        "cand_c",
+    ]
+
+
+def test_filtered_survivor_snapshot_empty_subset_is_valid(
+    tmp_workspace: Workspace,
+) -> None:
+    archive = CandidateArchive(tmp_workspace)
+    source = archive.ingest_workflow_round(
+        run_id="arun_1",
+        round_index=0,
+        workflow_id="wf_1",
+        raw_workflow_summary=_summary_from_output(
+            {
+                "representative_sequences": [
+                    {"candidate_id": "cand_a", "sequence": "AAAA"},
+                    {"candidate_id": "cand_b", "sequence": "BBBB"},
+                ]
+            }
+        ),
+    )
+
+    filtered = archive.filtered_survivor_snapshot(
+        run_id="arun_1",
+        round_index=1,
+        source_snapshot_id=source.snapshot_id,
+        selected_candidate_ids=[],
+        reason="no acceptable candidates",
+    )
+
+    assert filtered.kind == "survivor"
+    assert filtered.candidate_ids == []
+    assert archive.materialize(filtered.snapshot_id) == []
+    assert filtered.merge_audit["input_count"] == 2
+    assert filtered.merge_audit["output_count"] == 0
+
+
+def test_filtered_survivor_snapshot_ignores_unknown_ids_with_audit(
+    tmp_workspace: Workspace,
+) -> None:
+    archive = CandidateArchive(tmp_workspace)
+    source = archive.ingest_workflow_round(
+        run_id="arun_1",
+        round_index=0,
+        workflow_id="wf_1",
+        raw_workflow_summary=_summary_from_output(
+            {
+                "representative_sequences": [
+                    {"candidate_id": "cand_a", "sequence": "AAAA"},
+                    {"candidate_id": "cand_b", "sequence": "BBBB"},
+                ]
+            }
+        ),
+    )
+
+    filtered = archive.filtered_survivor_snapshot(
+        run_id="arun_1",
+        round_index=1,
+        source_snapshot_id=source.snapshot_id,
+        selected_candidate_ids=["cand_missing", "cand_b", "cand_unknown"],
+        reason="ranker included unknown ids",
+    )
+
+    assert [
+        candidate["candidate_id"]
+        for candidate in archive.materialize(filtered.snapshot_id)
+    ] == ["cand_b"]
+    assert filtered.merge_audit["filter_audit"]["unknown_candidate_ids"] == [
+        "cand_missing",
+        "cand_unknown",
+    ]
+    assert filtered.merge_audit["filter_audit"]["ignored_unknown_candidate_ids"] == [
+        "cand_missing",
+        "cand_unknown",
+    ]
+
+
+def test_filtered_survivor_snapshot_does_not_mutate_source_snapshot(
+    tmp_workspace: Workspace,
+) -> None:
+    archive = CandidateArchive(tmp_workspace)
+    current = archive.ingest_workflow_round(
+        run_id="arun_1",
+        round_index=0,
+        workflow_id="wf_1",
+        raw_workflow_summary=_summary_from_output(
+            {
+                "representative_sequences": [
+                    {"candidate_id": "cand_a", "sequence": "AAAA"},
+                    {"candidate_id": "cand_b", "sequence": "BBBB"},
+                ]
+            }
+        ),
+    )
+    source = archive.merge_survivors(
+        run_id="arun_1",
+        round_index=0,
+        previous_snapshot_id=None,
+        current_snapshot_id=current.snapshot_id,
+    )
+    source_refs = list(source.candidate_refs)
+    source_ids = source.candidate_ids
+
+    filtered = archive.filtered_survivor_snapshot(
+        run_id="arun_1",
+        round_index=1,
+        source_snapshot_id=source.snapshot_id,
+        selected_candidate_ids=["cand_b"],
+        reason="keep one survivor",
+    )
+
+    assert source.candidate_refs == source_refs
+    assert archive.snapshots[source.snapshot_id].candidate_refs == source_refs
+    assert [
+        candidate["candidate_id"]
+        for candidate in archive.materialize(source.snapshot_id)
+    ] == source_ids
+    assert filtered.candidate_refs is not source.candidate_refs
+
+
 def test_persisted_snapshot_round_trips_workflow_ids(
     tmp_workspace: Workspace,
 ) -> None:

@@ -83,3 +83,51 @@ def test_binder_sequence_evidence_request_does_not_force_structure_contract() ->
     contract = classification.deliverable_contract
     assert contract["answer_type"] == "candidate_submission"
     assert contract["required_candidate_capabilities"] == ["has_sequence"]
+
+
+def test_explicit_candidate_count_is_added_to_deliverable_contract() -> None:
+    classification = ModeRouter(ToolRegistry()).classify(
+        "Design 5 candidates for this target.",
+    )
+
+    assert classification.deliverable_contract["requested_candidate_count"] == 5
+
+
+def test_requested_candidate_count_param_priority() -> None:
+    classification = ModeRouter(ToolRegistry()).classify(
+        "Design 5 binder candidates for this target.",
+        params={
+            "requested_candidate_count": 4,
+            "num_candidates": 3,
+            "candidate_count": 2,
+            "top_k": 1,
+        },
+    )
+
+    assert classification.deliverable_contract["requested_candidate_count"] == 4
+
+
+def test_zero_candidate_count_is_not_added_to_deliverable_contract() -> None:
+    classification = ModeRouter(ToolRegistry()).classify(
+        "Design binder candidates.",
+        params={"requested_candidate_count": 0},
+    )
+
+    assert "requested_candidate_count" not in classification.deliverable_contract
+
+
+def test_budget_like_count_params_are_not_requested_candidate_count() -> None:
+    classification = ModeRouter(ToolRegistry()).classify(
+        "Design binder candidates.",
+        params={"count": 9, "num_designs": 8, "top_k_designs": 7},
+    )
+
+    assert "requested_candidate_count" not in classification.deliverable_contract
+
+
+def test_structure_count_text_is_not_requested_candidate_count() -> None:
+    classification = ModeRouter(ToolRegistry()).classify(
+        "Design 3 structures for this target."
+    )
+
+    assert "requested_candidate_count" not in classification.deliverable_contract

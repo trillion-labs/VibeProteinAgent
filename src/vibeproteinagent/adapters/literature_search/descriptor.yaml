@@ -9,6 +9,7 @@ startup_cost: low
 estimated_runtime_s: 30
 warm_load_capable: false
 pin_warm: false
+planner_visible: false
 supported_tasks: [literature_search]
 input_schema: schemas/literature_search.input.json
 output_schema: schemas/literature_search.output.json

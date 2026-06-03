@@ -49,7 +49,7 @@ def test_search_sequence_is_valid_first_tool_for_sequence_workflow() -> None:
     assert nodes[1]["inputs"]["candidates"] == "${outputs.retrieve_sequences.candidates}"
 
 
-def test_agent_visible_catalog_prefers_search_sequence_over_legacy_streams() -> None:
+def test_agent_visible_catalog_hides_legacy_sequence_helpers() -> None:
     registry = ToolRegistry()
     registry.discover()
     descriptors = {
@@ -59,9 +59,16 @@ def test_agent_visible_catalog_prefers_search_sequence_over_legacy_streams() -> 
     }
 
     assert "search_sequence" in descriptors
-    assert "go_sequences" in descriptors
-    assert "interpro_sequences" in descriptors
-    assert "legacy/internal" in descriptors["go_sequences"].description.lower()
-    assert "legacy/internal" in descriptors["interpro_sequences"].description.lower()
+    assert "mmseqs2_gpu" in descriptors
+    assert "template_select" in descriptors
+    assert "foldseek" in descriptors
+    assert "go_sequences" not in descriptors
+    assert "interpro_sequences" not in descriptors
     assert "function_term_resolver" not in descriptors
+    assert "go_term_search" not in descriptors
+    assert "interpro_entry_search" not in descriptors
+    assert "interpro_entry_lookup" not in descriptors
+    assert "ontology_lookup" not in descriptors
+    assert "literature_search" not in descriptors
     assert registry.get("go_sequences")[0].name == "go_sequences"
+    assert registry.get("interpro_sequences")[0].name == "interpro_sequences"

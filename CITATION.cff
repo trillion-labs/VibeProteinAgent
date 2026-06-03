@@ -3,8 +3,8 @@ message: "If you use this software, please cite it as below."
 type: software
 title: "VibeProteinAgent"
 authors:
-  - family-names: "Contributors"
-    given-names: "VibeProteinAgent"
-repository-code: "https://github.com/<your-org>/VibeProteinAgent"
-url: "https://github.com/<your-org>/VibeProteinAgent"
+  - family-names: "Seo"
+    given-names: "Hyunjin"
+repository-code: "https://github.com/trillion-labs/VibeProteinAgent"
+url: "https://github.com/trillion-labs/VibeProteinAgent"
 license: PolyForm-Noncommercial-1.0.0

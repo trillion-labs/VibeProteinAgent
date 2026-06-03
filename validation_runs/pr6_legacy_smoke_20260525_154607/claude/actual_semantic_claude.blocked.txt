@@ -1,1 +1,0 @@
-provider preflight failed; see validation_runs/pr6_legacy_smoke_20260525_154607/logs/preflight_claude.log

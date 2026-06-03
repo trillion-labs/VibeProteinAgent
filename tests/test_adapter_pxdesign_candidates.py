@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -33,6 +35,21 @@ def test_pxdesign_emits_canonical_candidates() -> None:
         candidate["scores"]["pxdesign"]["structure_detail"]
         == "binder_backbone_with_target_context"
     )
+    assert candidate["artifacts"]["pxdesign"]["target_pdb"] == "/tmp/target.pdb"
+    assert candidate["artifacts"]["pxdesign"]["target_chain"] == "A"
+
+
+def test_pxdesign_artifact_target_pdb_is_resolved_absolute_path(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "target.pdb"
+    target.write_text("END\n")
+    monkeypatch.chdir(tmp_path)
+    params = PXDesignInput(target_pdb="target.pdb", target_chain="A", binder_length=60)
+    design = PXDesignDesign(cif_path="/tmp/d.cif", sequence="ACDE", binder_length=4)
+
+    candidate = _pxdesign_candidates(params, [design])[0]
+
+    assert candidate["artifacts"]["pxdesign"]["target_pdb"] == str(target.resolve())
+    assert candidate["artifacts"]["pxdesign"]["target_chain"] == "A"
 
 
 def test_pxdesign_candidate_ids_are_deterministic() -> None:

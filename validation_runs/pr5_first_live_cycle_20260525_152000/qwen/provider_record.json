@@ -1,8 +1,0 @@
-{
-  "artifacts_path": "validation_runs/pr5_first_live_cycle_20260525_152000/qwen",
-  "duration_seconds": 0.0,
-  "first_error": "OpenRouter credential is unset",
-  "provider": "qwen",
-  "reason": "preflight_failed",
-  "status": "BLOCKED"
-}

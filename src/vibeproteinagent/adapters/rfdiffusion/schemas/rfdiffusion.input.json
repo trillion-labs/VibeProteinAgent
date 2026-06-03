@@ -30,6 +30,13 @@
       "description": "Canonical Candidate[] from an upstream tool. When provided, auto-promotes mode to `partial_diffusion` and uses the first item's structure_path as the seed structure.",
       "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "boltzgen", "local_id": "0"}, "structure_path": "/abs/seed.pdb"}]]
     },
+    "profile_guidance": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "default": null,
+      "description": "Family-profile guidance compiled from a profile_source upstream. For unconditional/symmetric modes, length defaults may be derived from profile length statistics when no explicit length fields are set; motif evidence remains advisory unless structure-mapped constraints are provided separately.",
+      "examples": [{"schema_version": "profile_guidance_v1", "length_stats": {"median": 120}, "motif_windows": []}]
+    },
     "target_pdb": {
       "type": ["string", "null"],
       "minLength": 1,

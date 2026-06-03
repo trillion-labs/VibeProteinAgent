@@ -43,6 +43,8 @@ class WorkflowNodeSummary:
     version: str
     state: str
     job_id: str | None
+    workflow_id: str | None = None
+    round_index: int | None = None
     upstream: list[str] = field(default_factory=list)
     params_hash: str | None = None
     # Resolved input parameters the node ran with — threaded through from the

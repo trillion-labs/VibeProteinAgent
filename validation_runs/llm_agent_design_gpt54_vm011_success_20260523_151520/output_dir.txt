@@ -1,1 +1,0 @@
-/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/llm_agent_design_gpt54_vm011_success_20260523_151520

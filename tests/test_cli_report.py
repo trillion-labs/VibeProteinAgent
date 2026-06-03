@@ -1194,6 +1194,116 @@ def test_report_prefers_latest_survivor_snapshot_refs(
     assert candidate.source["archive_status"] == "survivor"
 
 
+def test_report_can_collect_one_agent_run_across_multiple_workflow_rounds(
+    tmp_workspace: Workspace,
+) -> None:
+    wf_round_1, job_round_1 = _workflow_with_raw_candidate(
+        tmp_workspace,
+        candidate_id="round_1_candidate",
+    )
+    wf_round_2, job_round_2 = _workflow_with_raw_candidate(
+        tmp_workspace,
+        candidate_id="round_2_candidate",
+    )
+    session = AgentSessionStore(tmp_workspace)
+    run = session.create_run("multi-round user request")
+    session.update_run(
+        run.run_id,
+        workflow_ids=[wf_round_1, wf_round_2],
+        job_ids=[job_round_1, job_round_2],
+    )
+    _ensure_candidate_refs_column(tmp_workspace)
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="round_1_candidate",
+        version_id="cver_round_1",
+        round_index=0,
+        workflow_id=wf_round_1,
+        node_id="retrieve",
+        job_id=job_round_1,
+        status="survivor",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "round_1_candidate",
+            "sequence": "ROUNDONE",
+            "scores": {"semantic_relevance": {"score": 0.4}},
+        },
+        created_at=1,
+    )
+    _insert_agent_candidate_record(
+        tmp_workspace,
+        run_id=run.run_id,
+        candidate_id="round_2_candidate",
+        version_id="cver_round_2",
+        round_index=1,
+        workflow_id=wf_round_2,
+        node_id="retrieve",
+        job_id=job_round_2,
+        status="survivor",
+        candidate={
+            "schema_version": "candidate_v1",
+            "candidate_id": "round_2_candidate",
+            "sequence": "ROUNDTWO",
+            "scores": {"semantic_relevance": {"score": 0.9}},
+        },
+        created_at=2,
+    )
+    conn = tmp_workspace.connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO agent_candidate_snapshots (
+              run_id, snapshot_id, round_index, kind, candidate_ids_json,
+              candidate_refs_json, workflow_ids_json, merge_audit_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run.run_id,
+                "csnap_multi_survivor",
+                1,
+                "survivor",
+                "[]",
+                json.dumps(
+                    [{"candidate_id": "round_2_candidate", "version_id": "cver_round_2"}]
+                ),
+                json.dumps([wf_round_1, wf_round_2]),
+                "{}",
+                20,
+            ),
+        )
+    finally:
+        conn.close()
+
+    model = collect_report_model(tmp_workspace, run.run_id)
+    html = render_report_html(model)
+
+    assert model.summary.kind == "agent_run"
+    assert model.summary.id == run.run_id
+    assert model.graph.workflow_id == run.run_id
+    assert [candidate.candidate_id for candidate in model.candidates] == [
+        "round_2_candidate"
+    ]
+    assert [(node.workflow_id, node.round_index) for node in model.graph.nodes] == [
+        (wf_round_1, 0),
+        (wf_round_2, 1),
+    ]
+    assert "Workflow Execution Graph" in html
+    assert "audit-stage-strip audit-stage-round-flow" in html
+    assert "audit-round-marker" not in html
+    assert "Round 1" in html
+    assert "Round 2" in html
+    assert "audit-round-band" in html
+    assert html.index("Round 1") < html.index("Round 2")
+    workflow_section = html[
+        html.index('<section id="workflow-audit"') : html.index(
+            "</section>", html.index('<section id="workflow-audit"')
+        )
+    ]
+    assert wf_round_1 not in workflow_section
+    assert wf_round_2 not in workflow_section
+
+
 def test_report_filters_rejected_agent_candidate_records(
     tmp_workspace: Workspace,
 ) -> None:
@@ -1716,6 +1826,7 @@ def test_report_snapshot_scope_uses_source_workflow_lineage(
     records = _read_candidate_archive_snapshot(
         tmp_workspace,
         workflow_id=wf_target,
+        run_id=None,
         job_ids=[],
         node_ids=[],
         kind="survivor",
@@ -1844,6 +1955,7 @@ def test_report_candidate_refs_require_exact_version(
     records = _read_candidate_archive_snapshot(
         tmp_workspace,
         workflow_id=wf_id,
+        run_id=None,
         job_ids=[job_id],
         node_ids=["retrieve"],
         kind="current_round",

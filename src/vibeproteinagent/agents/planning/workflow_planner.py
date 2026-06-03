@@ -21,6 +21,8 @@ from vibeproteinagent.adapters.descriptor import (
 )
 from vibeproteinagent.adapters.visibility import is_agent_visible_tool
 from vibeproteinagent.agents.planning.canonical_tools import (
+    CANONICAL_PROFILE_CONSUMERS,
+    CANONICAL_PROFILE_PRODUCERS,
     CANONICAL_PRODUCERS,
     CANONICAL_TERM_CONSUMERS,
     CANONICAL_TERM_PRODUCERS,
@@ -28,13 +30,16 @@ from vibeproteinagent.agents.planning.canonical_tools import (
     build_canonical_wiring_for_planner,
     candidate_capability_profiles,
     candidate_contract,
-    candidate_contract_for_inputs,
+    candidate_contract_for_node,
     explicit_mode_input_field,
+    profile_guided_default_inputs,
 )
 from vibeproteinagent.agents.planning.parameter_ownership import planner_ownership_hints
 from vibeproteinagent.agents.planning.compiler import (
     PLANNER_COMPILED_SOURCE_KIND,
+    PXDESIGN_FULL_STRUCTURE_TAIL_TOOLS,
     compile_planner_ir,
+    normalize_pxdesign_full_structure_ir,
     validate_compiled_planner_plan,
 )
 from vibeproteinagent.agents.planning.ir import (
@@ -369,7 +374,7 @@ def _planner_ir_violation_from_error(error: JSONSchemaValidationError) -> Planne
             issue="relationship_not_allowed_in_v1",
             expected=(
                 'relationship must be one of "candidate_source", "term_source", '
-                'or "identifier_source" in planner_ir_v1'
+                '"identifier_source", or "profile_source" in planner_ir_v1'
             ),
         )
     if error.validator == "required":
@@ -482,10 +487,13 @@ def _planner_ir_prompt(
     known_inputs: dict[str, Any] | None,
     retry_context: dict[str, Any] | None,
     prior_round_context: dict[str, Any] | None = None,
+    deliverable_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prompt: dict[str, Any] = {}
     if prior_round_context is not None:
         prompt["prior_round_context"] = prior_round_context
+    if deliverable_contract:
+        prompt["deliverable_contract"] = deliverable_contract
     prompt.update({
         "request": user_request,
         "known_inputs": known_inputs or {},
@@ -513,7 +521,7 @@ def _planner_ir_prompt(
                     "upstream": [
                         {
                             "node": "earlier_node_id",
-                            "relationship": "candidate_source or term_source",
+                            "relationship": "candidate_source, profile_source, or term_source",
                         }
                     ],
                 }
@@ -640,9 +648,18 @@ def _validate_planner_ir_against_selected_tools(
             )
             continue
         used_tools.add(tool_name)
+        upstream = node.get("upstream")
+        upstreams = upstream if isinstance(upstream, list) else []
         schema = by_name[tool_name].get("input_schema")
         selected_mode = by_name[tool_name].get("selected_mode")
         inputs = node.get("inputs") or {}
+        if isinstance(inputs, dict):
+            for field, value in profile_guided_default_inputs(
+                tool_name,
+                upstreams,
+            ).items():
+                inputs.setdefault(field, value)
+            node["inputs"] = inputs
         if selected_mode is not None:
             mode_field = explicit_mode_input_field(tool_name)
             received_mode = inputs.get(mode_field) if isinstance(inputs, dict) else None
@@ -681,14 +698,13 @@ def _validate_planner_ir_against_selected_tools(
                     )
                 )
             continue
-        upstream = node.get("upstream")
-        upstreams = upstream if isinstance(upstream, list) else []
         node_by_id = _planner_ir_nodes_by_id(planner_ir)
         is_root = not upstreams
         if (
             is_root
             and tool_name not in CANONICAL_PRODUCERS
             and tool_name not in CANONICAL_TERM_PRODUCERS
+            and tool_name not in CANONICAL_PROFILE_PRODUCERS
         ):
             violations.append(
                 PlannerIRViolation(
@@ -705,6 +721,19 @@ def _validate_planner_ir_against_selected_tools(
             tool_name=tool_name,
             node_by_id=node_by_id,
         )
+        profile_source_fields = _profile_source_input_fields(
+            node=node,
+            tool_name=tool_name,
+            node_by_id=node_by_id,
+        )
+        for profile_violation in _profile_source_violations(
+            node=node,
+            node_index=index,
+            tool_name=tool_name,
+            upstreams=upstreams,
+            node_by_id=node_by_id,
+        ):
+            violations.append(profile_violation)
         for term_violation in _term_source_violations(
             node=node,
             node_index=index,
@@ -726,7 +755,7 @@ def _validate_planner_ir_against_selected_tools(
             schema=schema,
             known_inputs=known,
             is_root=is_root,
-            wired_inputs=term_source_fields,
+            wired_inputs=term_source_fields | profile_source_fields,
         )
         if missing_required:
             if is_root:
@@ -814,6 +843,8 @@ def _prepare_planner_ir_for_verification(
     *,
     known_inputs: dict[str, Any] | None,
     defaulted_inputs: list[dict[str, Any]] | None = None,
+    deliverable_contract: dict[str, Any] | None = None,
+    audit_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     prepared = deepcopy(planner_ir)
     known_inputs = known_inputs or {}
@@ -843,6 +874,14 @@ def _prepare_planner_ir_for_verification(
             node["input_provenance"] = provenance
         for input_field in inputs:
             provenance.setdefault(str(input_field), "planner_literal")
+        for input_field, value in profile_guided_default_inputs(
+            str(tool_name),
+            node.get("upstream") if isinstance(node.get("upstream"), list) else [],
+        ).items():
+            if input_field in inputs:
+                continue
+            inputs[input_field] = value
+            provenance[input_field] = "compiled_wiring"
         if isinstance(tool_name, str):
             mode_field = explicit_mode_input_field(tool_name)
             if mode_field != "mode" and "mode" in inputs and mode_field not in inputs:
@@ -870,6 +909,14 @@ def _prepare_planner_ir_for_verification(
                 known_inputs=known_inputs,
                 defaulted_inputs=defaulted_inputs,
             )
+            _apply_requested_candidate_count_budget(
+                tool_name,
+                inputs,
+                node_id=str(node.get("id") or ""),
+                schema=schema if isinstance(schema, dict) else {},
+                deliverable_contract=deliverable_contract,
+                audit_warnings=audit_warnings,
+            )
             satisfied_fields.update(str(input_field) for input_field in inputs)
             for input_field in inputs:
                 provenance.setdefault(str(input_field), "planner_literal")
@@ -881,6 +928,242 @@ def _prepare_planner_ir_for_verification(
         satisfied_fields,
     )
     return prepared
+
+
+def _normalize_pxdesign_ir_for_verification(
+    planner_ir: dict[str, Any],
+    *,
+    audit_warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    normalized = normalize_pxdesign_full_structure_ir(planner_ir)
+    if normalized == planner_ir:
+        return normalized
+    if audit_warnings is not None:
+        audit_warnings.append(_pxdesign_tail_audit_warning(planner_ir, normalized))
+    return normalized
+
+
+def _pxdesign_tail_audit_warning(
+    original_ir: dict[str, Any],
+    normalized_ir: dict[str, Any],
+) -> dict[str, Any]:
+    original_nodes = original_ir.get("nodes") if isinstance(original_ir, dict) else None
+    normalized_nodes = normalized_ir.get("nodes") if isinstance(normalized_ir, dict) else None
+    original_ids = {
+        str(node.get("id"))
+        for node in (original_nodes if isinstance(original_nodes, list) else [])
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    inserted_tools: list[str] = []
+    reused_tools: list[str] = []
+    pxdesign_nodes: list[str] = []
+    for node in normalized_nodes if isinstance(normalized_nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        tool = node.get("tool")
+        if tool == "pxdesign" and isinstance(node_id, str):
+            pxdesign_nodes.append(node_id)
+        if tool not in PXDESIGN_FULL_STRUCTURE_TAIL_TOOLS:
+            continue
+        if isinstance(node_id, str) and node_id in original_ids:
+            reused_tools.append(str(tool))
+        else:
+            inserted_tools.append(str(tool))
+    return {
+        "level": "warning",
+        "event_type": "pxdesign_full_structure_tail_inserted",
+        "pxdesign_nodes": sorted(pxdesign_nodes),
+        "inserted_tools": sorted(set(inserted_tools)),
+        "reused_tools": sorted(set(reused_tools)),
+        "reason": (
+            "PXDesign binder-design plans are deterministically normalized to "
+            "full-structure candidate evaluation before validation and execution."
+        ),
+    }
+
+
+def _with_pxdesign_tail_dependency_schemas(
+    planner_ir: dict[str, Any],
+    selected_tools: list[dict[str, Any]],
+    available_tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _planner_ir_uses_pxdesign(planner_ir):
+        return selected_tools
+    selected_by_name = {
+        str(tool.get("name")): tool
+        for tool in selected_tools
+        if isinstance(tool.get("name"), str)
+    }
+    available_by_name = {
+        str(tool.get("name")): tool
+        for tool in available_tools
+        if isinstance(tool.get("name"), str)
+    }
+    missing = [
+        name
+        for name in PXDESIGN_FULL_STRUCTURE_TAIL_TOOLS
+        if name not in selected_by_name and name not in available_by_name
+    ]
+    if missing:
+        raise InvalidParamsError(
+            "PXDesign full-structure workflow dependencies are unavailable",
+            details={
+                "issue": "pxdesign_tail_dependency_unavailable",
+                "missing_tools": missing,
+                "required_tools": list(PXDESIGN_FULL_STRUCTURE_TAIL_TOOLS),
+            },
+        )
+    augmented = list(selected_tools)
+    for name in PXDESIGN_FULL_STRUCTURE_TAIL_TOOLS:
+        if name in selected_by_name:
+            continue
+        augmented.append(deepcopy(available_by_name[name]))
+    return augmented
+
+
+def _planner_ir_uses_pxdesign(planner_ir: dict[str, Any]) -> bool:
+    return any(
+        isinstance(node, dict) and node.get("tool") == "pxdesign"
+        for node in planner_ir.get("nodes") or []
+    )
+
+
+def _apply_requested_candidate_count_budget(
+    tool_name: str,
+    inputs: dict[str, Any],
+    *,
+    node_id: str,
+    schema: dict[str, Any],
+    deliverable_contract: dict[str, Any] | None,
+    audit_warnings: list[dict[str, Any]] | None,
+) -> None:
+    requested_count = _contract_requested_candidate_count(deliverable_contract)
+    if requested_count is None:
+        return
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    for field_name in _requested_count_budget_fields(tool_name, properties):
+        field_schema = properties.get(field_name)
+        if not isinstance(field_schema, dict):
+            continue
+        schema_max = _schema_int_bound(field_schema.get("maximum"))
+        target = min(requested_count, schema_max) if schema_max is not None else requested_count
+        current = _positive_int_or_none(inputs.get(field_name))
+        if current is not None and current >= target:
+            if schema_max is not None and current > schema_max:
+                inputs[field_name] = schema_max
+                _record_budget_clamp_warning(
+                    audit_warnings,
+                    node_id=node_id,
+                    tool_name=tool_name,
+                    field_name=field_name,
+                    requested_count=requested_count,
+                    applied_value=schema_max,
+                    schema_max=schema_max,
+                )
+            continue
+        inputs[field_name] = target
+        if schema_max is not None and requested_count > schema_max:
+            _record_budget_clamp_warning(
+                audit_warnings,
+                node_id=node_id,
+                tool_name=tool_name,
+                field_name=field_name,
+                requested_count=requested_count,
+                applied_value=target,
+                schema_max=schema_max,
+            )
+
+
+def _requested_count_budget_fields(
+    tool_name: str,
+    properties: dict[str, Any],
+) -> list[str]:
+    fields: list[str] = []
+    if tool_name == "rank_designs":
+        fields.append("top_k")
+    if tool_name == "pxdesign":
+        fields.extend(["top_k_designs", "num_samples"])
+    if "num_designs" in properties:
+        fields.append("num_designs")
+    for field_name in ("top_k", "num_samples", "mpnn_num_designs"):
+        if field_name in properties:
+            fields.append(field_name)
+    out: list[str] = []
+    seen: set[str] = set()
+    for field_name in fields:
+        if field_name in seen or field_name not in properties:
+            continue
+        seen.add(field_name)
+        out.append(field_name)
+    return out
+
+
+def _contract_requested_candidate_count(
+    deliverable_contract: dict[str, Any] | None,
+) -> int | None:
+    if not isinstance(deliverable_contract, dict):
+        return None
+    return _positive_int_or_none(deliverable_contract.get("requested_candidate_count"))
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip().replace(",", "")
+        if not re.fullmatch(r"\d+", stripped):
+            return None
+        parsed = int(stripped)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _schema_int_bound(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _record_budget_clamp_warning(
+    audit_warnings: list[dict[str, Any]] | None,
+    *,
+    node_id: str,
+    tool_name: str,
+    field_name: str,
+    requested_count: int,
+    applied_value: int,
+    schema_max: int,
+) -> None:
+    if audit_warnings is None:
+        return
+    audit_warnings.append(
+        {
+            "level": "warning",
+            "event_type": "requested_candidate_count_clamped",
+            "node_id": node_id,
+            "tool": tool_name,
+            "field": field_name,
+            "requested_candidate_count": requested_count,
+            "applied_value": applied_value,
+            "schema_max": schema_max,
+            "message": (
+                f"Requested candidate count {requested_count} exceeds "
+                f"{tool_name}.{field_name} schema maximum {schema_max}; "
+                f"using {applied_value}."
+            ),
+        }
+    )
 
 
 def _apply_planner_default_inputs(
@@ -1050,6 +1333,74 @@ def _term_source_input_fields(
     return set()
 
 
+def _profile_source_input_fields(
+    *,
+    node: dict[str, Any],
+    tool_name: str,
+    node_by_id: dict[str, dict[str, Any]],
+) -> set[str]:
+    field = CANONICAL_PROFILE_CONSUMERS.get(tool_name)
+    if field is None:
+        return set()
+    for upstream in node.get("upstream") or []:
+        if not isinstance(upstream, dict):
+            continue
+        if upstream.get("relationship") != "profile_source":
+            continue
+        upstream_id = upstream.get("node")
+        upstream_node = node_by_id.get(str(upstream_id))
+        upstream_tool = upstream_node.get("tool") if isinstance(upstream_node, dict) else None
+        if isinstance(upstream_tool, str) and upstream_tool in CANONICAL_PROFILE_PRODUCERS:
+            return {field}
+    return set()
+
+
+def _profile_source_violations(
+    *,
+    node: dict[str, Any],
+    node_index: int,
+    tool_name: str,
+    upstreams: list[Any],
+    node_by_id: dict[str, dict[str, Any]],
+) -> list[PlannerIRViolation]:
+    out: list[PlannerIRViolation] = []
+    for upstream_index, upstream in enumerate(upstreams):
+        if not isinstance(upstream, dict):
+            continue
+        if upstream.get("relationship") != "profile_source":
+            continue
+        input_field = CANONICAL_PROFILE_CONSUMERS.get(tool_name)
+        if input_field is None:
+            out.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{node_index}/upstream/{upstream_index}/relationship",
+                    issue="profile_source_consumer_not_supported",
+                    expected=(
+                        f"Tool {tool_name!r} cannot consume profile_source. "
+                        "Use profile_source only into profile-aware tools such as "
+                        f"{sorted(CANONICAL_PROFILE_CONSUMERS)}."
+                    ),
+                )
+            )
+            continue
+        upstream_id = upstream.get("node")
+        upstream_node = node_by_id.get(str(upstream_id))
+        upstream_tool = upstream_node.get("tool") if isinstance(upstream_node, dict) else None
+        if not isinstance(upstream_tool, str) or upstream_tool not in CANONICAL_PROFILE_PRODUCERS:
+            out.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{node_index}/upstream/{upstream_index}/node",
+                    issue="profile_source_not_produced",
+                    expected=(
+                        f"Upstream node {upstream_id!r} must use a profile producer: "
+                        f"{sorted(CANONICAL_PROFILE_PRODUCERS)}."
+                    ),
+                )
+            )
+            continue
+    return out
+
+
 def _term_source_violations(
     *,
     node: dict[str, Any],
@@ -1149,9 +1500,10 @@ def _candidate_capability_violations(
     upstreams: list[Any],
     node_by_id: dict[str, dict[str, Any]],
 ) -> list[PlannerIRViolation]:
-    required = candidate_contract_for_inputs(
+    required = candidate_contract_for_node(
         tool_name,
         node.get("inputs") if isinstance(node.get("inputs"), dict) else {},
+        upstreams,
     )
     if not required.consumes:
         return []
@@ -1168,6 +1520,44 @@ def _candidate_capability_violations(
             if upstream_id == "prior_round"
             else str((upstream_node or {}).get("tool") or "")
         )
+        upstream_inputs = (
+            upstream_node.get("inputs")
+            if isinstance(upstream_node, dict) and isinstance(upstream_node.get("inputs"), dict)
+            else {}
+        )
+        upstream_relationships = (
+            upstream_node.get("upstream")
+            if isinstance(upstream_node, dict) and isinstance(upstream_node.get("upstream"), list)
+            else []
+        )
+        upstream_contract = candidate_contract_for_node(
+            upstream_tool,
+            upstream_inputs,
+            upstream_relationships,
+        )
+        if (
+            upstream_tool == "family_profile"
+            and not upstream_contract.produces
+            and not upstream_contract.preserves_upstream
+        ):
+            out.append(
+                PlannerIRViolation(
+                    path=f"/nodes/{node_index}/upstream/{upstream_index}",
+                    issue="upstream_does_not_produce_candidates",
+                    expected=(
+                        "family_profile build mode emits profile evidence only. "
+                        "Run family_profile again with profile_source and generated "
+                        "candidate_source before using it as a candidate_source."
+                    ),
+                    metadata={
+                        "producer_node": upstream_id,
+                        "producer_tool": upstream_tool,
+                        "consumer_node": node.get("id"),
+                        "consumer_tool": tool_name,
+                    },
+                )
+            )
+            continue
         produced = _planner_node_candidate_capabilities(
             upstream_id,
             node_by_id=node_by_id,
@@ -1220,9 +1610,10 @@ def _planner_node_candidate_capabilities(
     if node is None:
         return set()
     tool_name = producer_tool or str(node.get("tool") or "")
-    contract = candidate_contract_for_inputs(
+    contract = candidate_contract_for_node(
         tool_name,
         node.get("inputs") if isinstance(node.get("inputs"), dict) else {},
+        node.get("upstream") if isinstance(node.get("upstream"), list) else [],
     )
     capabilities = set(contract.produces)
     if contract.preserves_upstream:
@@ -2476,6 +2867,7 @@ class WorkflowPlanner:
                 known_inputs=known,
                 retry_context=retry_context,
                 prior_round_context=_prior_round_context_payload(prior_round_context),
+                deliverable_contract=deliverable_contract,
             )
             response = await self.provider.chat(
                 [
@@ -2494,15 +2886,27 @@ class WorkflowPlanner:
                 planner_ir = _load_planner_ir_json_or_raise(response.content)
                 _validate_planner_ir_v1_or_raise(planner_ir)
                 defaulted_inputs: list[dict[str, Any]] = []
+                budget_warnings: list[dict[str, Any]] = []
                 planner_ir = _prepare_planner_ir_for_verification(
                     planner_ir,
                     selected_tools,
                     known_inputs=known,
                     defaulted_inputs=defaulted_inputs,
+                    deliverable_contract=deliverable_contract,
+                    audit_warnings=budget_warnings,
+                )
+                planner_ir = _normalize_pxdesign_ir_for_verification(
+                    planner_ir,
+                    audit_warnings=budget_warnings,
+                )
+                validation_selected_tools = _with_pxdesign_tail_dependency_schemas(
+                    planner_ir,
+                    selected_tools,
+                    available_tool_schemas,
                 )
                 _validate_planner_ir_against_selected_tools(
                     planner_ir,
-                    selected_tools,
+                    validation_selected_tools,
                     known_inputs=known,
                 )
             except PlannerIRSchemaViolation as exc:
@@ -2518,16 +2922,30 @@ class WorkflowPlanner:
                         deterministic_repairs += 1
                         try:
                             repair_defaulted_inputs: list[dict[str, Any]] = []
+                            repair_budget_warnings: list[dict[str, Any]] = []
                             repaired_ir = _prepare_planner_ir_for_verification(
                                 repaired_ir,
                                 selected_tools,
                                 known_inputs=known,
                                 defaulted_inputs=repair_defaulted_inputs,
+                                deliverable_contract=deliverable_contract,
+                                audit_warnings=repair_budget_warnings,
+                            )
+                            repaired_ir = _normalize_pxdesign_ir_for_verification(
+                                repaired_ir,
+                                audit_warnings=repair_budget_warnings,
+                            )
+                            validation_selected_tools = (
+                                _with_pxdesign_tail_dependency_schemas(
+                                    repaired_ir,
+                                    selected_tools,
+                                    available_tool_schemas,
+                                )
                             )
                             _validate_planner_ir_v1_or_raise(repaired_ir)
                             _validate_planner_ir_against_selected_tools(
                                 repaired_ir,
-                                selected_tools,
+                                validation_selected_tools,
                                 known_inputs=known,
                             )
                         except PlannerIRSchemaViolation as repair_exc:
@@ -2542,7 +2960,8 @@ class WorkflowPlanner:
                                 )
                             return _attach_planner_metadata(
                                 plan,
-                                audit_warnings=planner_audit_warnings,
+                                audit_warnings=planner_audit_warnings
+                                + repair_budget_warnings,
                                 defaulted_inputs=repair_defaulted_inputs,
                                 deliverable_contract=deliverable_contract,
                             )
@@ -2572,16 +2991,28 @@ class WorkflowPlanner:
                     tool_catalog = self._planner_ir_tool_catalog(selected_tools)
                     verification_repairs += 1
                     try:
+                        repair_budget_warnings: list[dict[str, Any]] = []
                         planner_ir = _prepare_planner_ir_for_verification(
                             planner_ir,
                             selected_tools,
                             known_inputs=known,
                             defaulted_inputs=defaulted_inputs,
+                            deliverable_contract=deliverable_contract,
+                            audit_warnings=repair_budget_warnings,
+                        )
+                        planner_ir = _normalize_pxdesign_ir_for_verification(
+                            planner_ir,
+                            audit_warnings=repair_budget_warnings,
+                        )
+                        validation_selected_tools = _with_pxdesign_tail_dependency_schemas(
+                            planner_ir,
+                            selected_tools,
+                            available_tool_schemas,
                         )
                         _validate_planner_ir_v1_or_raise(planner_ir)
                         _validate_planner_ir_against_selected_tools(
                             planner_ir,
-                            selected_tools,
+                            validation_selected_tools,
                             known_inputs=known,
                         )
                     except PlannerIRSchemaViolation as repair_exc:
@@ -2596,7 +3027,8 @@ class WorkflowPlanner:
                             )
                         return _attach_planner_metadata(
                             plan,
-                            audit_warnings=planner_audit_warnings,
+                            audit_warnings=planner_audit_warnings
+                            + repair_budget_warnings,
                             defaulted_inputs=defaulted_inputs,
                             deliverable_contract=deliverable_contract,
                         )
@@ -2619,7 +3051,7 @@ class WorkflowPlanner:
                 )
             return _attach_planner_metadata(
                 plan,
-                audit_warnings=planner_audit_warnings,
+                audit_warnings=planner_audit_warnings + budget_warnings,
                 defaulted_inputs=defaulted_inputs,
                 deliverable_contract=deliverable_contract,
             )

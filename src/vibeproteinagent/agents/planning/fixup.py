@@ -9,9 +9,12 @@ FIXUP_KINDS = {
     "missing_canonical_input_slot",
     "node_reference_used_as_literal_path",
     "planner_literal_candidate_stream_reference",
+    "planner_literal_profile_reference",
     "prior_round_used_as_tool",
     "prior_round_referenced_without_context",
     "upstream_does_not_produce_candidates",
+    "missing_profile_input_slot",
+    "upstream_does_not_produce_profile",
     "candidate_capability_mismatch",
 }
 
@@ -94,6 +97,82 @@ def upstream_does_not_produce_candidates(
                         "Replace the upstream node's tool with one of the canonical producers."
                     ),
                     "allowed_tools": ["go_sequences", "sequence_analysis"],
+                    "target_node_id": upstream_node,
+                },
+            ],
+        }
+    )
+
+
+def missing_profile_input_slot(
+    *,
+    node_id: str,
+    tool: str,
+    upstream_node: str,
+    allowed_tools: list[str],
+) -> StructuredFixup:
+    return StructuredFixup(
+        {
+            "error_kind": "missing_profile_input_slot",
+            "node_id": node_id,
+            "tool": tool,
+            "field": "profile",
+            "upstream_node": upstream_node,
+            "explanation": (
+                f"Tool {tool!r} does not accept family profile evidence as input. "
+                f"Available profile consumers in this workflow: {', '.join(allowed_tools)}."
+            ),
+            "options": [
+                {
+                    "choice_id": "remove_upstream",
+                    "description": "Remove the invalid profile_source upstream entry.",
+                    "target_node_id": node_id,
+                    "target_upstream": upstream_node,
+                },
+                {
+                    "choice_id": "swap_tool",
+                    "description": (
+                        "Replace this node's tool with one of the profile consumers."
+                    ),
+                    "allowed_tools": allowed_tools,
+                },
+            ],
+        }
+    )
+
+
+def upstream_does_not_produce_profile(
+    *,
+    node_id: str,
+    tool: str,
+    upstream_node: str,
+    upstream_tool: str,
+) -> StructuredFixup:
+    return StructuredFixup(
+        {
+            "error_kind": "upstream_does_not_produce_profile",
+            "node_id": node_id,
+            "tool": tool,
+            "field": "profile",
+            "upstream_node": upstream_node,
+            "upstream_tool": upstream_tool,
+            "explanation": (
+                f"Upstream node {upstream_node!r} uses tool {upstream_tool!r}, "
+                "which does not emit family profile evidence."
+            ),
+            "options": [
+                {
+                    "choice_id": "remove_upstream",
+                    "description": "Remove the invalid profile_source upstream entry.",
+                    "target_node_id": node_id,
+                    "target_upstream": upstream_node,
+                },
+                {
+                    "choice_id": "swap_tool",
+                    "description": (
+                        "Replace the upstream node's tool with one of the profile producers."
+                    ),
+                    "allowed_tools": ["family_profile"],
                     "target_node_id": upstream_node,
                 },
             ],
@@ -231,6 +310,47 @@ def planner_literal_candidate_stream_reference(
                     "description": (
                         "Remove the literal candidate-stream input and use an "
                         "upstream candidate_source entry instead."
+                    ),
+                    "target_node_id": node_id,
+                    "field": field,
+                },
+                {
+                    "choice_id": "remove_node",
+                    "description": "Drop this node if it cannot be wired canonically.",
+                    "target_node_id": node_id,
+                },
+            ],
+        }
+    )
+
+
+def planner_literal_profile_reference(
+    *,
+    node_id: str,
+    tool: str,
+    field: str,
+    literal_value: Any,
+) -> StructuredFixup:
+    return StructuredFixup(
+        {
+            "error_kind": "planner_literal_profile_reference",
+            "node_id": node_id,
+            "tool": tool,
+            "field": field,
+            "literal_value": literal_value,
+            "explanation": (
+                f"Input {field!r} on node {node_id!r} is planner-authored "
+                "family profile evidence. Profiles must come from trusted "
+                "known/user input or from an upstream profile_source edge so "
+                "the compiler can keep profile evidence separate from "
+                "candidate streams."
+            ),
+            "options": [
+                {
+                    "choice_id": "remove_input",
+                    "description": (
+                        "Remove the literal profile input and use an upstream "
+                        "profile_source entry instead."
                     ),
                     "target_node_id": node_id,
                     "field": field,

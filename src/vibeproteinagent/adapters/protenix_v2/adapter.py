@@ -27,6 +27,7 @@ from vibeproteinagent.adapters.msa_policy import (
     should_use_remote_msa,
     strip_prepared_msa,
 )
+from vibeproteinagent.adapters.residue_mapping import parse_structure_residue_refs
 from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
 from vibeproteinagent.agents.planning.candidate import stable_candidate_id
 
@@ -643,6 +644,12 @@ def _write_protenix_input_json_from_candidates(
     seeds: list[int],
     path: Path,
 ) -> Path:
+    pxdesign_payload = _pxdesign_complex_payload(candidates, seeds)
+    if pxdesign_payload is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(pxdesign_payload, indent=2) + "\n")
+        return path
+
     sequences: list[dict[str, Any]] = []
     for candidate in candidates:
         sequence = candidate.get("sequence")
@@ -663,13 +670,81 @@ def _write_protenix_input_json_from_candidates(
     return path
 
 
+def _pxdesign_complex_payload(
+    candidates: list[dict[str, Any]],
+    seeds: list[int],
+) -> list[dict[str, Any]] | None:
+    contexts = [_pxdesign_target_context(candidate) for candidate in candidates]
+    if not contexts or not any(context is not None for context in contexts):
+        return None
+    if not all(context is not None for context in contexts):
+        raise ValueError(
+            "protenix_v2 canonical Candidate[] input cannot mix PXDesign "
+            "target-context candidates with candidates that lack PXDesign target context"
+        )
+
+    payload: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        sequence = candidate.get("sequence")
+        if not sequence:
+            raise ValueError("protenix_v2 canonical Candidate[] input requires sequence")
+        context = contexts[index] or {}
+        target_sequence = _target_chain_sequence(
+            Path(str(context["target_pdb"])),
+            str(context["target_chain"]),
+        )
+        payload.append(
+            {
+                "name": _candidate_sample_name(index),
+                "sequences": [
+                    {"proteinChain": {"sequence": target_sequence, "count": 1}},
+                    {"proteinChain": {"sequence": str(sequence), "count": 1}},
+                ],
+                "modelSeeds": list(seeds),
+            }
+        )
+    return payload
+
+
+def _pxdesign_target_context(candidate: dict[str, Any]) -> dict[str, str] | None:
+    artifacts = candidate.get("artifacts")
+    pxdesign = artifacts.get("pxdesign") if isinstance(artifacts, dict) else None
+    if not isinstance(pxdesign, dict):
+        return None
+    target_pdb = pxdesign.get("target_pdb")
+    target_chain = pxdesign.get("target_chain")
+    if not target_pdb or not target_chain:
+        return None
+    return {"target_pdb": str(target_pdb), "target_chain": str(target_chain)}
+
+
+def _target_chain_sequence(target_pdb: Path, target_chain: str) -> str:
+    refs = parse_structure_residue_refs(target_pdb.expanduser(), target_chain)
+    sequence = "".join(ref.aa for ref in refs if ref.aa and ref.aa != "X")
+    if not sequence:
+        raise ValueError(
+            f"protenix_v2 could not extract target chain {target_chain!r} "
+            f"sequence from {target_pdb}"
+        )
+    return sequence
+
+
+def _candidate_sample_name(index: int) -> str:
+    return f"canonical_candidate_{index:04d}"
+
+
 def _protenix_v2_candidates(
     params: ProtenixV2Input,
     records: list[ProtenixV2PredictionRecord],
 ) -> list[dict[str, Any]]:
-    sequence = _source_sequence(params)
     candidates: list[dict[str, Any]] = []
     for index, record in enumerate(records):
+        source_candidate = _source_candidate_for_record(params, record)
+        sequence = (
+            str(source_candidate.get("sequence"))
+            if isinstance(source_candidate, dict) and source_candidate.get("sequence")
+            else _source_sequence(params)
+        )
         local_id = f"protenix_{index:04d}"
         scores = {
             "seed": record.seed,
@@ -686,6 +761,13 @@ def _protenix_v2_candidates(
                 "full_confidence_json": record.full_confidence_json,
             }
         }
+        if (
+            isinstance(source_candidate, dict)
+            and _pxdesign_target_context(source_candidate) is not None
+        ):
+            artifacts["protenix_v2"]["complex_input_mode"] = (
+                "pxdesign_target_sequence_binder_sequence"
+            )
         candidate: dict[str, Any] = {
             "schema_version": "candidate_v1",
             "candidate_id": stable_candidate_id(
@@ -714,10 +796,49 @@ def _protenix_v2_candidates(
                 has_candidate_scores=True,
             ),
         }
+        if isinstance(source_candidate, dict):
+            source_scores = source_candidate.get("scores")
+            if isinstance(source_scores, dict):
+                candidate["scores"] = {**source_scores, **candidate["scores"]}
+            source_artifacts = source_candidate.get("artifacts")
+            if isinstance(source_artifacts, dict):
+                candidate["artifacts"] = {**source_artifacts, **candidate["artifacts"]}
         if sequence:
             candidate["sequence"] = sequence
         candidates.append(candidate)
     return candidates
+
+
+def _source_candidate_for_record(
+    params: ProtenixV2Input,
+    record: ProtenixV2PredictionRecord,
+) -> dict[str, Any] | None:
+    if not params.candidates:
+        return None
+    sample_name = _record_sample_name(record)
+    if sample_name is None:
+        return None
+    prefix = "canonical_candidate_"
+    if not sample_name.startswith(prefix):
+        return None
+    try:
+        index = int(sample_name.removeprefix(prefix))
+    except ValueError:
+        return None
+    if 0 <= index < len(params.candidates):
+        candidate = params.candidates[index]
+        return candidate if _is_canonical_candidate(candidate) else None
+    return None
+
+
+def _record_sample_name(record: ProtenixV2PredictionRecord) -> str | None:
+    native = record.candidate_id
+    if not isinstance(native, str):
+        return None
+    parts = native.split(":")
+    if len(parts) >= 3 and parts[0] == "protenix_v2":
+        return parts[1]
+    return None
 
 
 def _source_sequence(params: ProtenixV2Input) -> str | None:

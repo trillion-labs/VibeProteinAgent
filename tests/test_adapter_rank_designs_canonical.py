@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import pytest
-import torch
 from pydantic import ValidationError
 
 from vibeproteinagent.adapters import null_context
+from vibeproteinagent.adapters.base import torch
 from vibeproteinagent.adapters.rank_designs.adapter import RankDesignsAdapter, RankDesignsInput
 
 
@@ -81,6 +81,38 @@ def test_rank_designs_preserves_canonical_score_namespaces(tmp_path) -> None:
     assert row["qc_flag_count"] == 1
     assert row["scores"]["protein_qc"]["flags"] == ["high_instability_index"]
     assert row["scores"]["sequence_analysis"]["hydrophobic_fraction"] == 0.2
+
+
+def test_rank_designs_uses_family_profile_score_and_preserves_namespace(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    weak = _canonical_candidate(
+        "cand_weak_profile",
+        local_id="seq_0000",
+        sequence="AAAA",
+        score=0.5,
+    )
+    strong = _canonical_candidate(
+        "cand_strong_profile",
+        local_id="seq_0001",
+        sequence="CCCC",
+        score=0.5,
+    )
+    weak["scores"]["family_profile"] = {"ranking_score": 0.1}
+    strong["scores"]["family_profile"] = {
+        "ranking_score": 0.9,
+        "family_similarity_score": 0.8,
+        "motif_match_score": 0.7,
+    }
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[weak, strong], top_k=2),
+        null_context(tmp_path / "job"),
+    )
+
+    row = out.ranked_candidates[0]
+    assert row["candidate_id"] == "cand_strong_profile"
+    assert row["family_profile_score"] == pytest.approx(0.9)
+    assert row["scores"]["family_profile"]["motif_match_score"] == 0.7
 
 
 def test_rank_designs_normalizes_esm3_plddt_and_reads_ptm_namespace(tmp_path) -> None:

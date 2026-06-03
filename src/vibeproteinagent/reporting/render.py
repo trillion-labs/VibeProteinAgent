@@ -20,7 +20,6 @@ from typing import Any
 from vibeproteinagent._version import __version__
 from vibeproteinagent.core.errors import InvalidParamsError
 
-from ._brand import vpa_logo
 from .metrics import (
     DUAL_SCALE_METRICS as _DUAL_SCALE_METRICS,
 )
@@ -47,11 +46,24 @@ from .models import (
     ReportCandidate,
     ReportModel,
     ReportReviewModel,
+    ScoreGroup,
     ToolRole,
+    WorkflowType,
     WorkflowNodeSummary,
 )
 from .plots import PLDDT_HOVER_JS, build_plots
 from .review import build_review_model, classify_tool_role
+from .view_models import (
+    AgentRationaleViewModel,
+    CandidateBoardRow,
+    CandidateBoardViewModel,
+    CandidateDossierViewModel,
+    OverviewViewModel,
+    WorkflowTraceViewModel,
+    WorkflowStageViewModel,
+    WorkflowReviewPreset,
+    build_report_view_model,
+)
 
 
 def write_report(
@@ -390,14 +402,11 @@ def _board_metric_parts(bundle: CandidateEvidenceBundle) -> tuple[str, str, str]
     return "", "", ""
 
 
-def _board_card(bundle: CandidateEvidenceBundle) -> str:
-    """One compact candidate row in the result browser (table/list hybrid).
+def _board_card(bundle: CandidateEvidenceBundle, row: CandidateBoardRow | None = None) -> str:
+    """One candidate-first board row.
 
-    No cards / stars / success-green: the row is a dense ``rank · candidate ·
-    metric`` record. The final pick is marked authoritatively with a ``✓`` rank
-    glyph and a neutral ``FINAL`` label (a *semantic* state), kept visually
-    distinct from the *selection* state (a left accent bar + tint applied via
-    ``aria-selected``).
+    The row remains a button with the legacy ``board-card`` / ``data-cand``
+    hooks so the existing lazy dossier + viewer activation JS keeps working.
     """
     cand = bundle.candidate
     dom = _structure_dom_id(cand.candidate_id)
@@ -410,37 +419,45 @@ def _board_card(bundle: CandidateEvidenceBundle) -> str:
         rank_cell = f'<span class="crow-rank-num">{display_rank}</span>'
     else:
         rank_cell = '<span class="crow-rank-num crow-rank-dash">&middot;</span>'
-    final_tag = '<span class="crow-tag">Final</span>' if is_final else ""
-    value, mlabel, source = _board_metric_parts(bundle)
-    # Metric label + source sit UNDER the id in the wide column (where they can
-    # truncate gracefully); the right column carries only the bare value, so a
-    # long "metric · source" string can never push the row past the rail.
-    meta_bits = " · ".join(b for b in (mlabel, source) if b)
-    meta_line = f'<span class="crow-meta">{_h(meta_bits)}</span>' if meta_bits else ""
-    score_cell = (
-        f'<span class="crow-score">{_h(value)}</span>'
-        if value
-        else '<span class="crow-score crow-score-empty">&mdash;</span>'
-    )
+    row_status = row.recommendation_label if row else status_label
+    verdict = row.short_verdict if row else _why_candidate(cand)
+    chips = _saas_metric_chip_html(row.metric_chips[:7] if row else [])
+    has_structure = bool(row.has_structure if row else cand.structure_path)
+    has_downloads = bool(row.has_downloads if row else cand.artifacts)
+    structure_note = "Structure" if has_structure else "No structure"
+    download_note = "Downloads" if has_downloads else "No downloads"
     final_cls = " is-final" if is_final else ""
     return (
-        f'<button type="button" class="board-card crow status-{status_cls}{final_cls}" '
+        f'<button type="button" class="board-card candidate-board-row candidate-board-card status-{status_cls}{final_cls}" '
         f'data-cand="{_attr(dom)}" role="tab" aria-selected="false">'
+        f'<span class="candidate-card-top">'
         f'<span class="crow-rank">{rank_cell}</span>'
-        f'<span class="crow-main">'
-        f'<span class="crow-id-line">'
-        f'<span class="crow-id" title="{_attr(cand.candidate_id)}">{_h(_short(cand.candidate_id, 22))}</span>'
-        f'{final_tag}</span>'
-        f'{meta_line}</span>'
-        f'{score_cell}'
+        f'<span class="candidate-card-title">'
+        f'<span class="board-row-id" title="{_attr(cand.candidate_id)}">{_h(_short(cand.candidate_id, 32))}</span>'
+        f'<span class="board-row-status status-badge status-badge-{status_cls}">{_h(row_status)}</span>'
+        f'</span>'
+        f'</span>'
+        f'<span class="board-row-verdict">{_h(verdict)}</span>'
+        f'<span class="board-row-metrics">{chips}</span>'
+        f'<span class="board-row-footer">'
+        f'<span class="candidate-assets">'
+        f'<span class="asset-pill{" is-on" if has_structure else " is-missing"}">{_h(structure_note)}</span>'
+        f'<span class="asset-pill{" is-on" if has_downloads else " is-missing"}">{_h(download_note)}</span>'
+        f'</span>'
+        f'<strong class="open-dossier-action">Open dossier</strong>'
+        f'</span>'
         f"</button>"
     )
 
 
-def _board_html(review: ReportReviewModel) -> str:
+def _board_html(review: ReportReviewModel, board: CandidateBoardViewModel | None = None) -> str:
+    rows_by_id = {row.candidate_id: row for row in board.rows} if board else {}
     groups: list[str] = []
     for group in review.board_groups:
-        cards = "".join(_board_card(b) for b in group.bundles)
+        cards = "".join(
+            _board_card(b, rows_by_id.get(b.candidate.candidate_id))
+            for b in group.bundles
+        )
         # Incomplete / failed / rejected groups are marked ``collapsed`` by the
         # review layer: on a large retrieval/semantic run dozens of un-evaluated
         # rows would otherwise bury the primary (Final / Ranked) picks. Render
@@ -451,7 +468,7 @@ def _board_html(review: ReportReviewModel) -> str:
                 f'<details class="board-group board-group-collapsible" '
                 f'data-status="{_attr(group.status)}">'
                 f'<summary class="board-group-head">'
-                f'<span class="board-group-title">{_h(group.title)}</span>'
+                f'<span class="board-group-title">{_h(_board_group_display_title(group.status, group.title))}</span>'
                 f'<span class="board-group-count">{len(group.bundles)}</span></summary>'
                 f'<div class="board-group-cards">{cards}</div>'
                 f"</details>"
@@ -459,19 +476,24 @@ def _board_html(review: ReportReviewModel) -> str:
         else:
             groups.append(
                 f'<div class="board-group" data-status="{_attr(group.status)}">'
-                f'<div class="board-group-head"><span class="board-group-title">{_h(group.title)}</span>'
+                f'<div class="board-group-head"><span class="board-group-title">{_h(_board_group_display_title(group.status, group.title))}</span>'
                 f'<span class="board-group-count">{len(group.bundles)}</span></div>'
                 f'<div class="board-group-cards">{cards}</div>'
                 f"</div>"
             )
-    header = (
-        '<div class="cand-list-head" aria-hidden="true">'
-        '<span class="clh-rank">Rank</span>'
-        '<span class="clh-id">Candidate</span>'
-        '<span class="clh-score">Score</span>'
-        '</div>'
-    )
-    return f'<div class="cand-list">{header}{"".join(groups)}</div>'
+    return f'<div class="cand-list candidate-board">{"".join(groups)}</div>'
+
+
+def _board_group_display_title(status: str, fallback: str) -> str:
+    if status == CandidateStatus.FINAL:
+        return "Recommended"
+    if status == CandidateStatus.RANKED_ALTERNATIVE:
+        return "Strong Alternatives"
+    if status == CandidateStatus.INCOMPLETE_EVIDENCE:
+        return "Missing Evidence"
+    if status == CandidateStatus.FAILED_QC:
+        return "Failed QC"
+    return fallback
 
 
 def _detail_structure_tab(bundle: CandidateEvidenceBundle, *, active: bool) -> str:
@@ -556,21 +578,95 @@ def _detail_evidence_tab(bundle: CandidateEvidenceBundle) -> str:
 
 
 def _detail_scores_tab(bundle: CandidateEvidenceBundle) -> str:
+    body = _score_family_grid(bundle)
+    return f'<div class="cand-tabpanel" data-tab="scores">{body}</div>'
+
+
+def _score_family_grid(
+    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+) -> str:
+    groups = _ordered_score_groups_for_preset(bundle.score_groups, preset)
     cards: list[str] = []
-    for group in bundle.score_groups:
+    for group in groups:
         rows = "".join(
-            f'<div class="metric-row"><span class="metric-label">{_h(label)}'
-            f'{f"<span class=\"metric-src\">{_h(src)}</span>" if src else ""}</span>'
-            f'<span class="metric-value">{_h(value)}{(" " + _h(unit)) if unit else ""}</span></div>'
+            _score_family_metric_bar(group.family, label, value, unit, src)
             for label, value, unit, src in group.metrics
         )
+        family_cls = _score_family_class(group.family)
         cards.append(
-            f'<div class="score-family"><div class="score-family-head">'
+            f'<div class="score-family {family_cls}"><div class="score-family-head">'
             f'<span class="score-family-name">{_h(group.family)}</span>{_prov_chip(group.provenance)}</div>'
             f'<div class="score-family-body">{rows}</div></div>'
         )
     body = "".join(cards) or '<p class="empty">No scored metrics for this candidate.</p>'
-    return f'<div class="cand-tabpanel" data-tab="scores"><div class="score-grid">{body}</div></div>'
+    return f'<div class="score-grid">{body}</div>'
+
+
+def _score_family_class(family: str) -> str:
+    key = re.sub(r"[^a-z0-9]+", "-", str(family).lower()).strip("-")
+    return f"score-family-{key or 'other'}"
+
+
+def _score_family_metric_bar(
+    family: str, label: str, value: str, unit: str | None, source: str
+) -> str:
+    metric = (str(value), unit, source, Provenance.DERIVED)
+    numeric = _metric_float(metric)
+    percent = _score_family_bar_percent(label, numeric)
+    missing_cls = " is-missing" if percent is None else ""
+    width = 0.0 if percent is None else max(4.0, min(100.0, percent))
+    display_value = f"{value}{(' ' + unit) if unit else ''}"
+    value_markup = (
+        f'<span class="metric-value">{_h(display_value)}</span>'
+        if percent is not None
+        else f'<span class="metric-value metric-value-pill">{_h(display_value)}</span>'
+    )
+    meter = (
+        f'<div class="metric-bar-track" aria-hidden="true"><i style="width:{width:.0f}%"></i></div>'
+        if percent is not None
+        else ""
+    )
+    return (
+        f'<div class="metric-bar-row {_score_family_class(family)}{missing_cls}">'
+        '<div class="metric-bar-top">'
+        f'<span class="metric-label">{_h(label)}'
+        f'{f"<span class=\"metric-src\">{_h(source)}</span>" if source else ""}</span>'
+        f'{value_markup}'
+        '</div>'
+        f'{meter}'
+        '</div>'
+    )
+
+
+def _score_family_bar_percent(label: str, numeric: float | None) -> float | None:
+    normalized = _metric_label_for_display(label)
+    if normalized in {"QC", "QC filters"}:
+        return None
+    if numeric is None:
+        return None
+    direct = _snapshot_score_percent(normalized, numeric)
+    if direct is not None:
+        return direct
+    if normalized == "Delta G":
+        return max(8.0, min(100.0, abs(numeric) / 15.0 * 100.0))
+    if normalized == "GRAVY":
+        return max(4.0, min(100.0, (numeric + 2.0) / 4.0 * 100.0))
+    if normalized == "Net charge":
+        return max(4.0, min(100.0, (numeric + 5.0) / 10.0 * 100.0))
+    if normalized in {"Isoelectric point", "pI"}:
+        return max(4.0, min(100.0, numeric / 14.0 * 100.0))
+    if numeric <= 1.5:
+        return max(4.0, min(100.0, numeric * 100.0))
+    return max(4.0, min(100.0, abs(numeric)))
+
+
+def _ordered_score_groups_for_preset(
+    groups: list[ScoreGroup], preset: WorkflowReviewPreset | None
+) -> list[ScoreGroup]:
+    if preset is None:
+        return list(groups)
+    order = {family: idx for idx, family in enumerate(preset.evidence_family_order)}
+    return sorted(groups, key=lambda group: (order.get(group.family, 99), group.family))
 
 
 def _detail_msa_tab(bundle: CandidateEvidenceBundle) -> str:
@@ -589,45 +685,192 @@ def _detail_tools_tab(bundle: CandidateEvidenceBundle) -> str:
     return f'<div class="cand-tabpanel" data-tab="tools">{body}</div>'
 
 
-def _detail_template(bundle: CandidateEvidenceBundle) -> str:
+def _dossier_risk_missing_grid(
+    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+) -> str:
+    risks = _bundle_risk_notes(bundle)
+    missing = _bundle_missing_evidence_labels(bundle, preset)
+    risk_items = "".join(f"<li>{_h(item)}</li>" for item in risks) or "<li>No recorded risk notes.</li>"
+    missing_items = "".join(f"<li>{_h(item)}</li>" for item in missing) or "<li>No blocking missing evidence detected.</li>"
+    return (
+        '<div class="dossier-alert-grid">'
+        '<div class="dossier-alert dossier-risk"><h4>Risk Notes</h4>'
+        f'<ul>{risk_items}</ul></div>'
+        '<div class="dossier-alert dossier-missing"><h4>Missing Evidence</h4>'
+        f'<ul>{missing_items}</ul></div>'
+        '</div>'
+    )
+
+
+def _bundle_risk_notes(bundle: CandidateEvidenceBundle) -> list[str]:
+    notes: list[str] = []
+    for flag in bundle.candidate.qc_flags:
+        notes.append(str(flag).replace("_", " "))
+    for liability in bundle.candidate.liabilities:
+        if isinstance(liability, dict):
+            label = liability.get("label") or liability.get("type") or liability.get("name")
+            if label:
+                notes.append(str(label).replace("_", " "))
+        elif liability:
+            notes.append(str(liability).replace("_", " "))
+    if bundle.status == CandidateStatus.FAILED_QC and not notes:
+        notes.append("failed recorded QC checks")
+    return _dedupe_text(notes)[:6]
+
+
+def _bundle_missing_evidence_labels(
+    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+) -> list[str]:
+    workflow_type = preset.workflow_type if preset else bundle.workflow_type
+    families = {group.family for group in bundle.score_groups}
+    missing: list[str] = []
+    if workflow_type == WorkflowType.RETRIEVAL:
+        if not (bundle.score_groups or bundle.artifacts or bundle.tool_evidence or bundle.msa_blocks):
+            missing.append("retrieved evidence or source coverage")
+        return _dedupe_text(missing)
+    if workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO} and not bundle.candidate.structure_path:
+        missing.append("structure")
+    if workflow_type == WorkflowType.BINDER and "Interface & binding" not in families:
+        missing.append("interface and binding metrics")
+    if workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO} and "Structure confidence" not in families:
+        missing.append("structure confidence metrics")
+    if "Sequence biophysics" not in families:
+        missing.append("sequence biophysics metrics")
+    if workflow_type != WorkflowType.GENERIC and not bundle.msa_blocks and "Novelty & similarity" not in families:
+        missing.append("novelty or similarity evidence")
+    return _dedupe_text(missing)
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = str(value or "").strip()
+        key = clean.lower()
+        if clean and key not in seen:
+            seen.add(key)
+            out.append(clean)
+    return out
+
+
+def _bundle_metric(bundle: CandidateEvidenceBundle, target_label: str) -> tuple[str, str | None, str, str] | None:
+    target = _metric_label_for_display(target_label)
+    for group in bundle.score_groups:
+        for label, value, unit, source in group.metrics:
+            if _metric_label_for_display(label) == target:
+                return str(value), unit, source, group.provenance
+    return None
+
+
+def _metric_label_for_display(label: str) -> str:
+    if label == "\u0394G":
+        return "Delta G"
+    return label
+
+
+def _metric_float(metric: tuple[str, str | None, str, str] | None) -> float | None:
+    if metric is None:
+        return None
+    try:
+        return float(metric[0].replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dossier_verdict(
+    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+) -> str:
+    status_label, _status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
+    plddt = _metric_float(_bundle_metric(bundle, "pLDDT"))
+    iptm = _metric_float(_bundle_metric(bundle, "ipTM"))
+    ptm = _metric_float(_bundle_metric(bundle, "pTM"))
+    missing = _bundle_missing_evidence_labels(bundle, preset)
+    if bundle.status == CandidateStatus.FINAL:
+        lead = "Recommended final candidate"
+    elif bundle.status == CandidateStatus.RANKED_ALTERNATIVE:
+        lead = "Strong alternative"
+    elif bundle.status == CandidateStatus.FAILED_QC:
+        lead = "Failed QC candidate"
+    elif bundle.status == CandidateStatus.INCOMPLETE_EVIDENCE:
+        lead = "Candidate with missing evidence"
+    else:
+        lead = f"{status_label} candidate"
+    workflow_type = preset.workflow_type if preset else bundle.workflow_type
+    if workflow_type == WorkflowType.BINDER and iptm is not None and iptm >= 0.70:
+        lead += " with strong recorded binding-interface evidence"
+    elif workflow_type == WorkflowType.BINDER and iptm is not None and iptm >= 0.50:
+        lead += " with usable recorded binding-interface evidence"
+    elif workflow_type == WorkflowType.RETRIEVAL and (bundle.score_groups or bundle.artifacts or bundle.msa_blocks):
+        lead += " with recorded retrieval evidence"
+    elif workflow_type == WorkflowType.RETRIEVAL and bundle.status == CandidateStatus.FINAL:
+        lead += " with recorded final retrieval-hit status"
+    elif plddt is not None and plddt >= 90:
+        lead += " with high predicted structure confidence"
+    elif plddt is not None and plddt >= 70:
+        lead += " with moderate predicted structure confidence"
+    elif iptm is not None and iptm >= 0.70:
+        lead += " with strong recorded interface confidence"
+    elif ptm is not None and ptm >= 0.75:
+        lead += " with strong global fold confidence"
+    if missing:
+        lead += f"; missing {missing[0]}"
+    return lead + "."
+
+
+def _dossier_decision_points(
+    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+) -> list[str]:
+    metric_order = (
+        preset.metric_priority
+        if preset
+        else ["pLDDT", "pTM", "ipTM", "Delta G", "Affinity", "GRAVY", "Net charge"]
+    )
+    points: list[str] = []
+    for label in metric_order:
+        if label == "QC":
+            continue
+        metric = _bundle_metric(bundle, label)
+        if metric is None:
+            continue
+        value, unit, source, _prov = metric
+        unit_text = f" {unit}" if unit else ""
+        source_text = f" from {source}" if source else ""
+        points.append(f"{label} {value}{unit_text}{source_text}")
+        if len(points) >= 3:
+            break
+    risks = _bundle_risk_notes(bundle)
+    if risks:
+        points.append(f"Risk to review: {risks[0]}")
+    elif bundle.status != CandidateStatus.FAILED_QC:
+        points.append("QC passed; no major recorded liabilities.")
+    missing = _bundle_missing_evidence_labels(bundle, preset)
+    if missing:
+        points.append(f"Missing evidence: {missing[0]}")
+    return points[:5]
+
+
+def _dossier_summary_panel(
+    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+) -> str:
+    points = "".join(
+        f"<li>{_h(point)}</li>" for point in _dossier_decision_points(bundle, preset)
+    )
+    return (
+        '<div class="dossier-summary-panel">'
+        '<div><p class="saas-card-kicker">Why this candidate?</p>'
+        f'<p class="dossier-verdict">{_h(_dossier_verdict(bundle, preset))}</p></div>'
+        f'<ul class="dossier-decision-points">{points}</ul>'
+        f'{_prov_chip(Provenance.DERIVED, title="Summary derived from recorded candidate status, metrics, risks, and missing evidence.")}'
+        '</div>'
+    )
+
+
+def _detail_template(
+    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+) -> str:
     cand = bundle.candidate
     dom = _structure_dom_id(cand.candidate_id)
     has_structure = bool((cand.structure_path or "").strip())
-    has_msa = bool(bundle.msa_blocks)
-    has_scores = bool(bundle.score_groups)
-    has_tools = bool(bundle.tool_evidence)
-
-    # (tab key, label, included). Structure leads (default/leftmost) whenever a
-    # 3D artifact exists; Quality analysis (score bars + sequence) is always
-    # present and becomes the default landing tab when there is no structure.
-    tab_specs: list[tuple[str, str, bool]] = [
-        ("structure", "Structure", has_structure),
-        ("quality", "Quality analysis", True),
-        ("evidence", "Pipeline & evidence", True),
-        ("scores", "Scores", has_scores),
-        ("msa", "MSA", has_msa),
-        ("tools", "Tool evidence", has_tools),
-    ]
-    included_keys = [key for key, _label, included in tab_specs if included]
-    active_key = included_keys[0]
-    tabs = "".join(
-        f'<button type="button" class="cand-tab{" is-active" if key == active_key else ""}" '
-        f'role="tab" aria-selected="{"true" if key == active_key else "false"}" '
-        f'data-tab="{_attr(key)}">{_h(label)}</button>'
-        for key, label, included in tab_specs
-        if included
-    )
-    panels: list[str] = []
-    if has_structure:
-        panels.append(_detail_structure_tab(bundle, active=active_key == "structure"))
-    panels.append(_detail_quality_tab(bundle, active=active_key == "quality"))
-    panels.append(_detail_evidence_tab(bundle))
-    if has_scores:
-        panels.append(_detail_scores_tab(bundle))
-    if has_msa:
-        panels.append(_detail_msa_tab(bundle))
-    if has_tools:
-        panels.append(_detail_tools_tab(bundle))
 
     status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
     # When the agent submitted a design the ranker did not score #1, say so once
@@ -647,16 +890,47 @@ def _detail_template(bundle: CandidateEvidenceBundle) -> str:
         f'{rank_note}</div>'
         f"</div>"
     )
+    chain_context = _chain_context_for(cand)
+    if has_structure:
+        primary_media = (
+            '<div class="dossier-structure-primary">'
+            f'{_viewer_block(cand, chain_context)}'
+            f'{_candidate_downloads(cand)}'
+            '</div>'
+        )
+    else:
+        primary_media = (
+            '<div class="dossier-structure-primary dossier-no-structure">'
+            '<div class="viewer-empty">No structure artifact linked for this candidate.</div>'
+            f'{_candidate_sequence_block(cand, chain_context)}'
+            '</div>'
+        )
+    evidence_primary = (
+        '<aside class="dossier-evidence-primary">'
+        '<h4>Evidence Families</h4>'
+        f'{_score_family_grid(bundle, preset)}'
+        '</aside>'
+    )
+    primary = (
+        '<div class="candidate-dossier-primary">'
+        f'{primary_media}'
+        f'{evidence_primary}'
+        '</div>'
+    )
     return (
         f'<template class="cand-detail-tpl" data-cand="{_attr(dom)}">'
         f'<div class="cand-detail-inner">{head}'
-        f'<div class="cand-tabs" role="tablist">{tabs}</div>'
-        f'<div class="cand-tabpanels">{"".join(panels)}</div>'
+        f'{primary}'
+        f'{_dossier_risk_missing_grid(bundle, preset)}'
         f"</div></template>"
     )
 
 
-def _review_console_section(review: ReportReviewModel) -> str:
+def _review_console_section(
+    review: ReportReviewModel,
+    board_vm: CandidateBoardViewModel | None = None,
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
     base = review.base
     final_submission = base.final_submission or {}
     no_pick = final_submission.get("outcome") == "no_acceptable_candidate"
@@ -683,12 +957,17 @@ def _review_console_section(review: ReportReviewModel) -> str:
         if counts.get(status):
             meta_bits.append(f"{counts[status]} {label.lower()}")
     meta = " · ".join(meta_bits) or f"{len(review.bundles)} candidates"
-    board = _board_html(review)
-    templates = "".join(_detail_template(b) for b in review.bundles)
+    board = _board_html(review, board_vm)
+    templates = "".join(_detail_template(b, preset) for b in review.bundles)
+    guidance = (
+        preset.candidate_review_guidance
+        if preset
+        else "Review recommended candidates and alternatives as decision-ready design records."
+    )
 
     console_body = (
-        f"""<div class="console">
-    <div class="console-board" role="tablist" aria-label="Candidate board">{board}</div>
+        f"""<div class="console candidate-review-board-layout">
+    <div class="console-board candidate-review-board" role="tablist" aria-label="Candidate board">{board}</div>
     <div class="console-detail" id="cand-detail-host" aria-live="polite"></div>
   </div>
   {templates}"""
@@ -700,13 +979,1147 @@ def _review_console_section(review: ReportReviewModel) -> str:
     <div>
       <p class="card-eyebrow">Designs</p>
       <h2 class="card-title">Candidate review</h2>
+      <p class="saas-section-subtitle">{_h(guidance)} Open a dossier to inspect structure, evidence families, risks, missing evidence, downloads, and provenance.</p>
     </div>
     <span class="card-meta">{_h(meta)}</span>
   </header>
-  <p class="widget-explainer">Pick a candidate on the left to open its evidence dossier — status rationale, the pipeline that produced it, score families, 3D structure, and homologs. Final picks lead; explored and incomplete records follow.</p>
   {banner}
   {console_body}
 </section>"""
+
+
+def _saas_overview_section(vm: OverviewViewModel) -> str:
+    counts = "".join(
+        f'<div class="saas-stat">'
+        f'<span class="saas-stat-value">{_h(count.value)}</span>'
+        f'<span class="saas-stat-label">{_h(count.label)}</span>'
+        f'<span class="saas-stat-detail">{_h(count.detail)}</span>'
+        f'{_prov_chip(count.provenance)}'
+        f"</div>"
+        for count in vm.counts
+    )
+    caveat = (
+        f'<div class="saas-card saas-caveat"><p class="saas-card-kicker">Main Caveat</p>'
+        f'<p>{_h(vm.main_caveat)}</p>{_prov_chip(vm.caveat_provenance)}</div>'
+        if vm.main_caveat
+        else '<div class="saas-card saas-caveat saas-caveat-ok"><p class="saas-card-kicker">Main Caveat</p><p>No blocking caveat recorded.</p></div>'
+    )
+    count_warning = (
+        f'<p class="saas-count-warning">{_h(vm.count_warning)}</p>'
+        if vm.count_warning
+        else ""
+    )
+    return f"""<section id="overview" class="card saas-section saas-overview">
+  <header class="card-header saas-title-row">
+    <div>
+      <p class="card-eyebrow">Executive Summary</p>
+      <h2 class="card-title">Design Review Summary</h2>
+      <p class="saas-section-subtitle">High-level overview of the design run and key outcomes.</p>
+    </div>
+  </header>
+  <div class="saas-overview-grid">
+    {_overview_summary_card("User Query", vm.design_objective, "quote")}
+    {_overview_summary_card("Agent Interpretation", vm.agent_interpretation, "spark")}
+    <div class="saas-card saas-stats">{counts}</div>
+    {caveat}
+  </div>
+  {count_warning}
+</section>"""
+
+
+def _overview_summary_card(title: str, body: str, icon_name: str) -> str:
+    return (
+        '<div class="saas-card saas-icon-card">'
+        '<div class="saas-icon-card-head">'
+        f'<span class="overview-card-icon">{_icon_svg(icon_name)}</span>'
+        f'<p class="saas-card-kicker">{_h(title)}</p>'
+        '</div>'
+        f'<p>{_h(body)}</p>'
+        '</div>'
+    )
+
+
+def _report_brand_mark() -> str:
+    logo_path = Path(__file__).resolve().parents[3] / "assets" / "vpa_text_logo.png"
+    embedded = _data_uri(logo_path)
+    if embedded is None:
+        return '<span class="brand-fallback">VibeProteinAgent</span>'
+    src, _ = embedded
+    return (
+        '<span class="brand-lockup" role="img" aria-label="VibeProteinAgent">'
+        f'<img src="{_attr(src)}" alt="" aria-hidden="true" loading="eager" decoding="async">'
+        '</span>'
+    )
+
+
+def _saas_agent_rationale_section(vm: AgentRationaleViewModel) -> str:
+    decisions = "".join(
+        f'<li><span>{_h(item.label)}</span><p>{_h(item.value)}</p>{_prov_chip(item.provenance)}</li>'
+        for item in vm.major_decisions
+    ) or '<li><span>Decision rationale</span><p>No structured agent decisions were recorded.</p></li>'
+    stages = "".join(f"<span>{_h(stage)}</span>" for stage in vm.stage_plan) or "<span>No stage plan recorded</span>"
+    query = vm.user_query or "No agent user query was recorded for this run."
+    return f"""<section id="agent-rationale" class="card saas-section">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Agent Rationale</p>
+      <h2 class="card-title">Agent interpretation and decisions</h2>
+      <p class="saas-section-subtitle">Recorded intent, workflow selection, plan, and decision rationale.</p>
+    </div>
+    <span class="card-meta">{_h(vm.tool_call_count)} tool calls</span>
+  </header>
+  <div class="saas-rationale-grid">
+    <div class="saas-card">
+      <p class="saas-card-kicker">User Intent</p>
+      <p>{_h(query)}</p>
+    </div>
+    <div class="saas-card">
+      <p class="saas-card-kicker">Workflow Selection</p>
+      <p>{_h(vm.workflow_selection or "Workflow selection was derived from recorded workflow tools.")}</p>
+    </div>
+    <div class="saas-card saas-stage-card">
+      <p class="saas-card-kicker">Workflow Stages</p>
+      <div class="saas-stage-chips">{stages}</div>
+    </div>
+    <div class="saas-card saas-decisions">
+      <p class="saas-card-kicker">Major Decisions</p>
+      <ul>{decisions}</ul>
+    </div>
+  </div>
+</section>"""
+
+
+def _saas_candidate_comparison_section(
+    board: CandidateBoardViewModel,
+    preset: WorkflowReviewPreset | None = None,
+    review: ReportReviewModel | None = None,
+) -> str:
+    metric_cols = _comparison_metric_columns(preset)
+    bundles_by_id = (
+        {bundle.candidate.candidate_id: bundle for bundle in review.bundles}
+        if review is not None
+        else {}
+    )
+    rows = "".join(
+        _comparison_row(row, metric_cols, bundles_by_id.get(row.candidate_id))
+        for row in board.rows[:12]
+    )
+    if not rows:
+        rows = '<tr><td colspan="12" class="empty">No candidates available for comparison.</td></tr>'
+    status_counts: dict[str, int] = {}
+    for row in board.rows:
+        status_counts[row.recommendation_label] = status_counts.get(row.recommendation_label, 0) + 1
+    summary = "".join(
+        f'<div class="comparison-summary-card"><span>{_h(label)}</span><strong>{_h(count)}</strong></div>'
+        for label, count in _ordered_status_counts(status_counts)
+    )
+    headers = "".join(f"<th>{_h(label)}</th>" for label in metric_cols)
+    return f"""<section id="candidate-comparison" class="card saas-section">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Candidate Comparison</p>
+      <h2 class="card-title">Decision matrix</h2>
+      <p class="saas-section-subtitle">{_h(preset.comparison_note if preset else "Compare candidates by recommendation status, core metrics, evidence gaps, and actionability. Missing values are shown explicitly.")}</p>
+    </div>
+  </header>
+  <div class="comparison-summary-row">{summary}</div>
+  <div class="saas-table-wrap comparison-matrix-wrap">
+    <table class="saas-table candidate-comparison-matrix">
+      <thead><tr><th>Rank</th><th>Candidate</th><th>Status</th><th>Verdict</th>{headers}<th>Assets</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+  <p class="comparison-note">{_h(preset.scientific_question if preset else "Use this as a selection panel view.")} Diversity and clustering are only shown when supported by recorded evidence.</p>
+</section>"""
+
+
+def _comparison_metric_columns(preset: WorkflowReviewPreset | None) -> list[str]:
+    defaults = ["pLDDT", "pTM", "ipTM", "Delta G", "Affinity", "GRAVY", "Net charge", "QC"]
+    if preset is None:
+        return defaults
+    columns: list[str] = []
+    for label in preset.metric_priority:
+        shown = _metric_label_for_display(label)
+        if shown not in columns:
+            columns.append(shown)
+        if len(columns) >= 8:
+            break
+    for label in defaults:
+        if label not in columns and len(columns) < 8:
+            columns.append(label)
+    return columns
+
+
+def _ordered_status_counts(counts: dict[str, int]) -> list[tuple[str, int]]:
+    order = {
+        "Recommended": 0,
+        "Alternative": 1,
+        "Missing Evidence": 2,
+        "Failed QC": 3,
+        "Rejected": 4,
+    }
+    return sorted(counts.items(), key=lambda item: (order.get(item[0], 99), item[0]))
+
+
+def _comparison_row(
+    row: CandidateBoardRow,
+    metric_cols: list[str],
+    bundle: CandidateEvidenceBundle | None = None,
+) -> str:
+    metric_map = {_metric_label_for_display(chip.label): chip for chip in row.metric_chips}
+    cells = "".join(_comparison_metric_cell(metric_map.get(label)) for label in metric_cols)
+    rank = row.rank if row.rank is not None else "-"
+    asset_html = _comparison_asset_actions(row, bundle)
+    candidate_cell = (
+        f'<span class="comparison-candidate-id">{_h(row.candidate_id)}</span>'
+        f'<span class="comparison-candidate-sub">{_h(row.recommendation_label)}</span>'
+    )
+    return (
+        f'<tr class="comparison-row status-{_attr(row.status)}">'
+        f'<td><span class="comparison-rank">{_h(rank)}</span></td>'
+        f'<td>{candidate_cell}</td>'
+        f'<td><span class="status-badge">{_h(row.recommendation_label)}</span></td>'
+        f'<td class="comparison-verdict">{_h(row.short_verdict)}</td>'
+        f'{cells}<td><span class="comparison-assets">{asset_html}</span></td></tr>'
+    )
+
+
+def _comparison_asset_actions(
+    row: CandidateBoardRow, bundle: CandidateEvidenceBundle | None
+) -> str:
+    candidate = bundle.candidate if bundle is not None else None
+    actions: list[str] = []
+    if row.has_structure and candidate is not None and candidate.structure_path:
+        target = _structure_dom_id(candidate.candidate_id)
+        actions.append(
+            f'<a class="asset-pill is-on asset-action-link" href="#candidates" '
+            f'data-open-cand="{_attr(target)}" data-scroll-target="{_attr(target)}" '
+            f'title="Open the candidate dossier structure viewer">Structure</a>'
+        )
+    else:
+        actions.append('<span class="asset-pill is-missing" aria-disabled="true">No structure</span>')
+
+    download_links: list[str] = []
+    seen: set[str] = set()
+    if candidate is not None:
+        for artifact in candidate.artifacts:
+            if artifact.path in seen:
+                continue
+            seen.add(artifact.path)
+            download_links.append(
+                _download_link(
+                    artifact.path,
+                    artifact.field,
+                    kind=artifact.kind,
+                    css="asset-pill is-on asset-download-link",
+                )
+            )
+        if candidate.structure_path and candidate.structure_path not in seen:
+            download_links.append(
+                _download_link(
+                    candidate.structure_path,
+                    "structure",
+                    kind="structure",
+                    css="asset-pill is-on asset-download-link",
+                )
+            )
+    if not download_links:
+        actions.append('<span class="asset-pill is-missing" aria-disabled="true">No downloads</span>')
+    elif len(download_links) == 1:
+        actions.append(download_links[0])
+    else:
+        actions.append(
+            '<details class="asset-download-menu">'
+            '<summary class="asset-pill is-on">Downloads</summary>'
+            f'<span class="asset-download-menu-body">{"".join(download_links)}</span>'
+            '</details>'
+        )
+    return "".join(actions)
+
+
+def _comparison_metric_cell(chip: Any | None) -> str:
+    if chip is None:
+        return '<td class="metric-cell-missing"><span class="metric-missing" title="Metric not recorded">—</span></td>'
+    unit = f" {chip.unit}" if chip.unit else ""
+    title = chip.source or chip.family or chip.provenance
+    return (
+        f'<td><span class="matrix-chip" title="{_attr(title)}">'
+        f'{_h(chip.value)}{_h(unit)}</span></td>'
+    )
+
+
+def _saas_candidate_dossiers_section(
+    dossiers: list[CandidateDossierViewModel],
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
+    cards = "".join(
+        _evidence_snapshot_card(d, preset)
+        for d in dossiers[:6]
+    ) or '<p class="empty">No candidate dossiers are available.</p>'
+    return f"""<section id="candidate-dossiers" class="card saas-section">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Evidence Summary</p>
+      <h2 class="card-title">Top candidate evidence at a glance</h2>
+      <p class="saas-section-subtitle">Overview of the leading evidence packages before opening the full candidate review board. Structure inspection, risks, downloads, and provenance remain in Candidate Review dossiers.</p>
+    </div>
+  </header>
+  <div class="evidence-snapshot-grid">{cards}</div>
+</section>"""
+
+
+def _evidence_snapshot_card(
+    dossier: CandidateDossierViewModel,
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
+    primary_label = _snapshot_primary_metric_label(preset)
+    primary = _dossier_metric_chip(dossier, primary_label) or (
+        dossier.metric_chips[0] if dossier.metric_chips else None
+    )
+    primary_value = _chip_numeric_value(primary)
+    score = _snapshot_score_percent(primary.label if primary else "", primary_value)
+    score_text = f"{score:.0f}" if score is not None else "--"
+    score_style = f"--score:{score:.0f}" if score is not None else "--score:0"
+    bars = "".join(
+        _evidence_metric_bar(dossier, label, preset)
+        for label in _snapshot_metric_labels(preset)
+    )
+    missing_label = (
+        f"{len(dossier.missing_evidence)} missing"
+        if dossier.missing_evidence
+        else "Evidence complete"
+    )
+    return (
+        '<article class="evidence-snapshot-card">'
+        '<div class="evidence-snapshot-head">'
+        f'<div><p class="saas-card-kicker">{_h(dossier.status_label)}</p>'
+        f'<h3>{_h(dossier.candidate_id)}</h3></div>'
+        f'<span class="status-badge">{_h(dossier.status_label)}</span>'
+        "</div>"
+        '<div class="evidence-snapshot-body">'
+        f'<div class="snapshot-score" style="{_attr(score_style)}">'
+        f'<strong>{_h(score_text)}</strong><span>{_h(primary.label if primary else "Score")}</span></div>'
+        f'<div class="snapshot-bars">{bars}</div>'
+        "</div>"
+        '<div class="evidence-snapshot-foot">'
+        f'<span class="asset-pill{" is-missing" if dossier.missing_evidence else " is-on"}">{_h(missing_label)}</span>'
+        f'<span>{_h("Structure" if dossier.structure_path else "No structure")}</span>'
+        f'<a href="#candidates" data-open-cand="{_attr("viewer-" + dossier.candidate_id)}">Open dossier</a>'
+        "</div>"
+        "</article>"
+    )
+
+
+def _snapshot_primary_metric_label(preset: WorkflowReviewPreset | None = None) -> str:
+    if preset is not None and preset.workflow_type == WorkflowType.BINDER:
+        return "ipTM"
+    if preset is not None and preset.workflow_type == WorkflowType.RETRIEVAL:
+        return "QC"
+    return "pLDDT"
+
+
+def _snapshot_metric_labels(preset: WorkflowReviewPreset | None = None) -> list[str]:
+    if preset is not None and preset.workflow_type == WorkflowType.BINDER:
+        return ["ipTM", "pLDDT", "pTM", "GRAVY", "QC"]
+    if preset is not None and preset.workflow_type == WorkflowType.RETRIEVAL:
+        return ["QC", "MSA mean identity", "Seq recovery", "GRAVY"]
+    return ["pLDDT", "pTM", "GRAVY", "Net charge", "QC"]
+
+
+def _dossier_metric_chip(dossier: CandidateDossierViewModel, label: str) -> Any | None:
+    target = _metric_label_for_display(label)
+    for chip in dossier.metric_chips:
+        if _metric_label_for_display(chip.label) == target:
+            return chip
+    return None
+
+
+def _chip_numeric_value(chip: Any | None) -> float | None:
+    if chip is None:
+        return None
+    try:
+        return float(str(chip.value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _snapshot_score_percent(label: str, value: float | None) -> float | None:
+    if value is None:
+        return None
+    normalized = _metric_label_for_display(label)
+    if normalized == "pLDDT":
+        return max(0.0, min(100.0, value))
+    if normalized in {"ipTM", "pTM", "Affinity", "MSA mean identity", "Seq recovery"}:
+        return max(0.0, min(100.0, value * 100.0 if value <= 1.5 else value))
+    return None
+
+
+def _evidence_metric_bar(
+    dossier: CandidateDossierViewModel,
+    label: str,
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
+    chip = _dossier_metric_chip(dossier, label)
+    value = _chip_numeric_value(chip)
+    pct = _snapshot_score_percent(label, value)
+    if chip and _metric_label_for_display(label) == "QC":
+        pct = 100.0 if str(chip.value).lower() == "pass" else 42.0
+    title = _cross_candidate_metric_title(label, preset)
+    if chip is None or pct is None:
+        return (
+            '<div class="snapshot-bar is-missing">'
+            f'<span>{_h(title)}</span><em><i style="width:0%"></i></em><b>--</b></div>'
+        )
+    unit = chip.unit or ""
+    return (
+        '<div class="snapshot-bar">'
+        f'<span>{_h(title)}</span><em><i style="width:{max(2.0, min(100.0, pct)):.0f}%"></i></em>'
+        f'<b>{_h(str(chip.value))}{_h((" " + unit) if unit else "")}</b></div>'
+    )
+
+
+def _saas_cross_candidate_section(
+    dossiers: list[CandidateDossierViewModel], preset: WorkflowReviewPreset | None = None
+) -> str:
+    lengths = [len(d.sequence or "") for d in dossiers if d.sequence]
+    status_counts: dict[str, int] = {}
+    missing_counts: dict[str, int] = {}
+    qc_counts: dict[str, int] = {}
+    for d in dossiers:
+        status_counts[d.status_label] = status_counts.get(d.status_label, 0) + 1
+        qc_label = _dossier_qc_label(d)
+        qc_counts[qc_label] = qc_counts.get(qc_label, 0) + 1
+        for item in d.missing_evidence:
+            missing_counts[item.label] = missing_counts.get(item.label, 0) + 1
+    length_card = _saas_hist_card("Length (aa)", lengths)
+    status_card = _saas_count_card("Review Status", status_counts)
+    missing_card = _saas_count_card("Missing Evidence", missing_counts)
+    qc_card = _saas_count_card("QC Summary", qc_counts)
+    metric_cards: list[str] = []
+    missing_metric_labels: list[str] = []
+    for label in (
+        preset.cross_candidate_metrics
+        if preset
+        else ("pLDDT", "pTM", "ipTM", "GRAVY", "Net charge")
+    ):
+        values = _metric_values_from_dossiers(dossiers, label)
+        if values:
+            title = _cross_candidate_metric_title(label, preset)
+            metric_cards.append(_saas_range_card(title, values))
+        else:
+            missing_metric_labels.append(_cross_candidate_metric_title(label, preset))
+    missing_metrics_card = (
+        _saas_missing_metrics_card(missing_metric_labels)
+        if missing_metric_labels
+        else ""
+    )
+    diversity = _diversity_notice(dossiers)
+    return f"""<section id="cross-candidate-analysis" class="card saas-section">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Cross-Candidate Analysis</p>
+      <h2 class="card-title">Patterns across candidates</h2>
+      <p class="saas-section-subtitle">{_h(preset.cross_candidate_focus if preset else "Lightweight derived summaries across the current candidate set. Missing or unavailable evidence is shown explicitly.")}</p>
+    </div>
+  </header>
+  <div class="saas-pattern-grid">{length_card}{status_card}{qc_card}{missing_card}{''.join(metric_cards)}{missing_metrics_card}</div>
+  <div class="saas-insight-note">{diversity}{_prov_chip(Provenance.DERIVED)}</div>
+</section>"""
+
+
+def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> str:
+    final_submission = model.final_submission or {}
+    has_final = bool(
+        model.final_candidates
+        or final_submission.get("candidate_id")
+        or final_submission.get("submitted_candidates")
+    )
+    round_groups = _workflow_audit_round_groups(model.graph.nodes)
+    stages = _workflow_audit_round_flow_html(
+        round_groups,
+        workflow_type=vm.workflow_type,
+        has_final=has_final,
+    )
+    completed = str(model.summary.state or "completed").strip().lower()
+    status_label = "Completed" if completed in {"", "completed", "success"} else completed.replace("_", " ").title()
+    status_cls = "is-complete" if completed in {"", "completed", "success"} else "is-recorded"
+    round_count = max(1, len(round_groups))
+    run_shape = f"{round_count} round{'s' if round_count != 1 else ''}"
+    return f"""<section id="workflow-audit" class="card saas-section workflow-audit-section">
+  <header class="workflow-audit-header">
+    <div>
+      <p class="card-eyebrow">Secondary Audit</p>
+      <h2 class="card-title">Workflow Execution Graph</h2>
+      <p class="saas-section-subtitle">A compact left-to-right audit view of the recorded process for this user query.</p>
+    </div>
+    <div class="workflow-audit-meta">
+      <span class="workflow-status-pill {status_cls}">{_h(status_label)}</span>
+      <span>{_h(run_shape)}</span>
+      <span>{_h(str(len(model.graph.nodes)))} nodes</span>
+    </div>
+  </header>
+  <div class="workflow-graph-panel">
+    <ol class="audit-stage-strip audit-stage-round-flow">{stages}</ol>
+    <div class="workflow-graph-legend">
+      <span><i class="legend-dot is-complete"></i>Completed</span>
+      <span><i class="legend-dot is-skipped"></i>Not recorded</span>
+      <span><i class="legend-chip"></i>Recorded tool</span>
+    </div>
+  </div>
+</section>"""
+
+
+def _workflow_audit_round_groups(
+    nodes: list[WorkflowNodeSummary],
+) -> list[tuple[int, list[WorkflowNodeSummary]]]:
+    if not nodes:
+        return [(0, [])]
+    has_rounds = any(node.round_index is not None for node in nodes)
+    groups: dict[int, list[WorkflowNodeSummary]] = {}
+    for index, node in enumerate(nodes):
+        round_index = node.round_index if has_rounds and node.round_index is not None else 0
+        if has_rounds and node.round_index is None:
+            round_index = index
+        groups.setdefault(round_index, []).append(node)
+    return sorted(groups.items(), key=lambda item: item[0])
+
+
+def _workflow_audit_round_flow_html(
+    round_groups: list[tuple[int, list[WorkflowNodeSummary]]],
+    *,
+    workflow_type: str,
+    has_final: bool,
+) -> str:
+    pieces = [
+        _workflow_audit_endpoint_html(
+            1,
+            key="start",
+            title="Start",
+            icon="play",
+            state_label="Completed",
+            tool_label="User request",
+        )
+    ]
+    step_index = 2
+    for group_position, (round_index, nodes) in enumerate(round_groups, start=1):
+        is_last_round = group_position == len(round_groups)
+        band_html, used_steps = _workflow_audit_round_band_html(
+            round_index,
+            step_index,
+            nodes,
+            workflow_type=workflow_type,
+            has_final=has_final and is_last_round,
+        )
+        pieces.append(band_html)
+        step_index += used_steps
+    pieces.append(
+        _workflow_audit_endpoint_html(
+            step_index,
+            key="completed",
+            title="Completed",
+            icon="flag",
+            state_label="Success" if has_final or round_groups else "Recorded",
+            tool_label="Report ready",
+        )
+    )
+    return "".join(pieces)
+
+
+def _workflow_audit_round_band_html(
+    round_index: int,
+    start_index: int,
+    nodes: list[WorkflowNodeSummary],
+    *,
+    workflow_type: str,
+    has_final: bool,
+) -> tuple[str, int]:
+    stage_map = _workflow_audit_stage_map(nodes)
+    stage_specs = _workflow_trace_stage_specs(workflow_type, stage_map)
+    if "other" in stage_map and not any(spec["key"] == "other" for spec in stage_specs):
+        stage_specs = [
+            *stage_specs[:-1],
+            {
+                "key": "other",
+                "title": "Evidence Retrieval" if workflow_type == WorkflowType.RETRIEVAL else "Model Call",
+                "icon": "search",
+                "purpose": "Run recorded supporting tools.",
+                "evidence": "Recorded tool output",
+            },
+            stage_specs[-1],
+        ]
+    cards: list[str] = []
+    local_index = start_index
+    for spec in stage_specs:
+        key = spec["key"]
+        if key == "intent":
+            continue
+        stage = stage_map.get(key)
+        include_synthetic_final = key == "recommendation" and has_final and (
+            stage is None or stage.node_count == 0
+        )
+        if stage is None and not include_synthetic_final:
+            continue
+        cards.append(
+            _workflow_audit_recorded_stage_html(
+                local_index,
+                spec,
+                stage,
+                synthetic_tool="Final selection" if include_synthetic_final else "",
+            )
+        )
+        local_index += 1
+    if not cards:
+        cards.append(
+            _workflow_audit_empty_round_html(
+                local_index,
+                workflow_type=workflow_type,
+            )
+        )
+        local_index += 1
+    round_label = f"Round {round_index + 1}"
+    step_count = local_index - start_index
+    return (
+        '<li class="audit-round-band">'
+        '<div class="audit-round-head">'
+        f'<span>{_h(round_label)}</span>'
+        f'<em>{_h(str(step_count))} step{"s" if step_count != 1 else ""}</em>'
+        '</div>'
+        f'<ol class="audit-round-stages">{"".join(cards)}</ol>'
+        '</li>',
+        step_count,
+    )
+
+
+def _workflow_audit_stage_map(
+    nodes: list[WorkflowNodeSummary],
+) -> dict[str, WorkflowStageViewModel]:
+    grouped: dict[str, list[WorkflowNodeSummary]] = {}
+    for node in nodes:
+        grouped.setdefault(_workflow_audit_node_stage_key(node), []).append(node)
+    return {
+        key: WorkflowStageViewModel(
+            key=key,
+            label=key,
+            tools=_dedupe_text([node.tool for node in stage_nodes if node.tool]),
+            node_count=len(stage_nodes),
+            completed_count=sum(
+                1 for node in stage_nodes if str(node.state).lower() == "completed"
+            ),
+            failed_count=sum(
+                1 for node in stage_nodes if str(node.state).lower() == "failed"
+            ),
+            evidence_label=_workflow_audit_evidence_label(key),
+            provenance=Provenance.DERIVED,
+        )
+        for key, stage_nodes in grouped.items()
+    }
+
+
+def _workflow_audit_node_stage_key(node: WorkflowNodeSummary) -> str:
+    tool = (node.tool or "").strip().lower()
+    if tool in {"agent_intent", "user_request"}:
+        return "intent"
+    role = classify_tool_role(tool)
+    if role == ToolRole.GENERATOR:
+        return "structure" if tool in {"esm3", "boltzgen"} else "generation"
+    if role == ToolRole.RANKER:
+        return "ranking"
+    if role == ToolRole.SUBMISSION:
+        return "recommendation"
+    if role == ToolRole.EVALUATOR:
+        if tool in {"protein_qc", "sequence_analysis"}:
+            return "qc"
+        if tool in {"esm3", "esm2", "protenix_v2", "structure_analysis"}:
+            return "structure"
+        if tool in {"boltz2_affinity", "pxmeter", "ipsae", "prodigy", "vina"}:
+            return "interface"
+        return "qc"
+    return "other"
+
+
+def _workflow_audit_evidence_label(key: str) -> str:
+    return {
+        "generation": "Candidate designs",
+        "qc": "QC state and flags",
+        "structure": "Structure confidence and structure artifacts",
+        "interface": "Interface and binding evidence",
+        "ranking": "Ranked candidate scores",
+        "recommendation": "Final submitted candidates",
+        "other": "Additional recorded evidence",
+    }.get(key, "Recorded evidence")
+
+
+def _workflow_audit_stage_html(
+    index: int,
+    spec: dict[str, str],
+    stage_map: dict[str, WorkflowStageViewModel],
+    *,
+    has_final: bool = False,
+) -> str:
+    key = spec["key"]
+    stage = stage_map.get(key)
+    if key == "intent":
+        state_cls = "is-recorded"
+        count = "Objective recorded"
+        evidence = spec["evidence"]
+    elif stage is None or stage.node_count == 0:
+        if key == "recommendation" and has_final:
+            state_cls = "is-complete"
+            count = "Final candidates recorded"
+            evidence = "Final submitted candidates"
+        else:
+            state_cls = "is-skipped"
+            count = "Skipped / not recorded"
+            evidence = spec["evidence"]
+    else:
+        state_cls = "is-complete" if stage.failed_count == 0 else "has-failures"
+        count = (
+            f"{stage.node_count} nodes - {stage.completed_count} completed"
+            + (f" - {stage.failed_count} failed" if stage.failed_count else "")
+        )
+        evidence = stage.evidence_label or spec["evidence"]
+    tool_label = ""
+    if stage and stage.tools:
+        tool_label = ", ".join(_compact_tool_name(tool) for tool in stage.tools[:3])
+    icon = _workflow_stage_icon_name(key)
+    return (
+        f'<li class="audit-stage {state_cls}" data-stage="{_attr(key)}">'
+        '<div class="audit-stage-top">'
+        f'<span class="audit-stage-icon">{_icon_svg(icon)}</span>'
+        f'<span class="audit-stage-line"></span>'
+        "</div>"
+        f'<strong>{index}. {_h(spec["title"])}</strong>'
+        f'<p>{_h(spec["purpose"])}</p>'
+        f'<small><b>Evidence:</b> {_h(evidence)}</small>'
+        f'<small>{_h(count)}</small>'
+        f'{f"<em>{_h(tool_label)}</em>" if tool_label else ""}'
+        "</li>"
+    )
+
+
+def _workflow_audit_endpoint_html(
+    index: int,
+    *,
+    key: str,
+    title: str,
+    icon: str,
+    state_label: str,
+    tool_label: str,
+) -> str:
+    return (
+        f'<li class="audit-stage audit-flow-endpoint is-complete" data-stage="{_attr(key)}">'
+        f'<span class="audit-stage-number">{index}</span>'
+        f'<span class="audit-stage-icon">{_icon_svg(icon)}</span>'
+        f'<strong>{_h(title)}</strong>'
+        f'<span class="audit-stage-status">{_h(state_label)}</span>'
+        f'<div class="audit-tool-row"><span class="audit-tool-chip">{_h(tool_label)}</span></div>'
+        "</li>"
+    )
+
+
+def _workflow_audit_recorded_stage_html(
+    index: int,
+    spec: dict[str, str],
+    stage: WorkflowStageViewModel | None,
+    *,
+    synthetic_tool: str = "",
+) -> str:
+    key = spec["key"]
+    if stage is None:
+        state_cls = "is-complete"
+        state_label = "Completed"
+        tools = [synthetic_tool] if synthetic_tool else []
+    else:
+        state_cls = "is-complete" if stage.failed_count == 0 else "has-failures"
+        state_label = "Completed" if stage.failed_count == 0 else "Needs review"
+        tools = [_compact_tool_name(tool) for tool in stage.tools if tool][:4]
+    tool_html = "".join(
+        f'<span class="audit-tool-chip">{_h(tool)}</span>'
+        for tool in tools
+        if tool
+    )
+    if not tool_html:
+        tool_html = '<span class="audit-tool-chip is-muted">Recorded</span>'
+    return (
+        f'<li class="audit-stage {state_cls}" data-stage="{_attr(key)}">'
+        f'<span class="audit-stage-number">{index}</span>'
+        f'<span class="audit-stage-icon">{_icon_svg(_workflow_stage_icon_name(key))}</span>'
+        f'<strong>{_h(spec["title"])}</strong>'
+        f'<span class="audit-stage-status">{_h(state_label)}</span>'
+        f'<div class="audit-tool-row">{tool_html}</div>'
+        "</li>"
+    )
+
+
+def _workflow_audit_empty_round_html(index: int, *, workflow_type: str) -> str:
+    label = "Evidence not recorded" if workflow_type == WorkflowType.RETRIEVAL else "No tools recorded"
+    return (
+        f'<li class="audit-stage is-skipped" data-stage="empty-round">'
+        f'<span class="audit-stage-number">{index}</span>'
+        f'<span class="audit-stage-icon">{_icon_svg("search")}</span>'
+        '<strong>Recorded round</strong>'
+        '<span class="audit-stage-status">Not recorded</span>'
+        f'<div class="audit-tool-row"><span class="audit-tool-chip is-muted">{_h(label)}</span></div>'
+        "</li>"
+    )
+
+
+def _workflow_stage_icon_name(key: str) -> str:
+    return {
+        "intent": "intent",
+        "generation": "spark",
+        "qc": "shield",
+        "structure": "cube",
+        "interface": "bind",
+        "ranking": "rank",
+        "recommendation": "check",
+        "other": "search",
+    }.get(key, "workflow")
+
+
+def _icon_svg(name: str) -> str:
+    paths = {
+        "overview": '<rect x="4" y="5" width="7" height="7" rx="2"/><rect x="13" y="5" width="7" height="7" rx="2"/><rect x="4" y="14" width="7" height="5" rx="1.5"/><rect x="13" y="14" width="7" height="5" rx="1.5"/>',
+        "dossier": '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M10 13h6"/><path d="M10 17h4"/>',
+        "candidate": '<path d="M8 7a4 4 0 1 0 8 0a4 4 0 0 0-8 0"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+        "compare": '<path d="M6 6h11"/><path d="M6 12h15"/><path d="M6 18h8"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
+        "analytics": '<path d="M4 19V5"/><path d="M4 19h17"/><path d="M8 16v-5"/><path d="M13 16V8"/><path d="M18 16v-9"/>',
+        "workflow": '<circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="18" cy="6" r="2"/><path d="M8 6h6"/><path d="M16.7 7.4L7.3 16.6"/><path d="M8 18h6"/><path d="M6 8v8"/>',
+        "agent": '<path d="M12 3v3"/><path d="M7 6h10a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3z"/><path d="M9 12h.01"/><path d="M15 12h.01"/><path d="M9 16h6"/>',
+        "repro": '<path d="M4 4v6h6"/><path d="M20 20v-6h-6"/><path d="M20 10a8 8 0 0 0-14-4L4 10"/><path d="M4 14a8 8 0 0 0 14 4l2-4"/>',
+        "plot": '<path d="M4 19h17"/><path d="M4 19V5"/><path d="M7 15l4-4l3 3l5-7"/>',
+        "msa": '<path d="M5 6h14"/><path d="M5 10h10"/><path d="M5 14h14"/><path d="M5 18h7"/>',
+        "tools": '<path d="M14 7l3-3l3 3l-3 3z"/><path d="M4 20l7-7"/><path d="M8 4l12 12"/><path d="M4 8l4-4"/>',
+        "availability": '<path d="M12 3l8 4v6c0 5-3.5 8-8 9c-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2l4-4"/>',
+        "merge": '<path d="M5 5v4a4 4 0 0 0 4 4h6"/><path d="M5 19v-4a4 4 0 0 1 4-4h6"/><path d="M15 9l4 4l-4 4"/>',
+        "transcript": '<path d="M5 4h14v12H8l-3 3z"/><path d="M8 8h8"/><path d="M8 12h6"/>',
+        "intent": '<path d="M12 21a9 9 0 1 0 0-18a9 9 0 0 0 0 18z"/><path d="M12 7v5l3 2"/>',
+        "spark": '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
+        "quote": '<path d="M8 7H5.5A2.5 2.5 0 0 0 3 9.5V13h4v4H3v-7.5A5.5 5.5 0 0 1 8.5 4H10"/><path d="M18 7h-2.5A2.5 2.5 0 0 0 13 9.5V13h4v4h-4v-7.5A5.5 5.5 0 0 1 18.5 4H20"/>',
+        "shield": '<path d="M12 3l8 4v6c0 5-3.5 8-8 9c-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2l4-4"/>',
+        "cube": '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5"/><path d="M12 12v9"/><path d="M12 12L4 7.5"/>',
+        "bind": '<path d="M8 8a4 4 0 0 1 6 0l1 1"/><path d="M16 16a4 4 0 0 1-6 0l-1-1"/><path d="M7 13l-2-2a3 3 0 0 1 4-4l2 2"/><path d="M13 15l2 2a3 3 0 0 0 4-4l-2-2"/>',
+        "rank": '<path d="M5 19V9"/><path d="M12 19V5"/><path d="M19 19v-7"/><path d="M3 19h20"/>',
+        "check": '<path d="M20 6L9 17l-5-5"/>',
+        "search": '<path d="M11 18a7 7 0 1 0 0-14a7 7 0 0 0 0 14z"/><path d="M20 20l-4-4"/>',
+        "play": '<path d="M8 5v14l11-7z"/>',
+        "database": '<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>',
+        "flag": '<path d="M6 21V4"/><path d="M6 5h11l-1.5 4L17 13H6"/>',
+        "chevron-left": '<path d="M15 18l-6-6l6-6"/>',
+    }
+    body = paths.get(name, paths["overview"])
+    return (
+        '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+        f'{body}</svg>'
+    )
+
+
+def _saas_workflow_trace_section(vm: WorkflowTraceViewModel) -> str:
+    stage_map = {stage.key: stage for stage in vm.stages}
+    stage_specs = _workflow_trace_stage_specs(vm.workflow_type, stage_map)
+    stages = "".join(
+        _workflow_trace_stage_html(index, spec, stage_map)
+        for index, spec in enumerate(stage_specs, start=1)
+    )
+    return f"""<section id="workflow-trace" class="card saas-section">
+  <header class="card-header">
+    <div>
+      <p class="card-eyebrow">Workflow Trace</p>
+      <h2 class="card-title">Why this workflow?</h2>
+      <p class="saas-section-subtitle">Product-stage explanation derived from the recorded workflow graph. Each stage shows what evidence it contributed to the final review.</p>
+    </div>
+    <span class="card-meta">{_h(vm.workflow_type)}</span>
+  </header>
+  <ol class="workflow-stage-strip workflow-stage-count-{len(stage_specs)}">{stages}</ol>
+</section>"""
+
+
+def _workflow_trace_stage_specs(
+    workflow_type: str, stage_map: dict[str, WorkflowStageViewModel]
+) -> list[dict[str, str]]:
+    if workflow_type == WorkflowType.RETRIEVAL:
+        return [
+            {"key": "intent", "title": "User Intent", "icon": "?", "purpose": "Understand the evidence question and constraints.", "evidence": "Recorded objective"},
+            {"key": "other", "title": "Evidence Retrieval", "icon": "R", "purpose": "Search or retrieve relevant sequence/source evidence.", "evidence": "Retrieved hits and source context"},
+            {"key": "ranking", "title": "Evidence Synthesis", "icon": "S", "purpose": "Prioritize records by available support.", "evidence": "Ranked evidence records"},
+            {"key": "recommendation", "title": "Final Recommendation", "icon": "F", "purpose": "Select the strongest supported answer.", "evidence": "Final recommendation"},
+        ]
+    specs = [
+        {"key": "intent", "title": "User Intent", "icon": "?", "purpose": "Understand design goal and constraints.", "evidence": "Recorded objective"},
+        {"key": "generation", "title": "Generation", "icon": "G", "purpose": "Generate candidate sequences or structures.", "evidence": "Candidate designs"},
+        {"key": "qc", "title": "Sequence QC", "icon": "Q", "purpose": "Filter liabilities and basic biophysical issues.", "evidence": "QC state and flags"},
+        {"key": "structure", "title": "Structure Prediction", "icon": "3D", "purpose": "Predict 3D structures and confidence.", "evidence": "pLDDT, pTM, PAE, structures"},
+        {"key": "interface", "title": "Interface Scoring", "icon": "I", "purpose": "Assess target binding and interface quality.", "evidence": "ipTM, affinity, contacts"},
+        {"key": "ranking", "title": "Ranking", "icon": "R", "purpose": "Integrate evidence and rank candidates.", "evidence": "Composite review order"},
+        {"key": "recommendation", "title": "Final Recommendation", "icon": "F", "purpose": "Select final candidates for experimental follow-up.", "evidence": "Final submitted candidates"},
+    ]
+    if workflow_type == WorkflowType.DENOVO and not stage_map.get("interface", None):
+        # Keep interface visible but skipped so users do not read it as a
+        # required de novo stage.
+        return specs
+    return specs
+
+
+def _workflow_trace_stage_html(
+    index: int,
+    spec: dict[str, str],
+    stage_map: dict[str, WorkflowStageViewModel],
+) -> str:
+    key = spec["key"]
+    stage = stage_map.get(key)
+    if key == "intent":
+        state_cls = "is-recorded"
+        count = "Objective recorded"
+        evidence = spec["evidence"]
+    elif stage is None or stage.node_count == 0:
+        state_cls = "is-skipped"
+        count = "Skipped / not recorded"
+        evidence = spec["evidence"]
+    else:
+        state_cls = "is-complete" if stage.failed_count == 0 else "has-failures"
+        count = (
+            f"{stage.node_count} nodes - {stage.completed_count} completed"
+            + (f" - {stage.failed_count} failed" if stage.failed_count else "")
+        )
+        evidence = stage.evidence_label or spec["evidence"]
+    marker_label, marker_title = _workflow_stage_marker_label(key, spec, stage)
+    return (
+        f'<li class="workflow-stage {state_cls}" data-stage="{_attr(key)}">'
+        f'<div class="workflow-stage-marker"><span class="workflow-stage-index">{index}</span>'
+        f'<span class="workflow-stage-icon" title="{_attr(marker_title)}">{_h(marker_label)}</span></div>'
+        f'<div class="workflow-stage-body">'
+        f'<h3>{_h(spec["title"])}</h3>'
+        f'<p>{_h(spec["purpose"])}</p>'
+        f'<small><strong>Evidence:</strong> {_h(evidence)}</small>'
+        f'<small>{_h(count)}</small>'
+        f'</div></li>'
+    )
+
+
+def _workflow_stage_marker_label(
+    key: str,
+    spec: dict[str, str],
+    stage: WorkflowStageViewModel | None,
+) -> tuple[str, str]:
+    if key == "intent":
+        return ("intent", "intent")
+    if stage and stage.tools:
+        tools = [_compact_tool_name(tool) for tool in stage.tools if tool]
+        tools = [tool for tool in tools if tool]
+        if len(tools) > 1:
+            filtered = [tool for tool in tools if tool != "agent_intent"]
+            if filtered:
+                tools = filtered
+        if tools:
+            return (tools[0], ", ".join(tools))
+    if stage is None or stage.node_count == 0:
+        return ("not recorded", "not recorded")
+    return (spec["icon"], spec["icon"])
+
+
+def _compact_tool_name(tool: str) -> str:
+    name = str(tool).strip()
+    if not name:
+        return ""
+    aliases = {
+        "boltz2_affinity": "Boltz-2",
+        "boltz2": "Boltz-2",
+        "boltzgen": "BoltzGen",
+        "esm3": "ESM-3",
+        "esm2": "ESM-2",
+        "protenix_v2": "Protenix v2",
+        "proteinmpnn": "ProteinMPNN",
+        "pxdesign": "PXDesign",
+        "pxmeter": "PXMeter",
+        "ipsae": "ipSAE",
+        "prodigy": "PRODIGY",
+        "vina": "Vina",
+        "sequence_analysis": "Sequence analysis",
+        "protein_qc": "Protein QC",
+        "structure_analysis": "Structure analysis",
+        "rank_designs": "Rank designs",
+        "submit_candidate": "Submit candidate",
+    }
+    return aliases.get(name.lower(), name)
+
+
+def _saas_metric_chip_html(chips: list[Any]) -> str:
+    if not chips:
+        return '<span class="saas-chip saas-chip-muted">No metrics</span>'
+    return "".join(
+        f'<span class="saas-chip" title="{_attr(chip.source)}">'
+        f'<b>{_h(chip.label)}</b> {_h(chip.value)}{(" " + _h(chip.unit)) if chip.unit else ""}'
+        f'</span>'
+        for chip in chips
+    )
+
+
+def _dossier_summary(dossier: CandidateDossierViewModel) -> str:
+    if dossier.risk_notes:
+        return f"Risks to review: {', '.join(dossier.risk_notes[:2])}."
+    if dossier.missing_evidence:
+        return f"Missing evidence: {', '.join(item.label for item in dossier.missing_evidence[:2])}."
+    return "Evidence package is available for candidate review."
+
+
+def _saas_hist_card(title: str, values: list[int]) -> str:
+    if not values:
+        return _saas_empty_pattern_card(title, "No values available.")
+    return _saas_distribution_card(title, [float(v) for v in values], value_formatter=lambda v: str(int(v)))
+
+
+def _saas_count_card(title: str, counts: dict[str, int]) -> str:
+    if not counts:
+        return _saas_empty_pattern_card(title, "No recorded values.")
+    total = sum(counts.values()) or 1
+    rows = "".join(
+        f'<div class="saas-count-row"><span>{_h(label)}</span>'
+        f'<em><i style="width:{max(6, int(count / total * 100))}%"></i></em>'
+        f'<b>{_h(count)}</b></div>'
+        for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]
+    )
+    return f'<div class="saas-pattern-card saas-count-card"><h3>{_h(title)}</h3>{rows}</div>'
+
+
+def _metric_values_from_dossiers(dossiers: list[CandidateDossierViewModel], label: str) -> list[float]:
+    values: list[float] = []
+    target = _metric_label_for_display(label)
+    for dossier in dossiers:
+        for chip in dossier.metric_chips:
+            if _metric_label_for_display(chip.label) != target:
+                continue
+            try:
+                values.append(float(str(chip.value).replace(",", "")))
+            except (TypeError, ValueError):
+                pass
+            break
+    return values
+
+
+def _saas_range_card(title: str, values: list[float]) -> str:
+    if not values:
+        return _saas_empty_pattern_card(title, "Metric not recorded.")
+    return _saas_distribution_card(title, values, value_formatter=_fmt_range_value)
+
+
+def _saas_empty_pattern_card(title: str, message: str) -> str:
+    return (
+        f'<div class="saas-pattern-card saas-pattern-card-empty">'
+        f'<h3>{_h(title)}</h3><p class="empty">{_h(message)}</p></div>'
+    )
+
+
+def _cross_candidate_metric_title(
+    label: str, preset: WorkflowReviewPreset | None = None
+) -> str:
+    if (
+        preset is not None
+        and preset.workflow_type == WorkflowType.BINDER
+        and _metric_label_for_display(label) == "pLDDT"
+    ):
+        return "Complex pLDDT"
+    return label
+
+
+def _saas_missing_metrics_card(labels: list[str]) -> str:
+    unique = list(dict.fromkeys(label for label in labels if label))
+    chips = "".join(
+        f'<span class="missing-metric-token">{_h(label)}</span>'
+        for label in unique[:8]
+    )
+    more = (
+        f'<span class="missing-metric-token">+{len(unique) - 8} more</span>'
+        if len(unique) > 8
+        else ""
+    )
+    return (
+        '<div class="saas-pattern-card saas-missing-metrics-card">'
+        "<h3>Not recorded in this run</h3>"
+        f'<div class="missing-metric-list">{chips}{more}</div>'
+        "<p>Report rendering does not run enrichment, MSA, structure prediction, "
+        "or binding tools by default.</p>"
+        "</div>"
+    )
+
+
+def _saas_distribution_card(
+    title: str,
+    values: list[float],
+    *,
+    value_formatter: Callable[[float], str],
+) -> str:
+    lo = min(values)
+    hi = max(values)
+    avg = sum(values) / len(values)
+    bins = _distribution_bins(values, bucket_count=8)
+    max_count = max(bins) or 1
+    bars = "".join(
+        f'<span style="height:{max(8, int(count / max_count * 64))}px" title="{_attr(count)} candidate(s)"></span>'
+        for count in bins
+    )
+    return (
+        f'<div class="saas-pattern-card metric-range-card"><h3>{_h(title)}</h3>'
+        f'<div class="saas-bars saas-bars-distribution">{bars}</div>'
+        f'<div class="range-line"><span style="left:{_range_pct(lo, lo, hi)}%"></span>'
+        f'<b style="left:{_range_pct(avg, lo, hi)}%"></b>'
+        f'<span style="left:{_range_pct(hi, lo, hi)}%"></span></div>'
+        f'<p>{_h(value_formatter(lo))} to {_h(value_formatter(hi))} · avg {_h(value_formatter(avg))}</p></div>'
+    )
+
+
+def _distribution_bins(values: list[float], bucket_count: int = 8) -> list[int]:
+    lo = min(values)
+    hi = max(values)
+    span = max(hi - lo, 1e-9)
+    bins = [0 for _ in range(bucket_count)]
+    for value in values:
+        idx = min(bucket_count - 1, int((value - lo) / span * bucket_count))
+        bins[idx] += 1
+    return bins
+
+
+def _range_pct(value: float, lo: float, hi: float) -> int:
+    if hi <= lo:
+        return 50
+    return max(0, min(100, int((value - lo) / (hi - lo) * 100)))
+
+
+def _fmt_range_value(value: float) -> str:
+    if abs(value) >= 10:
+        return f"{value:.1f}"
+    return f"{value:.2f}"
+
+
+def _dossier_qc_label(dossier: CandidateDossierViewModel) -> str:
+    if dossier.status == CandidateStatus.FAILED_QC:
+        return "Failed QC"
+    if any(chip.label == "QC" and chip.value == "Review" for chip in dossier.metric_chips):
+        return "Review QC"
+    if any(chip.label == "QC" and chip.value == "Pass" for chip in dossier.metric_chips):
+        return "Passed QC"
+    return "QC not recorded"
+
+
+def _diversity_notice(dossiers: list[CandidateDossierViewModel]) -> str:
+    has_similarity = any(
+        any(group.family == "Novelty & similarity" for group in dossier.score_groups)
+        for dossier in dossiers
+    )
+    if has_similarity:
+        return "Similarity evidence is present for at least one candidate; inspect the dossiers before selecting a diverse panel. "
+    return "Diversity clustering is not recorded in this report; use length, charge, metric ranges, and any available MSA/similarity evidence as lightweight panel-selection signals. "
+
+
+def _timestamp_label(value: int | None) -> str:
+    if value is None:
+        return "Timestamp not recorded"
+    try:
+        seconds = float(value)
+        if seconds > 10_000_000_000:
+            seconds /= 1000.0
+        return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%d %H:%M UTC")
+    except (OSError, OverflowError, ValueError, TypeError):
+        return str(value)
 
 
 # ----------------------------------------------------------------- main render
@@ -751,15 +2164,16 @@ def render_report_html(
     # Candidate review console — the report's primary surface. Derived purely
     # from the (already display-prepared) model; never re-executes the engine.
     review = build_review_model(deduped)
+    saas_vm = build_report_view_model(deduped, review)
     model = _flatten_candidate_view(deduped)
     plots = build_plots(model)
     title = f"VPA report · {model.summary.id}"
 
-    headline = _executive_headline(model)
-    dashboard_html = _executive_dashboard(model)
-    verdict_html = _exec_verdict_callout(model)
-
-    show_workflow = len(model.graph.nodes) >= 2
+    # Keep the removed product-stage "Why this workflow?" trace out of the
+    # report, but restore the raw DAG as a secondary audit section outside the
+    # Appendix so node-level execution remains inspectable without making the
+    # appendix feel like a workflow debugger.
+    show_workflow_audit = bool(model.graph.nodes)
     show_plots = bool(plots)
     show_msa = bool(model.msa_blocks)
     show_candidates = bool(model.final_submission or model.final_candidates or model.candidates)
@@ -773,31 +2187,34 @@ def render_report_html(
     # no-op parameter-default audit noise and added little to the report.
     show_availability = False
 
-    # The report leads with results: the executive Summary, then the Candidate
-    # review console (its primary surface). Everything else — the workflow DAG,
-    # analytics, per-tool widgets, the agent's own reasoning, and replay info —
-    # is supporting detail, grouped into an "Appendix" so the console isn't
-    # buried under audit trails. ``None`` anchor marks a non-clickable divider.
-    nav_items: list[tuple[str | None, str, str]] = [("summary", "Summary", "◎")]
+    # The report follows a candidate-first SaaS hierarchy. Per-tool widgets
+    # remain available below the primary review surfaces so auditability is
+    # preserved. The raw workflow DAG is a secondary audit section, not an
+    # Appendix item.
+    nav_items: list[tuple[str | None, str, str]] = [("overview", "Overview", "overview")]
     if show_candidates:
-        nav_items.append(("candidates", "Candidates", "★"))
+        nav_items.append(("candidate-dossiers", "Evidence Summary", "dossier"))
+        nav_items.append(("candidates", "Candidate Review", "candidate"))
+        nav_items.append(("candidate-comparison", "Candidate Comparison", "compare"))
+        nav_items.append(("cross-candidate-analysis", "Cross-Candidate Analysis", "analytics"))
+    if show_workflow_audit:
+        nav_items.append(("workflow-audit", "Workflow Audit", "workflow"))
+    nav_items.append(("agent-rationale", "Agent Rationale", "agent"))
+    nav_items.append(("reproducibility", "Reproducibility", "repro"))
     appendix_items: list[tuple[str, str, str]] = []
-    if show_workflow:
-        appendix_items.append(("workflow", "Workflow", "⌥"))
     if show_plots:
-        appendix_items.append(("plots", "Plots", "▦"))
+        appendix_items.append(("plots", "Plots", "plot"))
     if show_msa:
-        appendix_items.append(("msa", "MSA", "≡"))
-    appendix_items.append(("details", "Per-tool results", "⊞"))
+        appendix_items.append(("msa", "MSA", "msa"))
+    appendix_items.append(("details", "Per-tool results", "tools"))
     if show_availability:
-        appendix_items.append(("availability", "Availability", "◌"))
+        appendix_items.append(("availability", "Availability", "availability"))
     if show_merge_audit:
-        appendix_items.append(("merge-audit", "Merge audit", "◇"))
+        appendix_items.append(("merge-audit", "Merge audit", "merge"))
     if show_conversation:
-        appendix_items.append(("conversation", "Conversation", "❝"))
-    appendix_items.append(("reproducibility", "Reproducibility", "⟲"))
+        appendix_items.append(("conversation", "Full Transcript", "transcript"))
     if appendix_items:
-        nav_items.append((None, "Appendix", "▽"))
+        nav_items.append((None, "Appendix", ""))
         nav_items.extend(appendix_items)
 
     def _nav_item_html(anchor: str | None, label: str, glyph: str) -> str:
@@ -805,7 +2222,7 @@ def render_report_html(
             return f'<span class="side-nav-divider">{_h(label)}</span>'
         return (
             f'<a href="#{anchor}" class="side-nav-item">'
-            f'<span class="side-nav-glyph">{_h(glyph)}</span>'
+            f'<span class="side-nav-glyph">{_icon_svg(glyph)}</span>'
             f'<span class="side-nav-label">{_h(label)}</span></a>'
         )
 
@@ -841,32 +2258,8 @@ def render_report_html(
         else ""
     )
 
-    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-
-    # ----- Summary section -----
-    pills = [
-        ("state-" + _state_class(model.summary.state), model.summary.state),
-        ("mono", _short(model.summary.id, 18)),
-        ("", _duration(model.summary.runtime_ms)),
-        ("", f"{viewer_mode} viewer"),
-    ]
-    pills_html = "".join(
-        f'<span class="pill {_h(cls)}" title="{_attr(model.summary.id if cls == "mono" else label)}">{_h(label)}</span>'
-        for cls, label in pills
-    )
-    summary_card = f"""<section id="summary" class="card card-summary">
-  <header class="card-header">
-    <div>
-      <p class="card-eyebrow">Executive Summary</p>
-      <h2 class="card-title">{_h(headline)}</h2>
-    </div>
-    <div class="card-header-pills">{pills_html}</div>
-  </header>
-  {dashboard_html}
-  {verdict_html}
-  {_hero_sequence_block(model)}
-  {_warning_list(model)}
-</section>"""
+    overview_section = _saas_overview_section(saas_vm.overview)
+    agent_rationale_section = _saas_agent_rationale_section(saas_vm.agent_rationale)
 
     # ----- Conversation section (LLM-agent runs only) -----
     conversation_section = (
@@ -882,31 +2275,47 @@ def render_report_html(
     )
 
     # ----- Candidate review console (primary surface) -----
-    candidates_section = _review_console_section(review) if show_candidates else ""
-
-    workflow_section = (
-        f"""<section id="workflow" class="card">
-  <header class="card-header"><div><p class="card-eyebrow">Pipeline</p><h2 class="card-title">Workflow graph</h2></div></header>
-  <p class="widget-explainer">Colour shows each node's completion state; arrows trace data dependencies between jobs.</p>
-  {_workflow_svg(model.graph.nodes)}
-  {_workflow_composition(model)}
-</section>"""
-        if show_workflow else ""
+    candidate_dossiers_section = (
+        _saas_candidate_dossiers_section(saas_vm.candidate_dossiers, saas_vm.review_preset)
+        if show_candidates
+        else ""
+    )
+    candidates_section = (
+        _review_console_section(review, saas_vm.candidate_board, saas_vm.review_preset)
+        if show_candidates
+        else ""
+    )
+    candidate_comparison_section = (
+        _saas_candidate_comparison_section(saas_vm.candidate_board, saas_vm.review_preset, review)
+        if show_candidates
+        else ""
+    )
+    cross_candidate_section = (
+        _saas_cross_candidate_section(saas_vm.candidate_dossiers, saas_vm.review_preset)
+        if show_candidates
+        else ""
+    )
+    workflow_audit_section = (
+        _workflow_audit_section(model, saas_vm.workflow_trace)
+        if show_workflow_audit
+        else ""
     )
 
     plots_section = (
-        f"""<section id="plots" class="card">
+        f"""<details id="plots" class="card appendix-panel">
+  <summary><span>Plots</span><small>Detailed analytic charts</small></summary>
   <header class="card-header"><div><p class="card-eyebrow">Analytics</p><h2 class="card-title">Plots</h2></div></header>
   {_plots_html(plots)}
-</section>"""
+</details>"""
         if show_plots else ""
     )
 
     msa_section = (
-        f"""<section id="msa" class="card">
+        f"""<details id="msa" class="card appendix-panel">
+  <summary><span>MSA / Sequence Context</span><small>Alignment evidence and homolog context</small></summary>
   <header class="card-header"><div><p class="card-eyebrow">Homologs</p><h2 class="card-title">MSA / Sequence Context</h2></div></header>
   {_msa_html(model.msa_blocks)}
-</section>"""
+</details>"""
         if show_msa else ""
     )
 
@@ -921,8 +2330,10 @@ def render_report_html(
 <body>
   <aside class="sidebar">
     <div class="sidebar-brand">
-      {vpa_logo("brand-mark")}
-      <span class="brand-text">VibeProteinAgent</span>
+      <div class="sidebar-brand-main">
+        {_report_brand_mark()}
+      </div>
+      <button class="sidebar-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true" data-sidebar-toggle>{_icon_svg("chevron-left")}</button>
     </div>
     <div class="sidebar-meta">
       <span class="sidebar-meta-label">Workspace</span>
@@ -931,45 +2342,51 @@ def render_report_html(
     <nav class="side-nav">{nav_html}</nav>
     <div class="sidebar-foot">
       <span>v{_h(__version__)}</span>
-      <span>{_h(generated_at)}</span>
     </div>
   </aside>
   <header class="top-bar">
     <div class="top-bar-left">
-      <span class="top-bar-kind">{_h(model.summary.kind.title())}</span>
-      <h1 class="top-bar-title">{_h(model.summary.name or model.summary.id)}</h1>
-      <span class="status-chip state-{_state_class(model.summary.state)}">{_h(model.summary.state)}</span>
+      <span class="status-chip state-{_state_class(model.summary.state)}">{_h(saas_vm.overview.display_status)}</span>
+      <span class="top-bar-kind">Workflow ID:</span>
+      <code class="top-bar-id" title="{_attr(saas_vm.overview.workflow_id)}">{_h(_short(saas_vm.overview.workflow_id, 28))}</code>
+      <span class="top-bar-date">{_h(_timestamp_label(saas_vm.overview.timestamp_ms))}</span>
     </div>
     <div class="top-bar-right">
-      <code class="top-bar-id" title="{_attr(model.summary.id)}">{_h(_short(model.summary.id, 28))}</code>
+      <button class="top-bar-action top-bar-action-primary" type="button" data-export-report>Export Report</button>
     </div>
   </header>
   <main class="content">
-    {summary_card}
+    {overview_section}
+    {candidate_dossiers_section}
     {candidates_section}
+    {candidate_comparison_section}
+    {cross_candidate_section}
+    {workflow_audit_section}
+    {agent_rationale_section}
+    <section id="reproducibility" class="card saas-section">
+      <header class="card-header">
+        <div><p class="card-eyebrow">Reproducibility</p><h2 class="card-title">Replay and audit package</h2></div>
+        <span class="card-meta">Stored run results</span>
+      </header>
+      {_repro_html(model)}
+    </section>
     <section id="appendix" class="appendix-divider">
       <span class="appendix-divider-label">Appendix · full run detail</span>
-      <p class="appendix-divider-note">Supporting evidence behind the candidate review above — the workflow DAG, analytics, per-tool widgets, the agent's reasoning, and replay info.</p>
+      <p class="appendix-divider-note">Supporting evidence behind the candidate review above — analytics, per-tool widgets, the agent's reasoning, artifact audit, and replay info.</p>
     </section>
-    {workflow_section}
     {plots_section}
     {msa_section}
-    <section id="details" class="card">
+    <details id="details" class="card appendix-panel">
+      <summary><span>Per-tool results</span><small>Raw tool widgets and candidate-filtered evidence</small></summary>
       <header class="card-header">
         <div><p class="card-eyebrow">Tool results</p><h2 class="card-title">Per-tool widgets</h2></div>
       </header>
       <p class="widget-explainer">These panels are organised by <strong>workflow node</strong> (one tool execution). Use the <strong>sample selector</strong> to filter every panel to a single candidate — the cards inside each block are then rebuilt from <strong>that design's own</strong> metrics, so this section tracks your candidate selection just like the review console above. A node that never processed the selected sample says so, and input / retrieval steps with no per-sample result stay visible for all. The raw JSON output is collapsed at the bottom of each panel for reference.</p>
       {_node_details(model.graph.nodes, _per_tool_cand_order(review))}
-    </section>
+    </details>
     {availability_section}
     {merge_audit_section}
     {conversation_section}
-    <section id="reproducibility" class="card">
-      <header class="card-header">
-        <div><p class="card-eyebrow">Reproducibility</p><h2 class="card-title">Replay command</h2></div>
-      </header>
-      {_repro_html(model)}
-    </section>
   </main>
   {threedmol_script}
   {viewer_data_script}
@@ -2775,6 +4192,10 @@ def _viewer_block(
   {plddt_note}
   {_structure_sequence_track(sequence_str, dom_id, chain_context)}
   <div class="structure-viewer" id="{_attr(dom_id)}" data-structure-id="{_attr(dom_id)}"></div>
+  <div class="structure-health" data-target="{_attr(dom_id)}" hidden>
+    <strong>Structure viewer unavailable.</strong>
+    <span>The viewer could not display this structure. Reload the page, close other GPU-heavy tabs, or reopen this report in a browser with WebGL enabled. Structure downloads remain available below.</span>
+  </div>
   <div class="structure-legend" data-legend="{_attr(default_colour)}">
     <span class="legend-text">Very low</span>
     <span class="legend-gradient"></span>
@@ -8286,26 +9707,37 @@ def _compact_inline(value: Any) -> str:
 
 
 def _repro_html(model: ReportModel) -> str:
-    """Reproducibility block — show only the replay command(s).
-
-    Per the simplified report contract, the long lists of IDs / tool versions
-    / params hashes / artifact SHA-256 are noisy chrome that's already
-    embedded in the per-tool widget metadata. The replay command is the one
-    piece of information a human actually re-uses, so it's the only thing we
-    surface here.
-    """
+    """Product-grade reproducibility block backed by recorded audit fields."""
     repro = model.reproducibility
     if repro is None or not repro.replay_commands:
         return "<p class='empty'>No replay command available.</p>"
     commands = "".join(
-        f'<div class="cmd"><pre>{_h(cmd)}</pre>'
+        f'<div class="cmd repro-command"><pre>{_h(cmd)}</pre>'
         f'<button class="copy-btn" data-copy="{_attr(cmd)}">Copy</button></div>'
         for cmd in repro.replay_commands
     )
+    ids = ", ".join(repro.ids[:3]) + ("..." if len(repro.ids) > 3 else "")
+    id_line = (
+        f'<p class="repro-id-line"><span>Recorded IDs</span><code>{_h(ids)}</code></p>'
+        if repro.ids
+        else ""
+    )
+    support_cards = (
+        '<div class="repro-support-grid">'
+        '<a class="repro-support-card" href="#details"><span>Technical provenance</span><strong>Per-tool results</strong></a>'
+        '<a class="repro-support-card" href="#conversation"><span>Agent record</span><strong>Full agent transcript</strong></a>'
+        "</div>"
+    )
     return (
-        '<p class="note">Run this command in the same workspace to regenerate '
-        'this report from the stored job results — no recomputation.</p>'
+        '<div class="repro-panel">'
+        '<div class="repro-copy-block">'
+        '<p class="note">Run from the same workspace to regenerate this report '
+        'from stored job results. No design tools are re-executed.</p>'
         f'{commands}'
+        '</div>'
+        f'{support_cards}'
+        f'{id_line}'
+        '</div>'
     )
 
 
@@ -8634,7 +10066,8 @@ def _agent_transcript_section(transcript: AgentTranscript) -> str:
         else ""
     )
 
-    return f"""<section id="conversation" class="card card-conversation">
+    return f"""<details id="conversation" class="card card-conversation appendix-panel">
+  <summary><span>Full Agent Transcript</span><small>Prompt, plan, final answer, messages, and tool calls</small></summary>
   <header class="card-header">
     <div>
       <p class="card-eyebrow">Conversation</p>
@@ -8647,7 +10080,7 @@ def _agent_transcript_section(transcript: AgentTranscript) -> str:
   {plan_html}
   {final_html}
   {transcript_html}
-</section>"""
+</details>"""
 
 
 def _agent_user_block(query: str) -> str:
@@ -9800,7 +11233,7 @@ def _css() -> str:
   --ok:#f39e3a;       --ok-soft:#fcebdd;    --ok-line:#f8c98a;
   --poor:#cc0980;     --poor-soft:#f4cfe6;  --poor-line:#e89ec5;
   --warn:#92400e;
-  --sidebar-w: 220px;
+  --sidebar-w: 280px;
   --topbar-h: 60px;
   --shadow-card: 0 1px 2px rgba(76, 29, 149, 0.06);
   --shadow-card-hover: 0 4px 16px rgba(76, 29, 149, 0.10);
@@ -12163,7 +13596,7 @@ a.lit-title:hover { color:var(--accent); text-decoration:underline; }
   display:inline; margin-left:5px; vertical-align:baseline;
   font-size:11px; font-weight:550; color:var(--muted);
 }
-.qc-card-src::before { content:"\00b7 "; color:var(--subtle); }
+.qc-card-src::before { content:"\\00b7 "; color:var(--subtle); }
 .metric-gauge { flex-shrink:0; }
 .gauge-value {
   font-family: Inter, system-ui, sans-serif;
@@ -12775,13 +14208,14 @@ code {
   color:var(--subtle);
 }
 .appendix-divider {
-  margin:34px 0 6px; padding:14px 4px 0; border-top:1px solid var(--line-strong);
+  margin:38px 0 8px; padding:16px 4px 0; border-top:1px dashed var(--line-strong);
+  opacity:.82;
 }
 .appendix-divider-label {
   display:inline-block; font-size:12px; font-weight:700; letter-spacing:.06em;
   text-transform:uppercase; color:var(--muted);
 }
-.appendix-divider-note { margin:4px 0 0; color:var(--subtle); font-size:13px; max-width:64ch; }
+.appendix-divider-note { margin:4px 0 0; color:var(--subtle); font-size:12.5px; max-width:64ch; }
 
 .console-banner {
   margin:0 0 16px; padding:14px 16px; border-radius:12px;
@@ -12958,11 +14392,2331 @@ code {
 .metric-label { font-size:12px; color:var(--ink); display:flex; align-items:baseline; gap:5px; flex-wrap:wrap; }
 /* Provenance — restrained inline "· Tool" text naming the source model. */
 .metric-src { font-size:11px; font-weight:550; color:var(--muted); }
-.metric-src::before { content:"\00b7 "; color:var(--subtle); }
+.metric-src::before { content:"\\00b7 "; color:var(--subtle); }
 .metric-value { font-size:13px; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; }
 .tool-evidence { margin-bottom:8px; border:1px solid var(--line); border-radius:9px; padding:8px 12px; }
 .tool-evidence summary { font-size:13px; font-weight:600; cursor:pointer; color:var(--ink); }
 .tool-evidence-json { margin:8px 0 0; font-size:11px; max-height:320px; overflow:auto; background:#faf9fe; padding:10px; border-radius:7px; }
+
+/* SaaS redesign scaffold */
+:root {
+  --saas-bg:#f7f8fb;
+  --saas-violet:#5b35e6;
+  --saas-blue:#2276d9;
+  --saas-teal:#0f9f9a;
+  --saas-green:#49a51d;
+  --saas-amber:#b7791f;
+  --saas-red:#c2410c;
+}
+body { background:var(--saas-bg); }
+.sidebar {
+  background:linear-gradient(180deg,#ffffff 0%,#f7f6ff 100%);
+  color:var(--ink);
+  border-right:1px solid var(--line);
+  box-shadow:1px 0 16px rgba(15,23,42,.04);
+}
+.sidebar-brand { color:var(--ink); align-items:flex-start; }
+.brand-text { display:flex; flex-direction:column; gap:1px; line-height:1.15; }
+.brand-text strong { font-size:15px; }
+.brand-text small { font-size:10.5px; color:var(--muted); font-weight:500; }
+.sidebar-meta { background:#fff; border-color:var(--line); }
+.sidebar-meta-label { color:var(--subtle); }
+.sidebar-meta-value { color:var(--ink); }
+.side-nav-item { color:#2d2a4a; }
+.side-nav-item:hover { background:var(--accent-soft); color:var(--saas-violet); }
+.side-nav-glyph { color:var(--saas-violet); }
+.sidebar-foot { color:var(--muted); border-top-color:var(--line); }
+.top-bar { min-height:var(--topbar-h); }
+.top-bar-left, .top-bar-right { gap:12px; }
+.top-bar-right { display:flex; align-items:center; flex-wrap:wrap; }
+.top-bar-date { font-size:13px; color:var(--muted); }
+.top-bar-action {
+  display:inline-flex; align-items:center; justify-content:center;
+  min-height:34px; padding:0 13px; border-radius:7px;
+  border:1px solid var(--line-strong); background:#fff;
+  color:var(--ink); text-decoration:none; font-size:12.5px; font-weight:600;
+  font-family:inherit; cursor:pointer;
+}
+.top-bar-action-primary {
+  background:var(--saas-violet); border-color:var(--saas-violet); color:#fff;
+  box-shadow:0 8px 18px rgba(91,53,230,.18);
+}
+.content { max-width:1500px; padding:24px 28px 56px; }
+.saas-section { border-radius:8px; padding:18px 20px; }
+.saas-section-subtitle { margin:4px 0 0; color:var(--muted); font-size:13.5px; }
+.saas-overview { background:transparent; border:none; box-shadow:none; padding:0; }
+.saas-overview:hover { box-shadow:none; }
+.saas-overview-grid {
+  display:grid; grid-template-columns:1.05fr 1.1fr 2.35fr 1.1fr;
+  gap:12px; align-items:stretch;
+}
+.saas-card {
+  background:#fff; border:1px solid var(--line-strong); border-radius:8px;
+  padding:14px 15px; box-shadow:0 1px 2px rgba(15,23,42,.035);
+}
+.saas-card p { margin:0; font-size:13.5px; line-height:1.55; color:var(--ink); }
+.saas-icon-card-head {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  margin:0 0 9px;
+}
+.saas-icon-card-head .saas-card-kicker {
+  margin:0 !important;
+}
+.overview-card-icon {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:26px;
+  height:26px;
+  border-radius:8px;
+  color:var(--saas-violet);
+  background:#f3efff;
+  border:1px solid #e4dcff;
+  flex:0 0 auto;
+}
+.overview-card-icon svg {
+  width:16px;
+  height:16px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:2;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+.saas-count-warning {
+  margin:8px 0 0; color:var(--muted); font-size:12px;
+}
+.saas-card-kicker {
+  margin:0 0 8px !important; color:var(--saas-violet) !important;
+  font-size:11.5px !important; font-weight:700; letter-spacing:.01em;
+}
+.saas-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:0; padding:0; overflow:hidden; }
+.saas-stat { padding:15px 14px; border-left:1px solid var(--line); min-width:0; }
+.saas-stat:first-child { border-left:none; }
+.saas-stat-value {
+  display:block; color:var(--saas-violet); font-size:28px; line-height:1; font-weight:760;
+  font-variant-numeric:tabular-nums;
+}
+.saas-stat-label { display:block; margin-top:6px; font-size:12px; color:var(--ink); font-weight:700; }
+.saas-stat-detail { display:block; margin-top:3px; font-size:11.5px; color:var(--muted); }
+.saas-stat .prov { margin-top:7px; display:inline-block; }
+.saas-caveat { border-color:#f1d7a7; background:#fffaf0; }
+.saas-caveat .saas-card-kicker { color:var(--saas-amber) !important; }
+.saas-caveat-ok { border-color:var(--line-strong); background:#fff; }
+.saas-rationale-grid {
+  display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px;
+}
+.saas-stage-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.saas-stage-chips span, .saas-chip {
+  display:inline-flex; align-items:center; gap:4px;
+  min-height:24px; padding:3px 8px; border-radius:6px;
+  background:#f6f4ff; border:1px solid #e2ddff; color:#31216f;
+  font-size:11.5px; font-weight:650; white-space:nowrap;
+}
+.saas-chip b { font-weight:750; }
+.saas-chip-muted { color:var(--muted); background:#f8f8fb; border-color:var(--line); }
+.saas-decisions ul { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:8px; }
+.saas-decisions li { border-top:1px solid var(--line); padding-top:8px; }
+.saas-decisions li:first-child { border-top:none; padding-top:0; }
+.saas-decisions span { font-size:12px; font-weight:700; color:var(--ink); }
+.saas-table-wrap { overflow:auto; }
+.saas-table { width:100%; border-collapse:separate; border-spacing:0; font-size:13px; }
+.saas-table th {
+  text-align:left; padding:9px 10px; color:var(--muted); font-size:11px;
+  text-transform:uppercase; letter-spacing:.06em; border-bottom:1px solid var(--line);
+}
+.saas-table td { padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }
+.saas-table code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+.comparison-summary-row {
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:12px;
+}
+.comparison-summary-card {
+  border:1px solid var(--line); border-radius:8px; background:#fff; padding:11px 12px;
+  display:flex; justify-content:space-between; align-items:center; gap:10px;
+}
+.comparison-summary-card span { color:var(--muted); font-size:12px; font-weight:700; }
+.comparison-summary-card strong { color:var(--saas-violet); font-size:20px; line-height:1; }
+.comparison-matrix-wrap {
+  border:1px solid var(--line); border-radius:9px; background:#fff;
+}
+.candidate-comparison-matrix th,
+.candidate-comparison-matrix td { white-space:nowrap; }
+.candidate-comparison-matrix .comparison-verdict {
+  min-width:220px; max-width:320px; white-space:normal; color:#3b3268; font-weight:550;
+}
+.candidate-comparison-matrix tr:first-child td {
+  background:#fcfbff;
+}
+.comparison-rank {
+  display:inline-flex; min-width:26px; min-height:26px; align-items:center; justify-content:center;
+  border-radius:7px; background:#eef2ff; color:#31216f; font-weight:850;
+}
+.matrix-chip {
+  display:inline-flex; align-items:center; min-height:24px; padding:2px 8px;
+  border-radius:6px; background:#f6f4ff; border:1px solid #e2ddff;
+  color:#20163f; font-weight:750; font-variant-numeric:tabular-nums;
+}
+.metric-missing {
+  display:inline-flex; min-height:24px; align-items:center; padding:2px 8px;
+  border-radius:6px; border:1px dashed var(--line-strong); color:var(--muted);
+  background:#fafafa; font-size:11.5px; font-weight:650;
+}
+.comparison-note { margin:10px 0 0; color:var(--muted); font-size:12.5px; }
+.saas-dossier-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+.saas-dossier-card {
+  border:1px solid var(--line); border-radius:8px; padding:14px; background:#fff;
+}
+.saas-dossier-card h3 {
+  margin:0 0 8px; font-size:15px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.saas-dossier-card p { margin:0 0 10px; font-size:13px; color:var(--muted); }
+.saas-chip-row { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
+.saas-dossier-meta { display:flex; flex-wrap:wrap; gap:6px; }
+.saas-dossier-meta span {
+  font-size:11px; color:var(--muted); background:#fafafa; border:1px solid var(--line);
+  border-radius:5px; padding:2px 6px;
+}
+.saas-pattern-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+.saas-pattern-card { border:1px solid var(--line); border-radius:8px; background:#fff; padding:13px; min-height:132px; }
+.saas-pattern-card h3 { margin:0 0 10px; font-size:13px; }
+.saas-pattern-card p { margin:8px 0 0; color:var(--muted); font-size:12px; }
+.saas-bars { height:72px; display:flex; align-items:flex-end; gap:4px; border-bottom:1px solid var(--line); }
+.saas-bars span {
+  flex:1; min-width:5px; border-radius:4px 4px 0 0;
+  background:linear-gradient(180deg,#7c5cff,#2aa7a0);
+}
+.saas-count-row { display:flex; justify-content:space-between; gap:8px; padding:5px 0; border-top:1px solid var(--line); }
+.saas-count-row:first-of-type { border-top:none; }
+.saas-count-row span { color:var(--muted); font-size:12px; }
+.saas-count-row b { font-size:12px; color:var(--ink); }
+.metric-range-card .range-line {
+  position:relative; height:8px; margin:28px 4px 18px; border-radius:999px;
+  background:linear-gradient(90deg,#ede9fe,#5eead4);
+}
+.metric-range-card .range-line span,
+.metric-range-card .range-line b {
+  position:absolute; top:50%; transform:translate(-50%,-50%);
+  width:12px; height:12px; border-radius:50%; background:#fff;
+  border:2px solid var(--saas-violet);
+}
+.metric-range-card .range-line b {
+  width:16px; height:16px; background:var(--saas-violet); border-color:#fff;
+  box-shadow:0 0 0 2px rgba(91,53,230,.25);
+}
+.saas-insight-note {
+  margin-top:12px; border:1px solid #ded8ff; border-radius:8px; background:#fbfaff;
+  padding:10px 12px; color:#3b3268; font-size:12.5px; line-height:1.45;
+}
+.saas-trace {
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;
+  list-style:none; padding:0; margin:0;
+}
+.saas-trace-stage {
+  position:relative; border:1px solid var(--line); background:#fff; border-radius:8px;
+  padding:14px 13px 12px;
+}
+.saas-trace-dot {
+  display:inline-block; width:28px; height:28px; border-radius:50%;
+  background:linear-gradient(135deg,var(--saas-violet),var(--saas-teal));
+  margin-bottom:8px;
+}
+.saas-trace-stage strong { display:block; font-size:13px; }
+.saas-trace-stage p { margin:5px 0; color:var(--muted); font-size:12px; }
+.saas-trace-stage small { color:var(--subtle); font-size:11px; }
+.candidate-review-board-layout {
+  grid-template-columns:minmax(520px, .82fr) minmax(720px, 1.18fr);
+  gap:20px;
+}
+.card-console {
+  border:none; background:transparent; box-shadow:none; padding:0;
+}
+.card-console:hover { box-shadow:none; }
+.card-console > .card-header,
+.card-console > .widget-explainer,
+.card-console > .console-banner {
+  margin-left:0; margin-right:0;
+}
+.card-console > .card-header {
+  padding:0 0 12px; border-bottom:none;
+}
+.candidate-review-board {
+  max-height:none; overflow:visible; padding:14px;
+  border:1px solid var(--line-strong); border-radius:10px; background:#fff;
+  box-shadow:0 8px 28px rgba(15,23,42,.04);
+}
+.candidate-board .board-group { margin-top:12px; }
+.candidate-board .board-group-head {
+  padding:8px 2px 10px; border-bottom:1px solid var(--line);
+}
+.candidate-board .board-group-title {
+  font-size:11px; color:#3b3268; letter-spacing:.08em; font-weight:850;
+}
+.candidate-board .board-group-count {
+  min-width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center;
+  border-radius:999px; background:#f3f0ff; color:var(--saas-violet);
+  font-weight:800; font-size:11px;
+}
+.candidate-board .board-group-count::before { content:none; }
+.candidate-board .board-group-cards { gap:10px; padding:10px 0 12px; }
+.candidate-board-row {
+  display:grid; grid-template-columns:1fr; align-items:start; gap:10px; width:100%;
+  padding:14px; border:1px solid var(--line); border-radius:10px;
+  background:#fff; text-align:left; cursor:pointer;
+  box-shadow:0 1px 2px rgba(15,23,42,.035);
+  transition:border-color .14s ease, box-shadow .14s ease, transform .14s ease;
+}
+.candidate-board-row:hover {
+  border-color:#cfc8ff; box-shadow:0 12px 28px rgba(91,53,230,.09);
+  transform:translateY(-1px);
+}
+.candidate-board-row[aria-selected="true"] {
+  border-color:var(--saas-violet); box-shadow:0 0 0 1px rgba(91,53,230,.18), 0 14px 32px rgba(91,53,230,.10);
+  background:#fcfbff;
+}
+.candidate-board-row.is-final {
+  border-color:#8c75ff; background:linear-gradient(180deg,#ffffff 0%,#fbf9ff 100%);
+}
+.candidate-card-top {
+  display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+}
+.candidate-card-title { min-width:0; display:flex; flex-direction:column; gap:5px; align-items:flex-end; }
+.candidate-board-row .crow-rank { display:flex; align-items:center; justify-content:center; }
+.candidate-board-row .crow-rank-num,
+.candidate-board-row .crow-rank-final {
+  min-width:32px; min-height:32px; display:inline-flex; align-items:center; justify-content:center;
+  border-radius:8px; background:#eef2ff; color:#31216f; font-size:13px; font-weight:850;
+}
+.candidate-board-row.is-final .crow-rank-final {
+  background:var(--saas-violet); color:#fff;
+}
+.board-row-id {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:14px; font-weight:850;
+  color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.status-badge {
+  display:inline-flex; align-items:center; min-height:22px; padding:2px 8px;
+  border-radius:999px; background:#f4f1ff; border:1px solid #ded8ff;
+  color:#37206f; font-size:10.5px; font-weight:800;
+}
+.status-badge-final { background:#ecfdf3; border-color:#bbf7d0; color:#067647; }
+.status-badge-ranked { background:#eff6ff; border-color:#bfdbfe; color:#1d4ed8; }
+.status-badge-incomplete { background:#fff7ed; border-color:#fed7aa; color:#9a3412; }
+.status-badge-failed { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
+.board-row-verdict { color:#302a52; font-size:13px; line-height:1.42; font-weight:600; }
+.board-row-metrics { display:flex; flex-wrap:wrap; gap:6px; }
+.board-row-footer {
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding-top:8px; border-top:1px solid var(--line);
+}
+.candidate-assets, .comparison-assets { display:flex; flex-wrap:wrap; gap:5px; }
+.asset-pill {
+  display:inline-flex; align-items:center; min-height:22px; padding:2px 7px;
+  border-radius:6px; font-size:10.5px; font-weight:750;
+}
+.asset-pill.is-on { background:#f0fdfa; border:1px solid #99f6e4; color:#0f766e; }
+.asset-pill.is-missing { background:#f8fafc; border:1px solid var(--line); color:var(--muted); }
+.open-dossier-action {
+  color:var(--saas-violet); font-size:12px; padding:6px 10px; border:1px solid #ded8ff;
+  border-radius:7px; background:#f6f4ff; white-space:nowrap;
+}
+.console-detail {
+  min-height:720px; border-color:var(--line-strong); border-radius:10px; background:#fff;
+  box-shadow:0 8px 28px rgba(15,23,42,.04);
+}
+.candidate-dossier-primary {
+  display:grid; grid-template-columns:1fr;
+  gap:14px; align-items:start; margin-top:14px;
+}
+.dossier-summary-panel {
+  display:grid; grid-template-columns:minmax(0,1.1fr) minmax(260px,.9fr) auto;
+  gap:14px; align-items:start; margin:0 0 14px;
+  border:1px solid #ded8ff; background:linear-gradient(180deg,#ffffff 0%,#fbfaff 100%);
+  border-radius:10px; padding:14px;
+}
+.dossier-verdict { margin:0; font-size:14px; line-height:1.5; color:#20163f; font-weight:650; }
+.dossier-decision-points { margin:0; padding-left:18px; color:#3b3268; font-size:12.5px; line-height:1.45; }
+.dossier-decision-points li + li { margin-top:4px; }
+.dossier-structure-primary {
+  border:1px solid var(--line); border-radius:8px; background:#fff; overflow:hidden;
+}
+.dossier-structure-primary .structure-section {
+  border:none; border-radius:0; min-height:560px;
+}
+.dossier-structure-primary .structure-viewer {
+  min-height:420px; height:clamp(420px, 48vh, 640px);
+}
+.dossier-evidence-primary {
+  border:1px solid var(--line); border-radius:8px; background:#fff; padding:14px;
+}
+.dossier-evidence-primary h4,
+.dossier-alert h4 {
+  margin:0 0 10px; font-size:12px; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--muted);
+}
+.dossier-evidence-primary .score-grid { grid-template-columns:1fr; }
+.candidate-dossier-primary .dossier-evidence-primary .score-grid {
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+}
+.dossier-alert-grid {
+  display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:14px 0;
+}
+.dossier-alert {
+  border:1px solid var(--line); border-radius:8px; background:#fff; padding:12px 14px;
+}
+.dossier-risk { background:#fffaf0; border-color:#f1d7a7; }
+.dossier-missing { background:#f8fbff; border-color:#cfe0ff; }
+.dossier-alert ul { margin:0; padding-left:18px; color:var(--ink); font-size:12.5px; }
+.dossier-alert li + li { margin-top:4px; }
+.dossier-no-structure { padding:14px; }
+.dossier-advanced {
+  margin-top:14px; border:1px solid var(--line); border-radius:8px; background:#fff;
+}
+.dossier-advanced > summary {
+  cursor:pointer; padding:10px 13px; font-size:12.5px; font-weight:800;
+  color:var(--saas-violet); list-style:none;
+}
+.dossier-advanced > summary::-webkit-details-marker { display:none; }
+.dossier-advanced[open] > summary { border-bottom:1px solid var(--line); }
+.dossier-advanced .cand-tabs,
+.dossier-advanced .cand-tabpanels { margin-left:12px; margin-right:12px; }
+.structure-health {
+  margin:10px 14px; padding:10px 12px; border:1px solid #f1d7a7; border-radius:7px;
+  background:#fffaf0; color:#7c2d12; font-size:12px;
+}
+.structure-health strong { display:block; margin-bottom:2px; color:#7c2d12; }
+.structure-viewer {
+  min-height:420px;
+  contain:layout paint;
+}
+.structure-viewer-context-lost {
+  outline:2px solid #f1d7a7;
+  outline-offset:-2px;
+}
+.appendix-panel {
+  padding:0; overflow:hidden; background:#fbfbfd; border-style:dashed;
+  box-shadow:none; opacity:.92;
+}
+.appendix-panel:hover { box-shadow:0 4px 18px rgba(15,23,42,.04); opacity:1; }
+.appendix-panel > summary {
+  cursor:pointer; list-style:none; display:flex; justify-content:space-between; align-items:center;
+  gap:16px; padding:13px 18px; color:#3b3268; font-weight:800;
+}
+.appendix-panel > summary::-webkit-details-marker { display:none; }
+.appendix-panel > summary::before {
+  content:"+"; width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center;
+  border:1px solid var(--line-strong); border-radius:6px; color:var(--saas-violet); margin-right:6px;
+  background:#fff;
+}
+.appendix-panel[open] > summary::before { content:"-"; }
+.appendix-panel > summary span { flex:1; }
+.appendix-panel > summary small { color:var(--muted); font-weight:600; }
+.appendix-panel > :not(summary) { margin-left:20px; margin-right:20px; }
+.appendix-panel > :last-child { margin-bottom:20px; }
+@media (max-width: 1200px) {
+  .saas-overview-grid { grid-template-columns:1fr 1fr; }
+  .saas-stats { grid-column:1 / -1; }
+  .saas-rationale-grid, .saas-pattern-grid { grid-template-columns:1fr 1fr; }
+  .candidate-review-board-layout, .candidate-dossier-primary { grid-template-columns:1fr; }
+  .dossier-summary-panel { grid-template-columns:1fr; }
+}
+@media (max-width: 720px) {
+  .saas-overview-grid, .saas-rationale-grid, .saas-pattern-grid { grid-template-columns:1fr; }
+  .saas-stats { grid-template-columns:1fr 1fr; }
+  .top-bar { align-items:flex-start; flex-direction:column; height:auto; padding:10px 16px; }
+  .top-bar-right { width:100%; }
+  .dossier-alert-grid { grid-template-columns:1fr; }
+  .board-row-footer, .candidate-card-top { align-items:flex-start; flex-direction:column; }
+}
+
+/* SaaS visual polish pass.
+   This final layer only changes presentation. It intentionally keeps the
+   existing report hierarchy, view-model data flow, and 3Dmol viewer logic. */
+:root {
+  --app-bg:#f8fafc;
+  --app-bg-soft:#fbfcff;
+  --surface:#ffffff;
+  --surface-soft:#f7f8fc;
+  --surface-tint:#fbfaff;
+  --surface-violet:#f5f2ff;
+  --surface-teal:#effdfb;
+  --border:#e6e8f0;
+  --border-strong:#d9ddec;
+  --text:#111827;
+  --text-soft:#374151;
+  --text-muted:#667085;
+  --text-subtle:#98a2b3;
+  --primary:#5b35e6;
+  --primary-700:#4320c8;
+  --primary-soft:#f1edff;
+  --blue:#2563eb;
+  --teal:#0f9f9a;
+  --success:#16a34a;
+  --success-soft:#ecfdf3;
+  --warning:#b7791f;
+  --warning-soft:#fffbeb;
+  --danger:#dc2626;
+  --danger-soft:#fef2f2;
+  --shadow-xs:0 1px 2px rgba(15,23,42,.04);
+  --shadow-sm:0 6px 18px rgba(15,23,42,.055);
+  --shadow-md:0 14px 36px rgba(15,23,42,.075);
+  --radius-xs:5px;
+  --radius-sm:7px;
+  --radius-md:8px;
+  --radius-lg:10px;
+}
+
+html { scroll-behavior:smooth; }
+body {
+  background:
+    radial-gradient(circle at 45% -10%, rgba(91,53,230,.07), transparent 32%),
+    linear-gradient(180deg,#fbfcff 0%,var(--app-bg) 42%,#f6f8fc 100%);
+  color:var(--text);
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  overflow-x:hidden;
+  transition:grid-template-columns .18s ease;
+}
+body.sidebar-collapsed {
+  --sidebar-w:74px;
+}
+
+a, button, summary { -webkit-tap-highlight-color:transparent; }
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible,
+.board-card:focus-visible,
+.candidate-board-row:focus-visible,
+.top-bar-action:focus-visible {
+  outline:3px solid rgba(91,53,230,.24);
+  outline-offset:2px;
+}
+
+.sidebar {
+  background:rgba(255,255,255,.92);
+  backdrop-filter:blur(18px);
+  border-right:1px solid var(--border);
+  box-shadow:1px 0 18px rgba(16,24,40,.045);
+  overflow:visible;
+  z-index:30;
+}
+.sidebar-brand {
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:20px 22px 20px;
+  gap:10px;
+  margin:0 -14px 14px;
+  border-bottom:1px solid var(--border);
+  overflow:visible;
+}
+.sidebar-brand-main {
+  display:flex;
+  align-items:center;
+  gap:11px;
+  min-width:0;
+  padding-right:30px;
+}
+.brand-lockup {
+  display:block;
+  position:relative;
+  width:238px;
+  height:80px;
+  overflow:hidden;
+  flex:0 0 238px;
+}
+.brand-lockup img {
+  position:absolute;
+  width:330px;
+  height:auto;
+  left:50%;
+  top:53%;
+  transform:translate(-50%, -50%);
+  display:block;
+  max-width:none;
+  pointer-events:none;
+}
+.brand-fallback {
+  color:var(--text);
+  font-size:17px;
+  font-weight:820;
+  line-height:1.15;
+  white-space:nowrap;
+}
+.brand-mark {
+  width:40px;
+  height:40px;
+  border-radius:0;
+  display:block;
+  flex:0 0 auto;
+  box-shadow:none;
+}
+.brand-text strong {
+  color:var(--text);
+  font-size:17px;
+  font-weight:820;
+  line-height:1.15;
+  white-space:nowrap;
+}
+.brand-text small {
+  color:var(--text-muted);
+  font-size:12px;
+  white-space:nowrap;
+}
+.sidebar-toggle {
+  position:absolute;
+  right:-24px;
+  top:16px;
+  z-index:70;
+  width:40px;
+  height:40px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:12px;
+  border:1px solid #d8dded;
+  background:#fff;
+  color:var(--primary);
+  box-shadow:0 12px 26px rgba(16,24,40,.13);
+  cursor:pointer;
+  transition:background .14s ease, border-color .14s ease, box-shadow .14s ease, transform .14s ease;
+}
+.sidebar-toggle:hover {
+  background:#f7f4ff;
+  border-color:#cfc4ff;
+  box-shadow:0 14px 30px rgba(91,53,230,.16);
+  transform:translateX(-1px);
+}
+.sidebar-toggle svg {
+  width:19px;
+  height:19px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:2.4;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  transition:transform .18s ease;
+}
+body.sidebar-collapsed .sidebar-toggle svg {
+  transform:rotate(180deg);
+}
+body.sidebar-collapsed .brand-text,
+body.sidebar-collapsed .sidebar-meta,
+body.sidebar-collapsed .side-nav-label,
+body.sidebar-collapsed .side-nav-divider {
+  display:none;
+}
+body.sidebar-collapsed .sidebar {
+  padding-left:10px;
+  padding-right:10px;
+}
+body.sidebar-collapsed .sidebar-brand {
+  justify-content:center;
+  padding-left:10px;
+  padding-right:10px;
+}
+body.sidebar-collapsed .sidebar-brand-main {
+  justify-content:center;
+  padding-right:0;
+}
+body.sidebar-collapsed .brand-lockup {
+  width:44px;
+  height:44px;
+  flex-basis:44px;
+  border-radius:12px;
+}
+body.sidebar-collapsed .brand-lockup img {
+  width:116px;
+  left:22%;
+}
+body.sidebar-collapsed .side-nav {
+  padding-left:4px;
+  padding-right:4px;
+}
+body.sidebar-collapsed .side-nav-item {
+  justify-content:center;
+  padding:0;
+}
+body.sidebar-collapsed .side-nav-glyph {
+  margin:0;
+}
+.side-nav { padding:12px 12px; gap:5px; }
+.side-nav-item {
+  min-height:38px;
+  padding:0 11px;
+  border-radius:var(--radius-md);
+  color:#27304a;
+  font-size:13px;
+  font-weight:650;
+  transition:background .14s ease, color .14s ease, box-shadow .14s ease, transform .14s ease;
+}
+.side-nav-item:hover {
+  background:var(--primary-soft);
+  color:var(--primary-700);
+  transform:translateX(1px);
+}
+.side-nav-item.active,
+.side-nav-item[aria-current="page"] {
+  background:linear-gradient(180deg,#f6f3ff 0%,#eee9ff 100%);
+  color:var(--primary-700);
+  box-shadow:inset 0 0 0 1px #ded6ff;
+}
+.side-nav-glyph {
+  width:18px;
+  color:var(--primary);
+  opacity:.92;
+}
+.side-nav-glyph svg {
+  width:17px;
+  height:17px;
+  display:block;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:2;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+.sidebar-meta {
+  margin:10px 13px;
+  padding:11px 12px;
+  border-radius:var(--radius-md);
+  background:var(--surface);
+  border:1px solid var(--border);
+  box-shadow:var(--shadow-xs);
+}
+.sidebar-meta-value {
+  font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size:13px;
+  font-weight:650;
+  letter-spacing:0;
+  line-height:1.35;
+  color:#27304a;
+}
+.sidebar-foot {
+  margin:auto 12px 0;
+  padding:12px 4px 4px;
+  border:none;
+  background:transparent;
+  box-shadow:none;
+  color:#667085;
+  font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size:12px;
+  font-weight:600;
+  letter-spacing:.01em;
+}
+body.sidebar-collapsed .sidebar-foot {
+  justify-content:center;
+  margin-left:0;
+  margin-right:0;
+}
+
+.top-bar {
+  background:rgba(255,255,255,.86);
+  backdrop-filter:blur(18px);
+  border-bottom:1px solid var(--border);
+  box-shadow:0 1px 2px rgba(16,24,40,.03);
+  padding:0 24px;
+  gap:16px;
+}
+.top-bar-left { min-width:0; flex:1 1 auto; }
+.top-bar-right { flex:0 1 auto; justify-content:flex-end; min-width:0; }
+.top-bar-status {
+  border:1px solid #b8efcf;
+  background:var(--success-soft);
+  color:#067647;
+  box-shadow:none;
+}
+.top-bar-workflow {
+  min-width:0;
+  color:#344054;
+  font-size:13px;
+}
+.top-bar-date {
+  color:var(--text-muted);
+  white-space:nowrap;
+}
+.top-bar-action {
+  min-height:34px;
+  border-radius:var(--radius-sm);
+  border-color:var(--border-strong);
+  background:var(--surface);
+  color:#293047;
+  box-shadow:var(--shadow-xs);
+  transition:background .14s ease, border-color .14s ease, box-shadow .14s ease, transform .14s ease;
+}
+.top-bar-action:hover {
+  background:#fbfbff;
+  border-color:#cfd4e4;
+  box-shadow:var(--shadow-sm);
+  transform:translateY(-1px);
+}
+.top-bar-action-primary {
+  border-color:var(--primary);
+  background:linear-gradient(180deg,#6849ee 0%,var(--primary) 100%);
+  color:#fff;
+  box-shadow:0 10px 22px rgba(91,53,230,.22);
+}
+
+.content {
+  max-width:1540px;
+  padding:26px 30px 64px;
+  min-width:0;
+}
+.main,
+.content,
+.saas-section,
+.card,
+.saas-card,
+.console-detail,
+.candidate-board-row {
+  min-width:0;
+}
+.section,
+.saas-section,
+.card {
+  border-radius:var(--radius-lg);
+  border-color:var(--border);
+  background:rgba(255,255,255,.96);
+  box-shadow:var(--shadow-xs);
+}
+.section:hover,
+.saas-section:hover,
+.card:hover {
+  box-shadow:var(--shadow-sm);
+}
+.saas-overview,
+.card-console {
+  background:transparent;
+  border:none;
+  box-shadow:none;
+}
+.saas-overview:hover,
+.card-console:hover {
+  box-shadow:none;
+}
+.card-header {
+  border-bottom-color:var(--border);
+  gap:12px;
+}
+.card-title,
+.section-title,
+.saas-section h2 {
+  color:var(--text);
+  font-weight:820;
+}
+.card-eyebrow,
+.kicker,
+.saas-card-kicker,
+.dossier-evidence-primary h4,
+.dossier-alert h4 {
+  color:#6b5aa9 !important;
+  letter-spacing:.055em;
+  font-weight:820;
+}
+.muted,
+.widget-explainer,
+.saas-section-subtitle,
+.comparison-note {
+  color:var(--text-muted);
+}
+.card-header .saas-section-subtitle {
+  margin-top:5px;
+  max-width:900px;
+}
+.card-console > .card-header {
+  align-items:flex-start;
+  padding-bottom:14px;
+}
+.card-console > .card-header + .console,
+.card-console > .card-header + .console-banner,
+.card-console > .card-header + .console-banner + .console {
+  margin-top:0;
+}
+
+.saas-overview-grid {
+  grid-template-columns:minmax(190px,1fr) minmax(220px,1.1fr) minmax(350px,2.05fr) minmax(190px,.95fr);
+  gap:14px;
+}
+body {
+  background:#ffffff;
+}
+.sidebar {
+  background:linear-gradient(180deg,#fbfbff 0%,#f6f7fb 100%);
+  border-right-color:#edf0f6;
+}
+.content {
+  background:#ffffff;
+}
+.saas-card {
+  border-color:var(--border);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-xs);
+}
+.saas-card:hover {
+  border-color:#d9dcf0;
+  box-shadow:var(--shadow-sm);
+}
+.saas-card p {
+  color:var(--text-soft);
+}
+.saas-stats {
+  border-radius:var(--radius-lg);
+  background:var(--surface);
+}
+.saas-stat {
+  padding:16px 10px 14px;
+  border-left-color:var(--border);
+}
+.saas-stat-value {
+  font-size:30px;
+  color:var(--primary);
+}
+.saas-stat-label {
+  font-size:11.5px;
+  overflow-wrap:normal;
+}
+.saas-stat-detail {
+  font-size:11px;
+}
+.saas-stat:nth-child(2) .saas-stat-value { color:var(--blue); }
+.saas-stat:nth-child(3) .saas-stat-value { color:var(--teal); }
+.saas-stat:nth-child(4) .saas-stat-value { color:var(--success); }
+.saas-caveat {
+  background:linear-gradient(180deg,#fffdf5 0%,#fffaf0 100%);
+  border-color:#f3d7a6;
+}
+.saas-caveat-ok {
+  background:linear-gradient(180deg,#ffffff 0%,#f8fbff 100%);
+  border-color:var(--border);
+}
+.prov,
+.status-badge,
+.asset-pill,
+.saas-chip,
+.matrix-chip,
+.metric-missing {
+  letter-spacing:0;
+}
+
+.candidate-review-board-layout {
+  grid-template-columns:minmax(500px,.76fr) minmax(680px,1.24fr);
+  gap:22px;
+  align-items:start;
+}
+.candidate-review-board {
+  padding:16px;
+  border-radius:var(--radius-lg);
+  border-color:var(--border);
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
+  box-shadow:var(--shadow-sm);
+}
+.candidate-board .board-group {
+  border-top:1px solid var(--border);
+  margin-top:14px;
+  padding-top:2px;
+}
+.candidate-board .board-group:first-child {
+  border-top:none;
+  margin-top:0;
+  padding-top:0;
+}
+.candidate-board .board-group-head {
+  border-bottom:none;
+  padding:7px 2px 8px;
+}
+.candidate-board .board-group-title {
+  color:#344054;
+  font-size:11px;
+  letter-spacing:.07em;
+}
+.candidate-board .board-group-count {
+  background:#f2f4f7;
+  color:#475467;
+}
+.candidate-board-row {
+  border-radius:var(--radius-lg);
+  border-color:var(--border);
+  background:var(--surface);
+  box-shadow:0 1px 2px rgba(16,24,40,.035);
+}
+.candidate-board-row:hover {
+  border-color:#cfc6ff;
+  box-shadow:0 14px 34px rgba(91,53,230,.095);
+}
+.candidate-board-row[aria-selected="true"] {
+  border-color:var(--primary);
+  background:linear-gradient(180deg,#ffffff 0%,#fbfaff 100%);
+  box-shadow:0 0 0 1px rgba(91,53,230,.18), 0 16px 36px rgba(91,53,230,.11);
+}
+.candidate-board-row.is-final {
+  border-color:#9b88ff;
+}
+.candidate-board-row .crow-rank-num,
+.candidate-board-row .crow-rank-final,
+.comparison-rank {
+  border-radius:var(--radius-sm);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.28);
+}
+.candidate-board-row.is-final .crow-rank-final {
+  background:linear-gradient(180deg,#6e50f2 0%,var(--primary) 100%);
+}
+.board-row-id {
+  color:#101828;
+}
+.board-row-verdict {
+  color:#344054;
+  font-weight:620;
+}
+.board-row-footer {
+  border-top-color:var(--border);
+}
+.open-dossier-action {
+  color:var(--primary-700);
+  border-color:#d9d2ff;
+  background:#f7f4ff;
+  font-weight:760;
+}
+.candidate-board-row:hover .open-dossier-action {
+  background:var(--primary);
+  color:#fff;
+  border-color:var(--primary);
+}
+.status-badge-final {
+  background:var(--success-soft);
+  border-color:#b7efca;
+  color:#067647;
+}
+.status-badge-ranked {
+  background:#eff6ff;
+  border-color:#c7d7fe;
+  color:#1d4ed8;
+}
+.status-badge-incomplete {
+  background:var(--warning-soft);
+  border-color:#f4d29b;
+  color:#92400e;
+}
+.status-badge-failed {
+  background:var(--danger-soft);
+  border-color:#fecaca;
+  color:#991b1b;
+}
+.saas-chip,
+.matrix-chip {
+  border-color:#e2ddff;
+  background:#f7f5ff;
+  color:#282056;
+}
+.saas-chip-muted,
+.metric-missing {
+  border-color:var(--border);
+  background:#f8fafc;
+  color:var(--text-muted);
+}
+.asset-pill.is-on {
+  background:var(--surface-teal);
+  border-color:#a7f3e8;
+  color:#0f766e;
+}
+.asset-pill.is-missing {
+  background:#f8fafc;
+  border-color:var(--border);
+}
+
+.console-detail {
+  border-radius:var(--radius-lg);
+  border-color:var(--border);
+  box-shadow:var(--shadow-sm);
+  position:sticky;
+  top:78px;
+}
+.cand-detail-head {
+  border-bottom-color:var(--border);
+  background:linear-gradient(180deg,#ffffff 0%,#fbfbff 100%);
+}
+.dossier-summary-panel {
+  border-radius:var(--radius-lg);
+  border-color:#ddd6ff;
+  background:linear-gradient(180deg,#ffffff 0%,#fbfaff 100%);
+  box-shadow:0 8px 24px rgba(91,53,230,.055);
+}
+.dossier-verdict {
+  color:#21164a;
+}
+.dossier-decision-points {
+  color:#3b3268;
+}
+.dossier-structure-primary {
+  border-radius:var(--radius-lg);
+  border-color:var(--border);
+  box-shadow:var(--shadow-xs);
+}
+.dossier-structure-primary .structure-section {
+  background:#ffffff;
+}
+.dossier-structure-primary .structure-viewer {
+  border-top-color:var(--border);
+}
+.dossier-structure-primary .downloads,
+.cand-tabpanel[data-tab="structure"] > .downloads {
+  margin:14px 14px 14px;
+  padding:12px 14px;
+  border:1px dashed var(--border);
+  border-radius:var(--radius-md);
+  background:#fbfcff;
+}
+.dossier-structure-primary .downloads-label,
+.cand-tabpanel[data-tab="structure"] > .downloads .downloads-label {
+  margin-right:2px;
+}
+.dossier-evidence-primary,
+.dossier-alert,
+.score-family,
+.saas-dossier-card,
+.saas-pattern-card,
+.comparison-summary-card,
+.comparison-matrix-wrap,
+.saas-trace-stage {
+  border-radius:var(--radius-lg);
+  border-color:var(--border);
+  background:var(--surface);
+  box-shadow:var(--shadow-xs);
+}
+.score-family:hover,
+.saas-dossier-card:hover,
+.saas-pattern-card:hover,
+.comparison-summary-card:hover,
+.saas-trace-stage:hover {
+  border-color:#d7dbea;
+  box-shadow:var(--shadow-sm);
+}
+.metric-row {
+  border-top-color:var(--border);
+}
+.metric-bar-row {
+  --family-accent:#4f46e5;
+  --family-soft:#f5f3ff;
+  padding:8px 0;
+  border-top:1px solid var(--border);
+}
+.metric-bar-row:first-child {
+  border-top:none;
+  padding-top:2px;
+}
+.metric-bar-top {
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  gap:12px;
+}
+.metric-bar-track {
+  display:block;
+  height:7px;
+  margin-top:7px;
+  border-radius:999px;
+  background:#eef1f7;
+  overflow:hidden;
+}
+.metric-bar-track i {
+  display:block;
+  height:100%;
+  border-radius:inherit;
+  background:var(--family-accent);
+}
+.metric-bar-row.is-missing .metric-bar-track i {
+  background:#cbd5e1;
+}
+.metric-value-pill {
+  display:inline-flex;
+  align-items:center;
+  min-height:22px;
+  padding:2px 8px;
+  border-radius:999px;
+  color:var(--family-accent);
+  background:var(--family-soft);
+  border:1px solid color-mix(in srgb, var(--family-accent) 22%, #ffffff);
+  font-size:12px;
+  text-transform:capitalize;
+}
+.score-family {
+  --family-accent:#4f46e5;
+  --family-soft:#f5f3ff;
+  position:relative;
+}
+.score-family::before {
+  content:"";
+  position:absolute;
+  left:0;
+  top:12px;
+  bottom:12px;
+  width:3px;
+  border-radius:999px;
+  background:var(--family-accent);
+  opacity:.72;
+}
+.score-family-interface-binding,
+.metric-bar-row.score-family-interface-binding {
+  --family-accent:#0f766e;
+  --family-soft:#ecfdf5;
+}
+.score-family-structure-confidence,
+.metric-bar-row.score-family-structure-confidence {
+  --family-accent:#2563eb;
+  --family-soft:#eff6ff;
+}
+.score-family-sequence-biophysics,
+.metric-bar-row.score-family-sequence-biophysics {
+  --family-accent:#7c3aed;
+  --family-soft:#f5f3ff;
+}
+.score-family-novelty-similarity,
+.metric-bar-row.score-family-novelty-similarity {
+  --family-accent:#c2410c;
+  --family-soft:#fff7ed;
+}
+.score-family-flags-liabilities,
+.metric-bar-row.score-family-flags-liabilities {
+  --family-accent:#16a34a;
+  --family-soft:#ecfdf3;
+}
+.metric-value {
+  color:#101828;
+  font-weight:780;
+}
+.dossier-alert-grid {
+  gap:12px;
+}
+.dossier-risk {
+  background:linear-gradient(180deg,#fffdf7 0%,#fffbeb 100%);
+  border-color:#f2d195;
+}
+.dossier-missing {
+  background:linear-gradient(180deg,#ffffff 0%,#f5f9ff 100%);
+  border-color:#cfe0ff;
+}
+.dossier-advanced {
+  border-color:var(--border);
+  background:#fbfcff;
+}
+.dossier-advanced > summary {
+  color:#4b35b4;
+}
+
+.comparison-summary-row {
+  gap:12px;
+}
+.comparison-summary-card {
+  padding:13px 14px;
+}
+.comparison-summary-card strong {
+  color:var(--primary);
+}
+.comparison-matrix-wrap {
+  overflow:hidden;
+}
+.candidate-comparison-matrix {
+  min-width:1080px;
+}
+.saas-table th {
+  background:#fbfcff;
+  color:#667085;
+  border-bottom-color:var(--border);
+}
+.saas-table td {
+  border-bottom-color:var(--border);
+}
+.candidate-comparison-matrix tr:first-child td {
+  background:#fbfaff;
+}
+.candidate-comparison-matrix .status-final td {
+  background:#fcfbff;
+}
+.candidate-comparison-matrix .status-final .comparison-rank {
+  background:linear-gradient(180deg,#6e50f2 0%,var(--primary) 100%);
+  color:#fff;
+}
+.candidate-comparison-matrix tbody tr:hover td {
+  background:#fbfcff;
+}
+.comparison-candidate-id {
+  display:block;
+  color:#111827;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px;
+  font-weight:850;
+}
+.comparison-candidate-sub {
+  display:block;
+  margin-top:3px;
+  color:#98a2b3;
+  font-size:10.5px;
+  font-weight:700;
+}
+.candidate-comparison-matrix .status-badge {
+  min-height:22px;
+  padding:2px 8px;
+  border-radius:999px;
+  font-size:11px;
+}
+.metric-cell-missing {
+  text-align:center;
+}
+.metric-missing {
+  min-width:22px;
+  min-height:22px;
+  justify-content:center;
+  padding:0 6px;
+  border-style:solid;
+  color:#a8a0bd;
+  background:#fbfcff;
+  font-size:13px;
+  font-weight:800;
+}
+.matrix-chip {
+  min-width:44px;
+  justify-content:center;
+}
+
+.saas-pattern-grid {
+  gap:14px;
+  grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+}
+.saas-pattern-card {
+  min-height:168px;
+  padding:15px;
+  border-radius:var(--radius-md);
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
+}
+.saas-pattern-card h3 {
+  color:#1f2937;
+  font-weight:800;
+  margin-bottom:12px;
+  letter-spacing:0;
+}
+.saas-pattern-card-empty {
+  background:#fbfcff;
+}
+.saas-pattern-card-empty .empty {
+  min-height:74px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border:1px dashed var(--border);
+  border-radius:var(--radius-sm);
+  color:#98a2b3;
+}
+.saas-missing-metrics-card {
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
+}
+.missing-metric-list {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin:2px 0 10px;
+}
+.missing-metric-token {
+  display:inline-flex;
+  align-items:center;
+  min-height:24px;
+  padding:3px 8px;
+  border:1px dashed var(--border);
+  border-radius:999px;
+  background:#f8fafc;
+  color:#667085;
+  font-size:11.5px;
+  font-weight:720;
+}
+.saas-bars {
+  border-bottom-color:var(--border);
+  height:76px;
+  gap:5px;
+  padding:0 2px;
+}
+.saas-bars span {
+  background:linear-gradient(180deg,#7c5cff 0%,#2fb7ad 100%);
+  box-shadow:inset 0 -1px 0 rgba(15,23,42,.08);
+  border-radius:5px 5px 0 0;
+}
+.saas-insight-note {
+  background:linear-gradient(180deg,#ffffff 0%,#f7f4ff 100%);
+  border-color:#ddd6ff;
+}
+.metric-range-card .range-line {
+  margin:14px 4px 12px;
+  height:7px;
+  background:linear-gradient(90deg,#ede9fe 0%,#d6f5ee 52%,#5eead4 100%);
+}
+.metric-range-card p {
+  font-size:11.5px;
+  font-weight:650;
+}
+.saas-count-card {
+  display:flex;
+  flex-direction:column;
+}
+.saas-count-row {
+  align-items:center;
+  gap:10px;
+}
+.saas-count-row span {
+  min-width:92px;
+  color:#475467;
+  font-weight:650;
+}
+.saas-count-row em {
+  flex:1;
+  height:7px;
+  overflow:hidden;
+  border-radius:999px;
+  background:#eef2ff;
+}
+.saas-count-row i {
+  display:block;
+  height:100%;
+  border-radius:inherit;
+  background:linear-gradient(90deg,#7c5cff,#2fb7ad);
+}
+.saas-count-row b {
+  min-width:18px;
+  text-align:right;
+  color:#1f2937;
+  font-weight:850;
+}
+
+.evidence-snapshot-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(290px,1fr));
+  gap:14px;
+}
+.evidence-snapshot-card {
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
+  box-shadow:var(--shadow-xs);
+  padding:15px;
+}
+.evidence-snapshot-head,
+.evidence-snapshot-foot {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.evidence-snapshot-head h3 {
+  margin:3px 0 0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:15px;
+  color:#111827;
+}
+.evidence-snapshot-body {
+  display:grid;
+  grid-template-columns:76px minmax(0,1fr);
+  gap:14px;
+  align-items:center;
+  margin:14px 0;
+}
+.snapshot-score {
+  width:74px;
+  height:74px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  border-radius:50%;
+  background:
+    radial-gradient(circle at center,#ffffff 0 54%,transparent 55%),
+    conic-gradient(var(--primary) calc(var(--score) * 1%), #eef2ff 0);
+  box-shadow:inset 0 0 0 1px #e8e4ff;
+}
+.snapshot-score strong {
+  color:#241653;
+  font-size:19px;
+  line-height:1;
+  font-weight:880;
+}
+.snapshot-score span {
+  margin-top:4px;
+  color:#706898;
+  font-size:10px;
+  font-weight:760;
+}
+.snapshot-bars {
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+}
+.snapshot-bar {
+  display:grid;
+  grid-template-columns:72px minmax(56px,1fr) minmax(42px,auto);
+  gap:8px;
+  align-items:center;
+}
+.snapshot-bar span,
+.snapshot-bar b {
+  font-size:11px;
+  font-weight:780;
+  color:#3b3268;
+}
+.snapshot-bar b {
+  text-align:right;
+  font-variant-numeric:tabular-nums;
+}
+.snapshot-bar em {
+  height:7px;
+  overflow:hidden;
+  border-radius:999px;
+  background:#eef2ff;
+}
+.snapshot-bar i {
+  display:block;
+  height:100%;
+  border-radius:inherit;
+  background:linear-gradient(90deg,#7c5cff,#2fb7ad);
+}
+.snapshot-bar.is-missing span,
+.snapshot-bar.is-missing b {
+  color:#98a2b3;
+}
+.snapshot-bar.is-missing em {
+  background:#f4f6fb;
+}
+.evidence-snapshot-foot {
+  padding-top:10px;
+  border-top:1px solid var(--border);
+  color:#667085;
+  font-size:11.5px;
+  font-weight:700;
+}
+.evidence-snapshot-foot a {
+  color:var(--primary-700);
+  text-decoration:none;
+  font-weight:820;
+}
+
+.workflow-audit-section {
+  background:#ffffff;
+}
+.workflow-audit-header {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:18px;
+  margin-bottom:16px;
+}
+.workflow-audit-meta {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  color:#667085;
+  font-size:11.5px;
+  font-weight:720;
+}
+.workflow-audit-meta > span:not(.workflow-status-pill) {
+  padding:6px 9px;
+  border:1px solid var(--border);
+  border-radius:999px;
+  background:#fbfcff;
+}
+.workflow-status-pill,
+.audit-stage-status {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  min-height:24px;
+  padding:4px 10px;
+  border-radius:999px;
+  border:1px solid #bbf7d0;
+  background:#dcfae6;
+  color:#067647;
+  font-size:11px;
+  font-weight:820;
+  line-height:1;
+}
+.workflow-status-pill::before,
+.audit-stage-status::before {
+  content:"";
+  width:6px;
+  height:6px;
+  border-radius:999px;
+  background:#12b76a;
+}
+.workflow-status-pill.is-recorded {
+  border-color:#d6bbfb;
+  background:#f4ebff;
+  color:#6941c6;
+}
+.workflow-status-pill.is-recorded::before {
+  background:#7f56d9;
+}
+.workflow-graph-panel {
+  padding:18px;
+  border:1px solid #e4e7ec;
+  border-radius:18px;
+  background:
+    linear-gradient(180deg,rgba(255,255,255,.94),rgba(248,250,252,.94)),
+    linear-gradient(90deg,rgba(99,102,241,.055) 1px,transparent 1px),
+    linear-gradient(180deg,rgba(99,102,241,.045) 1px,transparent 1px);
+  background-size:auto,28px 28px,28px 28px;
+  box-shadow:var(--shadow-xs);
+}
+.audit-stage-strip {
+  display:flex;
+  align-items:stretch;
+  gap:18px;
+  list-style:none;
+  margin:0;
+  padding:0 2px 12px;
+  overflow-x:auto;
+  scrollbar-width:thin;
+  scrollbar-color:#cfd5e8 transparent;
+}
+.audit-stage-strip > .audit-stage {
+  flex:0 0 145px;
+}
+.audit-stage-strip::-webkit-scrollbar {
+  height:8px;
+}
+.audit-stage-strip::-webkit-scrollbar-thumb {
+  background:#cfd5e8;
+  border-radius:999px;
+}
+.audit-stage {
+  position:relative;
+  flex:0 0 145px;
+  min-height:150px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:10px;
+  padding:16px 14px;
+  border:1px solid #dfe4ee;
+  border-radius:14px;
+  background:rgba(255,255,255,.94);
+  box-shadow:0 10px 28px rgba(16,24,40,.045);
+}
+.audit-stage:not(:last-child)::after {
+  content:"";
+  position:absolute;
+  top:50%;
+  right:-19px;
+  width:19px;
+  height:1.5px;
+  background:#aeb8cf;
+  z-index:1;
+}
+.audit-stage:not(:last-child)::before {
+  content:"";
+  position:absolute;
+  top:calc(50% - 4px);
+  right:-19px;
+  width:8px;
+  height:8px;
+  border-top:1.5px solid #aeb8cf;
+  border-right:1.5px solid #aeb8cf;
+  transform:rotate(45deg);
+  z-index:2;
+}
+.audit-round-band {
+  position:relative;
+  flex:0 0 auto;
+  min-width:180px;
+  padding:14px;
+  border:1px solid #e1e6f0;
+  border-radius:18px;
+  background:linear-gradient(180deg,rgba(255,255,255,.92),rgba(248,250,252,.92));
+  box-shadow:0 12px 30px rgba(16,24,40,.04);
+}
+.audit-round-band:not(:last-child)::after {
+  content:"";
+  position:absolute;
+  top:50%;
+  right:-19px;
+  width:19px;
+  height:1.5px;
+  background:#aeb8cf;
+  z-index:1;
+}
+.audit-round-band:not(:last-child)::before {
+  content:"";
+  position:absolute;
+  top:calc(50% - 4px);
+  right:-19px;
+  width:8px;
+  height:8px;
+  border-top:1.5px solid #aeb8cf;
+  border-right:1.5px solid #aeb8cf;
+  transform:rotate(45deg);
+  z-index:2;
+}
+.audit-round-head {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:12px;
+}
+.audit-round-head span {
+  color:#3b3268;
+  font-size:12px;
+  font-weight:880;
+  letter-spacing:.05em;
+  text-transform:uppercase;
+}
+.audit-round-head em {
+  padding:4px 8px;
+  border:1px solid #e4e7ec;
+  border-radius:999px;
+  background:#ffffff;
+  color:#667085;
+  font-size:10.5px;
+  font-style:normal;
+  font-weight:760;
+}
+.audit-round-stages {
+  display:flex;
+  align-items:stretch;
+  gap:18px;
+  list-style:none;
+  margin:0;
+  padding:0;
+}
+.audit-round-stages .audit-stage {
+  min-height:138px;
+}
+.audit-round-stages .audit-stage-icon {
+  width:48px;
+  height:48px;
+}
+.audit-round-stages .audit-stage-icon svg {
+  width:22px;
+  height:22px;
+}
+.audit-stage-number {
+  position:absolute;
+  top:12px;
+  left:12px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:22px;
+  height:22px;
+  border-radius:999px;
+  background:#f2f4f7;
+  color:#667085;
+  font-size:11px;
+  font-weight:840;
+}
+.audit-stage-icon {
+  width:54px;
+  height:54px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:999px;
+  color:#5b35e6;
+  background:#eee9ff;
+  box-shadow:inset 0 0 0 1px rgba(91,53,230,.06);
+}
+.audit-stage-icon svg {
+  width:25px;
+  height:25px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:2.15;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+.audit-stage[data-stage="preprocessing"] .audit-stage-icon {
+  color:#1570ef;
+  background:#eaf3ff;
+}
+.audit-stage[data-stage="model_call"] .audit-stage-icon {
+  color:#7f56d9;
+  background:#f4ebff;
+}
+.audit-stage[data-stage="validation"] .audit-stage-icon,
+.audit-stage[data-stage="completed"] .audit-stage-icon {
+  color:#039855;
+  background:#e8f8ef;
+}
+.audit-stage[data-stage="report_generation"] .audit-stage-icon {
+  color:#dc6803;
+  background:#fff4df;
+}
+.audit-stage strong {
+  color:#111827;
+  font-size:14px;
+  line-height:1.2;
+  text-align:center;
+  font-weight:820;
+}
+.audit-stage-status {
+  min-height:22px;
+  padding:4px 9px;
+  font-size:10.8px;
+}
+.audit-stage.has-failures .audit-stage-status {
+  border-color:#fecaca;
+  background:#fef2f2;
+  color:#b42318;
+}
+.audit-stage.has-failures .audit-stage-status::before {
+  background:#f04438;
+}
+.audit-tool-row {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  flex-wrap:wrap;
+  gap:5px;
+  min-height:24px;
+  margin-top:2px;
+}
+.audit-tool-chip {
+  display:inline-flex;
+  align-items:center;
+  max-width:116px;
+  min-height:22px;
+  padding:3px 8px;
+  border:1px solid #e4defb;
+  border-radius:999px;
+  background:#fbf9ff;
+  color:#5b35e6;
+  font-size:10.6px;
+  font-weight:800;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.audit-tool-chip.is-muted {
+  border-color:#e4e7ec;
+  background:#f8fafc;
+  color:#98a2b3;
+}
+.audit-stage.is-skipped {
+  opacity:.58;
+  border-style:dashed;
+  background:rgba(255,255,255,.72);
+}
+.audit-stage.is-skipped .audit-stage-icon {
+  color:#98a2b3;
+  background:#f2f4f7;
+  box-shadow:none;
+}
+.workflow-graph-legend {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:12px;
+  padding:10px 2px 0;
+  border-top:1px solid rgba(228,231,236,.72);
+  color:#667085;
+  font-size:11.5px;
+  font-weight:720;
+}
+.workflow-graph-legend span {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+}
+.legend-dot {
+  width:8px;
+  height:8px;
+  border-radius:999px;
+  background:#12b76a;
+}
+.legend-dot.is-skipped {
+  background:#cfd5e8;
+}
+.legend-chip {
+  width:22px;
+  height:12px;
+  border:1px solid #e4defb;
+  border-radius:999px;
+  background:#fbf9ff;
+}
+@media (max-width: 900px) {
+  .workflow-audit-header {
+    flex-direction:column;
+    align-items:stretch;
+  }
+  .workflow-audit-meta {
+    justify-content:flex-start;
+  }
+  .audit-stage-strip {
+    padding-bottom:14px;
+  }
+  .audit-round-stages .audit-stage,
+  .audit-stage-strip > .audit-stage {
+    flex-basis:150px;
+  }
+}
+.workflow-audit-details > summary {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:14px;
+  cursor:pointer;
+  list-style:none;
+}
+.workflow-audit-details > summary::-webkit-details-marker {
+  display:none;
+}
+.workflow-audit-details > summary strong {
+  display:block;
+  color:#111827;
+  font-size:20px;
+  line-height:1.2;
+}
+.workflow-audit-details > summary em {
+  color:#706898;
+  font-size:12px;
+  font-style:normal;
+  font-weight:760;
+}
+.workflow-audit-details > summary::after {
+  content:"+";
+  width:26px;
+  height:26px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid var(--border);
+  border-radius:8px;
+  color:var(--primary);
+  background:#fff;
+  font-weight:850;
+}
+.workflow-audit-details[open] > summary::after {
+  content:"-";
+}
+.workflow-audit-details > .workflow {
+  margin-top:16px;
+}
+.workflow-audit-details .dag-wrap {
+  margin-top:16px;
+  overflow-x:auto;
+  padding:10px 0 4px;
+}
+.workflow-audit-details .dag {
+  max-width:none;
+}
+.workflow-node-dag-details {
+  margin-top:14px;
+  border:1px dashed var(--border);
+  border-radius:var(--radius-lg);
+  background:#fff;
+}
+.workflow-node-dag-details > summary {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:12px 14px;
+  cursor:pointer;
+  list-style:none;
+}
+.workflow-node-dag-details > summary::-webkit-details-marker {
+  display:none;
+}
+.workflow-node-dag-details > summary span {
+  color:#33236f;
+  font-weight:850;
+}
+.workflow-node-dag-details > summary small {
+  color:#98a2b3;
+  font-weight:700;
+}
+.workflow-node-dag-details > :not(summary) {
+  margin-left:14px;
+  margin-right:14px;
+}
+
+.saas-trace-stage {
+  padding:15px 14px;
+}
+.saas-trace-dot {
+  box-shadow:0 8px 18px rgba(91,53,230,.16);
+}
+.saas-trace-stage strong {
+  color:#1f2937;
+  font-weight:800;
+}
+
+.workflow-stage-strip {
+  --stage-line:#d9ddec;
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(128px,1fr));
+  gap:12px;
+  list-style:none;
+  padding:0;
+  margin:0;
+  counter-reset:workflow-stage;
+}
+.workflow-stage {
+  position:relative;
+  min-height:176px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  padding:14px 12px 13px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
+  box-shadow:var(--shadow-xs);
+}
+.workflow-stage:not(:last-child)::after {
+  content:"";
+  position:absolute;
+  top:25px;
+  right:-12px;
+  width:14px;
+  height:14px;
+  border-top:2px solid var(--stage-line);
+  border-right:2px solid var(--stage-line);
+  transform:rotate(45deg);
+  opacity:.9;
+  z-index:1;
+}
+.workflow-stage:not(:last-child)::before {
+  content:"";
+  position:absolute;
+  top:31px;
+  right:-12px;
+  width:18px;
+  height:2px;
+  background:var(--stage-line);
+  opacity:.9;
+  z-index:1;
+}
+.workflow-stage-marker {
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.workflow-stage-index,
+.workflow-stage-icon {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:999px;
+  font-weight:850;
+}
+.workflow-stage-index {
+  width:25px;
+  height:25px;
+  color:#fff;
+  background:linear-gradient(135deg,var(--primary),var(--teal));
+  font-size:12px;
+  box-shadow:0 8px 18px rgba(91,53,230,.16);
+}
+.workflow-stage-icon {
+  min-width:26px;
+  min-height:26px;
+  max-width:96px;
+  padding:5px 7px;
+  color:#33236f;
+  background:#f3f0ff;
+  border:1px solid #ddd6ff;
+  font-size:10px;
+  line-height:1.1;
+  white-space:nowrap;
+  overflow-wrap:anywhere;
+  text-align:center;
+}
+.workflow-stage-body {
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.workflow-stage-body h3 {
+  margin:0;
+  color:#111827;
+  font-size:13px;
+  font-weight:850;
+}
+.workflow-stage-body p {
+  margin:0;
+  color:#475467;
+  font-size:11.5px;
+  line-height:1.38;
+}
+.workflow-stage-body small {
+  color:#706898;
+  font-size:10.5px;
+  line-height:1.35;
+}
+.workflow-stage-body small strong {
+  color:#3b3268;
+}
+.workflow-stage.is-recorded .workflow-stage-index {
+  background:linear-gradient(135deg,#6f4cff,#8b5cf6);
+}
+.workflow-stage.is-complete .workflow-stage-index {
+  background:linear-gradient(135deg,var(--primary),var(--teal));
+}
+.workflow-stage.has-failures {
+  border-color:#fecaca;
+  background:linear-gradient(180deg,#ffffff 0%,#fff7f7 100%);
+}
+.workflow-stage.has-failures .workflow-stage-index {
+  background:linear-gradient(135deg,#dc2626,#f97316);
+}
+.workflow-stage.is-skipped {
+  background:#fbfcff;
+  border-style:dashed;
+  opacity:.68;
+}
+.workflow-stage.is-skipped .workflow-stage-index,
+.workflow-stage.is-skipped .workflow-stage-icon {
+  background:#f2f4f7;
+  color:#98a2b3;
+  border-color:#e4e7ec;
+  box-shadow:none;
+}
+.workflow-stage.is-skipped::after {
+  opacity:.42;
+}
+.workflow-stage.is-skipped::before {
+  opacity:.42;
+}
+
+@media (min-width: 1180px) {
+  .workflow-stage-strip {
+    grid-template-columns:repeat(7,minmax(0,1fr));
+  }
+  .workflow-stage-count-4 {
+    grid-template-columns:repeat(4,minmax(0,1fr));
+  }
+}
+
+.comparison-assets {
+  align-items:flex-start;
+}
+.comparison-assets a.asset-pill,
+.asset-download-menu summary.asset-pill {
+  text-decoration:none;
+  cursor:pointer;
+}
+.comparison-assets a.asset-pill:hover,
+.asset-download-menu summary.asset-pill:hover {
+  border-color:var(--primary);
+  background:#f7f4ff;
+  color:var(--primary-700);
+}
+.asset-download-link {
+  flex-direction:row;
+  gap:4px;
+}
+.asset-download-link .artifact-name {
+  font-weight:800;
+}
+.asset-download-link .artifact-meta {
+  color:inherit;
+  font-size:10.5px;
+  opacity:.72;
+}
+.asset-download-menu {
+  position:relative;
+}
+.asset-download-menu > summary {
+  list-style:none;
+}
+.asset-download-menu > summary::-webkit-details-marker {
+  display:none;
+}
+.asset-download-menu-body {
+  position:absolute;
+  right:0;
+  z-index:4;
+  min-width:170px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  margin-top:6px;
+  padding:8px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-md);
+  background:#fff;
+  box-shadow:var(--shadow-md);
+}
+
+#reproducibility .card,
+#reproducibility .saas-card,
+.repro {
+  border-color:var(--border);
+  background:var(--surface);
+}
+.repro-panel {
+  display:grid;
+  grid-template-columns:minmax(0,1.65fr) minmax(260px,.75fr);
+  gap:16px;
+  align-items:start;
+}
+.repro-copy-block {
+  min-width:0;
+}
+.repro-command {
+  position:relative;
+  padding:16px 88px 16px 18px;
+  border-radius:var(--radius-md);
+  background:#18114a;
+  border:1px solid #2a2069;
+  box-shadow:var(--shadow-sm);
+}
+.repro-command pre {
+  margin:0;
+  padding:0;
+  border:none;
+  box-shadow:none;
+  background:transparent;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+}
+.repro-command .copy-btn {
+  position:absolute;
+  top:12px;
+  right:12px;
+}
+.repro-support-grid {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  align-self:end;
+}
+.repro-support-card {
+  text-decoration:none;
+  border:1px solid var(--border);
+  border-radius:var(--radius-md);
+  background:#fbfcff;
+  padding:12px;
+}
+.repro-support-card span {
+  display:block;
+  color:#667085;
+  font-size:11px;
+  font-weight:780;
+}
+.repro-support-card strong {
+  display:block;
+  margin-top:7px;
+  color:#33236f;
+  font-size:14px;
+  line-height:1;
+}
+.repro-support-card:hover {
+  border-color:#d9d2ff;
+  background:#f7f4ff;
+}
+.repro-id-line {
+  grid-column:1 / -1;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+  margin:0;
+  color:#667085;
+  font-size:12px;
+}
+.repro-id-line code {
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  background:#f7f4ff;
+  color:#33236f;
+  padding:3px 7px;
+}
+.appendix-panel {
+  background:#fbfcff;
+  border-color:#dbe0ed;
+  opacity:.86;
+}
+.appendix-panel:hover,
+.appendix-panel[open] {
+  opacity:1;
+}
+.appendix-panel > summary {
+  color:#3b3268;
+}
+.appendix-panel > summary small {
+  color:var(--text-muted);
+}
+pre,
+.tool-evidence-json {
+  background:#0f172a;
+  color:#e5e7eb;
+  border:1px solid #1e293b;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+
+@media (max-width: 1320px) {
+  .content { padding:22px 22px 54px; }
+  .saas-overview-grid { grid-template-columns:1fr 1fr; }
+  .saas-stats { grid-column:1 / -1; }
+  .candidate-review-board-layout { grid-template-columns:1fr; }
+  .console-detail { position:static; }
+}
+@media (max-width: 980px) {
+  body { display:block; }
+  .sidebar-toggle { display:none; }
+  body.sidebar-collapsed .brand-text { display:flex; }
+  body.sidebar-collapsed .sidebar-meta { display:flex; }
+  body.sidebar-collapsed .side-nav-label,
+  body.sidebar-collapsed .side-nav-divider { display:inline; }
+  body.sidebar-collapsed .side-nav-item { justify-content:flex-start; padding:0 11px; }
+  .sidebar {
+    position:relative;
+    width:auto;
+    min-height:auto;
+    border-right:none;
+    border-bottom:1px solid var(--border);
+  }
+  .side-nav {
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+  }
+  .top-bar {
+    position:relative;
+    left:auto;
+    height:auto;
+    flex-wrap:wrap;
+    gap:10px;
+    padding:12px 18px;
+  }
+  .main {
+    margin-left:0;
+  }
+  .content { padding:20px 16px 48px; }
+  .saas-rationale-grid,
+  .saas-pattern-grid {
+    grid-template-columns:1fr 1fr;
+  }
+  .repro-panel {
+    grid-template-columns:1fr;
+  }
+  .console-detail { position:static; }
+}
+@media (max-width: 720px) {
+  .saas-overview-grid,
+  .saas-rationale-grid,
+  .saas-pattern-grid,
+  .saas-trace {
+    grid-template-columns:1fr;
+  }
+  .saas-stats { grid-template-columns:1fr 1fr; }
+  .saas-stat { border-left:none; border-top:1px solid var(--border); }
+  .saas-stat:nth-child(-n+2) { border-top:none; }
+  .repro-support-grid { grid-template-columns:1fr 1fr; }
+  .dossier-structure-primary .structure-viewer {
+    min-height:360px;
+    height:420px;
+  }
+}
 """
 
 
@@ -12978,6 +16732,27 @@ def _js() -> str:
     return """
 // VPA_OFFLINE_VIEWER · deterministic offline 3D viewer · no external CDN, no LLM calls
 (function () {
+  // ----- Sidebar collapse -----
+  const sidebarToggle = document.querySelector('[data-sidebar-toggle]');
+  if (sidebarToggle) {
+    const storageKey = 'vpa-report-sidebar-collapsed';
+    const applySidebarState = (collapsed) => {
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+      sidebarToggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    };
+    try {
+      applySidebarState(window.localStorage.getItem(storageKey) === '1');
+    } catch (e) {
+      applySidebarState(false);
+    }
+    sidebarToggle.addEventListener('click', () => {
+      const collapsed = !document.body.classList.contains('sidebar-collapsed');
+      applySidebarState(collapsed);
+      try { window.localStorage.setItem(storageKey, collapsed ? '1' : '0'); } catch (e) {}
+    });
+  }
+
   // ----- Scroll-spy nav highlight -----
   const navLinks = Array.from(document.querySelectorAll('nav a'));
   const sectionsById = new Map();
@@ -13038,6 +16813,52 @@ def _js() -> str:
     });
   });
 
+  // ----- Top-bar report actions -----
+  function reportFileStem() {
+    const title = (document.title || 'vpa-report').trim() || 'vpa-report';
+    return title.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'vpa-report';
+  }
+  document.querySelectorAll('[data-export-report]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      try {
+        const html = '<!doctype html>\\n' + document.documentElement.outerHTML;
+        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = reportFileStem() + '.html';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      } catch (e) {
+        console.warn('Report export failed:', e);
+        window.print();
+      }
+    });
+  });
+  // ----- Reproducibility support cards -----
+  document.querySelectorAll('.repro-support-card').forEach((card) => {
+    card.addEventListener('click', (event) => {
+      const href = card.getAttribute('href') || '';
+      if (!href.startsWith('#')) return;
+      const target = document.querySelector(href);
+      if (!target) return;
+      event.preventDefault();
+      if (target.tagName && target.tagName.toLowerCase() === 'details') {
+        target.open = true;
+      }
+      if (href === '#appendix') {
+        const firstPanel = document.querySelector('.appendix-panel');
+        if (firstPanel) firstPanel.open = true;
+      }
+      const nested = target.querySelector && target.querySelector('details');
+      if (nested) nested.open = true;
+      target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      history.replaceState(null, '', href);
+    });
+  });
+
   // ----- MSA scheme + zoom toggles -----
   document.querySelectorAll('.msa-section').forEach((section) => {
     const grid = section.querySelector('.msa-grid');
@@ -13094,11 +16915,17 @@ def _js() -> str:
     // same notice for lazily-activated viewers so the console stays honest.
     window.__vpaSetupViewer = function (payload) {
       const el = payload && document.getElementById(payload.id);
-      if (el) el.innerHTML = '<div class="structure-status">3D viewer unavailable (3Dmol.js asset missing)</div>';
+      if (el) {
+        el.innerHTML = '<div class="structure-status">3D viewer unavailable (3Dmol.js asset missing)</div>';
+        showViewerFailure(el, '3Dmol.js asset missing.');
+      }
     };
     for (const payload of structurePayloads) {
       const el = document.getElementById(payload.id);
-      if (el) el.innerHTML = '<div class="structure-status">3D viewer unavailable (3Dmol.js asset missing)</div>';
+      if (el) {
+        el.innerHTML = '<div class="structure-status">3D viewer unavailable (3Dmol.js asset missing)</div>';
+        showViewerFailure(el, '3Dmol.js asset missing.');
+      }
     }
     return;
   }
@@ -13142,11 +16969,16 @@ def _js() -> str:
     let viewer;
     try {
       container.innerHTML = '';
-      viewer = $3Dmol.createViewer(container, { backgroundColor: 'white' });
+      viewer = $3Dmol.createViewer(container, {
+        backgroundColor: 'white',
+        antialias: true,
+        cartoonQuality: 8
+      });
       viewer.addModel(payload.content, fmt);
     } catch (err) {
       console.error('3Dmol load error', payload.id, err);
       container.innerHTML = '<div class="structure-status">Failed to load structure</div>';
+      showViewerFailure(container, '3Dmol could not load the structure model.');
       return;
     }
 
@@ -13220,15 +17052,18 @@ def _js() -> str:
       sidechains: false,
       pickerActive: false,
       hoverKey: null,   // transient hover highlight {resi, chain}
+      structureExtent: null,
     };
+    state.structureExtent = structureExtent(viewer);
 
     applyStructureStyles(state);
     // Click behaviour intentionally minimal — the report's residue
     // inspection happens through Pick (hover) mode, so clicking only
     // rotates / zooms the model rather than dropping label pins.
-    viewer.zoomTo();
-    viewer.render();
-    try { viewer.zoom(1.1, 500); } catch (e) { /* older 3Dmol versions */ }
+    zoomViewerToStructure(state, true);
+    markViewerHealthy(container);
+    installViewerHealthMonitor(container);
+    scheduleViewerResize(state, container);
 
     // ---- Toolbar wiring (one viewer's controls) ----
     const section = container.closest('.structure-section');
@@ -13294,12 +17129,141 @@ def _js() -> str:
     section.addEventListener('fullscreenchange', () => {
       // Resize after the layout settles so the canvas matches the new container.
       setTimeout(() => {
-        try { viewer.resize(); viewer.render(); } catch (e) {}
+        try {
+          viewer.resize();
+          zoomViewerToStructure(state, false);
+        } catch (e) {}
       }, 60);
     });
     window.addEventListener('resize', () => {
       try { viewer.resize(); viewer.render(); } catch (e) {}
     });
+  }
+
+  function installViewerHealthMonitor(container) {
+    const canvas = container.querySelector('canvas');
+    if (!canvas) return;
+    canvas.addEventListener('webglcontextlost', (event) => {
+      try { event.preventDefault(); } catch (e) {}
+      // A context-loss event alone is not a user-facing failure. Headless
+      // browsers and screenshot capture can emit CONTEXT_LOST_WEBGL after a
+      // successful visible render. Keep it as developer telemetry unless it is
+      // paired with an actual init/load/render failure elsewhere.
+      container.dataset.viewerContextLost = 'true';
+      console.warn('VPA structure viewer WebGL context lost', container.id);
+    }, false);
+    canvas.addEventListener('webglcontextrestored', () => {
+      markViewerHealthy(container);
+      container.classList.remove('structure-viewer-context-lost');
+      console.info('VPA structure viewer WebGL context restored', container.id);
+    }, false);
+  }
+
+  function markViewerHealthy(container) {
+    const section = container.closest('.structure-section');
+    const health = section ? section.querySelector('.structure-health') : null;
+    container.dataset.viewerModelLoaded = 'true';
+    container.dataset.viewerRendered = 'true';
+    container.dataset.viewerHealth = 'healthy';
+    container.classList.remove('structure-viewer-context-lost');
+    if (health) health.hidden = true;
+  }
+
+  function showViewerFailure(container, reason) {
+    const section = container.closest('.structure-section');
+    const health = section ? section.querySelector('.structure-health') : null;
+    container.dataset.viewerHealth = 'failed';
+    container.dataset.viewerFailureReason = reason || 'viewer failed';
+    container.classList.add('structure-viewer-context-lost');
+    if (health) {
+      const msg = health.querySelector('span');
+      if (msg && reason) {
+        msg.textContent = reason + ' Reload the page, close other GPU-heavy tabs, or reopen this report in a browser with WebGL enabled. Structure downloads remain available below.';
+      }
+      health.hidden = false;
+    }
+  }
+
+  function scheduleViewerResize(state, container, attempt) {
+    attempt = attempt || 0;
+    const run = () => {
+      const rect = container.getBoundingClientRect();
+      if ((rect.width < 2 || rect.height < 2) && attempt < 6) {
+        scheduleViewerResize(state, container, attempt + 1);
+        return;
+      }
+      try {
+        state.viewer.resize();
+        zoomViewerToStructure(state, false);
+        markViewerHealthy(container);
+      } catch (e) {
+        console.warn('VPA structure viewer resize failed', container.id, e);
+        if (attempt >= 6 && !viewerHasUsableCanvas(container)) {
+          showViewerFailure(container, 'The viewer could not size or render the structure canvas.');
+        }
+      }
+      if (attempt < 2) {
+        window.setTimeout(() => scheduleViewerResize(state, container, attempt + 1), 120);
+      }
+    };
+    if (window.requestAnimationFrame) {
+      window.requestAnimationFrame(run);
+    } else {
+      window.setTimeout(run, 60);
+    }
+  }
+
+  function viewerHasUsableCanvas(container) {
+    const canvas = container.querySelector('canvas');
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    return rect.width > 2 && rect.height > 2 && canvas.width > 2 && canvas.height > 2;
+  }
+
+  function structureExtent(viewer) {
+    // Lightweight bounding box used only to choose a conservative post-fit zoom.
+    // It does not alter selections or styles and deliberately ignores waters.
+    let atoms = [];
+    try {
+      atoms = viewer.selectedAtoms({ hetflag: false }) || [];
+    } catch (e) {}
+    if (!atoms.length) {
+      try { atoms = viewer.selectedAtoms({}) || []; } catch (e) { atoms = []; }
+    }
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    let count = 0;
+    for (const atom of atoms) {
+      const x = atom.x, y = atom.y, z = atom.z;
+      if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') continue;
+      minX = Math.min(minX, x); minY = Math.min(minY, y); minZ = Math.min(minZ, z);
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); maxZ = Math.max(maxZ, z);
+      count += 1;
+    }
+    if (!count) return null;
+    const spans = [maxX - minX, maxY - minY, maxZ - minZ].sort((a, b) => b - a);
+    return { atomCount: count, longAxis: spans[0], midAxis: spans[1], shortAxis: spans[2] };
+  }
+
+  function structureFillZoom(extent) {
+    if (!extent) return 1.12;
+    const longAxis = Math.max(extent.longAxis || 0, 0.001);
+    const midAxis = Math.max(extent.midAxis || 0, 0.001);
+    const shortAxis = Math.max(extent.shortAxis || 0, 0.001);
+    const elongation = longAxis / Math.max((midAxis + shortAxis) / 2, 0.001);
+    // Small or elongated binders otherwise look sparse after zoomTo(). Keep the
+    // multiplier modest so compact proteins and complexes are not clipped.
+    if (elongation >= 4.0) return 1.22;
+    if (longAxis < 45) return 1.18;
+    if (longAxis < 75) return 1.14;
+    return 1.08;
+  }
+
+  function zoomViewerToStructure(state, animated) {
+    const v = state.viewer;
+    try { v.zoomTo(); } catch (e) {}
+    try { v.zoom(structureFillZoom(state.structureExtent), animated ? 500 : 0); } catch (e) {}
+    try { v.render(); } catch (e) {}
   }
 
   // ---- Picker mode (hover-driven residue inspection) ----------------
@@ -13466,8 +17430,8 @@ def _js() -> str:
     const v = state.viewer;
     v.setStyle({}, {});
 
-    // Protein backbone cartoon
-    const cartoonStyle = { cartoon: cartoonColourSpec(state.colourMode) };
+    // Protein backbone cartoon.
+    const cartoonStyle = { cartoon: cartoonVisualSpec(state.colourMode) };
     v.setStyle({ hetflag: false }, cartoonStyle);
 
     // Hetero atoms (ligands etc.) as ball-and-stick
@@ -13515,6 +17479,18 @@ def _js() -> str:
       return { colorscheme: 'chain' };
     }
     return { color: 'spectrum' };
+  }
+
+  function cartoonVisualSpec(mode) {
+    // AFDB-like preset: retain all existing colour modes, but make the cartoon
+    // ribbon slightly thicker/smoother so small binders read as protein
+    // backbones rather than thin wire fragments.
+    const colour = cartoonColourSpec(mode);
+    return Object.assign({
+      thickness: 0.58,
+      width: 1.25,
+      arrows: true,
+    }, colour);
   }
 
   function toggleFullscreen(section) {
@@ -13591,6 +17567,20 @@ def _js() -> str:
     card.addEventListener('click', () => activate(card));
     card.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(card); }
+    });
+  });
+
+  document.querySelectorAll('[data-open-cand]').forEach((link) => {
+    link.addEventListener('click', (e) => {
+      const target = link.getAttribute('data-open-cand');
+      const card = cards.find((c) => c.dataset.cand === target);
+      if (!card) return;
+      e.preventDefault();
+      activate(card);
+      const detail = document.getElementById('cand-detail-host');
+      if (detail && detail.scrollIntoView) {
+        detail.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
     });
   });
 

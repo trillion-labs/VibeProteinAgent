@@ -18,6 +18,8 @@ from vibeproteinagent.adapters.rfdiffusion.adapter import (
     _build_env,
     _collect_designs,
     _mode_checkpoint_checks,
+    _profile_guidance_length_applied,
+    _rfdiffusion_profile_warnings,
     _required_weight,
     availability_report,
 )
@@ -256,6 +258,56 @@ def test_build_contigs_unconditional():
 def test_build_contigs_unconditional_total_length_is_fixed():
     p = RFdiffusionInput(total_length=60)
     assert _build_contigs(p, target_pdb=None) == ["60-60"]
+
+
+def test_profile_guidance_sets_unconditional_length_only_when_not_explicit() -> None:
+    profile = {
+        "schema_version": "family_profile_v1",
+        "consensus_sequence": "A" * 80,
+        "length_stats": {"median": 80},
+    }
+
+    guided = RFdiffusionInput(
+        mode="unconditional",
+        profile_guidance=profile,
+    )
+    explicit = RFdiffusionInput(
+        mode="unconditional",
+        length_min=100,
+        length_max=120,
+        profile_guidance=profile,
+    )
+
+    assert guided.length_min == 80
+    assert guided.length_max == 80
+    assert _profile_guidance_length_applied(guided) is True
+    assert explicit.length_min == 100
+    assert explicit.length_max == 120
+    assert _profile_guidance_length_applied(explicit) is False
+
+
+def test_profile_guidance_does_not_invent_rfdiffusion_structural_motifs(
+    tmp_path,
+) -> None:
+    target = _target_pdb(tmp_path)
+    profile = {
+        "schema_version": "family_profile_v1",
+        "consensus_sequence": "A" * 80,
+        "length_stats": {"median": 80},
+        "motif_windows": [{"start": 4, "end": 9, "consensus": "AAAAAA"}],
+    }
+
+    params = RFdiffusionInput(
+        mode="partial_diffusion",
+        target_pdb=str(target),
+        contigs=["A10-12"],
+        partial_T=20,
+        profile_guidance=profile,
+    )
+
+    assert params.length_min == 100
+    assert _profile_guidance_length_applied(params) is False
+    assert any("sequence evidence only" in item for item in _rfdiffusion_profile_warnings(params))
 
 
 def test_build_contigs_unconditional_reorders_reversed_range():

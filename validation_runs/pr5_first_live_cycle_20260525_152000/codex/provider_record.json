@@ -1,8 +1,0 @@
-{
-  "artifacts_path": "validation_runs/pr5_first_live_cycle_20260525_152000/codex",
-  "duration_seconds": 0.0,
-  "first_error": "codex command not found",
-  "provider": "codex",
-  "reason": "preflight_failed",
-  "status": "BLOCKED"
-}

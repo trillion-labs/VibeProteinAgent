@@ -7,7 +7,19 @@ tracks cache keys, and lets you report the full run.
 Demo notebook: [`demo/use_workflows_demo.ipynb`](../demo/use_workflows_demo.ipynb)
 writes and runs the lightweight workflow below.
 
-## 1. Start Workers
+## 1. Install And Activate
+
+```bash
+export VPA_HOME="${VPA_HOME:-$HOME/.vibeproteinagent}"
+npx vibeproteinagent install --profile base --cuda-profile auto --yes
+source "$VPA_HOME/env.sh"
+vpa install doctor --profile base
+```
+
+Use `full` or targeted `--tools` installs before running heavyweight design
+workflows.
+
+## 2. Start Workers
 
 This guide uses CPU-safe tools:
 
@@ -21,7 +33,28 @@ For mixed GPU/CPU design workflows, start both:
 vpa daemon start --workers 1 --cpu-workers 2 --workspace design_round
 ```
 
-## 2. Write A Minimal Workflow
+## 3. Optional Prewarm
+
+Prewarm the tools that the workflow will call after the daemon is running.
+`vpa daemon warm` uses the currently running daemon socket, so run it from the
+same shell/runtime environment as `daemon start`.
+
+```bash
+vpa daemon warm sequence_edit --json
+vpa daemon warm sequence_analysis --json
+vpa daemon warm protein_qc --json
+vpa daemon warm rank_designs --json
+```
+
+For heavyweight workflows, prewarm only the installed tools you actually plan to
+use:
+
+```bash
+vpa daemon warm proteinmpnn --workers all --json
+vpa daemon warm protenix_v2 --workers all --json
+```
+
+## 4. Write A Minimal Workflow
 
 Save this as `sequence_triage.yaml`:
 
@@ -79,7 +112,7 @@ Workflow basics:
 - `cache: true` lets VPA reuse matching node outputs in the same environment.
 - `rank_designs` can consume canonical candidates emitted by upstream tools.
 
-## 3. Inspect And Run
+## 5. Inspect And Run
 
 ```bash
 vpa workflow inspect sequence_triage.yaml
@@ -94,24 +127,25 @@ vpa workflow run sequence_triage.yaml \
 The command prints a `workflow_id` and each node state. If the daemon is not
 running, VPA records the workflow but cannot execute the nodes.
 
-## 4. Monitor, Resume, And Report
+## 6. Monitor, Resume, And Report
 
 ```bash
-vpa workflow status <workflow_id> --workspace workflow_demo
+vpa workflow status WORKFLOW_ID --workspace workflow_demo
 
 vpa workflow run sequence_triage.yaml \
   --workspace workflow_demo \
-  --resume <workflow_id> \
+  --resume WORKFLOW_ID \
   --max-wait-s 3600
 
-vpa report <workflow_id> \
+vpa report WORKFLOW_ID \
   --workspace workflow_demo \
   --out workflow_report.html \
   --open
 ```
 
 Use `--params-file params.yaml` when parameters are easier to maintain in a
-file:
+file. This is the recommended path for long sequences, FASTA paths, or nested
+parameters:
 
 ```yaml
 sequence: ACDEFGHIKLMNPQRSTVWY
@@ -132,10 +166,10 @@ vpa workflow run sequence_triage.yaml \
 A heavier de novo or binder workflow follows the same shape:
 
 ```text
-rfdiffusion or pxdesign
--> proteinmpnn or ligandmpnn
--> protenix_v2 or boltz2_affinity
--> protein_qc and structure_analysis
+rfdiffusion, rfdiffusion3, rfpeptides, pxdesign, boltzgen, bindcraft, or proteina_complexa
+-> proteinmpnn, ligandmpnn, esm2, or esm3 when sequence design/refinement is needed
+-> protenix_v2, boltz2_affinity, vina, or another requested prediction/affinity tool
+-> protein_qc, sequence_analysis, structure_analysis, and requested scoring tools
 -> rank_designs
 -> report
 ```

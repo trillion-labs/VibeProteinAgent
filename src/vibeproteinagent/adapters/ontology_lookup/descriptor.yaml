@@ -9,6 +9,7 @@ startup_cost: low
 estimated_runtime_s: 5
 warm_load_capable: false
 pin_warm: false
+planner_visible: false
 supported_tasks: [ontology_lookup]
 input_schema: schemas/ontology_lookup.input.json
 output_schema: schemas/ontology_lookup.output.json

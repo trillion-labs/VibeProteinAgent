@@ -1,8 +1,0 @@
-{
-  "artifacts_path": "validation_runs/pr6_legacy_smoke_20260525_154607/qwen",
-  "duration_seconds": 0.0,
-  "first_error": "OpenRouter credential is unset",
-  "provider": "qwen",
-  "reason": "preflight_failed",
-  "status": "BLOCKED"
-}

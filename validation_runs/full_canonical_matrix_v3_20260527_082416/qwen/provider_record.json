@@ -1,8 +1,0 @@
-{
-  "artifacts_path": "/mnt/vast/trillion/hyunjin/VibeProteinAgent/validation_runs/full_canonical_matrix_v3_20260527_082416/qwen",
-  "duration_seconds": 1071.0,
-  "first_error": "{\"ok\": false, \"error\": {\"code\": \"E_INVALID_PARAMS\", \"message\": \"agent LLM entry budget exhausted\", \"details\": {\"phase\": \"initial_plan\", \"max_entries\": 3, \"failure_count\": 3, \"phase_failures\": [{\"phase\": \"initial_plan\", \"attempt\": 1, \"code\": \"E_INVALID_PARAMS\", \"message\": \"planner selected a mode for a single-mode tool\", \"details\": {\"tool\": \"go_term_search\", \"selected_mode\": \"easy-search\", \"hint\": \"Use selected_mode only when the available tool outline includes allowed_modes.\"}}, {\"phase\": \"initi",
-  "provider": "qwen",
-  "reason": "workflow_failed",
-  "status": "FAIL"
-}
