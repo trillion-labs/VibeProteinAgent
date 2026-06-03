@@ -853,29 +853,17 @@ class AgentController:
                 decision.get("decision") == "next_round_with_surviving_candidate"
                 and round_index >= self.config.max_rounds - 1
             ):
-                ref = _first_submit_candidate_ref(
+                forced = _force_submit_best_candidate_decision(
+                    decision,
                     outcome.summary,
                     deliverable_contract=classification.deliverable_contract,
+                    reason=(
+                        "No local rounds remain; submit the best available "
+                        "candidate instead of requesting another round."
+                    ),
                 )
-                if ref is not None:
-                    decision = {
-                        **decision,
-                        "decision": "submit_candidate",
-                        "submit_candidate": {
-                            "candidates": [ref],
-                        },
-                        "reasoning": (
-                            str(decision.get("reasoning") or "").strip()
-                            or "No local rounds remain; submit the best surviving candidate."
-                        ),
-                    }
-                    submission_policy = ref.pop("_submission_policy", None)
-                    if isinstance(submission_policy, dict):
-                        decision["submission_policy"] = {
-                            **submission_policy,
-                            "deliverable_contract": classification.deliverable_contract,
-                        }
-                    decision.pop("next_round", None)
+                if forced is not None:
+                    decision = forced
             _normalize_effective_survivor_policy(decision, decision_brief)
             branch = _resolve_decision_branch(
                 decision,
@@ -1008,59 +996,93 @@ class AgentController:
                         self.session_store.add_decision(run_id, decision, round_index=round_index)
                         decisions.append(decision)
                         break
-                    try:
-                        submission, submit_job_id = (
-                            self._execute_no_acceptable_candidate_submission(
+                    forced = _force_submit_best_candidate_decision(
+                        decision,
+                        outcome.summary,
+                        deliverable_contract=classification.deliverable_contract,
+                        reason=(
+                            "Decision reached a terminal stop with candidates "
+                            "available; submit the best available candidate."
+                        ),
+                    )
+                    if forced is not None:
+                        decision = forced
+                        try:
+                            if classification.deliverable_contract:
+                                policy_record = decision.setdefault("submission_policy", {})
+                                if isinstance(policy_record, dict):
+                                    policy_record.setdefault(
+                                        "deliverable_contract",
+                                        classification.deliverable_contract,
+                                    )
+                            submission, submit_job_id = self._execute_submit_candidate_decision(
                                 run_id,
                                 broker,
                                 decision,
                                 round_index=round_index,
                                 policy=policy,
                             )
+                        except VPAError as exc:
+                            notes = decision.setdefault("notes", [])
+                            if isinstance(notes, list):
+                                notes.append(
+                                    {
+                                        "level": "error",
+                                        "message": (
+                                            "forced best-candidate terminal submission "
+                                            "failed during execution"
+                                        ),
+                                        "code": exc.code,
+                                        "details": _json_safe_decision_details(exc.details),
+                                    }
+                                )
+                            final_state = "failed"
+                            self.session_store.add_decision(run_id, decision, round_index=round_index)
+                            decisions.append(decision)
+                            break
+                        outcome.summary["final_submission"] = submission
+                        job_ids = outcome.summary.setdefault("job_ids", [])
+                        if isinstance(job_ids, list) and submit_job_id not in job_ids:
+                            job_ids.append(submit_job_id)
+                        decision["submission"] = submission
+                        decision["submit_job_id"] = submit_job_id
+                        self.session_store.add_summary(
+                            run_id,
+                            {
+                                "state": "completed",
+                                "job_id": submit_job_id,
+                                "tool": "submit_candidate",
+                                "final_submission": submission,
+                                "metrics_used": decision.get("metrics_used") or [],
+                            },
+                            job_id=submit_job_id,
                         )
-                    except VPAError as exc:
-                        notes = decision.setdefault("notes", [])
-                        if isinstance(notes, list):
-                            notes.append(
-                                {
-                                    "level": "error",
-                                    "message": (
-                                        "no_acceptable_candidate terminal submission "
-                                        "failed during execution"
-                                    ),
-                                    "code": exc.code,
-                                    "details": _json_safe_decision_details(exc.details),
-                                }
-                            )
-                        final_state = "failed"
-                        self.session_store.add_decision(run_id, decision, round_index=round_index)
-                        decisions.append(decision)
-                        break
-                    outcome.summary["final_submission"] = submission
-                    job_ids = outcome.summary.setdefault("job_ids", [])
-                    if isinstance(job_ids, list) and submit_job_id not in job_ids:
-                        job_ids.append(submit_job_id)
-                    source_decision = str(decision.get("decision") or "")
-                    decision["source_decision"] = source_decision
-                    decision["decision"] = "no_acceptable_candidate"
-                    decision["submission"] = submission
-                    decision["submit_job_id"] = submit_job_id
-                    self.session_store.add_summary(
-                        run_id,
-                        {
-                            "state": "completed",
-                            "job_id": submit_job_id,
-                            "tool": "submit_candidate",
-                            "final_submission": submission,
-                            "metrics_used": decision.get("metrics_used") or [],
-                        },
-                        job_id=submit_job_id,
-                    )
-                    final_state = "completed"
-                    final_result = AgentRunResult(
-                        kind="no_acceptable",
-                        reasoning=_negative_submission_reason(decision),
-                    )
+                        final_state = "completed"
+                        final_result = AgentRunResult(
+                            kind="candidate",
+                            submitted_candidate=submission,
+                            reasoning=str(decision.get("reasoning") or ""),
+                        )
+                    else:
+                        decision["source_decision"] = str(decision.get("decision") or "")
+                        decision["decision"] = "no_available_candidate"
+                        decision["technical_failure"] = False
+                        decision["resolved_branch"] = {
+                            "action": "stop",
+                            "reason": "no_available_candidate",
+                            "failure": False,
+                        }
+                        final_state = "completed"
+                        final_result = AgentRunResult(
+                            kind="no_available_candidate",
+                            reasoning=(
+                                str(decision.get("reasoning") or "").strip()
+                                or "No available candidate was produced before termination."
+                            ),
+                        )
+                    self.session_store.add_decision(run_id, decision, round_index=round_index)
+                    decisions.append(decision)
+                    break
                 elif branch.get("failure"):
                     final_state = "failed"
                 self.session_store.add_decision(run_id, decision, round_index=round_index)
@@ -1120,6 +1142,96 @@ class AgentController:
                     "A completed workflow finished, but the next-round planner "
                     "could not produce a valid executable continuation plan."
                 )
+                forced = (
+                    _force_submit_best_candidate_decision(
+                        decision,
+                        outcome.summary,
+                        deliverable_contract=classification.deliverable_contract,
+                        reason=(
+                            "Next-round planning failed after candidates were produced; "
+                            "submit the best available candidate."
+                        ),
+                    )
+                    if has_candidates
+                    else None
+                )
+                if forced is not None:
+                    decision = forced
+                    notes = decision.setdefault("notes", [])
+                    if isinstance(notes, list):
+                        notes.append(
+                            {
+                                "level": "warning",
+                                "message": (
+                                    "LLM next-round planning failed after workflow "
+                                    "completion; submitted the best available candidate."
+                                ),
+                                "code": exc.code,
+                                "details": _json_safe_decision_details(exc.details),
+                            }
+                        )
+                    try:
+                        if classification.deliverable_contract:
+                            policy_record = decision.setdefault("submission_policy", {})
+                            if isinstance(policy_record, dict):
+                                policy_record.setdefault(
+                                    "deliverable_contract",
+                                    classification.deliverable_contract,
+                                )
+                        submission, submit_job_id = self._execute_submit_candidate_decision(
+                            run_id,
+                            broker,
+                            decision,
+                            round_index=round_index,
+                            policy=policy,
+                        )
+                    except VPAError as submit_exc:
+                        notes = decision.setdefault("notes", [])
+                        if isinstance(notes, list):
+                            notes.append(
+                                {
+                                    "level": "error",
+                                    "message": (
+                                        "forced best-candidate terminal submission "
+                                        "failed during deterministic closure"
+                                    ),
+                                    "code": submit_exc.code,
+                                    "details": _json_safe_decision_details(submit_exc.details),
+                                }
+                            )
+                        self.session_store.add_decision(run_id, decision, round_index=round_index)
+                        final_state = "failed"
+                        break
+                    outcome.summary["final_submission"] = submission
+                    job_ids = outcome.summary.setdefault("job_ids", [])
+                    if isinstance(job_ids, list) and submit_job_id not in job_ids:
+                        job_ids.append(submit_job_id)
+                    decision["submission"] = submission
+                    decision["submit_job_id"] = submit_job_id
+                    decision["resolved_branch"] = {
+                        "action": "submit_candidate",
+                        "reason": reason,
+                        "failure": False,
+                    }
+                    self.session_store.add_summary(
+                        run_id,
+                        {
+                            "state": "completed",
+                            "job_id": submit_job_id,
+                            "tool": "submit_candidate",
+                            "final_submission": submission,
+                            "metrics_used": decision.get("metrics_used") or [],
+                        },
+                        job_id=submit_job_id,
+                    )
+                    final_result = AgentRunResult(
+                        kind="candidate",
+                        submitted_candidate=submission,
+                        reasoning=str(decision.get("reasoning") or ""),
+                    )
+                    self.session_store.add_decision(run_id, decision, round_index=round_index)
+                    final_state = "completed"
+                    break
                 decision["source_decision"] = str(decision.get("decision") or "")
                 decision["decision"] = (
                     "no_acceptable_candidate"
@@ -2231,6 +2343,52 @@ def _first_submit_candidate_ref(
         }
         return ref
     return None
+
+
+def _force_submit_best_candidate_decision(
+    decision: dict[str, Any],
+    summary: dict[str, Any],
+    *,
+    deliverable_contract: dict[str, Any] | None,
+    reason: str,
+) -> dict[str, Any] | None:
+    selected_contract = deliverable_contract or {}
+    ref = _first_submit_candidate_ref(
+        summary,
+        deliverable_contract=deliverable_contract,
+    )
+    if ref is None:
+        selected_contract = {}
+        ref = _first_submit_candidate_ref(summary, deliverable_contract={})
+    if ref is None:
+        return None
+    source_decision = str(decision.get("decision") or "")
+    submission_policy = ref.pop("_submission_policy", None)
+    forced = {
+        **decision,
+        "source_decision": source_decision,
+        "decision": "submit_candidate",
+        "submit_candidate": {"candidates": [ref]},
+        "reasoning": str(decision.get("reasoning") or "").strip() or reason,
+        "resolved_branch": {
+            "action": "submit_candidate",
+            "reason": reason,
+            "failure": False,
+        },
+    }
+    forced.pop("next_round", None)
+    if isinstance(submission_policy, dict):
+        forced["submission_policy"] = {
+            **submission_policy,
+            "deliverable_contract": selected_contract,
+            "forced_terminal_submission": True,
+        }
+    _append_controller_correction(
+        forced,
+        "forced_terminal_best_candidate_submission",
+        reason,
+    )
+    return forced
 
 
 def _missing_deliverable_capabilities(

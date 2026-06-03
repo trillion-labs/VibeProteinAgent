@@ -1,4 +1,4 @@
-# VibeProteinAgent
+<h1><img src="assets/vpa_logo_inline.png" alt="" height="36" align="top" style="margin-right:5px">VibeProteinAgent</h1>
 
 [![License: PolyForm NC 1.0.0](https://img.shields.io/badge/license-PolyForm--NC--1.0.0-6b1ea8.svg)](LICENSE)
 [![Use: Non-commercial](https://img.shields.io/badge/use-non--commercial-cc0980.svg)](#license)
@@ -64,8 +64,7 @@ Then run a query:
 ```text
 /vpa Run this VPA query in workspace [workspace name]:
 Design 50-80 aa soluble mini-protein binders to chain A of `[your_folder]/target.pdb`.
-Return the top 5 candidates with
-structures, QC, ranking, and an HTML report.
+Return the top 5 candidates with structures, QC, ranking, and an HTML report.
 ```
 
 The `/vpa` command is defined at [.claude/commands/vpa.md](.claude/commands/vpa.md).

@@ -23,7 +23,7 @@ class AgentConfig:
     timeout_s: float = 300.0
     max_tokens: int | None = None
     disable_reasoning: bool = True
-    max_rounds: int = 8
+    max_rounds: int = 10
     max_entries: int = 3
     stream: bool = False
     agent_profile: str = "planner"
@@ -67,7 +67,7 @@ class AgentConfig:
                 os.environ.get("VPA_AGENT_DISABLE_REASONING", "1").strip().lower()
                 not in {"0", "false", "no", "off"}
             ),
-            max_rounds=max_rounds or int(os.environ.get("VPA_AGENT_MAX_ROUNDS", "8")),
+            max_rounds=max_rounds or int(os.environ.get("VPA_AGENT_MAX_ROUNDS", "10")),
             max_entries=max_entries or int(os.environ.get("VPA_AGENT_MAX_ENTRIES", "3")),
             agent_profile=agent_profile or os.environ.get("VPA_AGENT_PROFILE", "planner"),
             api_key=(
