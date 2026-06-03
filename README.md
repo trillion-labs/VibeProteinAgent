@@ -41,8 +41,7 @@ Then send a protein request:
 ```text
 Run this VPA query in workspace [workspace name]:
 Design 50-80 aa soluble mini-protein binders to chain A of `[your_folder]/target.pdb`.
-Return the top 5 candidates with
-structures, QC, ranking, and an HTML report.
+Return the top 5 candidates with structures, QC, ranking, and an HTML report.
 ```
 
 Codex reads [AGENTS.md](AGENTS.md) and [skills.md](skills.md) from this repo, so
@@ -95,8 +94,7 @@ back.
 ```text
 Run this VPA query in workspace [workspace name]:
 Design 50-80 aa soluble mini-protein binders to chain A of `[your_folder]/target.pdb`.
-Return the top 5 candidates with
-structures, QC, ranking, and an HTML report.
+Return the top 5 candidates with structures, QC, ranking, and an HTML report.
 ```
 
 For retrieval or analysis:
