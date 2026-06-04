@@ -389,7 +389,7 @@ def test_decision_brief_exposes_only_positive_requested_candidate_count() -> Non
     assert zero["user_goal"]["requested_candidate_count"] is None
 
 
-def test_decision_brief_requested_candidate_count_priority_matches_router() -> None:
+def test_decision_brief_requested_candidate_count_priority_matches_contract_builder() -> None:
     kwargs = {
         "round_record": {"workflow_summary_raw": _raw_workflow_summary()},
         "prompt_context": {

@@ -4,6 +4,11 @@ Use the agent when you want to describe a scientific goal in natural language
 and let an LLM choose tools, build a VPA plan, execute it, and make a final
 decision from the stored outputs.
 
+`vpa agent run` is only for LLM-authored workflow planning. It is not a
+free-text router for direct tool runs, existing job status/results, reports, or
+explicit workflow descriptors. Use `vpa run`, `vpa status`, `vpa results`,
+`vpa report`, or `vpa workflow run` for those explicit operations.
+
 Demo notebook: [`demo/use_llm_agent_demo.ipynb`](../demo/use_llm_agent_demo.ipynb)
 is safe by default. It inspects the local tool surface and prints execution
 commands unless `VPA_DEMO_RUN_LLM=1` is set.
@@ -67,9 +72,9 @@ Do not commit provider tokens or CLI session files to the repository.
 
 ## 3. Plan First
 
-`--plan-only` classifies the request, asks the provider for a semantic plan,
-validates it locally, and compiles it into VPA workflow intent. It does not
-submit jobs, warm tools, or run models.
+`--plan-only` asks the provider for a semantic plan, validates it locally, and
+compiles it into VPA workflow intent. It does not submit jobs, warm tools, or
+run models.
 
 ```bash
 vpa agent run \
@@ -170,3 +175,8 @@ For requests that include local files, pass paths explicitly in the prompt or
 through `--target`, `--param`, or `--params-file`. For example, use
 `--target target.pdb` for binder design and `--param fasta_path=/abs/path/input.fasta`
 for a sequence-analysis request.
+
+If the user names a tool in the agent request, that name is planner context, not
+direct adapter dispatch. For example, "include rfdiffusion" means the planner
+should consider that tool in a workflow; direct RFdiffusion debugging should use
+`vpa run rfdiffusion ...`.

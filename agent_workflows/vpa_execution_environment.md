@@ -138,9 +138,26 @@ vpa results <job_id> --workspace "$VPA_WORKSPACE" --json
 
 ## Agent Runs From Natural Language
 
-For user-facing workflows, prefer `vpa agent run`. The user request can be plain
-natural language; the agent should handle routing, planning, validation,
-execution, decision, and reporting through VPA's deterministic contracts.
+For user-facing LLM-authored scientific workflows, use `vpa agent run`. The
+user request can be plain natural language, but the surrounding assistant must
+choose this command only after deciding that the request needs an agent-planned
+workflow. `vpa agent run` does not infer direct tool, status, report, or explicit
+workflow mode from free text.
+
+Use these command boundaries:
+
+| User intent | Command |
+|---|---|
+| Known direct tool/debug run | `vpa run <tool> ...` |
+| Existing job status/results/logs/artifacts | `vpa status`, `vpa results`, `vpa logs`, `vpa artifacts` |
+| Existing job/workflow/agent report | `vpa report job_/wf_/arun_...` |
+| Explicit workflow descriptor | `vpa workflow run path/to/workflow.yaml` |
+| LLM-authored scientific workflow | `vpa agent run "scientific goal..."` |
+
+Tool names inside an agent request are planning context. For example,
+`rfdiffusion 포함해서 agent run` should be passed as an agent-planned workflow
+request only when the assistant has decided a planned workflow is needed; it
+must not be treated as direct `rfdiffusion` adapter dispatch.
 
 Do not invent run-boundary options. Before live execution, resolve these fields
 from the user's request, explicit environment/configuration, or a direct user
@@ -193,7 +210,7 @@ vpa agent runs --workspace "$VPA_WORKSPACE"
 vpa agent show <agent_run_id> --workspace "$VPA_WORKSPACE"
 ```
 
-For non-executing classification/planning or saved plans:
+For non-executing planning previews or saved plans:
 
 ```bash
 vpa agent ask "Explain which VPA tools would answer this request." \

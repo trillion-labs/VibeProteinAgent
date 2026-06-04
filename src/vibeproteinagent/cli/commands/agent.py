@@ -46,11 +46,9 @@ def _merge_params(
 @agent_app.command("run")
 def agent_run(
     request: list[str] = typer.Argument(  # noqa: B008
-        ..., help="Natural language request or direct run text."
+        ..., help="Natural language scientific workflow goal."
     ),
     goal: str | None = typer.Option(None, "--goal", help="Additional scientific goal text."),
-    tool: str | None = typer.Option(None, "--tool", help="Force direct single-tool mode."),
-    workflow: str | None = typer.Option(None, "--workflow", help="Force explicit workflow mode."),
     target: str | None = typer.Option(None, "--target", help="Target PDB/path convenience param."),
     param: list[str] = typer.Option(None, "--param", help="KEY=VALUE agent/workflow param."),  # noqa: B008
     params_file: str | None = typer.Option(None, "--params-file", help="JSON/YAML params file."),
@@ -69,7 +67,6 @@ def agent_run(
         hide_input=True,
         show_default=False,
     ),
-    force_new: bool = typer.Option(False, "--force-new", help="Force fresh direct job IDs."),
     no_execute: bool = typer.Option(
         False,
         "--no-execute",
@@ -78,7 +75,7 @@ def agent_run(
     plan_only: bool = typer.Option(
         False,
         "--plan-only",
-        help="Classify/plan/validate only; do not submit jobs or workflows.",
+        help="Plan/validate only; do not submit jobs or workflows.",
     ),
     no_warm: bool = typer.Option(False, "--no-warm", help="Skip pre-warming tools."),
     max_rounds: int = typer.Option(8, "--max-rounds", help="Maximum agent optimization rounds."),
@@ -93,7 +90,7 @@ def agent_run(
     max_wait_s: int = typer.Option(3600, "--max-wait-s", help="Workflow execution wait budget."),
     json_: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Classify, optionally plan, execute through VPA, and persist an agent run."""
+    """Plan and optionally execute an LLM-authored VPA workflow."""
     try:
         text = " ".join(request)
         if goal:
@@ -112,9 +109,6 @@ def agent_run(
         data = controller.run_sync(
             text,
             params=params,
-            tool=tool,
-            workflow=workflow,
-            force_new=force_new,
             policy=ExecutionPolicy(
                 submit=not plan_only,
                 execute=not no_execute and not plan_only,
@@ -131,7 +125,7 @@ def agent_run(
 @agent_app.command("ask")
 def agent_ask(
     request: list[str] = typer.Argument(  # noqa: B008
-        ..., help="Request to classify or plan."
+        ..., help="Scientific workflow goal to preview."
     ),
     param: list[str] = typer.Option(None, "--param", help="KEY=VALUE param."),  # noqa: B008
     workspace_name: str | None = typer.Option(None, "--workspace", help="Workspace name."),
@@ -151,7 +145,7 @@ def agent_ask(
     ),
     json_: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Alias for `agent run --no-execute --no-warm`."""
+    """Preview the LLM-authored workflow plan without submitting work."""
     try:
         ws = _ensure_workspace(workspace_name)
         controller = AgentController(

@@ -21,6 +21,21 @@ When the user asks to install, repair, or prepare VPA or a VPA tool, read
 [agent_workflows/vpa_installation.md](agent_workflows/vpa_installation.md) and
 perform deterministic installer/preflight steps before execution.
 
+The skills-aware assistant is the route chooser. Pick an explicit VPA command
+before calling the runtime:
+
+- use `vpa run <tool>` for a known single-tool/debug run;
+- use `vpa status`, `vpa wait`, `vpa results`, `vpa logs`, `vpa artifacts`, or
+  `vpa report` for existing `job_`, `wf_`, or `arun_` state;
+- use `vpa workflow run` when the user supplies or requests a concrete workflow
+  descriptor;
+- use `vpa agent run` only for an LLM-authored scientific workflow plan.
+
+`vpa agent run` is not a natural-language router for direct tool/status/report
+or explicit workflow operations. Tool names inside an agent request, including
+phrases like "include rfdiffusion", are planner context rather than direct
+adapter dispatch.
+
 ## Repository And Command Map
 
 - Python package and CLI live under `src/vibeproteinagent/`; installed commands

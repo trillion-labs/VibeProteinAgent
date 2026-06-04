@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import gzip
+import io
 import os
 import json
+import shlex
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -19,6 +23,10 @@ from vibeproteinagent.install.installer import (
     InstallState,
     ManifestInstaller,
     _BOLTZGEN_RUNTIME_DEPS,
+    _FOLDSEEK_BINARY_ARCHIVE_MEMBER,
+    _MMSEQS_BINARY_ARCHIVE_MEMBER,
+    _TMALIGN_BINARY_GZIP_URL,
+    _VINA_BINARY_URL,
     _capability_summary,
     _ensure_weight,
     _env_exports,
@@ -109,6 +117,25 @@ def test_manifest_lint_rejects_no_error_contracts(isolated_vpa_home: Path) -> No
     result = lint_manifest(load_manifest())
 
     assert result["ok"] is True
+
+
+def test_declared_sidecar_install_scripts_exist(isolated_vpa_home: Path) -> None:
+    manifest = load_manifest()
+    source_root = Path(__file__).resolve().parents[1]
+    missing: list[str] = []
+    for tool in manifest.tools.values():
+        if tool.sidecar is None or not tool.sidecar.install_script:
+            continue
+        argv = shlex.split(tool.sidecar.install_script)
+        if len(argv) < 2 or argv[0] != "bash":
+            continue
+        if argv[1].startswith("-"):
+            continue
+        script = source_root / argv[1]
+        if not script.is_file():
+            missing.append(f"{tool.name}: {argv[1]}")
+
+    assert missing == []
 
 
 def test_protenix_v2_manifest_has_source_and_checkpoint_contract(
@@ -297,6 +324,288 @@ def test_artifact_index_resolves_local_weight_contract(
     assert (
         paths.cache_dir / "protenix" / "protenix_base_default_v1.0.0.pt"
     ).read_text() == "mock-checkpoint"
+    assert results[-1]["status"] == "installed"
+
+
+def test_foldseek_weight_downloads_public_binary_archive(
+    isolated_vpa_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = tmp_path / "payload"
+    binary = payload / _FOLDSEEK_BINARY_ARCHIVE_MEMBER
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\necho foldseek\n")
+    archive = tmp_path / "foldseek-linux-gpu.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(payload / "foldseek", arcname="foldseek")
+
+    def fake_urlretrieve(url: str, filename: str | Path) -> tuple[str, object]:
+        shutil.copy2(archive, filename)
+        return str(filename), None
+
+    monkeypatch.setattr(installer_module.urllib.request, "urlretrieve", fake_urlretrieve)
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+    weight = InstallWeight(
+        name="foldseek_binary",
+        path="envs/vpa/bin/foldseek",
+        artifact_ref="external_binaries/foldseek",
+        source_path="/missing/foldseek",
+    )
+    state = InstallState(paths.state_db)
+    results: list[dict[str, object]] = []
+
+    _ensure_weight(
+        InstallTool(name="foldseek", runtime="external_binary", binary="foldseek"),
+        weight,
+        paths,
+        InstallOptions(install_root=paths.root),
+        state,
+        results,
+        required=True,
+        artifact_index={},
+    )
+
+    installed = paths.shared_env / "bin" / "foldseek"
+    assert installed.read_text() == "#!/bin/sh\necho foldseek\n"
+    assert installed.stat().st_mode & 0o111
+    assert results[-1]["status"] == "downloaded"
+
+
+def test_mmseqs_weight_downloads_public_binary_archive(
+    isolated_vpa_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = tmp_path / "payload"
+    binary = payload / _MMSEQS_BINARY_ARCHIVE_MEMBER
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\necho mmseqs\n")
+    archive = tmp_path / "mmseqs-linux-gpu.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(payload / "mmseqs", arcname="mmseqs")
+
+    def fake_urlretrieve(url: str, filename: str | Path) -> tuple[str, object]:
+        shutil.copy2(archive, filename)
+        return str(filename), None
+
+    monkeypatch.setattr(installer_module.urllib.request, "urlretrieve", fake_urlretrieve)
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+    weight = InstallWeight(
+        name="mmseqs_binary",
+        path="envs/vpa/bin/mmseqs",
+        artifact_ref="external_binaries/mmseqs",
+        source_path="/missing/mmseqs",
+    )
+    state = InstallState(paths.state_db)
+    results: list[dict[str, object]] = []
+
+    _ensure_weight(
+        InstallTool(name="mmseqs2_gpu", runtime="external_binary", binary="mmseqs"),
+        weight,
+        paths,
+        InstallOptions(install_root=paths.root),
+        state,
+        results,
+        required=True,
+        artifact_index={},
+    )
+
+    installed = paths.shared_env / "bin" / "mmseqs"
+    assert installed.read_text() == "#!/bin/sh\necho mmseqs\n"
+    assert installed.stat().st_mode & 0o111
+    assert results[-1]["status"] == "downloaded"
+
+
+def test_tmalign_weight_downloads_public_gzip_binary(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = gzip.compress(b"#!/bin/sh\necho TMalign\n")
+
+    def fake_open_download_url(url: str) -> io.BytesIO:
+        assert url == _TMALIGN_BINARY_GZIP_URL
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(installer_module, "_open_download_url", fake_open_download_url)
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+    weight = InstallWeight(
+        name="tmalign_binary",
+        path="envs/vpa/bin/TMalign",
+        artifact_ref="external_binaries/TMalign",
+        source_path="/missing/TMalign",
+    )
+    state = InstallState(paths.state_db)
+    results: list[dict[str, object]] = []
+
+    _ensure_weight(
+        InstallTool(name="tmalign", runtime="external_binary", binary="TMalign"),
+        weight,
+        paths,
+        InstallOptions(install_root=paths.root),
+        state,
+        results,
+        required=True,
+        artifact_index={},
+    )
+
+    installed = paths.shared_env / "bin" / "TMalign"
+    assert installed.read_text() == "#!/bin/sh\necho TMalign\n"
+    assert installed.stat().st_mode & 0o111
+    assert results[-1]["status"] == "downloaded"
+
+
+def test_vina_weight_downloads_public_release_binary(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"#!/bin/sh\necho vina\n"
+
+    def fake_open_download_url(url: str) -> io.BytesIO:
+        assert url == _VINA_BINARY_URL
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(installer_module, "_open_download_url", fake_open_download_url)
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+    weight = InstallWeight(
+        name="vina_binary",
+        path="envs/vpa/bin/vina",
+        artifact_ref="external_binaries/vina",
+        source_path="/missing/vina",
+    )
+    state = InstallState(paths.state_db)
+    results: list[dict[str, object]] = []
+
+    _ensure_weight(
+        InstallTool(name="vina", runtime="external_binary", binary="vina"),
+        weight,
+        paths,
+        InstallOptions(install_root=paths.root),
+        state,
+        results,
+        required=True,
+        artifact_index={},
+    )
+
+    installed = paths.shared_env / "bin" / "vina"
+    assert installed.read_text() == "#!/bin/sh\necho vina\n"
+    assert installed.stat().st_mode & 0o111
+    assert results[-1]["status"] == "downloaded"
+
+
+def test_pxdesign_weight_downloads_public_cache_fallback(
+    isolated_vpa_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "alphafold_params_2022-12-06.tar"
+    payload = tmp_path / "af2"
+    payload.mkdir()
+    for name in ("params_model_1.npz", "params_model_1_ptm.npz"):
+        (payload / name).write_text(name)
+    with tarfile.open(archive, "w") as tf:
+        for file in payload.iterdir():
+            tf.add(file, arcname=file.name)
+
+    def fake_urlretrieve(url: str, filename: str | Path) -> tuple[str, object]:
+        target = Path(filename)
+        if "alphafold_params_2022-12-06.tar" in url:
+            shutil.copy2(archive, target)
+        else:
+            target.write_bytes(f"mock from {url}".encode())
+        return str(target), None
+
+    monkeypatch.setattr(installer_module.urllib.request, "urlretrieve", fake_urlretrieve)
+    paths = InstallPaths(
+        root=isolated_vpa_home,
+        shared_env=isolated_vpa_home / "envs" / "vpa",
+        sidecars_root=isolated_vpa_home / "sidecars",
+        cache_dir=isolated_vpa_home / "cache",
+        state_db=isolated_vpa_home / "install" / "state.json",
+    )
+    weight = InstallWeight(
+        name="pxdesign_weights",
+        path="cache/pxdesign",
+        artifact_ref="pxdesign/checkpoints",
+        source_path="/missing/pxdesign",
+    )
+    results: list[dict[str, object]] = []
+
+    _ensure_weight(
+        InstallTool(name="pxdesign", runtime="sidecar"),
+        weight,
+        paths,
+        InstallOptions(install_root=paths.root),
+        InstallState(paths.state_db),
+        results,
+        required=True,
+        artifact_index={},
+    )
+
+    cache = paths.cache_dir / "pxdesign"
+    assert (cache / "pxdesign_v0.1.0.pt").is_file()
+    assert (cache / "protenix_base_default_v0.5.0.pt").is_file()
+    assert (cache / "tool_weights" / "af2" / "params_model_1.npz").is_file()
+    assert (cache / "tool_weights" / "af2" / "params_model_1_ptm.npz").is_file()
+    assert results[-1]["status"] == "downloaded"
+
+
+def test_esm3_dependency_install_preserves_existing_torch(
+    isolated_vpa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probes = [
+        subprocess.CompletedProcess(["probe"], 1, stdout="", stderr="missing esm"),
+        subprocess.CompletedProcess(["verify"], 0, stdout="ok\n", stderr=""),
+    ]
+    install_commands: list[list[str]] = []
+
+    def fake_subprocess_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return probes.pop(0)
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> None:
+        install_commands.append(cmd)
+
+    monkeypatch.setattr(installer_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(installer_module, "_run", fake_run)
+
+    state = InstallState(isolated_vpa_home / "install" / "state.json")
+    results: list[dict[str, object]] = []
+    installer_module._ensure_esm3_shared_deps(
+        isolated_vpa_home / "envs" / "vpa" / "bin" / "python",
+        InstallOptions(install_root=isolated_vpa_home),
+        state,
+        results,
+    )
+
+    esm_commands = [cmd for cmd in install_commands if "esm==3.2.1.post1" in cmd]
+    assert len(esm_commands) == 1
+    assert "--no-deps" in esm_commands[0]
+    assert not any(arg.startswith("torch") for cmd in install_commands for arg in cmd)
     assert results[-1]["status"] == "installed"
 
 

@@ -14,6 +14,12 @@ RequestMode = Literal[
 
 
 class ModeClassification(BaseModel):
+    """Persisted run classification.
+
+    New ``AgentController.run`` requests are always ``agent_plan``. The broader
+    mode enum remains for historical agent run records and report rendering.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     mode: RequestMode

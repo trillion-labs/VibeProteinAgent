@@ -5,6 +5,7 @@ from .prompts import (
     DECISION_SYSTEM_PROMPT,
     PLANNER_IR_SYSTEM_PROMPT,
 )
+from .deliverable_contract import build_deliverable_contract
 from .workflow_planner import WorkflowPlanner
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "DECISION_SYSTEM_PROMPT",
     "PLANNER_IR_SYSTEM_PROMPT",
     "WorkflowPlanner",
+    "build_deliverable_contract",
 ]

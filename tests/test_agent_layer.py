@@ -11,16 +11,20 @@ import pytest
 from typer.testing import CliRunner
 
 from vibeproteinagent.adapters import ToolRegistry
-from vibeproteinagent.agents import AgentConfig, AgentController, AgentSessionStore, ModeRouter
+from vibeproteinagent.agents import AgentConfig, AgentController, AgentSessionStore
 from vibeproteinagent.agents.evaluation import DecisionEngine
 from vibeproteinagent.agents.execution import ExecutionPolicy
-from vibeproteinagent.agents.execution.controller import WorkflowExecutionOutcome
+from vibeproteinagent.agents.execution.controller import (
+    WorkflowExecutionOutcome,
+    load_plan_or_workflow,
+)
 from vibeproteinagent.agents.planning import WorkflowPlanner
 from vibeproteinagent.agents.planning.canonical_tools import EXPLICIT_MODE_TOOLS
 from vibeproteinagent.agents.planning.prompts import PLANNER_IR_SYSTEM_PROMPT
 from vibeproteinagent.agents.provider import ChatMessage, ProviderResponse, provider_from_config
 from vibeproteinagent.agents.provider.cli_agent import CliAgentProvider
 from vibeproteinagent.agents.provider.openrouter import _post_json_with_total_timeout
+from vibeproteinagent.agents.summarization import ResultSummarizer
 from vibeproteinagent.agents.tools.schemas import compact_tool_outline, compact_tool_schema
 from vibeproteinagent.cli.main import app
 from vibeproteinagent.core.errors import InvalidParamsError, TimeoutError_
@@ -67,7 +71,7 @@ def test_decision_engine_does_not_terminal_on_ranked_design() -> None:
 def _run_pending_jobs(store: JobStore, registry: ToolRegistry, stop: threading.Event) -> None:
     import typing
 
-    from vibeproteinagent.adapters.context import null_context
+    from vibeproteinagent.adapters.context import AdapterRunContext
 
     try:
         import torch
@@ -91,7 +95,16 @@ def _run_pending_jobs(store: JobStore, registry: ToolRegistry, stop: threading.E
             hints = typing.get_type_hints(adapter.run)
             input_model = hints.get("params")
             params = input_model(**rec.params) if input_model is not None else rec.params
-            out = adapter.run(params, null_context(rec.job_id))
+            context = AdapterRunContext(
+                job_id=rec.job_id,
+                workspace_root=store.workspace.root,
+                job_dir=store.workspace.job_dir(rec.job_id),
+                is_cancelled=lambda: False,
+                log=lambda line: None,
+                emit_progress=lambda pct: None,
+                fusion_inputs=None,
+            )
+            out = adapter.run(params, context)
             payload = out.model_dump() if hasattr(out, "model_dump") else dict(out)
             store.transition(rec.job_id, JobState.COMPLETED, output=payload)
 
@@ -176,71 +189,56 @@ def _two_stage_protein_qc_script(
     return "\n".join(lines) + "\n"
 
 
-def test_mode_router_preserves_direct_tool_without_llm(tmp_workspace: Workspace) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    route = ModeRouter(registry).classify("run noop payload=hello")
-
-    assert route.mode == "direct_tool"
-    assert route.requires_llm_planning is False
-    assert route.requested_tools == ["noop"]
-    assert route.params == {"payload": "hello"}
-
-
-def test_mode_router_splits_direct_tool_set_params(tmp_workspace: Workspace) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    route = ModeRouter(registry).classify(
-        "run noop then protein_qc noop.payload=hello protein_qc.input_dir=outputs/qc"
-    )
-
-    assert route.mode == "direct_tool_set"
-    assert route.execution == {"type": "sequential"}
-    by_tool = {job["tool"]: job["params"] for job in route.direct_jobs}
-    assert by_tool["noop"] == {"payload": "hello"}
-    assert by_tool["protein_qc"] == {"input_dir": "outputs/qc"}
-
-
-def test_mode_router_defaults_direct_tool_set_to_parallel(tmp_workspace: Workspace) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    route = ModeRouter(registry).classify("run noop and protein_qc")
-
-    assert route.mode == "direct_tool_set"
-    assert route.execution == {"type": "parallel"}
-
-
-def test_mode_router_keeps_design_chains_in_agent_planning(tmp_workspace: Workspace) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    route = ModeRouter(registry).classify(
-        "Use rfdiffusion, proteinmpnn, protenix_v2, structure_analysis, "
-        "protein_qc, and rank_designs to design and return an output sequence."
-    )
-
-    assert route.mode == "agent_plan"
-    assert route.requires_llm_planning is True
-
-
-def test_mode_router_result_word_inside_scientific_text_is_not_direct(
+def test_agent_run_always_uses_planner_for_direct_sounding_text(
     tmp_workspace: Workspace,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    route = ModeRouter(registry).classify(
-        "Design an enzyme for damaged NAD(P)H that is a result of hydration."
+    script = tmp_path / "fake_planner.py"
+    script.write_text(_two_stage_protein_qc_script(goal="direct text is planner input"))
+    monkeypatch.setenv("VPA_CODEX_COMMAND", "python")
+    monkeypatch.setenv("VPA_CODEX_ARGS", str(script))
+    controller = AgentController(
+        tmp_workspace,
+        config=AgentConfig.from_env(provider="codex", model="fake"),
     )
 
-    assert route.mode == "agent_plan"
+    data = controller.run_sync(
+        "run noop payload=hello",
+        params={"sequence": "ACDEFGHIK"},
+        policy=ExecutionPolicy(submit=False, execute=False, warm=False),
+    )
+
+    assert data["mode"] == "agent_plan"
+    assert data["classification"]["requires_llm_planning"] is True
+    assert data["classification"]["action"] == "plan"
+    assert data["job_ids"] == []
+    assert JobStore(tmp_workspace).list() == []
 
 
-def test_mode_router_fresh_analysis_request_uses_planning(tmp_workspace: Workspace) -> None:
-    registry = ToolRegistry()
-    registry.discover()
-    route = ModeRouter(registry).classify("analyze this sequence for liabilities")
+def test_agent_run_treats_mentioned_tools_as_planner_context(
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    script = tmp_path / "fake_planner.py"
+    script.write_text(_two_stage_protein_qc_script(goal="tool mention remains planner input"))
+    monkeypatch.setenv("VPA_CODEX_COMMAND", "python")
+    monkeypatch.setenv("VPA_CODEX_ARGS", str(script))
+    controller = AgentController(
+        tmp_workspace,
+        config=AgentConfig.from_env(provider="codex", model="fake"),
+    )
 
-    assert route.mode == "agent_plan"
-    assert route.requires_llm_planning is True
+    data = controller.run_sync(
+        "rfdiffusion 포함해서 agent run",
+        params={"sequence": "ACDEFGHIK"},
+        policy=ExecutionPolicy(submit=False, execute=False, warm=False),
+    )
+
+    assert data["mode"] == "agent_plan"
+    assert data["classification"]["requested_tools"] == []
+    assert data["job_ids"] == []
 
 
 def test_planner_prompt_is_format_only_not_template_routing() -> None:
@@ -330,111 +328,6 @@ def test_generic_planner_drafts_explicit_workflow_plan(
     assert plan["workflow_plan"]["nodes"][0]["tool"] == "protein_qc"
 
 
-def test_agent_direct_tool_set_accepts_explicit_jobs(tmp_workspace: Workspace) -> None:
-    controller = AgentController(tmp_workspace)
-    data = controller.run_sync(
-        "run noop and protein_qc",
-        params={
-            "jobs": [
-                {"tool": "noop", "params": {"payload": "a"}},
-                {"tool": "noop", "params": {"payload": "b"}},
-            ]
-        },
-    )
-
-    assert data["mode"] == "direct_tool_set"
-    assert len(data["job_ids"]) == 2
-    assert data["result"]["jobs"][0]["tool"] == "noop"
-
-
-def test_agent_direct_tool_set_reports_submission_failures(tmp_workspace: Workspace) -> None:
-    controller = AgentController(tmp_workspace)
-    data = controller.run_sync(
-        "run noop and protein_qc",
-        params={
-            "jobs": [
-                {"tool": "noop", "params": {"payload": "a"}},
-                {"tool": "noop", "params": {"x": "missing-payload"}},
-            ]
-        },
-    )
-
-    assert data["mode"] == "direct_tool_set"
-    assert data["state"] == "partial_failed"
-    assert data["result"]["jobs"][1]["code"] == "E_INVALID_PARAMS"
-
-
-def test_agent_plan_only_direct_tool_validates_params(tmp_workspace: Workspace) -> None:
-    controller = AgentController(tmp_workspace)
-
-    with pytest.raises(Exception) as exc_info:
-        controller.run_sync(
-            "run noop",
-            params={"x": "missing-payload"},
-            policy=ExecutionPolicy(submit=False, execute=False, warm=False),
-        )
-
-    assert getattr(exc_info.value, "code", None) == "E_INVALID_PARAMS"
-
-
-def test_agent_sequential_tool_set_without_daemon_does_not_submit_downstream(
-    tmp_workspace: Workspace,
-) -> None:
-    controller = AgentController(tmp_workspace)
-
-    data = controller.run_sync(
-        "run noop then protein_qc",
-        params={
-            "jobs": [
-                {"tool": "noop", "params": {"payload": "a"}},
-                {"tool": "protein_qc", "params": {"input_dir": "outputs/qc"}},
-            ]
-        },
-    )
-
-    assert data["mode"] == "direct_tool_set"
-    assert data["classification"]["execution"] == {"type": "sequential"}
-    assert len(data["job_ids"]) == 1
-
-
-def test_agent_direct_tool_submits_and_persists_run(tmp_workspace: Workspace) -> None:
-    controller = AgentController(tmp_workspace)
-    data = controller.run_sync("run noop payload=hello")
-
-    assert data["mode"] == "direct_tool"
-    assert data["job_ids"]
-    assert data["state"] == "queued"
-
-    runs = AgentSessionStore(tmp_workspace).list_runs()
-    assert runs[0].run_id == data["run_id"]
-    assert runs[0].mode == "direct_tool"
-    assert runs[0].job_ids == data["job_ids"]
-    assert runs[0].final_report is not None
-
-
-def test_agent_direct_warm_does_not_submit_job(tmp_workspace: Workspace) -> None:
-    controller = AgentController(tmp_workspace)
-    data = controller.run_sync("warm noop")
-
-    assert data["mode"] == "direct_tool"
-    assert data["classification"]["action"] == "warm"
-    assert data["job_ids"] == []
-    assert data["result"]["code"] == "E_DAEMON_UNAVAILABLE"
-
-
-def test_agent_status_request_does_not_submit_new_job(tmp_workspace: Workspace) -> None:
-    created = AgentController(tmp_workspace).run_sync("run noop payload=hello")
-    job_id = created["job_ids"][0]
-    before = len(JobStore(tmp_workspace).list())
-
-    status = AgentController(tmp_workspace).run_sync(f"status noop {job_id}")
-
-    assert status["mode"] == "direct_tool"
-    assert status["classification"]["action"] == "get_status"
-    assert status["job_ids"] == [job_id]
-    assert len(JobStore(tmp_workspace).list()) == before
-
-
 def test_agent_config_accepts_invocation_api_key_without_env() -> None:
     config = AgentConfig.from_env(api_key="sk-test")
 
@@ -460,7 +353,7 @@ def test_agent_config_defaults_to_local_cli_provider(monkeypatch) -> None:
 
     assert config.provider == "codex"
     assert config.timeout_s == 300
-    assert config.max_rounds == 8
+    assert config.max_rounds == 10
     assert config.max_entries == 3
     assert isinstance(provider_from_config(config), CliAgentProvider)
 
@@ -576,16 +469,19 @@ def test_cli_agent_provider_passes_model_argument(
     assert json.loads(argv_path.read_text())[-2:] == ["--model", "fake-model"]
 
 
-def test_direct_mode_does_not_require_valid_provider(tmp_workspace: Workspace) -> None:
+def test_agent_run_requires_planner_provider_for_direct_sounding_text(
+    tmp_workspace: Workspace,
+) -> None:
     controller = AgentController(
         tmp_workspace,
         config=AgentConfig.from_env(provider="not-a-provider", model="unused"),
     )
 
-    data = controller.run_sync("run noop payload=hello")
+    with pytest.raises(Exception) as exc_info:
+        controller.run_sync("run noop payload=hello")
 
-    assert data["mode"] == "direct_tool"
-    assert data["job_ids"]
+    assert getattr(exc_info.value, "code", None) == "E_INVALID_PARAMS"
+    assert JobStore(tmp_workspace).list() == []
 
 
 def test_agent_ask_plans_without_submitting_workflow(
@@ -614,7 +510,7 @@ def test_agent_ask_plans_without_submitting_workflow(
     assert WorkflowStore(tmp_workspace).list() == []
 
 
-def test_explicit_workflow_plan_only_validates_descriptor(
+def test_validate_plan_rejects_bad_workflow_yaml(
     tmp_workspace: Workspace,
     tmp_path: Path,
 ) -> None:
@@ -632,16 +528,12 @@ nodes:
     controller = AgentController(tmp_workspace)
 
     with pytest.raises(Exception) as exc_info:
-        controller.run_sync(
-            "run workflow",
-            workflow=str(bad),
-            policy=ExecutionPolicy(submit=False, execute=False, warm=False),
-        )
+        controller.validate_plan(load_plan_or_workflow(bad))
 
     assert getattr(exc_info.value, "code", None) == "E_UNKNOWN_TOOL"
 
 
-def test_explicit_workflow_no_execute_submits_without_running(
+def test_submit_plan_accepts_workflow_yaml(
     tmp_workspace: Workspace,
     tmp_path: Path,
 ) -> None:
@@ -663,14 +555,9 @@ nodes:
     )
     controller = AgentController(tmp_workspace)
 
-    data = controller.run_sync(
-        "run workflow",
-        workflow=str(wf_path),
-        params={"payload": "hello"},
-        policy=ExecutionPolicy(submit=True, execute=False, warm=False),
-    )
+    data = controller.submit_plan(load_plan_or_workflow(wf_path), {"payload": "hello"})
 
-    assert data["state"] == "submitted_not_executed"
+    assert data["state"] == "daemon_unavailable"
     assert data["workflow_ids"]
     assert data["job_ids"] == []
     nodes = WorkflowStore(tmp_workspace).list_nodes(data["workflow_id"])
@@ -826,11 +713,8 @@ def test_agent_plan_controller_executes_and_logs_provider_messages(
     assert data["workflow_ids"]
     run = AgentSessionStore(tmp_workspace).get_run(data["run_id"])
     assert run.provider_snapshot is not None
-    assert run.final_report["decision"]["decision"] == "no_acceptable_candidate"
-    assert (
-        run.final_report["summary"]["latest"]["final_submission"]["outcome"]
-        == "no_acceptable_candidate"
-    )
+    assert run.final_report["decision"]["decision"] == "submit_candidate"
+    assert run.final_report["summary"]["latest"]["final_submission"]["terminal"] is True
 
 
 def test_agent_plan_stops_after_explicit_submit_candidate(
@@ -1267,19 +1151,28 @@ def test_job_and_workflow_summaries_include_artifact_refs(
     tmp_workspace: Workspace,
     tmp_path: Path,
 ) -> None:
-    created = AgentController(tmp_workspace).run_sync("run noop payload=artifact")
-    job_id = created["job_ids"][0]
+    job_store = JobStore(tmp_workspace)
+    rec = job_store.submit(
+        "noop",
+        "1.0.0",
+        {"payload": "artifact"},
+        workspace_name=tmp_workspace.name,
+    )
+    job_store.transition(rec.job_id, JobState.QUEUED)
+    job_store.transition(rec.job_id, JobState.RUNNING)
+    job_store.transition(
+        rec.job_id,
+        JobState.COMPLETED,
+        output={"payload": "artifact"},
+    )
     artifact_file = tmp_path / "result.txt"
     artifact_file.write_text("small artifact")
-    ArtifactStore(tmp_workspace).register(job_id, "report", artifact_file, kind="text")
+    ArtifactStore(tmp_workspace).register(rec.job_id, "report", artifact_file, kind="text")
 
-    summary = AgentController(tmp_workspace).run_sync(f"summarize {job_id}")
+    summary = ResultSummarizer(tmp_workspace).summarize_job(rec.job_id)
 
-    artifacts = summary["summary"]["jobs"][0]["artifacts"]
+    artifacts = summary["artifacts"]
     assert artifacts["report"]["artifact_id"].startswith("art_")
-
-    run = AgentSessionStore(tmp_workspace).get_run(summary["run_id"])
-    assert run.artifacts["jobs"][0]["summary"]["report"]["artifact_id"].startswith("art_")
 
 
 def test_workflow_summary_extracts_ranked_candidates() -> None:
@@ -1518,9 +1411,32 @@ def test_workflow_planner_two_stage_prompt_resolves_selected_parameters(
 def test_agent_show_includes_persisted_run_details(
     runner: CliRunner,
     isolated_vpa_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    script = tmp_path / "fake_planner.py"
+    script.write_text(_two_stage_protein_qc_script(goal="x", node_id="n"))
+    monkeypatch.setenv("VPA_CODEX_COMMAND", "python")
+    monkeypatch.setenv("VPA_CODEX_ARGS", str(script))
     Workspace.create("default")
-    created = runner.invoke(app, ["agent", "run", "run", "noop", "payload=hi", "--json"])
+    created = runner.invoke(
+        app,
+        [
+            "agent",
+            "run",
+            "check",
+            "this",
+            "sequence",
+            "--provider",
+            "codex",
+            "--model",
+            "fake",
+            "--param",
+            "sequence=ACDEFGHIK",
+            "--plan-only",
+            "--json",
+        ],
+    )
     assert created.exit_code == 0, created.stdout
     run_id = json.loads(created.stdout)["data"]["run_id"]
 
@@ -1608,21 +1524,60 @@ def test_agent_validate_plan_rejects_unavailable_probe_tool(
     assert exc_info.value.details["availability"]["available"] is False
 
 
-def test_cli_agent_run_direct_tool_json(
+def test_cli_agent_run_direct_sounding_text_stays_agent_plan_json(
     runner: CliRunner,
     isolated_vpa_home: Path,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     Workspace.create("default")
+    script = tmp_path / "fake_planner.py"
+    script.write_text(_two_stage_protein_qc_script(goal="cli direct text is planner input"))
+    monkeypatch.setenv("VPA_CODEX_COMMAND", "python")
+    monkeypatch.setenv("VPA_CODEX_ARGS", str(script))
 
-    result = runner.invoke(app, ["agent", "run", "run", "noop", "payload=hi", "--json"])
+    result = runner.invoke(
+        app,
+        [
+            "agent",
+            "run",
+            "run",
+            "noop",
+            "payload=hi",
+            "--provider",
+            "codex",
+            "--model",
+            "fake",
+            "--param",
+            "sequence=ACDEFGHIK",
+            "--plan-only",
+            "--json",
+        ],
+    )
 
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     data = payload["data"]
-    assert data["mode"] == "direct_tool"
-    assert data["job_ids"]
-    assert data["classification"]["requires_llm_planning"] is False
+    assert data["mode"] == "agent_plan"
+    assert data["job_ids"] == []
+    assert data["classification"]["requires_llm_planning"] is True
+
+
+def test_cli_top_level_run_remains_direct_tool_json(
+    runner: CliRunner,
+    isolated_vpa_home: Path,
+) -> None:
+    Workspace.create("default")
+
+    result = runner.invoke(app, ["run", "noop", "payload=hi", "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    data = payload["data"]
+    assert data["tool"] == "noop"
+    assert data["job_id"]
 
 
 def test_cli_agent_validate_plan_accepts_workflow_yaml(

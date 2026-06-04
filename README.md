@@ -9,6 +9,7 @@ framework. It lets an agent install and run protein design tools, keep durable
 workspace evidence, and produce inspectable reports from natural-language
 protein requests.
 
+<!-- ![VPA framework](assets/readme/vpa_framework.png) -->
 ![VPA report snapshot](assets/readme/vpa-report-snapshot.svg)
 
 ## Why Use VPA?

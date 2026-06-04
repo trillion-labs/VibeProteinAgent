@@ -58,7 +58,11 @@ COMMANDS: list[tuple[str, list[str], bool]] = [
     # stdio mode actually starts a blocking MCP server (covered by the slow e2e test).
     # ws is documented as unimplemented and must surface E_DEPENDENCY.
     ("mcp serve ws",       ["mcp", "serve", "--transport", "ws", "--json"], False),
-    ("agent run direct",   ["agent", "run", "run", "noop", "payload=hi", "--json"], True),
+    (
+        "agent run requires planner",
+        ["agent", "run", "run", "noop", "payload=hi", "--provider", "not-a-provider", "--json"],
+        False,
+    ),
     ("agent runs",         ["agent", "runs", "--json"], True),
     ("doctor",             ["doctor", "--json"], True),
 ]

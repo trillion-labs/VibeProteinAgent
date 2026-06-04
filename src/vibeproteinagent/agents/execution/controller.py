@@ -10,13 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
-from vibeproteinagent.adapters import ToolRegistry, validate_params
+from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.agents.config import (
     AgentConfig,
     resolve_decision_normalization_mode,
 )
 from vibeproteinagent.agents.evaluation import DecisionEngine, DecisionSchemaViolation
-from vibeproteinagent.agents.planning import WorkflowPlanner
+from vibeproteinagent.agents.planning import (
+    WorkflowPlanner,
+    build_deliverable_contract,
+)
 from vibeproteinagent.agents.planning.candidate_merge import summarize_candidate_merge_audit
 from vibeproteinagent.agents.planning.compiler import (
     PLANNER_COMPILED_SOURCE_KIND,
@@ -33,7 +36,6 @@ from vibeproteinagent.agents.provider import (
     SessionLoggingProvider,
     provider_from_config,
 )
-from vibeproteinagent.agents.routing import ModeRouter
 from vibeproteinagent.agents.session import AgentSessionStore, ModeClassification
 from vibeproteinagent.agents.summarization import ResultSummarizer
 from vibeproteinagent.agents.tools import AgentToolBroker
@@ -48,8 +50,6 @@ from .candidate_archive import CandidateArchive
 from .candidate_pool import (
     candidate_capability_names as _candidate_capability_names,
     candidate_pool_items_from_summary as _candidate_pool_items_from_summary,
-    merge_candidate_pool as _merge_candidate_pool,
-    merge_candidate_pool_result as _merge_candidate_pool_result,
     safe_candidate_pool_stats_from_candidates as _safe_candidate_pool_stats_from_candidates,
 )
 from .decision_brief import DecisionBriefBuilder
@@ -88,7 +88,6 @@ class AgentController:
         self.registry.discover()
         self.config = config or AgentConfig.from_env()
         self.session_store = session_store or AgentSessionStore(workspace)
-        self.router = ModeRouter(self.registry)
         self._round_state: PriorRoundContext | None = None
         self._candidate_archive: CandidateArchive | None = None
 
@@ -97,18 +96,12 @@ class AgentController:
         request: str,
         *,
         params: dict[str, Any] | None = None,
-        tool: str | None = None,
-        workflow: str | None = None,
-        force_new: bool = False,
         policy: ExecutionPolicy | None = None,
     ) -> dict[str, Any]:
         return asyncio.run(
             self.run(
                 request,
                 params=params,
-                tool=tool,
-                workflow=workflow,
-                force_new=force_new,
                 policy=policy,
             )
         )
@@ -118,12 +111,10 @@ class AgentController:
         request: str,
         *,
         params: dict[str, Any] | None = None,
-        tool: str | None = None,
-        workflow: str | None = None,
-        force_new: bool = False,
         policy: ExecutionPolicy | None = None,
     ) -> dict[str, Any]:
         policy = policy or ExecutionPolicy()
+        request_params = params or {}
         run = self.session_store.create_run(
             request,
             provider=self.config.provider,
@@ -132,33 +123,28 @@ class AgentController:
         self.session_store.add_message(run.run_id, "user", request)
         broker = AgentToolBroker(self.workspace, self.registry, self.session_store, run.run_id)
 
-        classification = self.router.classify(
-            request,
-            params=params,
-            tool=tool,
-            workflow=workflow,
-            force_new=force_new,
+        classification = ModeClassification(
+            mode="agent_plan",
+            reason=(
+                "Agent run requests are planned workflows; direct tool, workflow, "
+                "status, result, and report operations use explicit VPA commands."
+            ),
+            requires_llm_planning=True,
+            params=request_params,
+            action="plan",
+            deliverable_contract=build_deliverable_contract(request, request_params),
         )
         self.session_store.update_run(run.run_id, state="classified", classification=classification)
 
         self._round_state = None
         try:
-            if classification.mode == "direct_tool":
-                report = self._run_direct_tool(run.run_id, broker, classification, policy)
-            elif classification.mode == "direct_tool_set":
-                report = self._run_direct_tool_set(run.run_id, broker, classification, policy)
-            elif classification.mode == "explicit_workflow":
-                report = self._run_explicit_workflow(run.run_id, broker, classification, policy)
-            elif classification.mode == "analysis_only":
-                report = self._run_analysis_only(run.run_id, classification)
-            else:
-                report = await self._run_agent_plan(
-                    run.run_id,
-                    broker,
-                    request,
-                    classification,
-                    policy,
-                )
+            report = await self._run_agent_plan(
+                run.run_id,
+                broker,
+                request,
+                classification,
+                policy,
+            )
             self.session_store.update_run(
                 run.run_id,
                 state=_agent_run_state(report),
@@ -173,312 +159,6 @@ class AgentController:
             raise
         finally:
             self._round_state = None
-
-    def _run_direct_tool(
-        self,
-        run_id: str,
-        broker: AgentToolBroker,
-        classification: ModeClassification,
-        policy: ExecutionPolicy,
-    ) -> dict[str, Any]:
-        tool = classification.requested_tools[0] if classification.requested_tools else None
-        if not tool:
-            if classification.action in {"get_status", "get_results"} and classification.job_refs:
-                return self._run_job_ref_action(run_id, broker, classification)
-            raise InvalidParamsError(
-                "direct_tool mode requires a tool or job reference",
-                details={},
-            )
-        if classification.action in {"get_status", "get_results"}:
-            return self._run_job_ref_action(run_id, broker, classification)
-        if classification.action == "warm":
-            result = broker.warm_tool(tool)
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state="completed" if result.get("ok") else "failed",
-                job_ids=[],
-                workflow_ids=[],
-                result=result,
-            )
-        if classification.action == "tool_info":
-            result = broker.tool_info(tool)
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state="completed" if result.get("ok", True) is not False else "failed",
-                job_ids=[],
-                workflow_ids=[],
-                result=result,
-            )
-        job_spec = (
-            classification.direct_jobs[0]
-            if classification.direct_jobs
-            else {"tool": tool, "params": classification.params, "version": "*"}
-        )
-        if not policy.submit:
-            _validate_direct_job_specs(self.registry, [job_spec])
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state="planned",
-                job_ids=[],
-                workflow_ids=[],
-                result={"job": _planned_job(job_spec, policy)},
-            )
-        result = broker.submit_job(
-            str(job_spec.get("tool") or tool),
-            _job_params(job_spec),
-            version=str(job_spec.get("version") or "*"),
-            call_id=_optional_str(job_spec.get("call_id")),
-            priority=str(job_spec.get("priority") or policy.priority),
-            force_new=_optional_bool(job_spec.get("force_new"), classification.force_new),
-            max_retries=_optional_int(job_spec.get("max_retries"), policy.max_retries),
-        )
-        if result.get("ok") is False and result.get("code"):
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state="failed",
-                job_ids=[],
-                workflow_ids=[],
-                result=result,
-            )
-        job_ids = [result["job_id"]]
-        summary = ResultSummarizer(self.workspace).summarize_job(result["job_id"])
-        self.session_store.add_summary(run_id, summary, job_id=result["job_id"])
-        return _final_report(
-            mode=classification.mode,
-            classification=classification,
-            state=result.get("state", "submitted"),
-            job_ids=job_ids,
-            workflow_ids=[],
-            result=result,
-            summary=summary,
-        )
-
-    def _run_direct_tool_set(
-        self,
-        run_id: str,
-        broker: AgentToolBroker,
-        classification: ModeClassification,
-        policy: ExecutionPolicy,
-    ) -> dict[str, Any]:
-        jobs = []
-        specs = classification.direct_jobs or [
-            {"tool": tool, "params": classification.params, "version": "*"}
-            for tool in classification.requested_tools
-        ]
-        if not policy.submit and classification.action == "submit":
-            _validate_direct_job_specs(self.registry, specs)
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state="planned",
-                job_ids=[],
-                workflow_ids=[],
-                result={"jobs": [_planned_job(spec, policy) for spec in specs]},
-            )
-        sequential = classification.execution.get("type") == "sequential"
-        supervisor_running = SupervisorClient().is_running() if sequential else False
-        for job_spec in specs:
-            tool = str(job_spec.get("tool") or "")
-            if classification.action == "warm":
-                result = broker.warm_tool(tool, version=str(job_spec.get("version") or "*"))
-            elif classification.action == "tool_info":
-                result = broker.tool_info(tool, version=str(job_spec.get("version") or "*"))
-            else:
-                result = broker.submit_job(
-                    tool,
-                    _job_params(job_spec),
-                    version=str(job_spec.get("version") or "*"),
-                    call_id=_optional_str(job_spec.get("call_id")),
-                    priority=str(job_spec.get("priority") or policy.priority),
-                    force_new=_optional_bool(job_spec.get("force_new"), classification.force_new),
-                    max_retries=_optional_int(job_spec.get("max_retries"), policy.max_retries),
-                )
-            jobs.append(result)
-            if (
-                classification.action == "submit"
-                and sequential
-                and isinstance(result, dict)
-                and result.get("job_id")
-            ):
-                if policy.execute and supervisor_running:
-                    waited = broker.wait_job(
-                        str(result["job_id"]),
-                        timeout_ms=policy.wait_job_timeout_ms,
-                    )
-                    jobs[-1] = waited
-                    if (
-                        waited.get("timed_out")
-                        or waited.get("state") not in {"completed"}
-                        or waited.get("ok") is False
-                    ):
-                        break
-                elif policy.execute:
-                    break
-        job_ids = [j["job_id"] for j in jobs if isinstance(j, dict) and j.get("job_id")]
-        summaries = [ResultSummarizer(self.workspace).summarize_job(jid) for jid in job_ids]
-        for jid, summary in zip(job_ids, summaries, strict=False):
-            self.session_store.add_summary(run_id, summary, job_id=jid)
-        state = _aggregate_job_state(jobs)
-        return _final_report(
-            mode=classification.mode,
-            classification=classification,
-            state=state,
-            job_ids=job_ids,
-            workflow_ids=[],
-            result={"jobs": jobs},
-            summary={"jobs": summaries},
-        )
-
-    def _run_job_ref_action(
-        self,
-        run_id: str,
-        broker: AgentToolBroker,
-        classification: ModeClassification,
-    ) -> dict[str, Any]:
-        results = []
-        summaries = []
-        for job_id in classification.job_refs:
-            if classification.action == "get_results":
-                result = broker.get_results(job_id)
-            else:
-                result = broker.get_status(job_id)
-            results.append(result)
-            try:
-                summary = ResultSummarizer(self.workspace).summarize_job(job_id)
-            except Exception:
-                summary = None
-            if summary is not None:
-                summaries.append(summary)
-                self.session_store.add_summary(run_id, summary, job_id=job_id)
-        return _final_report(
-            mode=classification.mode,
-            classification=classification,
-            state=_aggregate_job_state(results),
-            job_ids=classification.job_refs,
-            workflow_ids=[],
-            result={"jobs": results},
-            summary={"jobs": summaries},
-        )
-
-    def _run_explicit_workflow(
-        self,
-        run_id: str,
-        broker: AgentToolBroker,
-        classification: ModeClassification,
-        policy: ExecutionPolicy,
-    ) -> dict[str, Any]:
-        ref = classification.workflow_ref
-        if not ref:
-            raise InvalidParamsError("explicit_workflow mode requires workflow_ref", details={})
-        if ref.startswith("wf_"):
-            status = broker.get_workflow_status(ref)
-            summary = ResultSummarizer(self.workspace).summarize_workflow(ref)
-            self.session_store.add_summary(run_id, summary, workflow_id=ref)
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state=status.get("state", "unknown"),
-                job_ids=summary.get("job_ids", []),
-                workflow_ids=[ref],
-                result=status,
-                summary=summary,
-            )
-        if not policy.submit:
-            workflow_obj = _load_workflow_ref(ref)
-            WorkflowPlanner(self.registry).validate_invocation(
-                {
-                    "mode": "agent_plan",
-                    "workflow_plan": workflow_obj.model_dump(mode="json", exclude_none=True),
-                },
-                classification.params,
-                allow_internal_tools=True,
-            )
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state="planned",
-                job_ids=[],
-                workflow_ids=[],
-                result={"workflow_ref": ref, "params": classification.params},
-            )
-        if not policy.execute:
-            workflow_obj = _load_workflow_ref(ref)
-            WorkflowPlanner(self.registry).validate_invocation(
-                {
-                    "mode": "agent_plan",
-                    "workflow_plan": workflow_obj.model_dump(mode="json", exclude_none=True),
-                },
-                classification.params,
-                allow_internal_tools=True,
-            )
-            executor = WorkflowExecutor(self.workspace, self.registry, None)
-            workflow_id = executor.submit(workflow_obj, classification.params)
-            summary = ResultSummarizer(self.workspace).summarize_workflow(workflow_id)
-            summary["state"] = "submitted_not_executed"
-            self.session_store.add_summary(run_id, summary, workflow_id=workflow_id)
-            return _final_report(
-                mode=classification.mode,
-                classification=classification,
-                state="submitted_not_executed",
-                job_ids=summary.get("job_ids", []),
-                workflow_ids=[workflow_id],
-                result={
-                    "workflow_id": workflow_id,
-                    "state": "submitted_not_executed",
-                    "workflow_ref": ref,
-                    "params": classification.params,
-                },
-                summary=summary,
-            )
-        result = broker.run_workflow(ref, classification.params, max_wait_s=policy.max_wait_s)
-        workflow_id = result.get("workflow_id")
-        workflow_summary: dict[str, Any] | None = None
-        if workflow_id:
-            workflow_summary = ResultSummarizer(self.workspace).summarize_workflow(workflow_id)
-            self.session_store.add_summary(run_id, workflow_summary, workflow_id=workflow_id)
-        return _final_report(
-            mode=classification.mode,
-            classification=classification,
-            state=_workflow_result_state(result),
-            job_ids=(workflow_summary or {}).get("job_ids", []),
-            workflow_ids=[workflow_id] if workflow_id else [],
-            result=result,
-            summary=workflow_summary,
-        )
-
-    def _run_analysis_only(
-        self,
-        run_id: str,
-        classification: ModeClassification,
-    ) -> dict[str, Any]:
-        summarizer = ResultSummarizer(self.workspace)
-        job_summaries: list[dict[str, Any]] = []
-        workflow_summaries: list[dict[str, Any]] = []
-        job_ids: list[str] = []
-        for job_id in classification.job_refs:
-            summary = summarizer.summarize_job(job_id)
-            job_summaries.append(summary)
-            job_ids.append(job_id)
-            self.session_store.add_summary(run_id, summary, job_id=job_id)
-        if classification.workflow_ref and classification.workflow_ref.startswith("wf_"):
-            summary = summarizer.summarize_workflow(classification.workflow_ref)
-            workflow_summaries.append(summary)
-            self.session_store.add_summary(
-                run_id, summary, workflow_id=classification.workflow_ref
-            )
-        return _final_report(
-            mode=classification.mode,
-            classification=classification,
-            state="completed",
-            job_ids=job_ids,
-            workflow_ids=[classification.workflow_ref] if classification.workflow_ref else [],
-            result={"jobs": job_summaries, "workflows": workflow_summaries},
-            summary={"jobs": job_summaries, "workflows": workflow_summaries},
-        )
 
     async def _run_agent_plan(
         self,
@@ -2860,26 +2540,6 @@ def _agent_run_state(report: dict[str, Any]) -> str:
     return state
 
 
-def _workflow_result_state(result: dict[str, Any]) -> str:
-    if result.get("ok") is False:
-        code = result.get("code")
-        if code == ErrorCode.DAEMON_UNAVAILABLE:
-            return "daemon_unavailable"
-        if code == ErrorCode.TIMEOUT:
-            return "timeout"
-        return "failed"
-    return str(result.get("state") or "submitted")
-
-
-def _load_workflow_ref(ref: str):
-    try:
-        from vibeproteinagent.cli.commands.workflow import _resolve_descriptor
-
-        return load_workflow(_resolve_descriptor(ref))
-    except Exception:
-        return load_workflow(ref)
-
-
 def load_plan_or_workflow(path: str | Path) -> dict[str, Any]:
     p = Path(path)
     if p.suffix.lower() in {".yaml", ".yml"}:
@@ -2920,42 +2580,11 @@ def _partial_report(
     )
 
 
-def _job_params(job_spec: dict[str, Any]) -> dict[str, Any]:
-    params = job_spec.get("params")
-    if isinstance(params, dict):
-        return params
-    return {}
-
-
-def _optional_str(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
 def _plan_allows_internal_tools(plan: dict[str, Any]) -> bool:
     return plan.get("source_kind") in {
         PLANNER_COMPILED_SOURCE_KIND,
         "workflow_yaml",
         "workflow_template",
-    }
-
-
-def _optional_bool(value: Any, default: bool) -> bool:
-    return value if isinstance(value, bool) else default
-
-
-def _optional_int(value: Any, default: int) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else default
-
-
-def _planned_job(job_spec: dict[str, Any], policy: ExecutionPolicy) -> dict[str, Any]:
-    return {
-        "tool": job_spec.get("tool"),
-        "version": job_spec.get("version") or "*",
-        "params": _job_params(job_spec),
-        "validation_required": True,
-        "force_new": _optional_bool(job_spec.get("force_new"), False),
-        "priority": str(job_spec.get("priority") or policy.priority),
-        "max_retries": _optional_int(job_spec.get("max_retries"), policy.max_retries),
     }
 
 
@@ -2977,39 +2606,6 @@ def _is_terminal_planner_entry(entry: dict[str, Any]) -> bool:
         isinstance(item, dict) and item.get("issue") in terminal_issues
         for item in violations
     )
-
-
-def _aggregate_job_state(results: list[Any]) -> str:
-    if not results:
-        return "completed"
-    error_count = sum(
-        1 for item in results
-        if isinstance(item, dict) and item.get("ok") is False and item.get("code")
-    )
-    if error_count == len(results):
-        return "failed"
-    if error_count:
-        return "partial_failed"
-    states: set[str] = {
-        str(item.get("state"))
-        for item in results
-        if isinstance(item, dict) and isinstance(item.get("state"), str)
-    }
-    if not states:
-        return "completed"
-    if states <= {"completed"}:
-        return "completed"
-    if states & {"running", "queued", "submitted"}:
-        return "submitted"
-    return sorted(states)[0]
-
-
-def _validate_direct_job_specs(registry: ToolRegistry, specs: list[dict[str, Any]]) -> None:
-    registry.discover()
-    for spec in specs:
-        tool = str(spec.get("tool") or "")
-        descriptor, _ = registry.get(tool, str(spec.get("version") or "*"))
-        validate_params(descriptor, _job_params(spec))
 
 
 def _report_artifacts(summary: Any) -> dict[str, Any]:

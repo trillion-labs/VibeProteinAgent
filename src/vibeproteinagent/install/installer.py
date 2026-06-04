@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import os
 import os.path
@@ -40,6 +41,41 @@ from vibeproteinagent.install.manifest import (
 )
 from vibeproteinagent.install.planner import InstallSelection, resolve_selection
 from vibeproteinagent.install.state import InstallPaths, InstallState, install_lock
+
+_FOLDSEEK_BINARY_ARCHIVE_URL = "https://mmseqs.com/foldseek/foldseek-linux-gpu.tar.gz"
+_FOLDSEEK_BINARY_ARCHIVE_MEMBER = "foldseek/bin/foldseek"
+_MMSEQS_BINARY_ARCHIVE_URL = "https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz"
+_MMSEQS_BINARY_ARCHIVE_MEMBER = "mmseqs/bin/mmseqs"
+_TMALIGN_BINARY_GZIP_URL = "https://zhanglab.ccmb.med.umich.edu/TM-align/TMalign.gz"
+_VINA_BINARY_URL = (
+    "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.5/"
+    "vina_1.2.5_linux_x86_64"
+)
+_DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
+_ALPHAFOLD_PARAMS_ARCHIVE_URL = (
+    "https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar"
+)
+_PXDESIGN_CHECKPOINT_URLS = {
+    "pxdesign_v0.1.0.pt": (
+        "https://pxdesign.tos-cn-beijing.volces.com/release_model/pxdesign_v0.1.0.pt"
+    ),
+    "protenix_base_default_v0.5.0.pt": (
+        "https://pxdesign.tos-cn-beijing.volces.com/release_model/"
+        "protenix_base_default_v0.5.0.pt"
+    ),
+    "protenix_mini_default_v0.5.0.pt": (
+        "https://pxdesign.tos-cn-beijing.volces.com/release_model/"
+        "protenix_mini_default_v0.5.0.pt"
+    ),
+    "protenix_mini_tmpl_v0.5.0.pt": (
+        "https://pxdesign.tos-cn-beijing.volces.com/release_model/"
+        "protenix_mini_tmpl_v0.5.0.pt"
+    ),
+}
+_PXDESIGN_AF2_PARAM_FILES = ("params_model_1.npz", "params_model_1_ptm.npz")
 
 
 @dataclass(frozen=True)
@@ -1719,6 +1755,18 @@ def _ensure_esm3_shared_deps(
             "pip",
             "install",
             "--no-user",
+            *_ESM3_RUNTIME_DEPS,
+        ],
+        cwd=None,
+    )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-user",
+            "--no-deps",
             "esm==3.2.1.post1",
         ],
         cwd=None,
@@ -1736,6 +1784,22 @@ def _ensure_esm3_shared_deps(
         )
     results.append({"unit": "shared-dep:esm3", "status": "installed"})
     state.mark("shared-dep:esm3", "ready", {})
+
+
+_ESM3_RUNTIME_DEPS = (
+    "attrs",
+    "biotite",
+    "brotli",
+    "cloudpathlib",
+    "einops",
+    "ipython",
+    "msgpack-numpy",
+    "pandas",
+    "scikit-learn",
+    "tenacity",
+    "transformers",
+    "zstd",
+)
 
 
 def _ensure_ligandmpnn_shared_deps(
@@ -2395,6 +2459,7 @@ def _env_exports(
                     options,
                 ),
             )
+            exports.setdefault("TOOL_WEIGHTS_ROOT", str(paths.cache_dir / "pxdesign" / "tool_weights"))
         elif tool.name == "rfdiffusion3":
             exports.setdefault(
                 "VPA_RFDIFFUSION3_ENV",
@@ -2725,7 +2790,13 @@ def _ensure_weight(
     artifact_index: dict[str, ArtifactRecord] | None = None,
 ) -> None:
     path = _weight_path(paths, weight)
-    if _weight_ready(path, weight):
+    if _is_pxdesign_weight(tool, weight) and _pxdesign_weights_ready(path):
+        results.append(
+            {"unit": f"weight:{tool.name}:{weight.name}", "status": "ready", "path": str(path)}
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
+    if not _is_pxdesign_weight(tool, weight) and _weight_ready(path, weight):
         results.append(
             {"unit": f"weight:{tool.name}:{weight.name}", "status": "ready", "path": str(path)}
         )
@@ -2774,6 +2845,121 @@ def _ensure_weight(
                 "path": str(path),
                 "source": str(source),
             }
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
+    if _is_foldseek_binary_weight(tool, weight):
+        if options.offline:
+            raise DependencyError(
+                "required foldseek binary is not cached and --offline was set",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        _download_binary_from_archive(
+            path,
+            url=_FOLDSEEK_BINARY_ARCHIVE_URL,
+            member_name=_FOLDSEEK_BINARY_ARCHIVE_MEMBER,
+            tool_label="foldseek",
+        )
+        if not _weight_ready(path, weight):
+            raise DependencyError(
+                "downloaded foldseek binary did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {
+                "unit": f"weight:{tool.name}:{weight.name}",
+                "status": "downloaded",
+                "path": str(path),
+                "url": _FOLDSEEK_BINARY_ARCHIVE_URL,
+            }
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
+    if _is_mmseqs_binary_weight(tool, weight):
+        if options.offline:
+            raise DependencyError(
+                "required mmseqs binary is not cached and --offline was set",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        _download_binary_from_archive(
+            path,
+            url=_MMSEQS_BINARY_ARCHIVE_URL,
+            member_name=_MMSEQS_BINARY_ARCHIVE_MEMBER,
+            tool_label="mmseqs",
+        )
+        if not _weight_ready(path, weight):
+            raise DependencyError(
+                "downloaded mmseqs binary did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {
+                "unit": f"weight:{tool.name}:{weight.name}",
+                "status": "downloaded",
+                "path": str(path),
+                "url": _MMSEQS_BINARY_ARCHIVE_URL,
+            }
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
+    if _is_tmalign_binary_weight(tool, weight):
+        if options.offline:
+            raise DependencyError(
+                "required TMalign binary is not cached and --offline was set",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        _download_gzipped_binary(path, url=_TMALIGN_BINARY_GZIP_URL, tool_label="TMalign")
+        if not _weight_ready(path, weight):
+            raise DependencyError(
+                "downloaded TMalign binary did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {
+                "unit": f"weight:{tool.name}:{weight.name}",
+                "status": "downloaded",
+                "path": str(path),
+                "url": _TMALIGN_BINARY_GZIP_URL,
+            }
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
+    if _is_vina_binary_weight(tool, weight):
+        if options.offline:
+            raise DependencyError(
+                "required vina binary is not cached and --offline was set",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        _download_direct_binary(path, url=_VINA_BINARY_URL, tool_label="vina")
+        if not _weight_ready(path, weight):
+            raise DependencyError(
+                "downloaded vina binary did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {
+                "unit": f"weight:{tool.name}:{weight.name}",
+                "status": "downloaded",
+                "path": str(path),
+                "url": _VINA_BINARY_URL,
+            }
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
+    if _is_pxdesign_weight(tool, weight):
+        if options.offline:
+            raise DependencyError(
+                "required PXDesign weights are not cached and --offline was set",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        _download_pxdesign_weights(path)
+        if not _pxdesign_weights_ready(path):
+            raise DependencyError(
+                "downloaded PXDesign weights did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {"unit": f"weight:{tool.name}:{weight.name}", "status": "downloaded", "path": str(path)}
         )
         state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
         return
@@ -2843,6 +3029,194 @@ def _ensure_weight(
         {"unit": f"weight:{tool.name}:{weight.name}", "status": "downloaded", "path": str(path)}
     )
     state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+
+
+def _is_foldseek_binary_weight(tool: InstallTool, weight: InstallWeight) -> bool:
+    return tool.name == "foldseek" and weight.name == "foldseek_binary"
+
+
+def _is_mmseqs_binary_weight(tool: InstallTool, weight: InstallWeight) -> bool:
+    return tool.name == "mmseqs2_gpu" and weight.name == "mmseqs_binary"
+
+
+def _is_tmalign_binary_weight(tool: InstallTool, weight: InstallWeight) -> bool:
+    return tool.name == "tmalign" and weight.name == "tmalign_binary"
+
+
+def _is_vina_binary_weight(tool: InstallTool, weight: InstallWeight) -> bool:
+    return tool.name == "vina" and weight.name == "vina_binary"
+
+
+def _is_pxdesign_weight(tool: InstallTool, weight: InstallWeight) -> bool:
+    return tool.name == "pxdesign" and weight.name == "pxdesign_weights"
+
+
+def _pxdesign_weights_ready(path: Path) -> bool:
+    required = [
+        *(path / name for name in _PXDESIGN_CHECKPOINT_URLS),
+        *(path / "tool_weights" / "af2" / name for name in _PXDESIGN_AF2_PARAM_FILES),
+    ]
+    return all(item.is_file() and item.stat().st_size > 0 for item in required)
+
+
+def _download_pxdesign_weights(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    for filename, url in _PXDESIGN_CHECKPOINT_URLS.items():
+        target = path / filename
+        if target.is_file() and target.stat().st_size > 0:
+            continue
+        _download_file(url, target)
+    _download_pxdesign_af2_params(path / "tool_weights" / "af2")
+
+
+def _download_file(url: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f".{target.name}.download"
+    urllib.request.urlretrieve(url, tmp)
+    tmp.replace(target)
+
+
+def _open_download_url(url: str):
+    request = urllib.request.Request(url, headers={"User-Agent": _DOWNLOAD_USER_AGENT})
+    return urllib.request.urlopen(request)
+
+
+def _download_direct_binary(path: Path, *, url: str, tool_label: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    binary_tmp = path.parent / f".{path.name}.download"
+    try:
+        with _open_download_url(url) as source, binary_tmp.open("wb") as fh:
+            shutil.copyfileobj(source, fh)
+        _install_downloaded_binary(binary_tmp, path)
+    except Exception as exc:
+        if isinstance(exc, DependencyError):
+            raise
+        raise DependencyError(
+            f"failed to download {tool_label} binary",
+            details={"url": url, "path": str(path)},
+        ) from exc
+    finally:
+        binary_tmp.unlink(missing_ok=True)
+
+
+def _download_gzipped_binary(path: Path, *, url: str, tool_label: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gzip_tmp = path.parent / f".{path.name}.gz.download"
+    binary_tmp = path.parent / f".{path.name}.download"
+    try:
+        with _open_download_url(url) as source, gzip_tmp.open("wb") as fh:
+            shutil.copyfileobj(source, fh)
+        with gzip.open(gzip_tmp, "rb") as source, binary_tmp.open("wb") as fh:
+            shutil.copyfileobj(source, fh)
+        _install_downloaded_binary(binary_tmp, path)
+    except Exception as exc:
+        if isinstance(exc, DependencyError):
+            raise
+        raise DependencyError(
+            f"failed to download {tool_label} binary",
+            details={"url": url, "path": str(path)},
+        ) from exc
+    finally:
+        gzip_tmp.unlink(missing_ok=True)
+        binary_tmp.unlink(missing_ok=True)
+
+
+def _install_downloaded_binary(binary_tmp: Path, path: Path) -> None:
+    binary_tmp.chmod(0o755)
+    if path.exists() or path.is_symlink():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    binary_tmp.replace(path)
+
+
+def _download_pxdesign_af2_params(destination: Path) -> None:
+    if all((destination / name).is_file() for name in _PXDESIGN_AF2_PARAM_FILES):
+        return
+    destination.mkdir(parents=True, exist_ok=True)
+    archive = destination.parent / ".alphafold_params_2022-12-06.tar.download"
+    urllib.request.urlretrieve(_ALPHAFOLD_PARAMS_ARCHIVE_URL, archive)
+    try:
+        with tarfile.open(archive) as tf:
+            members = {member.name: member for member in tf.getmembers()}
+            for name in _PXDESIGN_AF2_PARAM_FILES:
+                member = members.get(name)
+                if member is None:
+                    nested = [item for item in members.values() if Path(item.name).name == name]
+                    member = nested[0] if nested else None
+                if member is None or not member.isfile():
+                    raise DependencyError(
+                        "AlphaFold params archive did not contain a required PXDesign file",
+                        details={"url": _ALPHAFOLD_PARAMS_ARCHIVE_URL, "file": name},
+                    )
+                source = tf.extractfile(member)
+                if source is None:
+                    raise DependencyError(
+                        "AlphaFold params archive member could not be extracted",
+                        details={"url": _ALPHAFOLD_PARAMS_ARCHIVE_URL, "file": name},
+                    )
+                target = destination / name
+                tmp = destination / f".{name}.download"
+                with source, tmp.open("wb") as fh:
+                    shutil.copyfileobj(source, fh)
+                tmp.replace(target)
+    finally:
+        archive.unlink(missing_ok=True)
+
+
+def _download_binary_from_archive(
+    path: Path,
+    *,
+    url: str,
+    member_name: str,
+    tool_label: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    archive = path.parent / f".{tool_label}-linux-gpu.tar.gz.download"
+    binary_tmp = path.parent / f".{path.name}.download"
+    urllib.request.urlretrieve(url, archive)
+    try:
+        with tarfile.open(archive) as tf:
+            try:
+                member = tf.getmember(member_name)
+            except KeyError as exc:
+                raise DependencyError(
+                    f"{tool_label} archive did not contain the expected binary",
+                    details={
+                        "url": url,
+                        "member": member_name,
+                    },
+                ) from exc
+            if not member.isfile():
+                raise DependencyError(
+                    f"{tool_label} archive member is not a file",
+                    details={
+                        "url": url,
+                        "member": member_name,
+                    },
+                )
+            source = tf.extractfile(member)
+            if source is None:
+                raise DependencyError(
+                    f"{tool_label} archive member could not be extracted",
+                    details={
+                        "url": url,
+                        "member": member_name,
+                    },
+                )
+            with source, binary_tmp.open("wb") as fh:
+                shutil.copyfileobj(source, fh)
+        binary_tmp.chmod(0o755)
+        if path.exists() or path.is_symlink():
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        binary_tmp.replace(path)
+    finally:
+        archive.unlink(missing_ok=True)
+        binary_tmp.unlink(missing_ok=True)
 
 
 def _weight_ready(path: Path, weight: InstallWeight) -> bool:

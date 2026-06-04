@@ -31,6 +31,7 @@ async function main() {
       }
       return;
     }
+    process.env.VPA_MICROMAMBA = await ensureMicromamba(installRoot);
     const installer = await ensureInstallerPython();
     try {
       const status = runPythonDryRun(

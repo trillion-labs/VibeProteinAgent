@@ -26,7 +26,9 @@ output/validation_cache/
 output/validation_runs/
 validation/
 validation_runs/
-scripts/
+scripts/*
+!scripts/install_pxdesign_pipeline_sidecar.sh
+!scripts/install_rfdiffusion3_sidecar.sh
 
 # Runtime / validation scratch output
 job_*/
