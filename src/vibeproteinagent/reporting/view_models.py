@@ -17,7 +17,6 @@ from .models import (
     CandidateStatus,
     MSABlock,
     Provenance,
-    ReportCandidate,
     ReportModel,
     ReportReviewModel,
     RunSummary,
@@ -182,9 +181,10 @@ class ReportSaaSViewModel:
 _STATUS_LABELS = {
     CandidateStatus.FINAL: "Recommended",
     CandidateStatus.RANKED_ALTERNATIVE: "Alternative",
-    CandidateStatus.INCOMPLETE_EVIDENCE: "Missing Evidence",
-    CandidateStatus.FAILED_QC: "Failed QC",
-    CandidateStatus.REJECTED: "Rejected",
+    CandidateStatus.EVALUATED_NOT_SELECTED: "Evaluated",
+    CandidateStatus.GENERATED_NOT_EVALUATED: "Generated Only",
+    CandidateStatus.REFERENCE_GROUNDING: "Reference",
+    CandidateStatus.FAILED_OR_REJECTED: "Failed/Rejected",
 }
 
 
@@ -226,13 +226,20 @@ def build_workflow_review_preset(
     has already classified the workflow from tool/evidence signals.
     """
 
-    tools = {(node.tool or "").strip().lower() for node in model.graph.nodes if node.tool}
+    tools = {
+        (node.tool or "").strip().lower()
+        for node in model.graph.nodes
+        if node.tool
+    }
     families = {
         group.family
         for bundle in review.bundles
         for group in bundle.score_groups
     }
-    has_structure = any(bool((bundle.candidate.structure_path or "").strip()) for bundle in review.bundles)
+    has_structure = any(
+        bool((bundle.candidate.structure_path or "").strip())
+        for bundle in review.bundles
+    )
     has_interface = "Interface & binding" in families or bool(
         tools & {"boltz2_affinity", "ipsae", "prodigy", "pxmeter", "vina"}
     )
@@ -256,10 +263,25 @@ def build_workflow_review_preset(
             confidence=confidence,
             confidence_basis=basis,
             scientific_question="Which candidates are most likely to bind the target?",
-            overview_focus="Binder design: prioritize interface evidence, complex structure confidence, pTM, affinity/contact estimates, liabilities, and novelty.",
-            candidate_review_guidance="Review candidates as target-binding designs. ipTM/interface evidence and complex structure confidence are primary; pLDDT is presented as model confidence, not binding evidence.",
-            comparison_note="For binder selection, prioritize ipTM/interface evidence, complex structure confidence, pTM, recorded affinity/contact estimates, liabilities, and panel diversity where recorded.",
-            cross_candidate_focus="Binder-level patterns emphasize ipTM, complex pLDDT/model confidence, pTM, QC status, missing structure/evidence prevalence, and sequence biophysics where recorded.",
+            overview_focus=(
+                "Binder design: prioritize interface evidence, complex structure "
+                "confidence, pTM, affinity/contact estimates, liabilities, and novelty."
+            ),
+            candidate_review_guidance=(
+                "Review candidates as target-binding designs. ipTM/interface evidence "
+                "and complex structure confidence are primary; pLDDT is presented as "
+                "model confidence, not binding evidence."
+            ),
+            comparison_note=(
+                "For binder selection, prioritize ipTM/interface evidence, complex "
+                "structure confidence, pTM, recorded affinity/contact estimates, "
+                "liabilities, and panel diversity where recorded."
+            ),
+            cross_candidate_focus=(
+                "Binder-level patterns emphasize ipTM, complex pLDDT/model confidence, "
+                "pTM, QC status, missing structure/evidence prevalence, and sequence "
+                "biophysics where recorded."
+            ),
             evidence_family_order=[
                 "Interface & binding",
                 "Structure confidence",
@@ -267,8 +289,33 @@ def build_workflow_review_preset(
                 "Flags & liabilities",
                 "Novelty & similarity",
             ],
-            metric_priority=["ipSAE", "ipTM", "pLDDT", "pTM", "Affinity", "Delta G", "Interface contacts", "GRAVY", "Net charge", "Instability", "pI", "QC"],
-            cross_candidate_metrics=["ipSAE", "ipTM", "pLDDT", "pTM", "GRAVY", "Net charge", "Instability", "pI", "Affinity", "Delta G", "Interface contacts"],
+            metric_priority=[
+                "ipSAE",
+                "ipTM",
+                "pLDDT",
+                "pTM",
+                "Affinity",
+                "Delta G",
+                "Interface contacts",
+                "GRAVY",
+                "Net charge",
+                "Instability",
+                "pI",
+                "QC",
+            ],
+            cross_candidate_metrics=[
+                "ipSAE",
+                "ipTM",
+                "pLDDT",
+                "pTM",
+                "GRAVY",
+                "Net charge",
+                "Instability",
+                "pI",
+                "Affinity",
+                "Delta G",
+                "Interface contacts",
+            ],
         )
     if review.workflow_type == WorkflowType.DENOVO or has_structure:
         confidence = 0.88 if has_structure else 0.72
@@ -276,12 +323,27 @@ def build_workflow_review_preset(
             workflow_type=WorkflowType.DENOVO,
             label="De novo design review",
             confidence=confidence,
-            confidence_basis="structure-generation or structure artifact evidence without binding-specific scoring",
+            confidence_basis=(
+                "structure-generation or structure artifact evidence without "
+                "binding-specific scoring"
+            ),
             scientific_question="Which candidates are most likely to fold and remain stable?",
-            overview_focus="De novo design: prioritize fold confidence, QC, sequence biophysics, developability risks, and novelty.",
-            candidate_review_guidance="Review candidates as foldability/stability designs. Structure confidence and QC are weighted before other metrics.",
-            comparison_note="For de novo selection, prioritize pLDDT, pTM, QC, sequence biophysics, and recorded liabilities.",
-            cross_candidate_focus="De novo patterns emphasize pLDDT/pTM distributions, QC state, sequence biophysics, and liability prevalence.",
+            overview_focus=(
+                "De novo design: prioritize fold confidence, QC, sequence biophysics, "
+                "developability risks, and novelty."
+            ),
+            candidate_review_guidance=(
+                "Review candidates as foldability/stability designs. Structure "
+                "confidence and QC are weighted before other metrics."
+            ),
+            comparison_note=(
+                "For de novo selection, prioritize pLDDT, pTM, QC, sequence "
+                "biophysics, and recorded liabilities."
+            ),
+            cross_candidate_focus=(
+                "De novo patterns emphasize pLDDT/pTM distributions, QC state, "
+                "sequence biophysics, and liability prevalence."
+            ),
             evidence_family_order=[
                 "Structure confidence",
                 "Flags & liabilities",
@@ -289,7 +351,17 @@ def build_workflow_review_preset(
                 "Novelty & similarity",
                 "Interface & binding",
             ],
-            metric_priority=["pLDDT", "pTM", "QC", "Instability", "GRAVY", "Net charge", "pI", "Delta G", "ipTM"],
+            metric_priority=[
+                "pLDDT",
+                "pTM",
+                "QC",
+                "Instability",
+                "GRAVY",
+                "Net charge",
+                "pI",
+                "Delta G",
+                "ipTM",
+            ],
             cross_candidate_metrics=["pLDDT", "pTM", "Instability", "GRAVY", "Net charge", "pI"],
         )
     if review.workflow_type == WorkflowType.RETRIEVAL or has_retrieval:
@@ -299,10 +371,22 @@ def build_workflow_review_preset(
             confidence=0.86 if has_retrieval else 0.68,
             confidence_basis="retrieval/search tools without structure-design evidence",
             scientific_question="What evidence supports the answer?",
-            overview_focus="Retrieval workflow: prioritize retrieved evidence, source confidence, coverage, and consistency.",
-            candidate_review_guidance="Review retrieved hits as evidence records. Evidence availability and source context are weighted before design metrics.",
-            comparison_note="For retrieval review, compare evidence coverage, missing-source gaps, and recorded confidence before treating hits as ranked designs.",
-            cross_candidate_focus="Retrieval patterns emphasize evidence availability, missing-source gaps, sequence coverage, and consistency signals when recorded.",
+            overview_focus=(
+                "Retrieval workflow: prioritize retrieved evidence, source confidence, "
+                "coverage, and consistency."
+            ),
+            candidate_review_guidance=(
+                "Review retrieved hits as evidence records. Evidence availability and "
+                "source context are weighted before design metrics."
+            ),
+            comparison_note=(
+                "For retrieval review, compare evidence coverage, missing-source gaps, "
+                "and recorded confidence before treating hits as ranked designs."
+            ),
+            cross_candidate_focus=(
+                "Retrieval patterns emphasize evidence availability, missing-source "
+                "gaps, sequence coverage, and consistency signals when recorded."
+            ),
             evidence_family_order=[
                 "Novelty & similarity",
                 "Sequence biophysics",
@@ -310,7 +394,16 @@ def build_workflow_review_preset(
                 "Structure confidence",
                 "Interface & binding",
             ],
-            metric_priority=["QC", "MSA mean identity", "Seq recovery", "GRAVY", "Net charge", "pLDDT", "pTM", "ipTM"],
+            metric_priority=[
+                "QC",
+                "MSA mean identity",
+                "Seq recovery",
+                "GRAVY",
+                "Net charge",
+                "pLDDT",
+                "pTM",
+                "ipTM",
+            ],
             cross_candidate_metrics=["MSA mean identity", "Seq recovery", "GRAVY", "Net charge"],
         )
     return WorkflowReviewPreset(
@@ -319,10 +412,22 @@ def build_workflow_review_preset(
         confidence=0.50,
         confidence_basis="no workflow-specific tool/evidence pattern dominated the report",
         scientific_question="Which records have the strongest available evidence?",
-        overview_focus="Generic workflow: surface available candidate evidence without assuming a task-specific metric hierarchy.",
-        candidate_review_guidance="Review candidates using the available recorded evidence. No workflow-specific priority was inferred.",
-        comparison_note="Use the available metrics and explicit missing-evidence markers; no workflow-specific priority was inferred.",
-        cross_candidate_focus="Generic patterns show available metric ranges and missing evidence without workflow-specific assumptions.",
+        overview_focus=(
+            "Generic workflow: surface available candidate evidence without assuming "
+            "a task-specific metric hierarchy."
+        ),
+        candidate_review_guidance=(
+            "Review candidates using the available recorded evidence. "
+            "No workflow-specific priority was inferred."
+        ),
+        comparison_note=(
+            "Use the available metrics and explicit missing-evidence markers; "
+            "no workflow-specific priority was inferred."
+        ),
+        cross_candidate_focus=(
+            "Generic patterns show available metric ranges and missing evidence "
+            "without workflow-specific assumptions."
+        ),
         evidence_family_order=[
             "Structure confidence",
             "Interface & binding",
@@ -330,8 +435,29 @@ def build_workflow_review_preset(
             "Flags & liabilities",
             "Novelty & similarity",
         ],
-        metric_priority=["pLDDT", "pTM", "ipTM", "ipSAE", "Delta G", "Affinity", "GRAVY", "Net charge", "Instability", "pI", "QC"],
-        cross_candidate_metrics=["pLDDT", "pTM", "ipTM", "ipSAE", "GRAVY", "Net charge", "Instability", "pI"],
+        metric_priority=[
+            "pLDDT",
+            "pTM",
+            "ipTM",
+            "ipSAE",
+            "Delta G",
+            "Affinity",
+            "GRAVY",
+            "Net charge",
+            "Instability",
+            "pI",
+            "QC",
+        ],
+        cross_candidate_metrics=[
+            "pLDDT",
+            "pTM",
+            "ipTM",
+            "ipSAE",
+            "GRAVY",
+            "Net charge",
+            "Instability",
+            "pI",
+        ],
     )
 
 
@@ -340,7 +466,6 @@ def build_overview_view_model(
 ) -> OverviewViewModel:
     preset = preset or build_workflow_review_preset(model, review)
     recorded_query = _recorded_user_query(model)
-    recorded_objective = _recorded_objective(model)
     objective = recorded_query or "User query not recorded in workspace metadata."
     interpretation = _agent_interpretation(model, review)
     generated_population = _count_population(review)
@@ -352,6 +477,18 @@ def build_overview_view_model(
     ]
     recommended_population = [
         bundle for bundle in generated_population if bundle.status == CandidateStatus.FINAL
+    ]
+    structured_population = [
+        bundle for bundle in generated_population if _has_structure_evidence(bundle)
+    ]
+    interface_population = [
+        bundle for bundle in generated_population if _has_interface_evidence(bundle)
+    ]
+    qc_population = [
+        bundle for bundle in generated_population if _has_qc_or_sequence_evidence(bundle)
+    ]
+    ranked_population = [
+        bundle for bundle in generated_population if _has_rank_evidence(bundle)
     ]
     counts = [
         CountSummary(
@@ -370,6 +507,30 @@ def build_overview_view_model(
             label="Fully Evaluated",
             value=len(evaluated_population),
             detail="Passed QC with workflow evidence",
+            provenance=Provenance.DERIVED,
+        ),
+        CountSummary(
+            label="Structure",
+            value=len(structured_population),
+            detail="Candidates with recorded structures",
+            provenance=Provenance.DERIVED,
+        ),
+        CountSummary(
+            label="Interface/Binding",
+            value=len(interface_population),
+            detail="Candidates with binding/interface evidence",
+            provenance=Provenance.DERIVED,
+        ),
+        CountSummary(
+            label="QC/Sequence",
+            value=len(qc_population),
+            detail="Candidates with QC or sequence biophysics",
+            provenance=Provenance.DERIVED,
+        ),
+        CountSummary(
+            label="Ranked",
+            value=len(ranked_population),
+            detail="Candidates with recorded rank",
             provenance=Provenance.DERIVED,
         ),
         CountSummary(
@@ -470,7 +631,11 @@ def build_candidate_dossier_view_model(
         status_label=_status_label(bundle.status),
         structure_path=candidate.structure_path,
         structure_variant_count=len(bundle.structure_variants),
-        download_count=len(candidate.artifacts) + len(bundle.artifacts) + (1 if candidate.structure_path else 0),
+        download_count=(
+            len(candidate.artifacts)
+            + len(bundle.artifacts)
+            + (1 if candidate.structure_path else 0)
+        ),
         msa_blocks=list(bundle.msa_blocks),
         score_groups=_ordered_score_groups(bundle.score_groups, preset),
         metric_chips=_metric_chips(bundle, preset),
@@ -501,15 +666,42 @@ def build_workflow_trace_view_model(
     for node in model.graph.nodes:
         stage_nodes[_stage_key(node)].append(node)
     stages = [
-        _stage_view("generation", "Generation", stage_nodes["generation"], "Candidate sequences or structures"),
+        _stage_view(
+            "generation",
+            "Generation",
+            stage_nodes["generation"],
+            "Candidate sequences or structures",
+        ),
         _stage_view("qc", "Sequence QC", stage_nodes["qc"], "QC flags and biophysical filters"),
-        _stage_view("structure", "Structure Prediction", stage_nodes["structure"], "Structure confidence"),
-        _stage_view("interface", "Interface Scoring", stage_nodes["interface"], "Binding/interface evidence"),
+        _stage_view(
+            "structure",
+            "Structure Prediction",
+            stage_nodes["structure"],
+            "Structure confidence",
+        ),
+        _stage_view(
+            "interface",
+            "Interface Scoring",
+            stage_nodes["interface"],
+            "Binding/interface evidence",
+        ),
         _stage_view("ranking", "Ranking", stage_nodes["ranking"], "Ranked candidate scores"),
-        _stage_view("recommendation", "Recommendation", stage_nodes["recommendation"], "Final candidate selection"),
+        _stage_view(
+            "recommendation",
+            "Recommendation",
+            stage_nodes["recommendation"],
+            "Final candidate selection",
+        ),
     ]
     if stage_nodes["other"]:
-        stages.append(_stage_view("other", "Other Evidence", stage_nodes["other"], "Additional workflow evidence"))
+        stages.append(
+            _stage_view(
+                "other",
+                "Other Evidence",
+                stage_nodes["other"],
+                "Additional workflow evidence",
+            )
+        )
     return WorkflowTraceViewModel(workflow_type=preset.workflow_type, stages=stages)
 
 
@@ -556,6 +748,31 @@ def _count_population(review: ReportReviewModel) -> list[CandidateEvidenceBundle
         seen.add(key)
         population.append(bundle)
     return population
+
+
+def _score_families(bundle: CandidateEvidenceBundle) -> set[str]:
+    return {group.family for group in bundle.score_groups}
+
+
+def _has_structure_evidence(bundle: CandidateEvidenceBundle) -> bool:
+    return bool(bundle.candidate.structure_path) or "Structure confidence" in _score_families(
+        bundle
+    )
+
+
+def _has_interface_evidence(bundle: CandidateEvidenceBundle) -> bool:
+    return "Interface & binding" in _score_families(bundle)
+
+
+def _has_qc_or_sequence_evidence(bundle: CandidateEvidenceBundle) -> bool:
+    families = _score_families(bundle)
+    return bool({"Sequence biophysics", "Flags & liabilities"} & families) or "protein_qc" in (
+        bundle.candidate.scores or {}
+    )
+
+
+def _has_rank_evidence(bundle: CandidateEvidenceBundle) -> bool:
+    return bundle.display_rank is not None or bundle.candidate.rank is not None
 
 
 def _metric_chips(
@@ -615,20 +832,34 @@ def _candidate_verdict(
         if strengths:
             return f"Recommended final candidate with {strengths[0]}{_missing_tail(missing)}."
         metric = _headline_metric(bundle)
-        return f"Recommended final candidate{': ' + metric if metric else ''}{_missing_tail(missing)}."
+        return (
+            "Recommended final candidate"
+            f"{': ' + metric if metric else ''}{_missing_tail(missing)}."
+        )
     if bundle.status == CandidateStatus.RANKED_ALTERNATIVE:
         if strengths:
             return f"Alternative with {strengths[0]}{_missing_tail(missing)}."
         metric = _headline_metric(bundle)
         return f"Alternative{': ' + metric if metric else ''}{_missing_tail(missing)}."
-    if bundle.status == CandidateStatus.FAILED_QC:
+    if bundle.status == CandidateStatus.EVALUATED_NOT_SELECTED:
+        if strengths:
+            return f"Evaluated but not selected: {strengths[0]}{_missing_tail(missing)}."
+        metric = _headline_metric(bundle)
+        return (
+            "Evaluated but not selected"
+            f"{': ' + metric if metric else ''}{_missing_tail(missing)}."
+        )
+    if bundle.status == CandidateStatus.GENERATED_NOT_EVALUATED:
+        return "Generated candidate; downstream evaluation was not recorded."
+    if bundle.status == CandidateStatus.REFERENCE_GROUNDING:
+        return "Reference or grounding evidence, not a submitted design candidate."
+    if bundle.status == CandidateStatus.FAILED_OR_REJECTED:
         flags = _risk_notes(bundle)
-        return f"Failed QC: {flags[0]}." if flags else "Failed recorded QC checks."
-    if bundle.status == CandidateStatus.INCOMPLETE_EVIDENCE:
-        missing = _missing_evidence(bundle, preset)
-        return f"Missing evidence: {missing[0]}." if missing else "Missing required evaluation evidence."
-    if bundle.status == CandidateStatus.REJECTED:
-        return "Rejected during candidate filtering or review."
+        return (
+            f"Failed or rejected: {flags[0]}."
+            if flags
+            else "Failed or rejected during recorded review."
+        )
     return "Candidate evidence available for review."
 
 
@@ -739,7 +970,7 @@ def _risk_notes(bundle: CandidateEvidenceBundle) -> list[str]:
                 notes.append(str(label).replace("_", " "))
         elif liability:
             notes.append(str(liability).replace("_", " "))
-    if bundle.status == CandidateStatus.INCOMPLETE_EVIDENCE:
+    if bundle.status == CandidateStatus.GENERATED_NOT_EVALUATED:
         notes.extend(_missing_evidence(bundle))
     return _dedup(notes)[:6]
 
@@ -751,24 +982,47 @@ def _missing_evidence(
     families = {group.family for group in bundle.score_groups}
     missing: list[str] = []
     if workflow_type == WorkflowType.RETRIEVAL:
-        if not (bundle.score_groups or bundle.artifacts or bundle.tool_evidence or bundle.msa_blocks):
+        if not (
+            bundle.score_groups
+            or bundle.artifacts
+            or bundle.tool_evidence
+            or bundle.msa_blocks
+        ):
             missing.append("retrieved evidence or source coverage")
         return _dedup(missing)
-    if workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO} and not bundle.candidate.structure_path:
+    if (
+        workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO}
+        and not bundle.candidate.structure_path
+    ):
         missing.append("structure")
     if workflow_type == WorkflowType.BINDER and "Interface & binding" not in families:
         missing.append("interface and binding metrics")
-    if workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO} and "Structure confidence" not in families:
+    if (
+        workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO}
+        and "Structure confidence" not in families
+    ):
         missing.append("structure confidence metrics")
     if "Sequence biophysics" not in families:
         missing.append("sequence biophysics metrics")
-    if workflow_type != WorkflowType.GENERIC and not bundle.msa_blocks and "Novelty & similarity" not in families:
+    if (
+        workflow_type != WorkflowType.GENERIC
+        and not bundle.msa_blocks
+        and "Novelty & similarity" not in families
+    ):
         missing.append("novelty or similarity evidence")
+    if (
+        bundle.status not in {CandidateStatus.FINAL, CandidateStatus.RANKED_ALTERNATIVE}
+        and _has_rank_evidence(bundle) is False
+    ):
+        missing.append("rank")
     return _dedup(missing)
 
 
 def _is_fully_evaluated(bundle: CandidateEvidenceBundle) -> bool:
-    if bundle.status in {CandidateStatus.FAILED_QC, CandidateStatus.INCOMPLETE_EVIDENCE}:
+    if bundle.status in {
+        CandidateStatus.FAILED_OR_REJECTED,
+        CandidateStatus.GENERATED_NOT_EVALUATED,
+    }:
         return False
     blocking = {
         "structure",
@@ -802,12 +1056,44 @@ def _count_warning(
 def _main_caveat(model: ReportModel, review: ReportReviewModel) -> str | None:
     if model.warnings:
         return _clip(model.warnings[0].message, 180)
-    failed = sum(1 for b in review.bundles if b.status == CandidateStatus.FAILED_QC)
-    incomplete = sum(1 for b in review.bundles if b.status == CandidateStatus.INCOMPLETE_EVIDENCE)
+    failed = sum(1 for b in review.bundles if b.status == CandidateStatus.FAILED_OR_REJECTED)
+    generated_only = sum(
+        1 for b in review.bundles if b.status == CandidateStatus.GENERATED_NOT_EVALUATED
+    )
+    subset_evaluated = sum(
+        1
+        for b in review.bundles
+        if b.status
+        in {
+            CandidateStatus.FINAL,
+            CandidateStatus.RANKED_ALTERNATIVE,
+            CandidateStatus.EVALUATED_NOT_SELECTED,
+            CandidateStatus.FAILED_OR_REJECTED,
+        }
+    )
     if failed:
-        return f"{failed} candidate{'s' if failed != 1 else ''} failed recorded QC checks."
-    if incomplete:
-        return f"{incomplete} candidate{'s' if incomplete != 1 else ''} have incomplete evidence."
+        return (
+            f"{failed} candidate{'s' if failed != 1 else ''} failed or were rejected "
+            "by recorded checks."
+        )
+    if generated_only and subset_evaluated:
+        suffix = (
+            "The remaining candidates are shown as generated but not evaluated."
+            if model.candidate_capability_filter_events
+            else (
+                "No subset selection reason was recorded, so the remaining candidates "
+                "are shown as generated but not evaluated."
+            )
+        )
+        return (
+            "The agent evaluated, ranked, or submitted only a subset of generated "
+            f"candidates. {suffix}"
+        )
+    if generated_only:
+        return (
+            f"{generated_only} candidate{'s' if generated_only != 1 else ''} "
+            "were generated but not downstream-evaluated."
+        )
     finals = sum(1 for b in review.bundles if b.status == CandidateStatus.FINAL)
     if finals == 0 and review.bundles:
         return "No final submitted candidate was recorded."
@@ -976,9 +1262,14 @@ def _recorded_thresholds(model: ReportModel) -> str:
         if final_submission.get(key) not in (None, "", {}, []):
             values.append(final_submission.get(key))
     reasoning = final_submission.get("reasoning")
-    if isinstance(reasoning, str) and any(token in reasoning.lower() for token in ("threshold", "criteria", "cutoff", ">= ", "<= ")):
+    if isinstance(reasoning, str) and any(
+        token in reasoning.lower()
+        for token in ("threshold", "criteria", "cutoff", ">= ", "<= ")
+    ):
         values.append(reasoning)
-    return "; ".join(_format_threshold_value(value) for value in values if value not in (None, "", {}, []))
+    return "; ".join(
+        _format_threshold_value(value) for value in values if value not in (None, "", {}, [])
+    )
 
 
 def _format_threshold_value(value: Any) -> str:
@@ -1032,8 +1323,8 @@ __all__ = [
     "OverviewViewModel",
     "ReportSaaSViewModel",
     "ReproducibilityViewModel",
-    "WorkflowStageViewModel",
     "WorkflowReviewPreset",
+    "WorkflowStageViewModel",
     "WorkflowTraceViewModel",
     "build_agent_rationale_view_model",
     "build_candidate_board_row",

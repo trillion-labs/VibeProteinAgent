@@ -31,11 +31,24 @@ vpa-run-and-workspace.
 Use `merge_candidates` when multiple streams must become one stream. Use
 `rank_designs` before final selection when objective evidence needs comparison.
 
+## Reportable Evidence
+
+Adaptive top-k validation is allowed for expensive tools, but the filter must
+be reportable: record the input count, selected/skipped candidate ids, selection
+reason, selection metrics, and downstream tool in a candidate selection/filter
+event when possible. Reports should show generated, evaluated, ranked, and
+submitted populations separately.
+
+Evaluator tools should consume canonical `candidates` whenever available. Raw
+paths are acceptable for one-off diagnostics, but do not use an unrecorded
+manual table or transcript-only calculation as the sole final-selection
+evidence. Put evidence in tool output or a structured recorded artifact.
+
 ## Reporting
 
 Reports are read-only over jobs, workflows, artifacts, candidate records, and
 legacy history. They must not create agent state, launch enrichment jobs by
-default, or invent final selections.
+default, invent final selections, or be hand-edited as HTML.
 
 ## Audit
 

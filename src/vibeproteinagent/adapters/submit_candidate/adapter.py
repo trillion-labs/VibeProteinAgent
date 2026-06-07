@@ -143,7 +143,7 @@ class SubmitCandidateAdapter(ToolAdapter):
             "supersedes": params.supersedes,
             "auto_selected": False,
             "next_report_command": (
-                f"vpa report {report_id} --workspace {workspace.name} --out report.html"
+                f"vpa report {report_id} --workspace {workspace.name}"
             ),
         }
         (out_dir / "submission.json").write_text(

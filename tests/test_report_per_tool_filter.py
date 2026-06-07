@@ -193,6 +193,7 @@ def test_slice_swaps_in_per_candidate_structure_analysis_artifacts():
             "structure_analysis": {
                 "burial": {"buried": 7, "exposed": 37, "intermediate": 16},
                 "interface": {"ligand_contact_count": 4},
+                "site_contacts": {"contact_count": 2, "mapped_position_count": 3},
                 "secondary_structure": {"helix": 49, "sheet": 0, "loop": 11},
                 "ligand_contacts": {"contact_count": 4},
                 "ligand_pocket": {"ligand_buried_fraction": 0.5},
@@ -225,6 +226,7 @@ def test_slice_swaps_in_per_candidate_structure_analysis_artifacts():
     # can't be loaded).
     assert sliced["burial"]["buried"] == 7
     assert sliced["interface"]["ligand_contact_count"] == 4
+    assert sliced["site_contacts"]["contact_count"] == 2
     assert sliced["ligand_pocket"]["ligand_buried_fraction"] == 0.5
     # The node-level aggregates must NOT leak into this candidate's panel.
     assert "liabilities" not in sliced
@@ -263,13 +265,16 @@ def test_structure_analysis_widget_uses_corrected_ligand_contact_residue_count()
         {
             "artifacts": {},
             "interface": {"ligand_contact_count": 1},
+            "site_contacts": {"contact_count": 2, "mapped_position_count": 3},
             "ligand_pocket": {"ligand_buried_fraction": 0.5},
         }
     )
 
     assert "Ligand contacts" in html
+    assert "Site contacts" in html
     assert "Ligand buried" in html
     assert ">1</text>" in html
+    assert ">2</text>" in html
     assert ">50</text>" in html
 
 

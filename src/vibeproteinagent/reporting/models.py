@@ -160,9 +160,17 @@ class CandidateStatus:
 
     FINAL = "final"  # referenced by final_submission
     RANKED_ALTERNATIVE = "ranked_alternative"  # ranked, not submitted, evidence ok
-    INCOMPLETE_EVIDENCE = "incomplete_evidence"  # missing key evidence (shards land here)
-    FAILED_QC = "failed_qc"  # protein_qc passes_filters is False / severe flags
-    REJECTED = "rejected"  # explicitly dropped (capability filter / merge)
+    EVALUATED_NOT_SELECTED = "evaluated_not_selected"
+    GENERATED_NOT_EVALUATED = "generated_not_evaluated"
+    REFERENCE_GROUNDING = "reference_grounding"
+    FAILED_OR_REJECTED = "failed_or_rejected"
+
+    # Backward-compatible names used by existing callers/tests. They now point
+    # at the reportable-evidence vocabulary above rather than preserving older
+    # UI wording.
+    INCOMPLETE_EVIDENCE = GENERATED_NOT_EVALUATED
+    FAILED_QC = FAILED_OR_REJECTED
+    REJECTED = FAILED_OR_REJECTED
 
 
 class ToolRole:

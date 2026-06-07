@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -76,13 +77,10 @@ def _polybasic_hits(seq: str, run: int = _POLYBASIC_RUN) -> list[int]:
     return [m.start() for m in re.finditer(r"[KR]{" + str(run) + r",}", seq)]
 
 
-def _extract_seq_and_plddt(pdb_path: Path) -> tuple[str, float | None]:
-    """Walk a PDB/mmCIF once, returning (sequence, mean CA B-factor).
-
-    For AF2/Chai/Boltz outputs the B-factor column carries pLDDT and the mean
-    over CAs is the de-facto pLDDT for the whole chain. For experimental
-    structures the value is just a B-factor — still numerically meaningful.
-    """
+def _extract_seq_and_bfactor_plddt(
+    pdb_path: Path,
+) -> tuple[str, float | None, float | None]:
+    """Walk a PDB/mmCIF once, returning sequence and B-factor diagnostics."""
     from Bio.PDB import MMCIFParser, PDBParser
 
     parser = (
@@ -91,35 +89,128 @@ def _extract_seq_and_plddt(pdb_path: Path) -> tuple[str, float | None]:
         else PDBParser(QUIET=True)
     )
     structure = parser.get_structure("x", str(pdb_path))
-    bfactors: list[float] = []
+    ca_bfactors: list[float] = []
+    atom_bfactors: list[float] = []
     seq_chars: list[str] = []
     for model in structure:
         for chain in model:
             for res in chain:
                 if res.id[0] != " ":
                     continue
+                for atom in res:
+                    atom_bfactors.append(float(atom.get_bfactor()))
                 if "CA" not in res:
                     continue
-                bfactors.append(float(res["CA"].get_bfactor()))
+                ca_bfactors.append(float(res["CA"].get_bfactor()))
                 seq_chars.append(_AA3_TO_1.get(res.get_resname(), ""))
         break
     seq = "".join(seq_chars)
-    mean_b = float(np.mean(bfactors)) if bfactors else None
-    return seq, mean_b
+    ca_mean = float(np.mean(ca_bfactors)) if ca_bfactors else None
+    atom_mean = float(np.mean(atom_bfactors)) if atom_bfactors else None
+    return seq, ca_mean, atom_mean
+
+
+def _numeric_plddt(value: Any) -> float | None:
+    try:
+        return normalize_plddt(float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _plddt_from_json_artifact(path: Any) -> float | None:
+    if not path:
+        return None
+    try:
+        payload = json.loads(Path(str(path)).expanduser().read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("plddt", "mean_plddt", "global_plddt"):
+        value = _numeric_plddt(payload.get(key))
+        if value is not None:
+            return value
+    confidence = payload.get("confidence")
+    if isinstance(confidence, dict):
+        for key in ("plddt", "mean_plddt", "global_plddt"):
+            value = _numeric_plddt(confidence.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _official_plddt_from_candidate(
+    candidate: dict[str, Any] | None,
+) -> tuple[float | None, str | None]:
+    if not _is_canonical_candidate(candidate):
+        return None, None
+    assert candidate is not None
+    scores = candidate.get("scores") if isinstance(candidate.get("scores"), dict) else {}
+    score_paths = (
+        ("protenix_v2", "plddt"),
+        ("esm3", "mean_plddt"),
+        ("esm3", "plddt"),
+        ("esm2", "mean_plddt"),
+        ("esm2", "plddt"),
+    )
+    for namespace, key in score_paths:
+        value = _numeric_plddt(_nested_value(scores, (namespace, key)))
+        if value is not None:
+            return value, f"scores.{namespace}.{key}"
+
+    artifacts = (
+        candidate.get("artifacts")
+        if isinstance(candidate.get("artifacts"), dict)
+        else {}
+    )
+    for namespace in ("protenix_v2", "esm3", "esm2"):
+        payload = artifacts.get(namespace)
+        if not isinstance(payload, dict):
+            continue
+        for key in ("summary_json", "confidence_json", "full_confidence_json"):
+            value = _plddt_from_json_artifact(payload.get(key))
+            if value is not None:
+                return value, f"artifacts.{namespace}.{key}.plddt"
+    return None, None
 
 
 def _score_sequence(
     sequence: str | None,
     pdb_path: str | None,
     requested: set[str],
+    *,
+    source_candidate: dict[str, Any] | None = None,
 ) -> tuple[dict[str, float | str | None], list[str]]:
     sequence = sequence or ""
-    pdb_plddt: float | None = None
+    ca_bfactor_plddt: float | None = None
+    atom_bfactor_plddt: float | None = None
     if pdb_path:
-        pdb_seq, pdb_plddt = _extract_seq_and_plddt(Path(pdb_path).expanduser())
-        pdb_plddt = normalize_plddt(pdb_plddt)
+        pdb_seq, ca_bfactor_plddt, atom_bfactor_plddt = _extract_seq_and_bfactor_plddt(
+            Path(pdb_path).expanduser()
+        )
+        ca_bfactor_plddt = normalize_plddt(ca_bfactor_plddt)
+        atom_bfactor_plddt = normalize_plddt(atom_bfactor_plddt)
         if not sequence:
             sequence = pdb_seq
+    official_plddt, plddt_source = _official_plddt_from_candidate(source_candidate)
+    chosen_plddt = official_plddt
+    if chosen_plddt is None:
+        chosen_plddt = ca_bfactor_plddt if ca_bfactor_plddt is not None else atom_bfactor_plddt
+        if chosen_plddt is not None:
+            plddt_source = (
+                "ca_bfactor_plddt"
+                if ca_bfactor_plddt is not None
+                else "atom_bfactor_plddt"
+            )
 
     metrics: dict[str, float | str | None] = {}
     flags: list[str] = []
@@ -127,8 +218,11 @@ def _score_sequence(
     from Bio.SeqUtils.ProtParam import ProteinAnalysis
 
     if "plddt" in requested:
-        metrics["plddt"] = pdb_plddt
-        if pdb_plddt is not None and pdb_plddt < _PLDDT_LOW:
+        metrics["plddt"] = chosen_plddt
+        metrics["plddt_source"] = plddt_source
+        metrics["ca_bfactor_plddt"] = ca_bfactor_plddt
+        metrics["atom_bfactor_plddt"] = atom_bfactor_plddt
+        if chosen_plddt is not None and chosen_plddt < _PLDDT_LOW:
             flags.append("low_plddt")
 
     if "polybasic" in requested:
@@ -183,7 +277,17 @@ class ProteinQCAdapter(ToolAdapter):
         ctx.emit_progress(0.05)
 
         requested = set(params.metrics or _DEFAULT_METRICS)
-        metrics, flags = _score_sequence(params.sequence, params.pdb_path, requested)
+        first_candidate = (
+            params.candidates[0]
+            if params.candidates and _is_canonical_candidate(params.candidates[0])
+            else None
+        )
+        metrics, flags = _score_sequence(
+            params.sequence,
+            params.pdb_path,
+            requested,
+            source_candidate=first_candidate,
+        )
         ctx.emit_progress(0.30)
 
         ctx.emit_progress(1.0)
@@ -227,7 +331,14 @@ def _protein_qc_candidates(
             structure_path=structure_path,
             upstream=source_candidate if _is_canonical_candidate(source_candidate) else None,
         )
-        metrics, flags = _score_sequence(sequence, structure_path, requested)
+        metrics, flags = _score_sequence(
+            sequence,
+            structure_path,
+            requested,
+            source_candidate=source_candidate
+            if _is_canonical_candidate(source_candidate)
+            else None,
+        )
         candidate.setdefault("scores", {})["protein_qc"] = {
             **metrics,
             "passes_filters": not flags,

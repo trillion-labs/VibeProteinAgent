@@ -105,7 +105,7 @@
     "run_dssp": {
       "type": "boolean",
       "default": true,
-      "description": "When true, run DSSP internally to assign secondary structure. Disable to skip DSSP dependency when only contact/RSA analysis is needed.",
+      "description": "When true, assign secondary structure using pydssp first, then mkdssp/dssp if pydssp is unavailable, then a CA-geometry heuristic. Disable to use the heuristic directly when only contact/RSA analysis is needed.",
       "examples": [true, false]
     },
     "output_prefix": {

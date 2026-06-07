@@ -85,6 +85,13 @@ stateless per job, so you own the loop; run as many jobs as the objective
 warrants. Independent attempts can run in parallel — submit alternatives
 together and wait on them as a batch rather than serializing.
 
+For expensive downstream validation, you may evaluate only a top subset. Before
+doing so, make the subset rule explicit and, when the tool output supports it,
+record a candidate selection/filter event with the input count, selected ids,
+skipped ids, selection reason, selection metrics, and downstream tool. The final
+report must be able to distinguish generated-only candidates from evaluated,
+ranked, and submitted candidates.
+
 Use one `traj_` trajectory for each user query. You may choose direct `vpa run`
 calls or an explicit `vpa workflow run` block at any point; the choice is open.
 Do not treat workflow as required for protein design. Use it only when you decide
@@ -117,6 +124,7 @@ objective:
 - [ ] objective + measurable acceptance criteria stated
 - [ ] one trajectory tracks this user query
 - [ ] candidate tools/workflows tried, with reason
+- [ ] any top-k/subset validation rule recorded
 - [ ] evidence jobs run -> rank_designs when comparison helps
 - [ ] verified against criteria (qc / structure_analysis / rank) -> if short, fix and re-run
 - [ ] explored alternatives / iterated while it improves the objective

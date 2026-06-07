@@ -215,6 +215,62 @@ def test_submit_candidate_resolves_rank_and_dotted_score_highlights(
     }
 
 
+def test_submit_candidate_ranked_functional_design_keeps_structure_and_highlights(
+    tmp_workspace: Workspace,
+) -> None:
+    job_id = _completed_job(
+        tmp_workspace,
+        {
+            "ranked_candidates": [
+                {
+                    "candidate_id": "v40",
+                    "rank": 1,
+                    "score": 2.4,
+                    "sequence": "ACDEFA",
+                    "structure_path": "/tmp/v40.cif",
+                    "scores": {
+                        "protenix_v2": {"plddt": 79.512},
+                        "protein_qc": {
+                            "plddt": 79.512,
+                            "ca_bfactor_plddt": 83.363,
+                        },
+                        "tmalign": {"tm_score_normalized": 0.88058},
+                    },
+                }
+            ]
+        },
+    )
+
+    out = _adapter(tmp_workspace).run(
+        SubmitCandidateInput(
+            outcome="accepted",
+            candidates=[
+                {
+                    "job_id": job_id,
+                    "rank": 1,
+                    "justification": "best functional design",
+                    "scores_to_highlight": [
+                        "protenix_v2.plddt",
+                        "protein_qc.ca_bfactor_plddt",
+                        "tmalign.tm_score_normalized",
+                    ],
+                }
+            ],
+            reasoning="accepted functional design",
+        ),
+        null_context(tmp_workspace.job_dir("job_submit_functional")),
+    )
+
+    resolved = out.candidates_resolved[0]
+    assert resolved["candidate_id"] == "v40"
+    assert resolved["structure_path"] == "/tmp/v40.cif"
+    assert resolved["scores_highlighted"] == {
+        "protenix_v2.plddt": 79.512,
+        "protein_qc.ca_bfactor_plddt": 83.363,
+        "tmalign.tm_score_normalized": 0.88058,
+    }
+
+
 def test_submit_candidate_validates_empty_outcomes() -> None:
     with pytest.raises(ValidationError, match="accepted submission requires"):
         SubmitCandidateInput(outcome="accepted", candidates=[], reasoning="x")

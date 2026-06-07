@@ -12,7 +12,6 @@ from vibeproteinagent.adapters.structure_analysis.adapter import (
     StructureAnalysisInput,
     _parse_structure,
 )
-from vibeproteinagent.core.binary import find_binary
 
 _PDB = Path(__file__).resolve().parent / "fixtures" / "6MRR.pdb"
 _CIF = Path(__file__).resolve().parent / "fixtures" / "5o45.cif"
@@ -60,14 +59,6 @@ def _atom_line_with_icode(
         f"{record:<6}{serial:5d} {atom:<4s} {resname:>3s} {chain}{resseq:4d}{icode:1s}"
         f"   {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
     )
-
-
-def _dssp_available() -> bool:
-    try:
-        find_binary(("mkdssp", "dssp"), env_override="VPA_DSSP_BINARY")
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def _hetatm_standard_aa_cif(tmp_path: Path) -> Path:
@@ -223,19 +214,22 @@ def test_structure_analysis_mmcif_standard_aa_hetatm_is_residue_not_ligand(tmp_p
     assert [lig.resname for lig in ligands] == ["LIG"]
 
 
-def test_structure_analysis_falls_back_after_mkdssp_failure_for_hetatm_standard_aa(
+def test_structure_analysis_prefers_pydssp_before_mkdssp_for_hetatm_standard_aa(
     monkeypatch,
     tmp_path,
 ):
     cif = _hetatm_standard_aa_cif(tmp_path)
+    dssp_called = False
 
-    def fail_dssp(*_args, **_kwargs):
+    def fail_if_dssp_called(*_args, **_kwargs):
+        nonlocal dssp_called
+        dssp_called = True
         return None, None, "DSSP execution failed: mocked exit 1"
 
     def fake_pydssp(residues):
         return {residue.key: "loop" for residue in residues}, None
 
-    monkeypatch.setattr(structure_adapter, "_run_dssp", fail_dssp)
+    monkeypatch.setattr(structure_adapter, "_run_dssp", fail_if_dssp_called)
     monkeypatch.setattr(structure_adapter, "_run_pydssp", fake_pydssp)
 
     adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
@@ -248,7 +242,34 @@ def test_structure_analysis_falls_back_after_mkdssp_failure_for_hetatm_standard_
     assert out.residue_counts == {"A": 2}
     assert out.ligand_contacts["contact_count"] == 2
     assert out.secondary_structure["loop"] == 2
-    assert any("used pydssp" in warning for warning in out.warnings)
+    assert dssp_called is False
+    assert any("assigned from pydssp" in warning for warning in out.warnings)
+
+
+def test_structure_analysis_uses_mkdssp_only_when_pydssp_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    cif = _hetatm_standard_aa_cif(tmp_path)
+
+    def fail_pydssp(_residues):
+        return None, "pydssp unavailable: mocked"
+
+    def fake_dssp(_path, coords, _out_dir, _output_prefix):
+        return {residue.key: "sheet" for residue, _ca in coords}, tmp_path / "fake.dssp", None
+
+    monkeypatch.setattr(structure_adapter, "_run_pydssp", fail_pydssp)
+    monkeypatch.setattr(structure_adapter, "_run_dssp", fake_dssp)
+
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        StructureAnalysisInput(structure_path=str(cif), run_dssp=True),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.secondary_structure["sheet"] == 2
+    assert any("pydssp unavailable; used DSSP" in warning for warning in out.warnings)
+    assert any("assigned from DSSP" in warning for warning in out.warnings)
 
 
 def test_structure_analysis_ligand_contacts_use_heavy_atoms_not_ca(tmp_path):
@@ -356,6 +377,87 @@ def test_structure_analysis_ligand_counts_distinct_insertion_code_residues(tmp_p
     assert "\t10\tB\tLIG\t" in ligand_tsv
 
 
+def test_structure_analysis_site_contacts_use_heavy_atom_interface_and_infer_chain(
+    tmp_path,
+):
+    pdb_path = tmp_path / "site_contact_complex.pdb"
+    pdb_path.write_text(
+        "".join(
+            [
+                _atom_line(1, "ATOM", "N", "ALA", "A", 1, 0.0, 20.0, element="N"),
+                _atom_line(2, "ATOM", "CA", "ALA", "A", 1, 1.0, 20.0),
+                _atom_line(3, "ATOM", "C", "ALA", "A", 1, 2.0, 20.0),
+                _atom_line(4, "ATOM", "O", "ALA", "A", 1, 3.0, 20.0, element="O"),
+                _atom_line(5, "ATOM", "N", "CYS", "A", 2, 20.0, 0.0, element="N"),
+                _atom_line(6, "ATOM", "CA", "CYS", "A", 2, 21.0, 0.0),
+                _atom_line(7, "ATOM", "C", "CYS", "A", 2, 22.0, 0.0),
+                _atom_line(8, "ATOM", "O", "CYS", "A", 2, 23.0, 0.0, element="O"),
+                _atom_line(9, "ATOM", "CB", "CYS", "A", 2, 0.0, 0.0),
+                _atom_line(10, "ATOM", "N", "ASP", "A", 3, 0.0, 30.0, element="N"),
+                _atom_line(11, "ATOM", "CA", "ASP", "A", 3, 1.0, 30.0),
+                _atom_line(12, "ATOM", "C", "ASP", "A", 3, 2.0, 30.0),
+                _atom_line(13, "ATOM", "O", "ASP", "A", 3, 3.0, 30.0, element="O"),
+                _atom_line(14, "ATOM", "N", "GLY", "B", 1, 30.0, 0.0, element="N"),
+                _atom_line(15, "ATOM", "CA", "GLY", "B", 1, 31.0, 0.0),
+                _atom_line(16, "ATOM", "C", "GLY", "B", 1, 32.0, 0.0),
+                _atom_line(17, "ATOM", "O", "GLY", "B", 1, 33.0, 0.0, element="O"),
+                _atom_line(18, "ATOM", "CB", "GLY", "B", 1, 1.0, 0.0),
+            ]
+        )
+    )
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        StructureAnalysisInput(
+            structure_path=str(pdb_path),
+            sequence="ACD",
+            positions=[2],
+            interface_chain_ids=["B"],
+            contact_distance_angstrom=2.0,
+            run_dssp=False,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.annotation_scope["position_index_basis"] == "sequence_alignment_substring"
+    assert out.annotation_scope["mapped_positions"][0]["chain_id"] == "A"
+    assert out.interface["contact_count"] == 1
+    assert out.interface["interface_residue_count"] == 1
+    assert out.interface["partner_interface_residue_count"] == 1
+    assert out.site_contacts["contact_count"] == 1
+    assert out.site_contacts["contacted_positions"] == [2]
+    assert out.site_contacts["contacted_labels"] == ["C2"]
+    contact_tsv = Path(out.artifacts["interface_contacts_tsv"]).read_text()
+    assert "\tCB\tCB\t1.0\t" in contact_tsv
+
+
+def test_structure_analysis_multichain_sequence_positions_require_unique_chain(
+    tmp_path,
+):
+    pdb_path = tmp_path / "ambiguous_sequence_complex.pdb"
+    pdb_path.write_text(
+        "".join(
+            [
+                _ca_line(1, "ALA", "A", 1, 0.0),
+                _ca_line(2, "CYS", "B", 1, 4.0),
+            ]
+        )
+    )
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    with pytest.raises(ValueError, match="requires chain_id"):
+        adapter.run(
+            StructureAnalysisInput(
+                structure_path=str(pdb_path),
+                sequence="AC",
+                positions=[1],
+                interface_chain_ids=["B"],
+                run_dssp=False,
+            ),
+            null_context(tmp_path / "job"),
+        )
+
+
 def test_structure_analysis_dssp_input_sanitizes_standard_aa_hetatm(tmp_path):
     cif = _hetatm_standard_aa_cif(tmp_path)
     residues, _ligands = _parse_structure(cif)
@@ -370,20 +472,27 @@ def test_structure_analysis_dssp_input_sanitizes_standard_aa_hetatm(tmp_path):
     assert " LIG " not in text
 
 
-@pytest.mark.slow
-@pytest.mark.skipif(
-    not _dssp_available(),
-    reason="mkdssp/dssp binary unavailable",
-)
-def test_structure_analysis_uses_real_dssp_when_available(tmp_path):
+def test_structure_analysis_uses_ca_geometry_when_pydssp_and_mkdssp_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    def fail_pydssp(_residues):
+        return None, "pydssp unavailable: mocked"
+
+    def fail_dssp(*_args, **_kwargs):
+        return None, None, "DSSP unavailable: mocked"
+
+    monkeypatch.setattr(structure_adapter, "_run_pydssp", fail_pydssp)
+    monkeypatch.setattr(structure_adapter, "_run_dssp", fail_dssp)
+
     adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
     out = adapter.run(
         StructureAnalysisInput(structure_path=str(_PDB), max_annotations=5, run_dssp=True),
         null_context(tmp_path),
     )
-    assert "raw_dssp" in out.artifacts
-    assert Path(out.artifacts["raw_dssp"]).exists()
-    assert any("DSSP" in warning for warning in out.warnings)
+    assert out.secondary_structure["helix"] + out.secondary_structure["loop"] > 0
+    assert "raw_dssp" not in out.artifacts
+    assert any("used CA-geometry heuristic" in warning for warning in out.warnings)
 
 
 @pytest.mark.slow
@@ -395,4 +504,6 @@ def test_structure_analysis_uses_pydssp_when_available(tmp_path):
         null_context(tmp_path),
     )
     assert out.secondary_structure["helix"] > 0
+    assert out.artifacts.get("raw_dssp") is None
+    assert any("assigned from pydssp" in warning for warning in out.warnings)
     assert "dssp_tsv" in out.artifacts

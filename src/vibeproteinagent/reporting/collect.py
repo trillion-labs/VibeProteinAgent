@@ -104,6 +104,8 @@ _SCORE_KEYS = (
     "pi",
     "instability_index",
     "polybasic_hits",
+    "ca_bfactor_plddt",
+    "atom_bfactor_plddt",
     "aromatic_fraction",
     # Context (kept for filtering, never bar-rendered)
     "num_residues",
@@ -116,6 +118,12 @@ _SCORE_KEYS = (
 # {mean_plddt: ..., ptm: ...}). Without this, those metrics never reach
 # the report's candidate cards or table.
 _NESTED_SCORE_KEYS = ("confidence_scores", "metrics", "scores")
+_REFERENCE_CANDIDATE_TOOLS = frozenset({
+    "interpro_sequences",
+    "go_sequences",
+    "family_profile",
+})
+_NON_BOARD_CANDIDATE_TOOLS = _REFERENCE_CANDIDATE_TOOLS | frozenset({"submit_candidate"})
 
 
 def collect_report_model(workspace: Workspace, source_id: str, *, top_k: int = 5) -> ReportModel:
@@ -367,7 +375,7 @@ def _collect_trajectory(workspace: Workspace, trajectory_id: str) -> ReportModel
     )
     events.sort(key=lambda e: (e[0], e[2]))
 
-    for _, kind, event_id, event in events:
+    for _, kind, _event_id, event in events:
         if kind == "job":
             job = event
             assert isinstance(job, JobRecord)
@@ -437,7 +445,9 @@ def _collect_trajectory(workspace: Workspace, trajectory_id: str) -> ReportModel
         [j.finished_at for j in direct_jobs if j.finished_at is not None]
         + [w.finished_at for w in workflows if w.finished_at is not None]
     )
-    all_job_terminal = all(j.state.value in {"completed", "failed", "cancelled"} for j in direct_jobs)
+    all_job_terminal = all(
+        j.state.value in {"completed", "failed", "cancelled"} for j in direct_jobs
+    )
     all_workflow_terminal = all(w.state in {"completed", "failed", "cancelled"} for w in workflows)
     state = (
         "completed"
@@ -803,9 +813,10 @@ def _candidate_capability_filter_events_from_nodes(
     events: list[dict[str, Any]] = []
     for node in nodes:
         output = node.output if isinstance(node.output, dict) else {}
-        event = output.get("candidate_capability_filter_event")
-        if isinstance(event, dict):
-            events.append(_availability_filter_event(node, event))
+        for key in ("candidate_capability_filter_event", "candidate_selection_event"):
+            event = output.get(key)
+            if isinstance(event, dict):
+                events.append(_availability_filter_event(node, event, event_type=key))
         if len(events) >= _AVAILABILITY_EVENT_LIMIT:
             break
     return events[:_AVAILABILITY_EVENT_LIMIT]
@@ -970,21 +981,39 @@ def _availability_empty_event(
 def _availability_filter_event(
     node: WorkflowNodeSummary,
     event: dict[str, Any],
+    *,
+    event_type: str = "candidate_capability_filter_event",
 ) -> dict[str, Any]:
     filtered = event.get("filtered_candidates")
     if not isinstance(filtered, list):
         filtered = []
+    selected_ids = [
+        str(item) for item in event.get("selected_candidate_ids") or [] if item not in (None, "")
+    ]
+    skipped_ids = [
+        str(item) for item in event.get("skipped_candidate_ids") or [] if item not in (None, "")
+    ]
     return {
+        "event_type": event_type,
         "node_id": node.node_id,
         "tool": node.tool,
         "status": event.get("status"),
-        "reason": event.get("reason"),
+        "reason": event.get("selection_reason") or event.get("reason"),
         "input_field": event.get("input_field"),
-        "candidate_count": _as_int(event.get("candidate_count")),
+        "candidate_count": _as_int(event.get("input_candidate_count"))
+        or _as_int(event.get("candidate_count")),
         "compatible_candidate_count": _as_int(
             event.get("compatible_candidate_count")
-        ),
-        "skipped_candidate_count": _as_int(event.get("skipped_candidate_count")),
+        )
+        or (len(selected_ids) if selected_ids else None),
+        "skipped_candidate_count": _as_int(event.get("skipped_candidate_count"))
+        or (len(skipped_ids) if skipped_ids else None),
+        "downstream_tool": event.get("downstream_tool"),
+        "selection_metrics": event.get("selection_metrics")
+        if isinstance(event.get("selection_metrics"), dict)
+        else {},
+        "selected_candidate_ids": selected_ids[:_AVAILABILITY_FILTERED_CANDIDATE_LIMIT],
+        "skipped_candidate_ids": skipped_ids[:_AVAILABILITY_FILTERED_CANDIDATE_LIMIT],
         "required_capabilities": [
             str(item) for item in event.get("required_capabilities") or []
         ],
@@ -1233,7 +1262,10 @@ def _report_enrichment_nodes(
     params: dict[str, dict[str, Any]] = {}
     previous = upstream
     seen_node_ids: set[str] = set()
-    for index, job in enumerate(_read_report_enrichment_jobs_readonly(workspace, source_id), start=1):
+    for index, job in enumerate(
+        _read_report_enrichment_jobs_readonly(workspace, source_id),
+        start=1,
+    ):
         job_artifacts = _artifact_list(
             _read_artifacts_for_job_readonly(workspace, job.job_id),
             job_id=job.job_id,
@@ -1600,20 +1632,31 @@ def _normalize_candidates(
     node_params: dict[str, dict[str, Any]] | None = None,
 ) -> list[ReportCandidate]:
     ranked = _ranked_candidates(nodes, artifacts)
-    if ranked:
-        return ranked
     candidates: list[ReportCandidate] = []
     params_by_node = node_params or {}
+    exclude_reference_candidates = _has_design_candidate_context(nodes)
     for node in nodes:
         output = node.output if isinstance(node.output, dict) else {}
         candidates.extend(
             _candidates_from_output(
                 node, output, artifacts,
                 node_params=params_by_node.get(node.node_id),
+                exclude_reference_candidates=exclude_reference_candidates,
             )
         )
     _attach_qc_and_analysis(candidates, nodes, merge_global_metrics=False)
+    if ranked:
+        return _dedupe_candidates([*ranked, *candidates])
     return _dedupe_candidates(candidates)
+
+
+def _has_design_candidate_context(nodes: list[WorkflowNodeSummary]) -> bool:
+    for node in nodes:
+        tool = (node.tool or "").lower()
+        if not tool or tool in _NON_BOARD_CANDIDATE_TOOLS:
+            continue
+        return True
+    return False
 
 
 def _submission_outputs(nodes: list[WorkflowNodeSummary]) -> list[dict[str, Any]]:
@@ -1786,7 +1829,14 @@ def _candidates_from_output(
     artifacts: list[ReportArtifact],
     *,
     node_params: dict[str, Any] | None = None,
+    exclude_reference_candidates: bool = False,
 ) -> list[ReportCandidate]:
+    tool = (node.tool or "").lower()
+    if tool == "submit_candidate":
+        return []
+    if exclude_reference_candidates and tool in _REFERENCE_CANDIDATE_TOOLS:
+        return []
+
     rows: list[dict[str, Any]] = []
     for key in ("top_candidates", "top_designs", "designs", "predictions", "candidates"):
         value = output.get(key)

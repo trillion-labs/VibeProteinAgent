@@ -25,18 +25,28 @@ or `--since` when a workspace is shared.
 ## Report
 
 ```text
-vpa report <traj_id> --workspace <name> --out report.html
+vpa report <traj_id> --workspace <name>
 ```
+
+Each query gets its own uniquely-named workspace; write its report to a unique
+path. Omitting `--out` defaults to `<id>_report.html`, which is already unique —
+don't override it with a shared `report.html` that overwrites a prior query's
+report.
 
 `traj_` reports cover the query trajectory: tagged direct jobs plus tagged
 workflows. `job_` reports cover one job unless the job is a legacy
 `submit_candidate` handle; `wf_` reports cover one workflow only. A final
 objective report should target the completed trajectory after `submit_candidate`.
 Final selection comes from explicit `submit_candidate` output; reports are
-read-only evidence rendering and do not auto-select candidates.
+read-only deterministic evidence rendering and do not auto-select candidates.
+Do not hand-edit generated HTML to add missing artifacts or rationale. If the
+report is missing evidence, record that evidence through VPA jobs or structured
+artifacts, then render the report again.
 
 ## Evidence
 
 Summaries should include objective, criteria, workspace, source id, candidate
 ids, ranking metrics, submitted outcome, report path, and caveats. Keep
 uncertainty tied to measured evidence rather than narrative confidence.
+When adaptive subset validation was used, summarize generated, evaluated,
+ranked, and submitted populations separately.

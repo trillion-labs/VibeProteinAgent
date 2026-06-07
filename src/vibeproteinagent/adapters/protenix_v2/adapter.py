@@ -336,7 +336,7 @@ def _convert_mmcif_to_pdb(cif_path: Path, warnings: list[str]) -> Path | None:
     """Materialize a best-effort PDB sibling without changing CIF-primary output."""
     pdb_path = cif_path.with_suffix(".pdb")
     try:
-        from Bio.PDB import MMCIFParser, PDBIO
+        from Bio.PDB import PDBIO, MMCIFParser
 
         parser = MMCIFParser(QUIET=True)
         structure = parser.get_structure(cif_path.stem, str(cif_path))
@@ -801,41 +801,60 @@ def _protenix_v2_candidates(
             artifacts["protenix_v2"]["complex_input_mode"] = (
                 "pxdesign_target_sequence_binder_sequence"
             )
-        candidate: dict[str, Any] = {
-            "schema_version": "candidate_v1",
-            "candidate_id": stable_candidate_id(
-                "protenix_v2",
-                local_id,
-                native_id=record.candidate_id,
-                sequence=sequence,
-                structure_path=record.cif_path,
-                index=index,
-            ),
-            "source": {
-                "tool": "protenix_v2",
-                "node_id": None,
-                "job_id": None,
-                "local_id": local_id,
-                "native_id": record.candidate_id,
-                "index": index,
-            },
-            "structure_path": record.cif_path,
-            "scores": {"protenix_v2": scores},
-            "artifacts": artifacts,
-            "capabilities": candidate_capability_flags(
-                has_sequence=bool(sequence),
-                has_backbone_structure=bool(record.cif_path),
-                has_full_structure=bool(record.cif_path),
-                has_candidate_scores=True,
-            ),
-        }
-        if isinstance(source_candidate, dict):
-            source_scores = source_candidate.get("scores")
-            if isinstance(source_scores, dict):
-                candidate["scores"] = {**source_scores, **candidate["scores"]}
-            source_artifacts = source_candidate.get("artifacts")
-            if isinstance(source_artifacts, dict):
-                candidate["artifacts"] = {**source_artifacts, **candidate["artifacts"]}
+        generated_capabilities = candidate_capability_flags(
+            has_sequence=bool(sequence),
+            has_backbone_structure=bool(record.cif_path),
+            has_full_structure=bool(record.cif_path),
+            has_candidate_scores=True,
+        )
+        if _is_canonical_candidate(source_candidate):
+            assert source_candidate is not None
+            candidate = {
+                key: value
+                for key, value in source_candidate.items()
+                if key
+                in {
+                    "schema_version",
+                    "candidate_id",
+                    "source",
+                    "sequence",
+                    "structure_path",
+                    "capabilities",
+                }
+            }
+            candidate["scores"] = dict(source_candidate.get("scores") or {})
+            candidate["artifacts"] = dict(source_candidate.get("artifacts") or {})
+            candidate["capabilities"] = dict(source_candidate.get("capabilities") or {})
+            for key, value in generated_capabilities.items():
+                candidate["capabilities"][key] = bool(candidate["capabilities"].get(key)) or bool(
+                    value
+                )
+        else:
+            candidate = {
+                "schema_version": "candidate_v1",
+                "candidate_id": stable_candidate_id(
+                    "protenix_v2",
+                    local_id,
+                    native_id=record.candidate_id,
+                    sequence=sequence,
+                    structure_path=record.cif_path,
+                    index=index,
+                ),
+                "source": {
+                    "tool": "protenix_v2",
+                    "node_id": None,
+                    "job_id": None,
+                    "local_id": local_id,
+                    "native_id": record.candidate_id,
+                    "index": index,
+                },
+                "scores": {},
+                "artifacts": {},
+                "capabilities": generated_capabilities,
+            }
+        candidate["structure_path"] = record.cif_path
+        candidate.setdefault("scores", {})["protenix_v2"] = scores
+        candidate.setdefault("artifacts", {}).update(artifacts)
         if sequence:
             candidate["sequence"] = sequence
         candidates.append(candidate)

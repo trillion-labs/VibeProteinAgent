@@ -149,3 +149,9 @@ After evidence is available, run `rank_designs` when ranking is needed and
 `submit_candidate` returns `next_report_command`, run that command. Otherwise
 render `vpa report <traj_id>`. One user query should end with one trajectory
 report that covers the jobs/workflows used for that query.
+
+Prefer canonical `candidates=[...]` wiring for evaluator tools so evidence
+stays attached to the logical design. Use raw `pdb_path`/`structure_path`
+diagnostics only when candidate identity is unavailable or intentionally
+ambiguous, and note that such evidence may render as unmatched or missing from
+final candidate dossiers.

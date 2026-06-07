@@ -45,8 +45,8 @@ from .models import (
     ReportReviewModel,
     ScoreGroup,
     ToolRole,
-    WorkflowType,
     WorkflowNodeSummary,
+    WorkflowType,
 )
 from .plots import PLDDT_HOVER_JS
 from .review import build_review_model, classify_tool_role
@@ -56,9 +56,9 @@ from .view_models import (
     CandidateBoardViewModel,
     CandidateDossierViewModel,
     OverviewViewModel,
-    WorkflowTraceViewModel,
-    WorkflowStageViewModel,
     WorkflowReviewPreset,
+    WorkflowStageViewModel,
+    WorkflowTraceViewModel,
     build_report_view_model,
 )
 
@@ -345,9 +345,10 @@ def _load_3dmol_min_js() -> str | None:
 _STATUS_DISPLAY: dict[str, tuple[str, str]] = {
     CandidateStatus.FINAL: ("Final", "final"),
     CandidateStatus.RANKED_ALTERNATIVE: ("Ranked", "ranked"),
-    CandidateStatus.INCOMPLETE_EVIDENCE: ("Incomplete", "incomplete"),
-    CandidateStatus.FAILED_QC: ("Failed QC", "failed"),
-    CandidateStatus.REJECTED: ("Rejected", "rejected"),
+    CandidateStatus.EVALUATED_NOT_SELECTED: ("Evaluated", "evaluated"),
+    CandidateStatus.GENERATED_NOT_EVALUATED: ("Generated only", "generated"),
+    CandidateStatus.REFERENCE_GROUNDING: ("Reference", "reference"),
+    CandidateStatus.FAILED_OR_REJECTED: ("Failed/rejected", "failed"),
 }
 
 _PROV_LABEL: dict[str, str] = {
@@ -496,10 +497,14 @@ def _board_group_display_title(status: str, fallback: str) -> str:
         return "Recommended"
     if status == CandidateStatus.RANKED_ALTERNATIVE:
         return "Alternatives"
-    if status == CandidateStatus.INCOMPLETE_EVIDENCE:
-        return "Missing Evidence"
-    if status == CandidateStatus.FAILED_QC:
-        return "Failed QC"
+    if status == CandidateStatus.EVALUATED_NOT_SELECTED:
+        return "Evaluated, Not Selected"
+    if status == CandidateStatus.GENERATED_NOT_EVALUATED:
+        return "Generated, Not Evaluated"
+    if status == CandidateStatus.REFERENCE_GROUNDING:
+        return "Reference Grounding"
+    if status == CandidateStatus.FAILED_OR_REJECTED:
+        return "Failed or Rejected"
     return fallback
 
 
@@ -797,10 +802,14 @@ def _dossier_verdict(
         lead = "Recommended final candidate"
     elif bundle.status == CandidateStatus.RANKED_ALTERNATIVE:
         lead = "Alternative"
-    elif bundle.status == CandidateStatus.FAILED_QC:
-        lead = "Failed QC candidate"
-    elif bundle.status == CandidateStatus.INCOMPLETE_EVIDENCE:
-        lead = "Candidate with missing evidence"
+    elif bundle.status == CandidateStatus.EVALUATED_NOT_SELECTED:
+        lead = "Evaluated but not selected candidate"
+    elif bundle.status == CandidateStatus.GENERATED_NOT_EVALUATED:
+        lead = "Generated candidate without recorded downstream evaluation"
+    elif bundle.status == CandidateStatus.REFERENCE_GROUNDING:
+        lead = "Reference grounding record"
+    elif bundle.status == CandidateStatus.FAILED_OR_REJECTED:
+        lead = "Failed or rejected candidate"
     else:
         lead = f"{status_label} candidate"
     workflow_type = preset.workflow_type if preset else bundle.workflow_type
@@ -1172,9 +1181,11 @@ def _ordered_status_counts(counts: dict[str, int]) -> list[tuple[str, int]]:
     order = {
         "Recommended": 0,
         "Alternative": 1,
-        "Missing Evidence": 2,
-        "Failed QC": 3,
-        "Rejected": 4,
+        "Ranked Alternative": 1,
+        "Evaluated": 2,
+        "Generated Only": 3,
+        "Reference": 4,
+        "Failed/Rejected": 5,
     }
     return sorted(counts.items(), key=lambda item: (order.get(item[0], 99), item[0]))
 
@@ -1647,6 +1658,7 @@ def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> s
     status_cls = "is-complete" if completed in {"", "completed", "success"} else "is-recorded"
     node_count = len(model.graph.nodes)
     tool_calls = _workflow_audit_tool_call_list(model.graph.nodes)
+    selection_events = _workflow_audit_selection_events(model)
     return f"""<section id="workflow-audit" class="card saas-section workflow-audit-section">
   <header class="workflow-audit-header">
     <div>
@@ -1662,6 +1674,7 @@ def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> s
   <div class="workflow-graph-panel">
     <ol class="audit-stage-strip audit-stage-flow">{stages}</ol>
     {tool_calls}
+    {selection_events}
     <div class="workflow-graph-legend">
       <span><i class="legend-dot is-complete"></i>Completed</span>
       <span><i class="legend-dot is-skipped"></i>Not recorded</span>
@@ -1669,6 +1682,20 @@ def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> s
     </div>
   </div>
 </section>"""
+
+
+def _workflow_audit_selection_events(model: ReportModel) -> str:
+    events = model.candidate_capability_filter_events
+    if not events:
+        return ""
+    rows = "".join(_candidate_capability_filter_event_html(event) for event in events[:12])
+    return (
+        '<details class="workflow-tool-call-list" open>'
+        '<summary><strong>Candidate selection and filters</strong>'
+        '<em>Recorded subset coverage before downstream tools</em></summary>'
+        f'<div class="artifact-list">{rows}</div>'
+        '</details>'
+    )
 
 
 def _workflow_audit_tool_call_list(nodes: list[WorkflowNodeSummary]) -> str:
@@ -2905,17 +2932,34 @@ def _candidate_capability_filter_event_html(event: dict[str, Any]) -> str:
         for item in filtered[:5]
         if isinstance(item, dict)
     )
+    selected = event.get("selected_candidate_ids") if isinstance(event.get("selected_candidate_ids"), list) else []
+    skipped = event.get("skipped_candidate_ids") if isinstance(event.get("skipped_candidate_ids"), list) else []
+    selected_html = (
+        f'<span class="artifact-pill"><strong>selected</strong> {_h(", ".join(map(str, selected)))}</span>'
+        if selected
+        else ""
+    )
+    skipped_html = (
+        f'<span class="artifact-pill"><strong>skipped sample</strong> {_h(", ".join(map(str, skipped)))}</span>'
+        if skipped
+        else ""
+    )
     counts = (
         f'{event.get("compatible_candidate_count") or 0} compatible / '
         f'{event.get("skipped_candidate_count") or 0} skipped'
     )
+    label = "candidate subset selection" if event.get("event_type") == "candidate_selection_event" else "candidate consumer"
     return f"""
       <div class="artifact-row">
         <div>
-          <strong>{_h(str(event.get("node_id") or "candidate consumer"))}</strong>
+          <strong>{_h(str(event.get("node_id") or label))}</strong>
           <div class="artifact-meta">
             <span class="artifact-pill"><strong>status</strong> {_h(str(event.get("status") or ""))}</span>
             <span class="artifact-pill"><strong>counts</strong> {_h(counts)}</span>
+            <span class="artifact-pill"><strong>reason</strong> {_h(str(event.get("reason") or ""))}</span>
+            <span class="artifact-pill"><strong>downstream</strong> {_h(str(event.get("downstream_tool") or ""))}</span>
+            {selected_html}
+            {skipped_html}
             {filtered_html}
           </div>
         </div>
@@ -3176,7 +3220,7 @@ def _exec_confidence_col(model: ReportModel) -> str:
     if top is None:
         return ""
     rows: list[str] = []
-    for key, label, tip, lo, hi in _EXEC_CONFIDENCE_SPECS:
+    for key, label, tip, _lo, _hi in _EXEC_CONFIDENCE_SPECS:
         if len(rows) >= 4:
             break
         src_tool: str | None = None
@@ -5093,7 +5137,6 @@ def _workflow_composition(model: ReportModel) -> str:
         return ""
     summary = model.summary
     kind = (summary.kind or "").lower()
-    name = summary.name or ""
     by_id = {n.node_id: n for n in nodes}
     edges = sum(len([u for u in (n.upstream or []) if u in by_id]) for n in nodes)
 
@@ -5424,7 +5467,7 @@ def _slice_node_output_for_candidate(
         sliced["flags"] = pq.get("flags") or []
     sa = scores.get("structure_analysis")
     if isinstance(sa, dict):
-        for key in ("burial", "interface", "ligand_pocket"):
+        for key in ("burial", "interface", "site_contacts", "ligand_pocket"):
             if isinstance(sa.get(key), dict):
                 sliced[key] = sa[key]
         # Swap the node-level artifact bundle for THIS candidate's own. The
@@ -5446,9 +5489,12 @@ def _slice_node_output_for_candidate(
                 "liabilities",
                 "secondary_structure",
                 "ligand_contacts",
+                "site_contacts",
                 "ligand_pocket",
             ):
-                if leak_key == "ligand_pocket" and isinstance(sa.get(leak_key), dict):
+                if leak_key in {"site_contacts", "ligand_pocket"} and isinstance(
+                    sa.get(leak_key), dict
+                ):
                     continue
                 sliced.pop(leak_key, None)
     seq_an = scores.get("sequence_analysis")
@@ -6856,6 +6902,7 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
     for key in (
         "burial",
         "interface",
+        "site_contacts",
         "ligand_pocket",
         "chains",
         "liabilities",
@@ -6866,6 +6913,11 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
 
     burial = summary.get("burial") if isinstance(summary.get("burial"), dict) else {}
     interface = summary.get("interface") if isinstance(summary.get("interface"), dict) else {}
+    site_contacts = (
+        summary.get("site_contacts")
+        if isinstance(summary.get("site_contacts"), dict)
+        else {}
+    )
     ligand_pocket = (
         summary.get("ligand_pocket")
         if isinstance(summary.get("ligand_pocket"), dict)
@@ -6970,6 +7022,18 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
                 "Residues with at least one inter-chain contact within 5 A.",
                 "neutral",
                 gauge={"value": n_ir, "lo": 0.0, "hi": max(20.0, n_ir * 2)},
+            ))
+    if isinstance(site_contacts, dict) and site_contacts:
+        site_contact_count = site_contacts.get("contact_count")
+        mapped_count = site_contacts.get("mapped_position_count")
+        if site_contact_count is not None and mapped_count:
+            n_sc = _num(site_contact_count) or 0.0
+            n_mapped = _num(mapped_count) or 0.0
+            cards.append(_score_card(
+                "Site contacts", f"{_fmt(site_contact_count)} / {_fmt(mapped_count)}",
+                "Requested target-site positions with at least one partner-chain heavy-atom contact.",
+                "neutral",
+                gauge={"value": n_sc, "lo": 0.0, "hi": max(1.0, n_mapped)},
             ))
     cards_html = (
         _card_grid(cards)
@@ -13608,6 +13672,9 @@ body { background:var(--saas-bg); }
 }
 .status-badge-final { background:#ecfdf3; border-color:#bbf7d0; color:#067647; }
 .status-badge-ranked { background:#eff6ff; border-color:#bfdbfe; color:#1d4ed8; }
+.status-badge-evaluated { background:#eef2ff; border-color:#c7d2fe; color:#3730a3; }
+.status-badge-generated { background:#fff7ed; border-color:#fed7aa; color:#9a3412; }
+.status-badge-reference { background:#f8fafc; border-color:#cbd5e1; color:#475569; }
 .status-badge-incomplete { background:#fff7ed; border-color:#fed7aa; color:#9a3412; }
 .status-badge-failed { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
 .board-row-verdict { color:#302a52; font-size:13px; line-height:1.42; font-weight:600; }
@@ -14302,6 +14369,21 @@ body {
   background:#eff6ff;
   border-color:#c7d7fe;
   color:#1d4ed8;
+}
+.status-badge-evaluated {
+  background:#eef2ff;
+  border-color:#c7d2fe;
+  color:#3730a3;
+}
+.status-badge-generated {
+  background:var(--warning-soft);
+  border-color:#f4d29b;
+  color:#92400e;
+}
+.status-badge-reference {
+  background:#f8fafc;
+  border-color:#cbd5e1;
+  color:#475569;
 }
 .status-badge-incomplete {
   background:var(--warning-soft);

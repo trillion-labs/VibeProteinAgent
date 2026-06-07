@@ -27,7 +27,6 @@ from vibeproteinagent.reporting.review import (
     detect_workflow_type,
 )
 
-
 # --------------------------------------------------------------------------- #
 # Builders
 # --------------------------------------------------------------------------- #
@@ -122,7 +121,13 @@ def test_detect_denovo_when_candidate_has_structure_even_with_retrieval_tool():
     # A retrieval tool plus a structure means it is not a pure retrieval run.
     model = _model(
         nodes=[_node("n1", "search_sequence")],
-        candidates=[ReportCandidate(candidate_id="c1", sequence="ACDE", structure_path="/tmp/x.pdb")],
+        candidates=[
+            ReportCandidate(
+                candidate_id="c1",
+                sequence="ACDE",
+                structure_path="/tmp/x.pdb",
+            )
+        ],
     )
     assert detect_workflow_type(model) == WorkflowType.DENOVO
 
@@ -217,12 +222,22 @@ def test_failed_qc_status():
     assert _bundle_for(review, "c1").status == CandidateStatus.FAILED_QC
 
 
-def test_ranked_alternative_when_evaluation_evidence_present():
+def test_evaluated_not_selected_when_evaluation_evidence_present_without_rank():
     cand = ReportCandidate(
         candidate_id="c1", sequence="AAAA",
         scores={"esm3": {"mean_plddt": 0.91, "ptm": 0.8}},
     )
     review = build_review_model(_model(candidates=[cand]))
+    assert _bundle_for(review, "c1").status == CandidateStatus.EVALUATED_NOT_SELECTED
+
+
+def test_ranked_alternative_when_rank_designs_scored_candidate():
+    cand = ReportCandidate(
+        candidate_id="c1", sequence="AAAA",
+        scores={"esm3": {"mean_plddt": 0.91, "ptm": 0.8}},
+    )
+    ranked = [{"candidate_id": "c1", "rank": 1, "score": 0.8}]
+    review = build_review_model(_model(nodes=[_rank_designs_node(ranked)], candidates=[cand]))
     assert _bundle_for(review, "c1").status == CandidateStatus.RANKED_ALTERNATIVE
 
 
@@ -248,19 +263,20 @@ def test_retrieval_relabels_incomplete_evidence_group_title():
         _model(nodes=[_node("retrieve", "search_sequence")], candidates=cands)
     )
     assert review.workflow_type == WorkflowType.RETRIEVAL
-    group = _group_for(review, CandidateStatus.INCOMPLETE_EVIDENCE)
+    group = _group_for(review, CandidateStatus.REFERENCE_GROUNDING)
     assert group is not None
-    assert group.title == "Retrieved — not individually evaluated"
+    assert group.title == "Retrieved grounding evidence"
 
 
 def test_non_retrieval_keeps_default_incomplete_title():
-    # A generic workflow keeps the original wording.
+    # A generic workflow labels unscored generated candidates as generated-only
+    # rather than implying that downstream validation failed.
     cand = ReportCandidate(candidate_id="c1", sequence="AAAA")
     review = build_review_model(_model(candidates=[cand]))
     assert review.workflow_type != WorkflowType.RETRIEVAL
-    group = _group_for(review, CandidateStatus.INCOMPLETE_EVIDENCE)
+    group = _group_for(review, CandidateStatus.GENERATED_NOT_EVALUATED)
     assert group is not None
-    assert group.title == "Incomplete evidence"
+    assert group.title == "Generated, not evaluated"
 
 
 # --------------------------------------------------------------------------- #
@@ -361,10 +377,10 @@ def test_board_groups_ordered_and_failed_collapsed():
     review = build_review_model(_model(candidates=cands, finals=[final]))
 
     titles = [g.title for g in review.board_groups]
-    # Final must come first; failed QC after ranked alternatives.
+    # Final must come first; failed/rejected after evaluated candidates.
     assert titles.index("Final / Submitted") == 0
-    assert "Ranked alternatives" in titles
-    failed = next(g for g in review.board_groups if g.status == CandidateStatus.FAILED_QC)
+    assert "Evaluated, not selected" in titles
+    failed = next(g for g in review.board_groups if g.status == CandidateStatus.FAILED_OR_REJECTED)
     assert failed.collapsed is True
     final_group = next(g for g in review.board_groups if g.status == CandidateStatus.FINAL)
     assert final_group.collapsed is False

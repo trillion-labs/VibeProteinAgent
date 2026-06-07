@@ -239,6 +239,7 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
             ("protenix_v2", "ranking_score", "Rank score", None, _fmt),
             ("protenix_v2", "gpde", "gPDE", None, _fmt),
             ("protein_qc", "plddt", "pLDDT", None, _plddt_disp),
+            ("protein_qc", "ca_bfactor_plddt", "CA B-factor pLDDT", None, _plddt_disp),
         ],
     ),
     (
@@ -341,7 +342,9 @@ def _build_score_groups(
     flag_metrics: list[tuple[str, str, str | None, str]] = []
     qc = _score_namespace(candidate, "protein_qc")
     if "passes_filters" in qc:
-        flag_metrics.append(("QC filters", "pass" if qc.get("passes_filters") else "fail", None, "Protein QC"))
+        flag_metrics.append(
+            ("QC filters", "pass" if qc.get("passes_filters") else "fail", None, "Protein QC")
+        )
     flags = _string_list(candidate.qc_flags) or _string_list(qc.get("flags"))
     if flags:
         flag_metrics.append(("Flags", ", ".join(flags), None, "Protein QC"))
@@ -496,14 +499,24 @@ def _resolve_final_records(model: ReportModel) -> dict[int, str]:
     return resolved
 
 
-def _classify_status(candidate: ReportCandidate, is_final: bool) -> str:
+def _classify_status(
+    candidate: ReportCandidate,
+    is_final: bool,
+    *,
+    workflow_type: str,
+    scoring_rank: int | None = None,
+) -> str:
     if is_final:
         return CandidateStatus.FINAL
     if _qc_fails(candidate):
-        return CandidateStatus.FAILED_QC
-    if _has_evaluation_evidence(candidate):
+        return CandidateStatus.FAILED_OR_REJECTED
+    if workflow_type == WorkflowType.RETRIEVAL:
+        return CandidateStatus.REFERENCE_GROUNDING
+    if scoring_rank is not None:
         return CandidateStatus.RANKED_ALTERNATIVE
-    return CandidateStatus.INCOMPLETE_EVIDENCE
+    if _has_evaluation_evidence(candidate):
+        return CandidateStatus.EVALUATED_NOT_SELECTED
+    return CandidateStatus.GENERATED_NOT_EVALUATED
 
 
 def _missing_evidence(candidate: ReportCandidate) -> list[str]:
@@ -514,6 +527,8 @@ def _missing_evidence(candidate: ReportCandidate) -> list[str]:
         missing.append("qc")
     if not _has_evaluation_evidence(candidate):
         missing.append("evaluation")
+    if _as_int(candidate.rank) is None:
+        missing.append("rank")
     return missing
 
 
@@ -709,7 +724,12 @@ def _build_bundle(
     top_ranked_id: str | None = None,
 ) -> CandidateEvidenceBundle:
     is_final = final_provenance is not None
-    status = _classify_status(candidate, is_final)
+    status = _classify_status(
+        candidate,
+        is_final,
+        workflow_type=workflow_type,
+        scoring_rank=scoring_rank,
+    )
     cand_msa = _msa_for_candidate(candidate, msa_blocks)
     # Authoritative rank for the board badge + selector card: the ranker's own
     # rank when known, else the recorded collection-order rank.
@@ -753,16 +773,21 @@ def _build_bundle(
 _GROUP_ORDER: list[tuple[str, str, bool]] = [
     (CandidateStatus.FINAL, "Final / Submitted", False),
     (CandidateStatus.RANKED_ALTERNATIVE, "Ranked alternatives", False),
-    (CandidateStatus.INCOMPLETE_EVIDENCE, "Incomplete evidence", True),
-    (CandidateStatus.FAILED_QC, "Failed QC", True),
-    (CandidateStatus.REJECTED, "Rejected records", True),
+    (CandidateStatus.EVALUATED_NOT_SELECTED, "Evaluated, not selected", False),
+    (CandidateStatus.GENERATED_NOT_EVALUATED, "Generated, not evaluated", True),
+    (CandidateStatus.REFERENCE_GROUNDING, "Reference grounding", True),
+    (CandidateStatus.FAILED_OR_REJECTED, "Failed or rejected", True),
 ]
 
 
 def _rank_key(bundle: CandidateEvidenceBundle) -> tuple[float, float]:
     # Prefer the authoritative display rank (ranker's rank) so the board order
     # matches the Design-ranking widget; fall back to the recorded rank.
-    rank = bundle.display_rank if bundle.display_rank is not None else _as_int(bundle.candidate.rank)
+    rank = (
+        bundle.display_rank
+        if bundle.display_rank is not None
+        else _as_int(bundle.candidate.rank)
+    )
     score = _as_float(bundle.candidate.score)
     return (
         float(rank) if rank is not None else float("inf"),
@@ -779,11 +804,8 @@ def _board_group_title(status: str, default_title: str, workflow_type: str) -> s
     evidence. Calling them "Incomplete evidence" reads as a defect; relabel so
     the reader understands the bucket is "retrieved but not evaluated".
     """
-    if (
-        workflow_type == WorkflowType.RETRIEVAL
-        and status == CandidateStatus.INCOMPLETE_EVIDENCE
-    ):
-        return "Retrieved — not individually evaluated"
+    if workflow_type == WorkflowType.RETRIEVAL and status == CandidateStatus.REFERENCE_GROUNDING:
+        return "Retrieved grounding evidence"
     return default_title
 
 

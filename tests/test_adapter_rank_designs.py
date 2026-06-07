@@ -388,6 +388,153 @@ def test_rank_designs_merges_enriched_canonical_workflow_by_candidate_id(
     assert row["scores"]["protein_qc"]["plddt"] == 88.0
 
 
+def _functional_candidate(
+    candidate_id: str,
+    *,
+    tool: str,
+    sequence: str,
+    structure_path: str | None = None,
+    scores: dict | None = None,
+) -> dict:
+    return {
+        "schema_version": "candidate_v1",
+        "candidate_id": candidate_id,
+        "source": {"tool": tool, "local_id": candidate_id, "index": 0},
+        "sequence": sequence,
+        **({"structure_path": structure_path} if structure_path else {}),
+        "scores": scores or {},
+        "artifacts": {},
+    }
+
+
+def test_rank_designs_ignores_reference_hits_and_merges_functional_validation(
+    tmp_workspace: Workspace,
+) -> None:
+    interpro_job = _completed_job(
+        tmp_workspace,
+        "interpro_sequences",
+        {
+            "candidates": [
+                _functional_candidate(
+                    f"ipr_hit_{idx}",
+                    tool="interpro_sequences",
+                    sequence="REFERENCE",
+                    scores={"interpro_sequences": {"score": 0.99}},
+                )
+                for idx in range(3)
+            ]
+        },
+    )
+    esm2_job = _completed_job(
+        tmp_workspace,
+        "esm2",
+        {
+            "candidates": [
+                _functional_candidate(
+                    "v25",
+                    tool="esm2",
+                    sequence="ACDEFG",
+                    scores={"esm2": {"score": 0.6}},
+                ),
+                _functional_candidate(
+                    "v40",
+                    tool="esm2",
+                    sequence="ACDEFA",
+                    scores={"esm2": {"score": 0.8}},
+                ),
+            ]
+        },
+    )
+    protenix_job = _completed_job(
+        tmp_workspace,
+        "protenix_v2",
+        {
+            "candidates": [
+                _functional_candidate(
+                    "v25",
+                    tool="esm2",
+                    sequence="ACDEFG",
+                    structure_path="/tmp/v25.cif",
+                    scores={
+                        "esm2": {"score": 0.6},
+                        "protenix_v2": {"plddt": 75.7, "ptm": 0.661},
+                    },
+                ),
+                _functional_candidate(
+                    "v40",
+                    tool="esm2",
+                    sequence="ACDEFA",
+                    structure_path="/tmp/v40.cif",
+                    scores={
+                        "esm2": {"score": 0.8},
+                        "protenix_v2": {"plddt": 79.512, "ptm": 0.745},
+                    },
+                ),
+            ]
+        },
+    )
+    qc_job = _completed_job(
+        tmp_workspace,
+        "protein_qc",
+        {
+            "candidates": [
+                _functional_candidate(
+                    "v40",
+                    tool="esm2",
+                    sequence="ACDEFA",
+                    structure_path="/tmp/v40.cif",
+                    scores={
+                        "protein_qc": {
+                            "plddt": 79.512,
+                            "ca_bfactor_plddt": 83.363,
+                            "flags": [],
+                        }
+                    },
+                )
+            ]
+        },
+    )
+    tmalign_job = _completed_job(
+        tmp_workspace,
+        "tmalign",
+        {
+            "candidates": [
+                _functional_candidate(
+                    "v40",
+                    tool="esm2",
+                    sequence="ACDEFA",
+                    structure_path="/tmp/v40.cif",
+                    scores={"tmalign": {"tm_score_normalized": 0.88058, "rmsd": 1.2}},
+                )
+            ]
+        },
+    )
+
+    adapter = RankDesignsAdapter(
+        config={}, weights_dir=tmp_workspace.root / "weights", device=torch.device("cpu")
+    )
+    out = adapter.run(
+        RankDesignsInput(
+            job_ids=[interpro_job, esm2_job, protenix_job, qc_job, tmalign_job],
+            top_k=5,
+        ),
+        null_context(tmp_workspace.job_dir("job_rank_functional")),
+    )
+
+    by_id = {row["candidate_id"]: row for row in out.ranked_candidates}
+    assert out.candidate_count == 2
+    assert set(by_id) == {"v25", "v40"}
+    assert out.warnings == []
+    v40 = by_id["v40"]
+    assert v40["structure_path"] == "/tmp/v40.cif"
+    assert v40["scores"]["esm2"]["score"] == 0.8
+    assert v40["scores"]["protenix_v2"]["plddt"] == pytest.approx(79.512)
+    assert v40["scores"]["protein_qc"]["plddt"] == pytest.approx(79.512)
+    assert v40["scores"]["protein_qc"]["ca_bfactor_plddt"] == pytest.approx(83.363)
+    assert v40["scores"]["tmalign"]["tm_score_normalized"] == pytest.approx(0.88058)
+    assert set(v40["evidence_tools"]) == {"esm2", "protenix_v2", "protein_qc", "tmalign"}
+
+
 def test_rank_designs_output_round_trip():
     out = RankDesignsOutput(
         candidate_count=1,

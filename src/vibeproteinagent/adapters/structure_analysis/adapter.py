@@ -19,6 +19,7 @@ from vibeproteinagent.adapters.residue_mapping import (
     clean_sequence,
     residue_refs_from_objects,
     resolve_positions,
+    resolve_reference_sequence,
 )
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
 from vibeproteinagent.candidates.schema import stable_candidate_id
@@ -374,6 +375,181 @@ def _run_pydssp(
     return {key: _ss_label(str(code)) for key, code in zip(keys, ss_codes, strict=True)}, None
 
 
+def _chain_sequences(residues: list[Residue]) -> dict[str, str]:
+    by_chain: dict[str, list[str]] = defaultdict(list)
+    for residue in residues:
+        if residue.aa != "X":
+            by_chain[residue.chain_id].append(residue.aa)
+    return {chain_id: "".join(chars) for chain_id, chars in by_chain.items()}
+
+
+def _analysis_chain_id(
+    params: StructureAnalysisInput,
+    residues: list[Residue],
+    warnings: list[str],
+) -> str | None:
+    if params.chain_id:
+        return params.chain_id
+    if not params.positions or not (params.sequence or params.fasta_path):
+        return None
+
+    chain_ids = sorted({residue.chain_id for residue in residues if residue.aa != "X"})
+    if len(chain_ids) <= 1:
+        return None
+    reference = resolve_reference_sequence(params.sequence, params.fasta_path)
+    if not reference:
+        return None
+    chain_sequences = _chain_sequences(residues)
+    matches = [
+        chain_id
+        for chain_id, chain_sequence in chain_sequences.items()
+        if chain_sequence and chain_sequence == reference
+    ]
+    if len(matches) == 1:
+        chain_id = matches[0]
+        warnings.append(
+            "inferred chain_id from exact reference sequence match for requested positions: "
+            f"{chain_id}"
+        )
+        return chain_id
+    if matches:
+        raise ValueError(
+            "structure_analysis could not infer a unique chain_id from the provided "
+            f"sequence; exact matches={sorted(matches)}. Pass chain_id explicitly."
+        )
+    raise ValueError(
+        "structure_analysis sequence/fasta position mapping in a multi-chain structure "
+        "requires chain_id unless the provided sequence exactly matches one parsed chain"
+    )
+
+
+def _closest_heavy_atom_contact(
+    left: Residue,
+    right: Residue,
+    cutoff: float,
+) -> tuple[str, str, float, int] | None:
+    closest: tuple[str, str, float] | None = None
+    pair_count = 0
+    for left_atom, left_coord in _heavy_atoms(left):
+        for right_atom, right_coord in _heavy_atoms(right):
+            distance = _dist(left_coord, right_coord)
+            if distance <= cutoff:
+                pair_count += 1
+                if closest is None or distance < closest[2]:
+                    closest = (left_atom, right_atom, distance)
+    if closest is None:
+        return None
+    return closest[0], closest[1], closest[2], pair_count
+
+
+def _interface_contact_residue_sets(
+    *,
+    residues: list[Residue],
+    all_residues: list[Residue],
+    interface_chain_ids: list[str],
+) -> tuple[list[Residue], list[Residue], bool]:
+    interface_chains = set(interface_chain_ids)
+    if not interface_chains:
+        return all_residues, all_residues, True
+    if len(interface_chains) >= 2:
+        selected = [residue for residue in all_residues if residue.chain_id in interface_chains]
+        return selected, selected, True
+    query = [residue for residue in residues if residue.chain_id not in interface_chains]
+    if not query:
+        query = list(residues)
+    partner = [
+        residue
+        for residue in all_residues
+        if residue.chain_id in interface_chains and residue not in query
+    ]
+    return query, partner, False
+
+
+def _interface_contacts(
+    *,
+    residues: list[Residue],
+    all_residues: list[Residue],
+    interface_chain_ids: list[str],
+    cutoff: float,
+) -> tuple[list[dict[str, Any]], set[tuple[str, int, str]], set[tuple[str, int, str]]]:
+    query_residues, partner_residues, unordered_all_pairs = _interface_contact_residue_sets(
+        residues=residues,
+        all_residues=all_residues,
+        interface_chain_ids=interface_chain_ids,
+    )
+    contacts: list[dict[str, Any]] = []
+    interface_set: set[tuple[str, int, str]] = set()
+    partner_interface_set: set[tuple[str, int, str]] = set()
+    seen_pairs: set[tuple[tuple[str, int, str], tuple[str, int, str]]] = set()
+    for left in query_residues:
+        for right in partner_residues:
+            if left is right or left.chain_id == right.chain_id:
+                continue
+            pair_key = tuple(sorted((left.key, right.key)))
+            if unordered_all_pairs and pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            contact = _closest_heavy_atom_contact(left, right, cutoff)
+            if contact is None:
+                continue
+            left_atom, right_atom, distance, pair_count = contact
+            contacts.append({
+                "chain_id": left.chain_id,
+                "resseq": left.resseq,
+                "icode": left.icode,
+                "other_chain_id": right.chain_id,
+                "other_resseq": right.resseq,
+                "other_icode": right.icode,
+                "protein_atom": left_atom,
+                "other_atom": right_atom,
+                "distance": round(distance, 3),
+                "atom_pair_count": pair_count,
+            })
+            interface_set.add(left.key)
+            partner_interface_set.add(right.key)
+            if unordered_all_pairs:
+                interface_set.add(right.key)
+    return contacts, interface_set, partner_interface_set
+
+
+def _site_contacts(
+    *,
+    mapped_positions: list[dict[str, Any]],
+    missing_positions: list[int],
+    interface_set: set[tuple[str, int, str]],
+    partner_chain_ids: list[str],
+    cutoff: float,
+) -> dict[str, Any]:
+    contacted: list[dict[str, Any]] = []
+    for mapping in mapped_positions:
+        key = (
+            str(mapping.get("chain_id") or ""),
+            int(mapping.get("resseq")),
+            str(mapping.get("icode") or ""),
+        )
+        if key not in interface_set:
+            continue
+        entry = dict(mapping)
+        entry["label"] = f"{entry.get('aa')}{entry.get('requested_position')}"
+        contacted.append(entry)
+    requested_count = len(mapped_positions) + len(missing_positions)
+    contacted_positions = [int(entry["requested_position"]) for entry in contacted]
+    return {
+        "requested_position_count": requested_count,
+        "mapped_position_count": len(mapped_positions),
+        "contact_count": len(contacted),
+        "contact_fraction": (
+            len(contacted) / len(mapped_positions) if mapped_positions else 0.0
+        ),
+        "contacted_positions": contacted_positions,
+        "contacted_residue_ids": [str(entry["residue_id"]) for entry in contacted],
+        "contacted_labels": [str(entry["label"]) for entry in contacted],
+        "missing_positions": sorted(int(pos) for pos in missing_positions),
+        "partner_chain_ids": list(partner_chain_ids),
+        "distance_cutoff_angstrom": cutoff,
+    }
+
+
 def _patches(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     patches: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
@@ -468,6 +644,7 @@ class StructureAnalysisOutput(BaseModel):
     secondary_structure: dict[str, float]
     burial: dict[str, int]
     interface: dict[str, int]
+    site_contacts: dict[str, Any] = Field(default_factory=dict)
     ligand_contacts: dict[str, int]
     ligand_pocket: dict[str, Any] = Field(default_factory=dict)
     liabilities: list[dict[str, Any]]
@@ -486,41 +663,46 @@ def _analyze_structure(
 ) -> tuple[dict[str, Any], list[str]]:
     if not path.exists():
         raise FileNotFoundError(f"structure_analysis input not found: {path}")
-    residues, ligands = _parse_structure(path)
-    if params.chain_id:
-        residues = [r for r in residues if r.chain_id == params.chain_id]
+    all_residues, ligands = _parse_structure(path)
+    warnings: list[str] = []
+    analysis_chain_id = _analysis_chain_id(params, all_residues, warnings)
+    residues = all_residues
+    if analysis_chain_id:
+        residues = [r for r in all_residues if r.chain_id == analysis_chain_id]
     if not residues:
         raise ValueError("structure_analysis found no protein residues")
     out_dir.mkdir(parents=True, exist_ok=True)
     coords = [(r, r.ca) for r in residues if r.ca is not None]
     dssp_source_path: Path | None = None
     ss_source = "ca_geometry"
-    warnings: list[str] = []
     if params.run_dssp:
-        ss_by_key, dssp_source_path, dssp_warning = _run_dssp(
-            path,
-            coords,
-            out_dir,
-            output_prefix,
-        )
-        if ss_by_key is None:
-            pydssp_by_key, pydssp_warning = _run_pydssp(residues)
-            if pydssp_by_key is not None:
-                ss_by_key = pydssp_by_key
-                ss_source = "pydssp"
-                if dssp_warning:
-                    warnings.append(f"mkdssp unavailable; used pydssp: {dssp_warning}")
-            else:
+        pydssp_by_key, pydssp_warning = _run_pydssp(residues)
+        if pydssp_by_key is not None:
+            ss_by_key = pydssp_by_key
+            ss_source = "pydssp"
+            warnings.append("secondary_structure assigned from pydssp")
+        else:
+            ss_by_key, dssp_source_path, dssp_warning = _run_dssp(
+                path,
+                coords,
+                out_dir,
+                output_prefix,
+            )
+            if ss_by_key is None:
                 ss_by_key = _secondary_structure(coords)
+                if pydssp_warning:
+                    warnings.append(
+                        f"pydssp unavailable; used CA-geometry heuristic: {pydssp_warning}"
+                    )
                 if dssp_warning:
                     warnings.append(
                         f"DSSP unavailable; used CA-geometry heuristic: {dssp_warning}"
                     )
+            else:
                 if pydssp_warning:
-                    warnings.append(pydssp_warning)
-        else:
-            ss_source = "dssp"
-            warnings.append("secondary_structure assigned from DSSP")
+                    warnings.append(f"pydssp unavailable; used DSSP: {pydssp_warning}")
+                ss_source = "dssp"
+                warnings.append("secondary_structure assigned from DSSP")
     else:
         ss_by_key = _secondary_structure(coords)
         warnings.append("run_dssp=false; secondary_structure uses CA-geometry heuristic")
@@ -577,7 +759,7 @@ def _analyze_structure(
         resolution = resolve_positions(
             residues=residue_refs_from_objects(residues),
             positions=sorted(wanted),
-            chain_id=params.chain_id or residues[0].chain_id,
+            chain_id=analysis_chain_id or residues[0].chain_id,
             sequence=params.sequence,
             fasta_path=params.fasta_path,
             position_basis=params.position_basis,
@@ -614,33 +796,19 @@ def _analyze_structure(
         elif provided != parsed_sequence:
             warnings.append("provided sequence differs from parsed structure sequence")
 
-    contacts: list[dict[str, Any]] = []
-    interface_set: set[tuple[str, int, str]] = set()
-    interface_chains = set(params.interface_chain_ids)
-    for r, ca in coords:
-        if ca is None:
-            continue
-        for other, other_ca in coords:
-            if other is r or other_ca is None:
-                continue
-            if (
-                interface_chains
-                and other.chain_id not in interface_chains
-                and r.chain_id not in interface_chains
-            ):
-                continue
-            if r.chain_id == other.chain_id:
-                continue
-            d = _dist(ca, other_ca)
-            if d <= params.contact_distance_angstrom:
-                contacts.append({
-                    "chain_id": r.chain_id,
-                    "resseq": r.resseq,
-                    "other_chain_id": other.chain_id,
-                    "other_resseq": other.resseq,
-                    "distance": round(d, 3),
-                })
-                interface_set.add(r.key)
+    contacts, interface_set, partner_interface_set = _interface_contacts(
+        residues=residues,
+        all_residues=all_residues,
+        interface_chain_ids=params.interface_chain_ids,
+        cutoff=params.contact_distance_angstrom,
+    )
+    site_contacts = _site_contacts(
+        mapped_positions=mapped_positions,
+        missing_positions=missing_positions,
+        interface_set=interface_set,
+        partner_chain_ids=params.interface_chain_ids,
+        cutoff=params.contact_distance_angstrom,
+    )
 
     ligand_names = {x.upper() for x in params.ligand_resnames}
     ligand_contacts: list[dict[str, Any]] = []
@@ -741,8 +909,10 @@ def _analyze_structure(
         "interface": {
             "contact_count": len(contacts),
             "interface_residue_count": len(interface_set),
+            "partner_interface_residue_count": len(partner_interface_set),
             "ligand_contact_count": ligand_contact_residue_count,
         },
+        "site_contacts": site_contacts,
         "ligand_contacts": {
             "contact_count": ligand_contact_residue_count,
             "contact_residue_count": ligand_contact_residue_count,
@@ -801,11 +971,16 @@ def _analyze_structure(
             )
             fh.write("\t".join(str(row[k]) for k in keys) + "\n")
     with contacts_path.open("w") as fh:
-        fh.write("chain_id\tresseq\tother_chain_id\tother_resseq\tdistance\n")
+        fh.write(
+            "chain_id\tresseq\ticode\tother_chain_id\tother_resseq\tother_icode\t"
+            "protein_atom\tother_atom\tdistance\tatom_pair_count\n"
+        )
         for c in contacts:
             fh.write(
-                f"{c['chain_id']}\t{c['resseq']}\t{c['other_chain_id']}\t"
-                f"{c['other_resseq']}\t{c['distance']}\n"
+                f"{c['chain_id']}\t{c['resseq']}\t{c['icode']}\t"
+                f"{c['other_chain_id']}\t{c['other_resseq']}\t{c['other_icode']}\t"
+                f"{c['protein_atom']}\t{c['other_atom']}\t{c['distance']}\t"
+                f"{c['atom_pair_count']}\n"
             )
     with ligand_contacts_path.open("w") as fh:
         fh.write(
@@ -859,6 +1034,7 @@ class StructureAnalysisAdapter(ToolAdapter):
                 "exposed": int(summary["burial"].get("exposed", 0)),
             },
             interface=summary["interface"],
+            site_contacts=summary["site_contacts"],
             ligand_contacts=summary["ligand_contacts"],
             ligand_pocket=summary["ligand_pocket"],
             liabilities=summary["liabilities"],
@@ -966,6 +1142,7 @@ def _structure_scores(summary: dict[str, Any]) -> dict[str, Any]:
         "secondary_structure": summary["secondary_structure"],
         "burial": summary["burial"],
         "interface": summary["interface"],
+        "site_contacts": summary["site_contacts"],
         "ligand_contacts": summary["ligand_contacts"],
         "ligand_pocket": summary["ligand_pocket"],
         "liability_count": len(summary["liabilities"]),

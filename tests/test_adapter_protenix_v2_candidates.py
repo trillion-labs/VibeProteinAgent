@@ -16,10 +16,10 @@ from vibeproteinagent.adapters.protenix_v2.adapter import (
 from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
-def _candidate(sequence: str = "ACDE") -> dict:
+def _candidate(sequence: str = "ACDE", candidate_id: str = "cand_protenix_input") -> dict:
     return {
         "schema_version": "candidate_v1",
-        "candidate_id": "cand_protenix_input",
+        "candidate_id": candidate_id,
         "source": {
             "tool": "upstream",
             "node_id": None,
@@ -29,8 +29,8 @@ def _candidate(sequence: str = "ACDE") -> dict:
             "index": 0,
         },
         "sequence": sequence,
-        "scores": {},
-        "artifacts": {},
+        "scores": {"esm2": {"score": 0.42}},
+        "artifacts": {"esm2": {"fasta": "/tmp/esm2.fa"}},
     }
 
 
@@ -124,7 +124,9 @@ def test_protenix_v2_emits_canonical_candidates() -> None:
 def test_protenix_v2_candidate_ids_are_deterministic() -> None:
     params = ProtenixV2Input(candidates=[_candidate("MKKL")])
     records = [_record(0)]
-    assert _protenix_v2_candidates(params, records)[0]["candidate_id"] == _protenix_v2_candidates(params, records)[0]["candidate_id"]
+    first = _protenix_v2_candidates(params, records)
+    second = _protenix_v2_candidates(params, records)
+    assert first[0]["candidate_id"] == second[0]["candidate_id"]
 
 
 def test_protenix_v2_candidate_source_fields() -> None:
@@ -133,6 +135,20 @@ def test_protenix_v2_candidate_source_fields() -> None:
     assert source["tool"] == "protenix_v2"
     assert source["local_id"] == "protenix_0000"
     assert source["index"] == 0
+
+
+def test_protenix_v2_preserves_upstream_identity_for_canonical_sample() -> None:
+    params = ProtenixV2Input(candidates=[_candidate("MKKL", candidate_id="v40")])
+
+    candidate = _protenix_v2_candidates(params, [_pxdesign_record(0)])[0]
+
+    assert candidate["candidate_id"] == "v40"
+    assert candidate["sequence"] == "MKKL"
+    assert candidate["structure_path"] == "/tmp/protenix_0.cif"
+    assert candidate["scores"]["esm2"]["score"] == 0.42
+    assert candidate["scores"]["protenix_v2"]["plddt"] == 80.0
+    assert candidate["artifacts"]["esm2"]["fasta"] == "/tmp/esm2.fa"
+    assert candidate["artifacts"]["protenix_v2"]["predicted_cif"] == "/tmp/protenix_0.cif"
 
 
 def test_protenix_v2_output_preserves_legacy_fields() -> None:

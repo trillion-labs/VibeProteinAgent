@@ -40,7 +40,15 @@ def _node(node_id: str, tool: str, *, upstream=None, state="completed"):
     )
 
 
-def _model(*, nodes=None, candidates=None, finals=None, warnings=None, raw_summary=None):
+def _model(
+    *,
+    nodes=None,
+    candidates=None,
+    finals=None,
+    warnings=None,
+    raw_summary=None,
+    candidate_capability_filter_events=None,
+):
     return ReportModel(
         summary=RunSummary(
             kind="workflow",
@@ -54,6 +62,7 @@ def _model(*, nodes=None, candidates=None, finals=None, warnings=None, raw_summa
         candidates=list(candidates or []),
         final_candidates=list(finals or []),
         warnings=list(warnings or []),
+        candidate_capability_filter_events=list(candidate_capability_filter_events or []),
         raw_summary=dict(raw_summary or {}),
     )
 
@@ -186,6 +195,62 @@ def test_overview_prefers_recorded_warning_as_main_caveat():
     assert overview.main_caveat == "Structure prediction did not complete."
 
 
+def test_overview_explains_subset_evaluation_without_selection_reason():
+    model = _model(
+        nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")],
+        candidates=[
+            ReportCandidate(
+                candidate_id="selected",
+                rank=1,
+                sequence="ACDE",
+                scores={"protein_qc": {"passes_filters": True}},
+            ),
+            ReportCandidate(candidate_id="not_evaluated", sequence="WXYZ"),
+        ],
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert overview.main_caveat == (
+        "The agent evaluated, ranked, or submitted only a subset of generated "
+        "candidates. No subset selection reason was recorded, so the remaining "
+        "candidates are shown as generated but not evaluated."
+    )
+
+
+def test_overview_explains_recorded_subset_evaluation():
+    model = _model(
+        nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")],
+        candidates=[
+            ReportCandidate(
+                candidate_id="selected",
+                rank=1,
+                sequence="ACDE",
+                scores={"protein_qc": {"passes_filters": True}},
+            ),
+            ReportCandidate(candidate_id="not_evaluated", sequence="WXYZ"),
+        ],
+        candidate_capability_filter_events=[
+            {
+                "event_type": "candidate_selection_event",
+                "selected_candidate_ids": ["selected"],
+                "skipped_candidate_ids": ["not_evaluated"],
+                "reason": "top preliminary score",
+            }
+        ],
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert overview.main_caveat == (
+        "The agent evaluated, ranked, or submitted only a subset of generated "
+        "candidates. The remaining candidates are shown as generated but not "
+        "evaluated."
+    )
+
+
 def test_agent_rationale_uses_recorded_workflow_query_and_graph_plan():
     model = _model(
         nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")],
@@ -234,7 +299,14 @@ def test_candidate_board_rows_map_status_metric_chips_and_download_flags():
     assert "strong recorded interface evidence" in row.short_verdict
     assert row.has_structure is True
     assert row.has_downloads is True
-    assert {chip.label for chip in row.metric_chips} >= {"pLDDT", "pTM", "ipTM", "GRAVY", "Net charge", "QC"}
+    assert {chip.label for chip in row.metric_chips} >= {
+        "pLDDT",
+        "pTM",
+        "ipTM",
+        "GRAVY",
+        "Net charge",
+        "QC",
+    }
     assert [chip.label for chip in row.metric_chips[:3]] == ["ipTM", "pLDDT", "pTM"]
 
 

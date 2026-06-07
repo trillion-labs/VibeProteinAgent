@@ -10,6 +10,12 @@
     "secondary_structure": {"type": "object", "additionalProperties": {"type": "number"}},
     "burial": {"type": "object", "additionalProperties": {"type": "integer"}},
     "interface": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "site_contacts": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {},
+      "description": "Requested-position contact metrics for site-conditioned binder workflows."
+    },
     "ligand_contacts": {"type": "object", "additionalProperties": {"type": "integer"}},
     "ligand_pocket": {
       "type": "object",

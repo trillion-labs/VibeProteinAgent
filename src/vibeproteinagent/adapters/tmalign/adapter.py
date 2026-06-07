@@ -304,7 +304,15 @@ def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     out = {
         key: value
         for key, value in candidate.items()
-        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
+        if key
+        in {
+            "schema_version",
+            "candidate_id",
+            "source",
+            "sequence",
+            "structure_path",
+            "capabilities",
+        }
     }
     out["scores"] = dict(candidate.get("scores") or {})
     out["artifacts"] = dict(candidate.get("artifacts") or {})

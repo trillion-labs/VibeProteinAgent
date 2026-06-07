@@ -12,6 +12,12 @@ from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.workspace import JobStore, Workspace
 
+_REFERENCE_CANDIDATE_TOOLS = frozenset({
+    "interpro_sequences",
+    "go_sequences",
+    "family_profile",
+})
+
 
 class RankDesignsInput(BaseModel):
     job_ids: list[str] = Field(default_factory=list)
@@ -255,6 +261,8 @@ def _rows_from_jobs(
     for job_id in job_ids:
         job = store.get(job_id)
         output = job.output if isinstance(job.output, dict) else {}
+        if job.tool_name in _REFERENCE_CANDIDATE_TOOLS:
+            continue
         canonical_rows = _canonical_candidates_from_output(output)
         if canonical_rows:
             for candidate in canonical_rows:

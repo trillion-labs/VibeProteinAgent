@@ -81,8 +81,45 @@ def test_plddt_from_unit_interval_bfactor_is_persisted_on_percent_scale(tmp_path
     )
 
     assert out.metrics["plddt"] == pytest.approx(98.0)
+    assert out.metrics["plddt_source"] == "ca_bfactor_plddt"
+    assert out.metrics["ca_bfactor_plddt"] == pytest.approx(98.0)
+    assert out.metrics["atom_bfactor_plddt"] == pytest.approx(98.0)
     assert "low_plddt" not in out.flags
     assert out.candidates[0]["scores"]["protein_qc"]["plddt"] == pytest.approx(98.0)
+
+
+def test_canonical_protenix_global_plddt_wins_over_ca_bfactor(tmp_path):
+    pdb_path = tmp_path / "protenix_like.pdb"
+    pdb_path.write_text(
+        "ATOM      1  CA  ALA A   1      11.104  13.207   2.100  1.00 83.36           C\n"
+        "ATOM      2  CB  ALA A   1      11.904  14.207   2.100  1.00 75.66           C\n"
+        "TER\n"
+        "END\n"
+    )
+    candidate = {
+        "schema_version": "candidate_v1",
+        "candidate_id": "v40",
+        "source": {"tool": "esm2", "local_id": "v40", "index": 0},
+        "sequence": "A",
+        "structure_path": str(pdb_path),
+        "scores": {"protenix_v2": {"plddt": 79.512}},
+        "artifacts": {},
+    }
+    adapter = ProteinQCAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        ProteinQCInput(candidates=[candidate], metrics=["plddt"]),
+        null_context(tmp_path),
+    )
+
+    assert out.metrics["plddt"] == pytest.approx(79.512)
+    assert out.metrics["plddt_source"] == "scores.protenix_v2.plddt"
+    assert out.metrics["ca_bfactor_plddt"] == pytest.approx(83.36)
+    assert out.metrics["atom_bfactor_plddt"] == pytest.approx(79.51)
+    qc_scores = out.candidates[0]["scores"]["protein_qc"]
+    assert qc_scores["plddt"] == pytest.approx(79.512)
+    assert qc_scores["plddt_source"] == "scores.protenix_v2.plddt"
+    assert qc_scores["ca_bfactor_plddt"] == pytest.approx(83.36)
 
 
 @pytest.mark.skipif(not _PDB_FIXTURE.exists(), reason="6MRR fixture missing")

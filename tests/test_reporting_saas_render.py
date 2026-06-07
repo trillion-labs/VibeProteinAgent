@@ -144,7 +144,10 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "data-sidebar-toggle" in html
     assert "sidebar-collapsed" in html
     assert "vpa-report-sidebar-collapsed" in html
-    assert '<button class="top-bar-action top-bar-action-primary" type="button" data-export-report>Export Report</button>' in html
+    assert (
+        '<button class="top-bar-action top-bar-action-primary" type="button" '
+        "data-export-report>Export Report</button>"
+    ) in html
     assert "Download Data" not in html
     assert "saas-icon-card" in html
     assert "overview-card-icon" in html
@@ -161,13 +164,16 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "candidate-board-row" in html
     assert "candidate-board-card" in html
     assert "Recommended" in html
-    assert "Alternatives" in html or "Alternative" in html
+    assert "Evaluated, Not Selected" in html or "Evaluated" in html
     assert "Strong Alternatives" not in html
     assert "Strong alternative" not in html
     assert "Why this candidate?" not in html
     assert "Binder design review" in html
     assert "Which candidates are most likely to bind the target?" in html
-    assert "Recommended due to strong recorded interface evidence and high complex structure confidence" in html
+    assert (
+        "Recommended due to strong recorded interface evidence and high complex "
+        "structure confidence"
+    ) in html
     assert "ipTM" in html
     assert "candidate-dossier-primary" in html
     assert '<div class="dossier-summary-panel">' not in html
