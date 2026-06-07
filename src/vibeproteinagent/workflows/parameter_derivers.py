@@ -4,6 +4,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from vibeproteinagent.candidates.paths import candidate_pdb_path
+
 
 def is_canonical_candidate(value: Any) -> bool:
     return isinstance(value, dict) and value.get("schema_version") == "candidate_v1"
@@ -13,14 +15,14 @@ def candidate_structure_path(
     candidate: dict[str, Any],
     *,
     prefer_pdb: bool = True,
+    require_pdb: bool = False,
 ) -> str | None:
     if prefer_pdb:
-        direct = candidate.get("structure_path")
-        if isinstance(direct, str) and direct.lower().endswith(".pdb"):
-            return direct
-        artifact_path = _artifact_path(candidate, "pdb_path")
-        if artifact_path:
-            return artifact_path
+        pdb_path = candidate_pdb_path(candidate)
+        if pdb_path:
+            return pdb_path
+        if require_pdb:
+            return None
     for key in ("structure_path", "full_structure_path", "backbone_path", "pdb_path", "cif_path"):
         value = candidate.get(key)
         if isinstance(value, str) and value:

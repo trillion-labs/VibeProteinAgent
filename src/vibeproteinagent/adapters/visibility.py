@@ -5,7 +5,6 @@ from vibeproteinagent.adapters.descriptor import ToolDescriptor
 _INTERNAL_TOOL_NAMES = frozenset(
     {
         "mpnn_to_protenix_input",
-        "merge_candidates",
         "noop",
         "sequence_to_protenix_input",
     }

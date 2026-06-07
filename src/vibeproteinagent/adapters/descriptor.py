@@ -471,6 +471,7 @@ def validate_params(
         tool_name=descriptor.name,
         schema=schema,
         raw_errors=raw_errors,
+        params=params,
     )
     first_field = raw_errors[0]["field"]
     first_message = enriched_errors[0]["message"]

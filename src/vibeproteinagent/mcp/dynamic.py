@@ -9,7 +9,7 @@ from pydantic import create_model
 
 from vibeproteinagent.adapters import ToolDescriptor
 from vibeproteinagent.adapters.visibility import is_agent_visible_tool
-from vibeproteinagent.core.errors import InvalidParamsError
+from vibeproteinagent.core.errors import DaemonUnavailableError, InvalidParamsError, VPAError
 from vibeproteinagent.workspace import TERMINAL_STATES
 
 from .tools import SessionCtx, get_results, submit_job, wait_job
@@ -42,6 +42,11 @@ def _augment_schema_with_runtime_controls(schema: dict[str, Any]) -> dict[str, A
         "minimum": 0,
         "default": 0,
         "description": "Maximum automatic retries on retryable runtime errors.",
+    }
+    props["trajectory_id"] = {
+        "type": ["string", "null"],
+        "default": None,
+        "description": "Optional VPA trajectory id (traj_*) for one user-query trajectory.",
     }
     return augmented
 
@@ -151,7 +156,7 @@ def _make_runner(ctx: SessionCtx, descriptor: ToolDescriptor, wait_s: float):
         args = dict(arguments or {})
         schema = _augment_schema_with_runtime_controls(resolve_input_schema(descriptor))
         try:
-            validate_against(schema, args)
+            validate_against(schema, args, tool_name=descriptor.name)
         except InvalidParamsError as exc:
             return vpa_error_to_dict(exc)
         force_new_raw = args.pop("force_new", False)
@@ -163,6 +168,17 @@ def _make_runner(ctx: SessionCtx, descriptor: ToolDescriptor, wait_s: float):
                 )
             )
         force_new = force_new_raw
+        trajectory_id_raw = args.pop("trajectory_id", None)
+        if trajectory_id_raw is not None and not isinstance(trajectory_id_raw, str):
+            return vpa_error_to_dict(
+                InvalidParamsError(
+                    "trajectory_id must be a string or null",
+                    details={
+                        "field": "trajectory_id",
+                        "got_type": type(trajectory_id_raw).__name__,
+                    },
+                )
+            )
         max_retries_raw = args.pop("max_retries", 0)
         if (
             not isinstance(max_retries_raw, int)
@@ -176,6 +192,22 @@ def _make_runner(ctx: SessionCtx, descriptor: ToolDescriptor, wait_s: float):
                         "field": "max_retries",
                         "got_type": type(max_retries_raw).__name__,
                     },
+            )
+        )
+        try:
+            runtime_info = ctx.supervisor().require_workspace(ctx.workspace.name)
+        except VPAError as exc:
+            return vpa_error_to_dict(exc)
+        if not runtime_info.get("running"):
+            return vpa_error_to_dict(
+                DaemonUnavailableError(
+                    "supervisor is not running; dynamic MCP tool execution requires a daemon",
+                    details={
+                        "requested_workspace": ctx.workspace.name,
+                        "supervisor_workspace": runtime_info.get("workspace"),
+                        "socket": runtime_info.get("socket"),
+                        "hint": "start the daemon for this workspace before calling dynamic run_<tool>",
+                    },
                 )
             )
         submission = submit_job(
@@ -183,6 +215,7 @@ def _make_runner(ctx: SessionCtx, descriptor: ToolDescriptor, wait_s: float):
             tool=descriptor.name,
             params=args,
             version=f"=={descriptor.version}",
+            trajectory_id=trajectory_id_raw,
             force_new=force_new,
             max_retries=max_retries_raw,
         )
@@ -199,12 +232,17 @@ def _make_runner(ctx: SessionCtx, descriptor: ToolDescriptor, wait_s: float):
             if rec.state in TERMINAL_STATES:
                 break
             if time.time() >= deadline:
+                runtime_info = ctx.supervisor().runtime_info()
                 return {
                     "ok": False,
                     "code": "E_TIMEOUT",
                     "job_id": job_id,
                     "state": rec.state.value,
                     "idempotent_hit": idempotent_hit,
+                    "requested_workspace": ctx.workspace.name,
+                    "supervisor_workspace": runtime_info.get("workspace"),
+                    "daemon_running": runtime_info.get("running"),
+                    "workspace_match": runtime_info.get("workspace") == ctx.workspace.name,
                     "message": f"timed out waiting {wait_s:.0f}s for job {job_id}",
                 }
             await asyncio.sleep(0.5)

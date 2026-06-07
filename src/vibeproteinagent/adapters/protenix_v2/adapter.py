@@ -28,8 +28,8 @@ from vibeproteinagent.adapters.msa_policy import (
     strip_prepared_msa,
 )
 from vibeproteinagent.adapters.residue_mapping import parse_structure_residue_refs
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 # --------------------------------------------------------------------------- paths
 
@@ -212,6 +212,7 @@ class ProtenixV2PredictionRecord(BaseModel):
     seed: int
     rank: int
     cif_path: str
+    pdb_path: str | None = None
     summary_json: str
     pae_path: str | None = None
     full_confidence_json: str | None = None
@@ -236,6 +237,7 @@ class ProtenixV2Output(BaseModel):
     metrics: ProtenixV2Metrics
     all_predictions: list[ProtenixV2PredictionRecord]
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     runtime_ms: int
     seeds_used: list[int]
 
@@ -328,6 +330,31 @@ def _write_ipsae_pae_json(full_data_path: Path, summary_path: Path) -> Path | No
         if summary_out != summary_path:
             summary_out.write_text(summary_path.read_text())
     return pae_path
+
+
+def _convert_mmcif_to_pdb(cif_path: Path, warnings: list[str]) -> Path | None:
+    """Materialize a best-effort PDB sibling without changing CIF-primary output."""
+    pdb_path = cif_path.with_suffix(".pdb")
+    try:
+        from Bio.PDB import MMCIFParser, PDBIO
+
+        parser = MMCIFParser(QUIET=True)
+        structure = parser.get_structure(cif_path.stem, str(cif_path))
+        writer = PDBIO()
+        writer.set_structure(structure)
+        writer.save(str(pdb_path))
+    except Exception as exc:
+        warnings.append(
+            "could not convert Protenix mmCIF to PDB for PDB-only downstream "
+            f"consumers: {type(exc).__name__}: {exc}"
+        )
+        return None
+    if not pdb_path.is_file() or pdb_path.stat().st_size == 0:
+        warnings.append(
+            f"could not convert Protenix mmCIF to PDB: empty output at {pdb_path}"
+        )
+        return None
+    return pdb_path
 
 
 def _confidence_sample_name(prediction_sample_name: str, seed: int) -> str:
@@ -505,7 +532,7 @@ class ProtenixV2Adapter(ToolAdapter):
         self._infer_predict(self.runner, cfg)
         ctx.emit_progress(0.90)
 
-        all_records, best = self._collect_outputs(job_outputs, params.seeds)
+        all_records, best, warnings = self._collect_outputs(job_outputs, params.seeds)
         if best is None:
             raise RuntimeError(
                 f"Protenix produced no predictions under {job_outputs}. "
@@ -516,7 +543,7 @@ class ProtenixV2Adapter(ToolAdapter):
         runtime_ms = int((time.time() - t0) * 1000)
         output = ProtenixV2Output(
             predicted_cif=str(best.cif_path),
-            predicted_pdb=None,
+            predicted_pdb=best.pdb_path,
             pae_path=best.pae_path,
             metrics=ProtenixV2Metrics(
                 plddt=float(best.plddt if best.plddt is not None else 0.0),
@@ -528,6 +555,7 @@ class ProtenixV2Adapter(ToolAdapter):
                 summary_json=str(best.summary_json),
             ),
             all_predictions=all_records,
+            warnings=warnings,
             runtime_ms=runtime_ms,
             seeds_used=list(params.seeds),
         )
@@ -537,9 +565,10 @@ class ProtenixV2Adapter(ToolAdapter):
     @staticmethod
     def _collect_outputs(
         dump_dir: Path, seeds: list[int]
-    ) -> tuple[list[ProtenixV2PredictionRecord], ProtenixV2PredictionRecord | None]:
+    ) -> tuple[list[ProtenixV2PredictionRecord], ProtenixV2PredictionRecord | None, list[str]]:
         """Walk Protenix's DataDumper layout and return (all, best_by_ranking)."""
         records: list[ProtenixV2PredictionRecord] = []
+        warnings: list[str] = []
         # DataDumper layout: <base>/<dataset_name>/<sample_name>/seed_<seed>/
         #     predictions/<sample_name>_sample_<rank>.cif
         #     predictions/<sample_name>_summary_confidence_sample_<rank>.json
@@ -574,6 +603,7 @@ class ProtenixV2Adapter(ToolAdapter):
                 parent / f"{confidence_sample_name}_full_data_sample_{rank}.json"
             )
             pae_path = _write_ipsae_pae_json(full_confidence, summary_path)
+            pdb_path = _convert_mmcif_to_pdb(cif_path, warnings)
             rec = ProtenixV2PredictionRecord(
                 candidate_id=(
                     f"protenix_v2:{prediction_sample_name}:seed_{seed_val}:rank_{rank}"
@@ -581,6 +611,7 @@ class ProtenixV2Adapter(ToolAdapter):
                 seed=seed_val,
                 rank=rank,
                 cif_path=str(cif_path),
+                pdb_path=str(pdb_path) if pdb_path is not None else None,
                 summary_json=str(summary_path),
                 pae_path=str(pae_path) if pae_path is not None else None,
                 full_confidence_json=(
@@ -594,7 +625,7 @@ class ProtenixV2Adapter(ToolAdapter):
             records.append(rec)
 
         if not records:
-            return records, None
+            return records, None, warnings
         # Pick the highest ranking_score (Protenix default rank metric); fall
         # back to (rank=0, lowest seed) ordering when scores are absent.
         records.sort(
@@ -604,7 +635,7 @@ class ProtenixV2Adapter(ToolAdapter):
                 r.rank,
             )
         )
-        return records, records[0]
+        return records, records[0], warnings
 
     def estimate_vram(self, params: ProtenixV2Input) -> int:
         # Conservative ceiling; tighten after measuring on a fixture run.
@@ -759,6 +790,8 @@ def _protenix_v2_candidates(
                 "summary_json": record.summary_json,
                 "pae_path": record.pae_path,
                 "full_confidence_json": record.full_confidence_json,
+                "predicted_cif": record.cif_path,
+                "predicted_pdb": record.pdb_path,
             }
         }
         if (

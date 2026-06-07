@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   error_details_json TEXT,
   log_path          TEXT NOT NULL,
   workspace         TEXT NOT NULL,
+  trajectory_id     TEXT,
   workflow_id       TEXT,
   workflow_node_id  TEXT,
   worker_id         INTEGER,
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state     ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_tool      ON jobs(tool_name, tool_version);
+CREATE INDEX IF NOT EXISTS idx_jobs_traj      ON jobs(trajectory_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_wf        ON jobs(workflow_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_paramhash ON jobs(tool_name, tool_version, params_hash);
 
@@ -58,9 +60,34 @@ CREATE TABLE IF NOT EXISTS workflows (
   version        TEXT NOT NULL,
   descriptor     TEXT NOT NULL,
   params_json    TEXT NOT NULL,
+  trajectory_id  TEXT,
   state          TEXT NOT NULL CHECK (state IN ('submitted','running','completed','failed','cancelled')),
   submitted_at   INTEGER NOT NULL,
   finished_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_workflows_traj ON workflows(trajectory_id);
+
+CREATE TABLE IF NOT EXISTS trajectories (
+  trajectory_id       TEXT PRIMARY KEY,
+  workspace           TEXT NOT NULL,
+  user_query          TEXT NOT NULL,
+  objective           TEXT,
+  state               TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','completed')),
+  final_submit_job_id TEXT,
+  report_path         TEXT,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  completed_at        INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS trajectory_reports (
+  trajectory_id        TEXT PRIMARY KEY,
+  report_path          TEXT NOT NULL,
+  source_id            TEXT NOT NULL,
+  format               TEXT NOT NULL,
+  final_submit_job_id  TEXT,
+  created_at           INTEGER NOT NULL,
+  FOREIGN KEY (trajectory_id) REFERENCES trajectories(trajectory_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS workflow_nodes (
@@ -109,78 +136,3 @@ CREATE TABLE IF NOT EXISTS job_artifacts (
 );
 
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
-CREATE TABLE IF NOT EXISTS agent_runs (
-  run_id                 TEXT PRIMARY KEY,
-  workspace              TEXT NOT NULL,
-  user_request           TEXT NOT NULL,
-  mode                   TEXT,
-  state                  TEXT NOT NULL,
-  provider               TEXT,
-  model                  TEXT,
-  provider_snapshot_json TEXT,
-  system_prompt_version  TEXT NOT NULL,
-  tool_schema_version    TEXT NOT NULL,
-  classification_json    TEXT,
-  workflow_ids_json      TEXT NOT NULL DEFAULT '[]',
-  job_ids_json           TEXT NOT NULL DEFAULT '[]',
-  artifacts_json         TEXT NOT NULL DEFAULT '[]',
-  final_report_json      TEXT,
-  created_at             INTEGER NOT NULL,
-  updated_at             INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at);
-
-CREATE TABLE IF NOT EXISTS agent_messages (
-  message_id   TEXT PRIMARY KEY,
-  run_id       TEXT NOT NULL,
-  role         TEXT NOT NULL,
-  content      TEXT NOT NULL,
-  model        TEXT,
-  token_count  INTEGER,
-  created_at   INTEGER NOT NULL,
-  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_agent_messages_run ON agent_messages(run_id);
-
-CREATE TABLE IF NOT EXISTS agent_tool_calls (
-  tool_call_id TEXT PRIMARY KEY,
-  run_id       TEXT NOT NULL,
-  tool_name    TEXT NOT NULL,
-  args_json    TEXT NOT NULL,
-  result_json  TEXT,
-  ok           INTEGER NOT NULL,
-  created_at   INTEGER NOT NULL,
-  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_run ON agent_tool_calls(run_id);
-
-CREATE TABLE IF NOT EXISTS agent_plans (
-  plan_id                TEXT PRIMARY KEY,
-  run_id                 TEXT NOT NULL,
-  plan_json              TEXT NOT NULL,
-  status                 TEXT NOT NULL,
-  validation_errors_json TEXT NOT NULL DEFAULT '[]',
-  workflow_id            TEXT,
-  created_at             INTEGER NOT NULL,
-  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS agent_summaries (
-  summary_id   TEXT PRIMARY KEY,
-  run_id       TEXT NOT NULL,
-  workflow_id  TEXT,
-  job_id        TEXT,
-  summary_json  TEXT NOT NULL,
-  created_at    INTEGER NOT NULL,
-  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS agent_decisions (
-  decision_id   TEXT PRIMARY KEY,
-  run_id        TEXT NOT NULL,
-  round_index   INTEGER NOT NULL,
-  decision_json TEXT NOT NULL,
-  created_at    INTEGER NOT NULL,
-  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
-);

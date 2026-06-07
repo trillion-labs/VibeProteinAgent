@@ -421,7 +421,7 @@ def test_runtime_guard_completes_exact_id_consumer_as_empty_branch(
         "dehydratase_sequences",
         tool="go_sequences",
         inputs={
-            "go_id": "${outputs.prior_round.selected_go_id}",
+            "go_id": "${outputs.external_candidates.selected_go_id}",
             "max_sequences": 2,
         },
     )
@@ -430,7 +430,7 @@ def test_runtime_guard_completes_exact_id_consumer_as_empty_branch(
         ToolRegistry(),
         supervisor=None,
         virtual_outputs={
-            "prior_round": {
+            "external_candidates": {
                 "status": "no_match",
                 "selected_go_id": None,
                 "matches": [],

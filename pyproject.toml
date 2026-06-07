@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "vibeproteinagent"
 dynamic = ["version"]
-description = "Local-first GPU-first agentic protein design framework."
+description = "Local-first GPU-ready protein design tool substrate."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "PolyForm-Noncommercial-1.0.0" }
 authors = [{ name = "VibeProteinAgent contributors" }]
-keywords = ["protein", "agent", "gpu", "mcp", "workflow"]
+keywords = ["protein", "gpu", "mcp", "workflow", "bioinformatics"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Science/Research",

@@ -8,13 +8,14 @@ tools, mutate the report model, or render HTML.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from .models import (
-    AgentDecision,
     CandidateEvidenceBundle,
     CandidateStatus,
+    MSABlock,
     Provenance,
     ReportCandidate,
     ReportModel,
@@ -44,6 +45,7 @@ class OverviewViewModel:
     timestamp_ms: int | None
     design_objective: str
     agent_interpretation: str
+    agent_objective: str
     workflow_summary: str
     counts: list[CountSummary] = field(default_factory=list)
     main_caveat: str | None = None
@@ -115,6 +117,7 @@ class CandidateDossierViewModel:
     structure_path: str | None
     structure_variant_count: int = 0
     download_count: int = 0
+    msa_blocks: list[MSABlock] = field(default_factory=list)
     score_groups: list[ScoreGroup] = field(default_factory=list)
     metric_chips: list[MetricChip] = field(default_factory=list)
     risk_notes: list[str] = field(default_factory=list)
@@ -264,8 +267,8 @@ def build_workflow_review_preset(
                 "Flags & liabilities",
                 "Novelty & similarity",
             ],
-            metric_priority=["ipTM", "pLDDT", "pTM", "Affinity", "Delta G", "Interface contacts", "GRAVY", "Net charge", "QC"],
-            cross_candidate_metrics=["ipTM", "pLDDT", "pTM", "GRAVY", "Net charge", "Affinity", "Delta G", "Interface contacts"],
+            metric_priority=["ipSAE", "ipTM", "pLDDT", "pTM", "Affinity", "Delta G", "Interface contacts", "GRAVY", "Net charge", "Instability", "pI", "QC"],
+            cross_candidate_metrics=["ipSAE", "ipTM", "pLDDT", "pTM", "GRAVY", "Net charge", "Instability", "pI", "Affinity", "Delta G", "Interface contacts"],
         )
     if review.workflow_type == WorkflowType.DENOVO or has_structure:
         confidence = 0.88 if has_structure else 0.72
@@ -327,8 +330,8 @@ def build_workflow_review_preset(
             "Flags & liabilities",
             "Novelty & similarity",
         ],
-        metric_priority=["pLDDT", "pTM", "ipTM", "Delta G", "Affinity", "GRAVY", "Net charge", "QC"],
-        cross_candidate_metrics=["pLDDT", "pTM", "ipTM", "GRAVY", "Net charge"],
+        metric_priority=["pLDDT", "pTM", "ipTM", "ipSAE", "Delta G", "Affinity", "GRAVY", "Net charge", "Instability", "pI", "QC"],
+        cross_candidate_metrics=["pLDDT", "pTM", "ipTM", "ipSAE", "GRAVY", "Net charge", "Instability", "pI"],
     )
 
 
@@ -336,12 +339,9 @@ def build_overview_view_model(
     model: ReportModel, review: ReportReviewModel, preset: WorkflowReviewPreset | None = None
 ) -> OverviewViewModel:
     preset = preset or build_workflow_review_preset(model, review)
-    transcript = model.agent_transcript
-    objective = _first_nonempty(
-        transcript.user_query if transcript else None,
-        model.summary.name,
-        f"{model.summary.kind} {model.summary.id}",
-    )
+    recorded_query = _recorded_user_query(model)
+    recorded_objective = _recorded_objective(model)
+    objective = recorded_query or "User query not recorded in workspace metadata."
     interpretation = _agent_interpretation(model, review)
     generated_population = _count_population(review)
     passed_population = [
@@ -387,6 +387,7 @@ def build_overview_view_model(
         timestamp_ms=model.summary.finished_at or model.summary.submitted_at,
         design_objective=_clip(objective, 220),
         agent_interpretation=_clip(f"{interpretation} {preset.overview_focus}", 260),
+        agent_objective=_agent_objective_summary(model, preset),
         workflow_summary=preset.overview_focus,
         counts=counts,
         main_caveat=_main_caveat(model, review),
@@ -404,29 +405,15 @@ def build_agent_rationale_view_model(
         f"{preset.label} ({preset.confidence:.0%} confidence): "
         f"{preset.scientific_question} Basis: {preset.confidence_basis}."
     )
-    transcript = model.agent_transcript
-    if transcript is None:
-        return AgentRationaleViewModel(
-            workflow_selection=workflow_selection,
-            stage_plan=_stage_plan_from_graph(model.graph.nodes),
-            has_full_transcript=False,
-        )
-    decisions = [
-        AgentRationaleItem(
-            label=_clip(_human_decision_label(d.decision_label), 80),
-            value=_clip(d.reason or ", ".join(map(str, d.notes)) or d.decision_label, 220),
-            provenance=Provenance.EXACT,
-        )
-        for d in transcript.decisions[:4]
-    ]
+    recorded_query = _recorded_user_query(model)
+    recorded_objective = _recorded_objective(model)
+    intent = _first_nonempty(recorded_query, recorded_objective)
     return AgentRationaleViewModel(
-        user_query=transcript.user_query or None,
-        intent_summary=_clip(transcript.user_query or "", 220) or None,
+        user_query=intent or None,
+        intent_summary=_clip(intent, 220) or None,
         workflow_selection=workflow_selection,
-        stage_plan=_stage_plan_from_transcript_or_graph(transcript, model.graph.nodes),
-        major_decisions=decisions,
-        tool_call_count=len(transcript.tool_calls),
-        has_full_transcript=bool(transcript.messages or transcript.tool_calls),
+        stage_plan=_stage_plan_from_graph(model.graph.nodes),
+        has_full_transcript=False,
     )
 
 
@@ -434,7 +421,11 @@ def build_candidate_board_view_model(
     review: ReportReviewModel, preset: WorkflowReviewPreset | None = None
 ) -> CandidateBoardViewModel:
     preset = preset or _preset_from_review_only(review)
-    rows = [build_candidate_board_row(bundle, preset) for bundle in _ordered_bundles(review)]
+    bundles = _ordered_bundles(review)
+    rows = [
+        build_candidate_board_row(bundle, preset, display_rank=index)
+        for index, bundle in enumerate(bundles, start=1)
+    ]
     return CandidateBoardViewModel(
         rows=rows,
         recommended_count=sum(1 for row in rows if row.status == CandidateStatus.FINAL),
@@ -443,14 +434,18 @@ def build_candidate_board_view_model(
 
 
 def build_candidate_board_row(
-    bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
+    bundle: CandidateEvidenceBundle,
+    preset: WorkflowReviewPreset | None = None,
+    display_rank: int | None = None,
 ) -> CandidateBoardRow:
     preset = preset or _preset_for_workflow_type(bundle.workflow_type)
     candidate = bundle.candidate
     label = _status_label(bundle.status)
     return CandidateBoardRow(
         candidate_id=candidate.candidate_id,
-        rank=bundle.display_rank if bundle.display_rank is not None else candidate.rank,
+        rank=display_rank if display_rank is not None else (
+            bundle.display_rank if bundle.display_rank is not None else candidate.rank
+        ),
         status=bundle.status,
         status_label=label,
         recommendation_label=label,
@@ -476,6 +471,7 @@ def build_candidate_dossier_view_model(
         structure_path=candidate.structure_path,
         structure_variant_count=len(bundle.structure_variants),
         download_count=len(candidate.artifacts) + len(bundle.artifacts) + (1 if candidate.structure_path else 0),
+        msa_blocks=list(bundle.msa_blocks),
         score_groups=_ordered_score_groups(bundle.score_groups, preset),
         metric_chips=_metric_chips(bundle, preset),
         risk_notes=_risk_notes(bundle),
@@ -622,9 +618,9 @@ def _candidate_verdict(
         return f"Recommended final candidate{': ' + metric if metric else ''}{_missing_tail(missing)}."
     if bundle.status == CandidateStatus.RANKED_ALTERNATIVE:
         if strengths:
-            return f"Strong alternative with {strengths[0]}{_missing_tail(missing)}."
+            return f"Alternative with {strengths[0]}{_missing_tail(missing)}."
         metric = _headline_metric(bundle)
-        return f"Strong alternative{': ' + metric if metric else ''}{_missing_tail(missing)}."
+        return f"Alternative{': ' + metric if metric else ''}{_missing_tail(missing)}."
     if bundle.status == CandidateStatus.FAILED_QC:
         flags = _risk_notes(bundle)
         return f"Failed QC: {flags[0]}." if flags else "Failed recorded QC checks."
@@ -651,8 +647,14 @@ def _candidate_strength_phrases(
     chips = _metric_chips(bundle, preset, limit=8)
     by_label = {chip.label: chip for chip in chips}
     phrases: list[str] = []
+    ipsae = _chip_float(by_label.get("ipSAE"))
     iptm = _chip_float(by_label.get("ipTM"))
-    if preset.workflow_type == WorkflowType.BINDER and iptm is not None:
+    if preset.workflow_type == WorkflowType.BINDER and ipsae is not None:
+        if ipsae >= 0.50:
+            phrases.append("strong recorded interface evidence")
+        elif ipsae >= 0.30:
+            phrases.append("usable recorded interface evidence")
+    elif preset.workflow_type == WorkflowType.BINDER and iptm is not None:
         if iptm >= 0.70:
             phrases.append("strong recorded interface evidence")
         elif iptm >= 0.50:
@@ -813,33 +815,28 @@ def _main_caveat(model: ReportModel, review: ReportReviewModel) -> str | None:
 
 
 def _agent_interpretation(model: ReportModel, review: ReportReviewModel) -> str:
-    transcript = model.agent_transcript
-    if transcript and transcript.plan_structured:
-        summary = _structured_plan_summary(transcript.plan_structured)
-        if summary:
-            return _clip(summary, 220)
-    if transcript and transcript.plan_text:
-        return _clip(transcript.plan_text, 220)
     return _workflow_summary(review)
 
 
-def _structured_plan_summary(plan: dict[str, Any]) -> str:
-    for key in ("summary", "rationale", "goal", "objective"):
-        value = plan.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    steps = plan.get("steps") or plan.get("workflow") or plan.get("plan")
-    if isinstance(steps, list):
-        labels = []
-        for step in steps[:5]:
-            if isinstance(step, str):
-                labels.append(step)
-            elif isinstance(step, dict):
-                labels.append(str(step.get("name") or step.get("tool") or step.get("step") or "").strip())
-        labels = [label for label in labels if label]
-        if labels:
-            return " -> ".join(labels)
-    return ""
+def _agent_objective_summary(
+    model: ReportModel,
+    preset: WorkflowReviewPreset,
+) -> str:
+    objective = _recorded_objective(model)
+    thresholds = _recorded_thresholds(model)
+    parts: list[str] = []
+    if objective:
+        parts.append(f"Objective: {objective}")
+    else:
+        parts.append(
+            "No separate objective field was recorded; this report summarizes the "
+            f"recorded tool evidence as a {preset.label.lower()}."
+        )
+    if thresholds:
+        parts.append(f"Thresholds/criteria: {thresholds}")
+    else:
+        parts.append("No explicit numeric thresholds were captured in VPA metadata.")
+    return " ".join(parts)
 
 
 def _workflow_summary(review: ReportReviewModel) -> str:
@@ -869,19 +866,6 @@ def _preset_for_workflow_type(workflow_type: str) -> WorkflowReviewPreset:
         board_groups=[],
     )
     return build_workflow_review_preset(dummy_model, dummy_review)
-
-
-def _stage_plan_from_transcript_or_graph(
-    transcript: Any, nodes: list[WorkflowNodeSummary]
-) -> list[str]:
-    if transcript.plan_structured:
-        summary = _structured_plan_summary(transcript.plan_structured)
-        if summary:
-            parts = [part.strip() for part in summary.replace("\n", " -> ").split("->")]
-            parts = [part for part in parts if part]
-            if parts:
-                return parts[:8]
-    return _stage_plan_from_graph(nodes)
 
 
 def _stage_plan_from_graph(nodes: list[WorkflowNodeSummary]) -> list[str]:
@@ -951,15 +935,69 @@ def _display_status(state: str | None) -> str:
     return value.title() if value else "Unknown"
 
 
-def _human_decision_label(label: str) -> str:
-    return label.replace("_", " ").strip().title() if label else "Decision"
-
-
 def _first_nonempty(*values: str | None) -> str:
     for value in values:
         if value and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def _recorded_user_query(model: ReportModel) -> str:
+    raw = model.raw_summary if isinstance(model.raw_summary, dict) else {}
+    return _first_nonempty(
+        str(raw.get("user_query")) if raw.get("user_query") is not None else None,
+        _workflow_context_from_raw(raw, "user_query"),
+    )
+
+
+def _recorded_objective(model: ReportModel) -> str:
+    raw = model.raw_summary if isinstance(model.raw_summary, dict) else {}
+    return _first_nonempty(
+        str(raw.get("objective")) if raw.get("objective") is not None else None,
+        str(raw.get("design_objective")) if raw.get("design_objective") is not None else None,
+        _workflow_context_from_raw(raw, "objective"),
+    )
+
+
+def _recorded_thresholds(model: ReportModel) -> str:
+    raw = model.raw_summary if isinstance(model.raw_summary, dict) else {}
+    values: list[Any] = []
+    for key in (
+        "thresholds",
+        "acceptance_thresholds",
+        "acceptance_criteria",
+        "success_criteria",
+        "criteria",
+    ):
+        if raw.get(key) not in (None, "", {}, []):
+            values.append(raw.get(key))
+    final_submission = model.final_submission if isinstance(model.final_submission, dict) else {}
+    for key in ("acceptance_criteria", "success_criteria", "thresholds"):
+        if final_submission.get(key) not in (None, "", {}, []):
+            values.append(final_submission.get(key))
+    reasoning = final_submission.get("reasoning")
+    if isinstance(reasoning, str) and any(token in reasoning.lower() for token in ("threshold", "criteria", "cutoff", ">= ", "<= ")):
+        values.append(reasoning)
+    return "; ".join(_format_threshold_value(value) for value in values if value not in (None, "", {}, []))
+
+
+def _format_threshold_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _workflow_context_from_raw(raw: dict[str, Any], key: str) -> str | None:
+    workflows = raw.get("workflows")
+    if not isinstance(workflows, list):
+        return None
+    for workflow in workflows:
+        if isinstance(workflow, dict) and workflow.get(key):
+            return str(workflow.get(key))
+    return None
 
 
 def _clip(value: str, limit: int) -> str:

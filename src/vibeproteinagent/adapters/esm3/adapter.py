@@ -16,8 +16,8 @@ from vibeproteinagent.adapters.profile_guidance import (
     profile_guidance_metadata,
     profile_guidance_warnings,
 )
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.compat import ensure_esm3_shared_hf_cache
 from vibeproteinagent.core.config import model_cache_root
 from vibeproteinagent.core.errors import DependencyError

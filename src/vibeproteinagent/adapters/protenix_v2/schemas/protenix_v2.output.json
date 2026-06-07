@@ -13,7 +13,7 @@
     "pae_path": {
       "type": ["string", "null"],
       "default": null,
-      "description": "AF3-style confidence JSON containing the top-ranked prediction PAE matrix for downstream tools such as ipSAE."
+      "description": "AF3-style confidence JSON containing the top-ranked prediction PAE matrix. Wire this path explicitly to downstream tools such as `ipsae.pae_path`."
     },
     "metrics": {
       "type": "object",
@@ -37,6 +37,7 @@
           "seed": {"type": "integer"},
           "rank": {"type": "integer"},
           "cif_path": {"type": "string"},
+          "pdb_path": {"type": ["string", "null"]},
           "summary_json": {"type": "string"},
           "pae_path": {"type": ["string", "null"]},
           "full_confidence_json": {"type": ["string", "null"]},
@@ -52,6 +53,11 @@
       "$comment": "Canonical Candidate v1 output emitted additively; see src/vibeproteinagent/schemas/candidate_v1.json.",
       "type": "array",
       "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"},
       "default": []
     },
     "runtime_ms": {"type": "integer", "minimum": 0},

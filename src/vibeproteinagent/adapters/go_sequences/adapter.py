@@ -31,7 +31,7 @@ from vibeproteinagent.adapters._remote.uniprot import (
 )
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 
 class GOSequencesInput(BaseModel):

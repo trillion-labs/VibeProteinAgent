@@ -9,10 +9,7 @@ from vibeproteinagent.adapters.esm2.adapter import (
     _DEFAULT_MODEL,
     _esm2_candidates,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
-from vibeproteinagent.agents.planning.canonical_tools import EXPLICIT_MODE_TOOLS
-from vibeproteinagent.agents.planning.compiler import compile_planner_ir
-from vibeproteinagent.agents.planning.fixup import StructuredFixup
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate(sequence: str = "ACDE") -> dict:
@@ -30,24 +27,6 @@ def _candidate(sequence: str = "ACDE") -> dict:
         "sequence": sequence,
         "scores": {},
         "artifacts": {},
-    }
-
-
-def _ir(inputs: dict | None = None) -> dict:
-    return {
-        "version": "planner_ir_v1",
-        "goal": "Run esm2 explicit mode dispatch.",
-        "assumptions": [],
-        "missing_inputs": [],
-        "nodes": [
-            {
-                "id": "esm2_node",
-                "tool": "esm2",
-                "intent": "Exercise esm2 mode handling.",
-                "inputs": inputs or {},
-                "upstream": [],
-            }
-        ],
     }
 
 
@@ -169,21 +148,3 @@ def test_esm2_consumes_canonical_legacy_and_rejects_mixed() -> None:
     assert ESM2Input(sequence="MKKL", mode="embedding").sequence == "MKKL"
     with pytest.raises(ValidationError, match="Mixed canonical and legacy"):
         ESM2Input(candidates=[_candidate("MKKL"), {"sequence": "ACDE"}], mode="embedding")
-
-
-def test_esm2_explicit_mode_dispatch_requires_valid_mode() -> None:
-    assert EXPLICIT_MODE_TOOLS["esm2"] == ["embedding", "sequence_generation"]
-
-    with pytest.raises(StructuredFixup) as missing:
-        compile_planner_ir(_ir())
-    assert missing.value.payload["error_kind"] == "missing_explicit_mode"
-    assert missing.value.payload["tool"] == "esm2"
-    assert missing.value.payload["allowed_modes"] == ["embedding", "sequence_generation"]
-
-    compile_planner_ir(_ir({"mode": "embedding"}))
-    compile_planner_ir(_ir({"mode": "sequence_generation"}))
-
-    with pytest.raises(StructuredFixup) as invalid:
-        compile_planner_ir(_ir({"mode": "not_a_mode"}))
-    assert invalid.value.payload["error_kind"] == "missing_explicit_mode"
-    assert invalid.value.payload["received_mode"] == "not_a_mode"

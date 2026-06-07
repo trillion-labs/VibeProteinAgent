@@ -14,7 +14,7 @@ from vibeproteinagent.adapters.profile_guidance import (
     profile_guidance_metadata,
     profile_guidance_warnings,
 )
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 _DEFAULT_MODEL = "facebook/esm2_t12_35M_UR50D"
 _AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"

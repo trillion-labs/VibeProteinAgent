@@ -8,7 +8,7 @@ from vibeproteinagent.adapters.esm3.adapter import (
     ESM3Output,
     _esm3_candidates,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate(sequence: str = "ACDE") -> dict:

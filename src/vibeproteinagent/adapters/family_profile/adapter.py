@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
+from vibeproteinagent.candidates.schema import validate_candidate_v1
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
 
 _AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 _AA_SET = frozenset(_AMINO_ACIDS)

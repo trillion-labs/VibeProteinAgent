@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.paths import candidate_pdb_path
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_residue_id,
@@ -91,9 +92,12 @@ class LigandMPNNInput(BaseModel):
                 "Pass either all canonical Candidate[] or all legacy items."
             )
         if all(canonical):
-            structure_path = candidates[0].get("structure_path")
+            structure_path = candidate_pdb_path(candidates[0])
             if not structure_path:
-                raise ValueError("ligandmpnn canonical Candidate[] input requires structure_path")
+                raise ValueError(
+                    "ligandmpnn canonical Candidate[] input requires a PDB artifact "
+                    "(pdb_path or predicted_pdb); CIF-only candidates are not accepted"
+                )
             out = dict(data)
             out.setdefault("pdb_path", structure_path)
             if candidates[0].get("sequence"):

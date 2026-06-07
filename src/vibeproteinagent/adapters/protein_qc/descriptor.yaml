@@ -1,7 +1,7 @@
 name: protein_qc
 version: "1.0.0"
 category: scoring
-description: "Lightweight QC scalars (pLDDT, polybasic-patch, GRAVY, instability index, pI) for a sequence or structure. Cheap pre-filter before expensive scoring or refolding; selectable metric subset. Adopted from https://proteinbase.com/protein-design-skills/protein-qc"
+description: "Light-weight quality control scalars (pLDDT, polybasic-patch, GRAVY, instability index, pI) for a sequence or structure. Cheap pre-filter before expensive scoring or refolding."
 runtime: python
 backend: biopython
 gpu_required: false

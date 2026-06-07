@@ -25,6 +25,43 @@ def _ca_line(serial: int, resname: str, chain: str, resseq: int, x: float) -> st
     )
 
 
+def _atom_line(
+    serial: int,
+    record: str,
+    atom: str,
+    resname: str,
+    chain: str,
+    resseq: int,
+    x: float,
+    y: float,
+    z: float = 0.0,
+    element: str = "C",
+) -> str:
+    return (
+        f"{record:<6}{serial:5d} {atom:<4s} {resname:>3s} {chain}{resseq:4d}"
+        f"    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+    )
+
+
+def _atom_line_with_icode(
+    serial: int,
+    record: str,
+    atom: str,
+    resname: str,
+    chain: str,
+    resseq: int,
+    icode: str,
+    x: float,
+    y: float,
+    z: float = 0.0,
+    element: str = "C",
+) -> str:
+    return (
+        f"{record:<6}{serial:5d} {atom:<4s} {resname:>3s} {chain}{resseq:4d}{icode:1s}"
+        f"   {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+    )
+
+
 def _dssp_available() -> bool:
     try:
         find_binary(("mkdssp", "dssp"), env_override="VPA_DSSP_BINARY")
@@ -212,6 +249,111 @@ def test_structure_analysis_falls_back_after_mkdssp_failure_for_hetatm_standard_
     assert out.ligand_contacts["contact_count"] == 2
     assert out.secondary_structure["loop"] == 2
     assert any("used pydssp" in warning for warning in out.warnings)
+
+
+def test_structure_analysis_ligand_contacts_use_heavy_atoms_not_ca(tmp_path):
+    pdb_path = tmp_path / "sidechain_ligand_contact.pdb"
+    pdb_path.write_text(
+        "".join(
+            [
+                _atom_line(1, "ATOM", "CA", "ALA", "A", 1, 20.0, 0.0),
+                _atom_line(2, "ATOM", "CB", "ALA", "A", 1, 0.0, 0.0),
+                _atom_line(3, "HETATM", "C1", "LIG", "L", 1, 1.0, 0.0),
+                _atom_line(4, "HETATM", "O1", "LIG", "L", 1, 8.0, 0.0, element="O"),
+                _atom_line(5, "HETATM", "H1", "LIG", "L", 1, 0.5, 0.0, element="H"),
+            ]
+        )
+    )
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        StructureAnalysisInput(
+            structure_path=str(pdb_path),
+            ligand_resnames=["LIG"],
+            contact_distance_angstrom=2.0,
+            run_dssp=False,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.interface["ligand_contact_count"] == 1
+    assert out.ligand_contacts["contact_count"] == 1
+    assert out.ligand_contacts["contact_residue_count"] == 1
+    assert out.ligand_contacts["ligand_heavy_atom_count"] == 2
+    assert out.ligand_contacts["contact_ligand_atom_count"] == 1
+    assert out.ligand_pocket["ligand_heavy_atom_count"] == 2
+    assert out.ligand_pocket["ligand_buried_atom_count"] == 1
+    assert out.ligand_pocket["ligand_buried_fraction"] == pytest.approx(0.5)
+    ligand_tsv = Path(out.artifacts["ligand_contacts_tsv"]).read_text()
+    assert "\tCB\tC1\t1.0\t" in ligand_tsv
+    assert "H1" not in ligand_tsv
+
+
+def test_structure_analysis_ligand_legacy_counts_are_contacting_residues(tmp_path):
+    pdb_path = tmp_path / "multi_ligand_residue_contact.pdb"
+    pdb_path.write_text(
+        "".join(
+            [
+                _atom_line(1, "ATOM", "CA", "ALA", "A", 1, 20.0, 0.0),
+                _atom_line(2, "ATOM", "CB", "ALA", "A", 1, 0.0, 0.0),
+                _atom_line(3, "HETATM", "C1", "LIG", "L", 1, 1.0, 0.0),
+                _atom_line(4, "HETATM", "C2", "LIG", "L", 2, 1.2, 0.0),
+            ]
+        )
+    )
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        StructureAnalysisInput(
+            structure_path=str(pdb_path),
+            ligand_resnames=["LIG"],
+            contact_distance_angstrom=2.0,
+            run_dssp=False,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.interface["ligand_contact_count"] == 1
+    assert out.ligand_contacts["contact_count"] == 1
+    assert out.ligand_contacts["contact_residue_count"] == 1
+    assert out.ligand_contacts["contact_atom_pair_count"] == 2
+    assert out.ligand_contacts["contact_ligand_atom_count"] == 2
+    assert out.ligand_pocket["pocket_residue_count"] == 1
+    assert out.ligand_pocket["ligand_buried_atom_count"] == 2
+
+
+def test_structure_analysis_ligand_counts_distinct_insertion_code_residues(tmp_path):
+    pdb_path = tmp_path / "icode_ligand_contacts.pdb"
+    pdb_path.write_text(
+        "".join(
+            [
+                _atom_line_with_icode(1, "ATOM", "CB", "ALA", "A", 10, "A", 0.0, 0.0),
+                _atom_line_with_icode(2, "ATOM", "CB", "GLY", "A", 10, "B", 0.0, 1.0),
+                _atom_line(3, "HETATM", "C1", "LIG", "L", 1, 1.0, 0.0),
+                _atom_line(4, "HETATM", "C2", "LIG", "L", 1, 1.0, 1.0),
+            ]
+        )
+    )
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        StructureAnalysisInput(
+            structure_path=str(pdb_path),
+            ligand_resnames=["LIG"],
+            contact_distance_angstrom=2.0,
+            run_dssp=False,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.interface["ligand_contact_count"] == 2
+    assert out.ligand_contacts["contact_count"] == 2
+    assert out.ligand_contacts["contact_residue_count"] == 2
+    assert out.ligand_pocket["pocket_residue_count"] == 2
+    ligand_tsv = Path(out.artifacts["ligand_contacts_tsv"]).read_text()
+    assert ligand_tsv.splitlines()[0].split("\t")[:3] == ["chain_id", "resseq", "icode"]
+    assert "\t10\tA\tLIG\t" in ligand_tsv
+    assert "\t10\tB\tLIG\t" in ligand_tsv
 
 
 def test_structure_analysis_dssp_input_sanitizes_standard_aa_hetatm(tmp_path):

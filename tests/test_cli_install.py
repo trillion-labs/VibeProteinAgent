@@ -164,7 +164,7 @@ def test_cli_install_dry_run_accepts_cpu_cuda_profile(
 ) -> None:
     res = runner.invoke(
         app,
-        ["install", "--profile", "agent", "--cuda-profile", "cpu", "--dry-run", "--json"],
+        ["install", "--profile", "base", "--cuda-profile", "cpu", "--dry-run", "--json"],
     )
     assert res.exit_code == 0, res.stdout
     data = json.loads(res.stdout)["data"]

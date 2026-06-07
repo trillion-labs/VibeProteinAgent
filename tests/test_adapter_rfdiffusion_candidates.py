@@ -9,7 +9,7 @@ from vibeproteinagent.adapters.rfdiffusion.adapter import (
     RFdiffusionOutput,
     _canonical_candidate_from_design,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate(structure_path: str = "/tmp/backbone.pdb") -> dict:

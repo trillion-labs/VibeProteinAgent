@@ -7,7 +7,7 @@ from vibeproteinagent.adapters.sequence_analysis.adapter import (
     SequenceAnalysisAdapter,
     SequenceAnalysisInput,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def test_sequence_analysis_emits_parallel_canonical_candidates(tmp_path) -> None:

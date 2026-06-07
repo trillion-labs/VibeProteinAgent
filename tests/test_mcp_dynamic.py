@@ -13,6 +13,7 @@ import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.adapters.visibility import is_agent_visible_tool
+from vibeproteinagent.core.errors import DaemonWorkspaceMismatchError
 from vibeproteinagent.mcp.dynamic import register_dynamic_tools
 from vibeproteinagent.mcp.server import build_server
 from vibeproteinagent.mcp.tools import SessionCtx
@@ -28,6 +29,7 @@ def test_dynamic_tools_named_run_prefix(tmp_workspace: Workspace) -> None:
     ctx = SessionCtx(workspace=tmp_workspace, registry=ToolRegistry())
     names = register_dynamic_tools(app, ctx)
     assert "run_noop" not in names
+    assert "run_merge_candidates" in names
     assert "run_proteina_complexa" in names
     assert "run_proteinmpnn" in names
     assert "run_protenix_v2" in names
@@ -46,6 +48,7 @@ def test_mcp_list_tools_hides_internal_by_default(tmp_workspace: Workspace) -> N
     }
 
     assert internal_names.isdisjoint(public_names)
+    assert "merge_candidates" in public_names
     assert "proteina_complexa" in public_names
     assert internal_names.issubset(
         {tool["name"] for tool in mcp_list_tools(ctx, include_internal=True)}
@@ -106,7 +109,7 @@ def test_build_server_registers_all_tools(
     ):
         assert n in names, f"missing orchestration tool {n}"
 
-    # Dynamic tools (first-class scientific tools only).
+    # Dynamic tools (first-class agent-visible tools).
     for n in ("run_proteina_complexa", "run_proteinmpnn", "run_protenix_v2"):
         assert n in names, f"missing dynamic tool {n}"
     assert "run_noop" not in names
@@ -130,18 +133,11 @@ def test_dynamic_tool_returns_error_for_invalid_params(
     assert result["code"] == "E_INVALID_PARAMS"
 
 
-def test_dynamic_tool_times_out_without_daemon(
+def test_dynamic_tool_reports_daemon_unavailable_without_daemon(
     tmp_workspace: Workspace,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a running supervisor the queued job never starts; the synchronous
-    wait inside the dynamic tool MUST surface a timeout instead of hanging."""
+    """Dynamic run_<tool> is submit-and-wait, so it requires a live daemon."""
     import asyncio
-
-    import vibeproteinagent.mcp.dynamic as dyn
-
-    # Force the per-tool wait budget to a sub-second value for this test.
-    monkeypatch.setattr(dyn, "_wait_timeout_s_for", lambda _d: 0.5)
 
     from mcp.server.fastmcp import FastMCP
 
@@ -152,5 +148,38 @@ def test_dynamic_tool_times_out_without_daemon(
     assert tool is not None
     result: Any = asyncio.run(tool.run({"sequence": "ACDEFGHIK"}))
     assert result["ok"] is False
-    assert result["code"] == "E_TIMEOUT"
-    assert "job_id" in result
+    assert result["code"] == "E_DAEMON_UNAVAILABLE"
+    assert result["details"]["requested_workspace"] == tmp_workspace.name
+
+
+def test_dynamic_tool_reports_daemon_workspace_mismatch(
+    tmp_workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    def _mismatch(self, workspace_name: str):
+        raise DaemonWorkspaceMismatchError(
+            "running supervisor is attached to a different workspace",
+            details={
+                "requested_workspace": workspace_name,
+                "supervisor_workspace": "other",
+            },
+        )
+
+    monkeypatch.setattr(
+        "vibeproteinagent.workers.supervisor_client.SupervisorClient.require_workspace",
+        _mismatch,
+    )
+
+    from mcp.server.fastmcp import FastMCP
+
+    app = FastMCP("test")
+    ctx = SessionCtx(workspace=tmp_workspace, registry=ToolRegistry())
+    register_dynamic_tools(app, ctx)
+    tool = app._tool_manager.get_tool("run_protein_qc")
+    assert tool is not None
+    result: Any = asyncio.run(tool.run({"sequence": "ACDEFGHIK"}))
+    assert result["ok"] is False
+    assert result["code"] == "E_DAEMON_WORKSPACE_MISMATCH"
+    assert result["details"]["supervisor_workspace"] == "other"

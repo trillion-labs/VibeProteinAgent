@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from vibeproteinagent.adapters.ipsae.adapter import IpSaeInput, IpSaeOutput, _ipsae_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate() -> dict:

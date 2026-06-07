@@ -67,6 +67,7 @@ class JobRecord(BaseModel):
     error_details: dict[str, Any] | None = None
     log_path: str
     workspace: str
+    trajectory_id: str | None = None
     workflow_id: str | None = None
     workflow_node_id: str | None = None
     worker_id: int | None = None
@@ -125,9 +126,27 @@ class WorkflowRecord(BaseModel):
     version: str
     descriptor: str
     params: dict[str, Any]
+    trajectory_id: str | None = None
     state: str
     submitted_at: int
     finished_at: int | None = None
+
+
+class TrajectoryRecord(BaseModel):
+    """One user-query trajectory tracked across direct jobs and workflows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trajectory_id: str
+    workspace: str
+    user_query: str
+    objective: str | None = None
+    state: str = "open"
+    final_submit_job_id: str | None = None
+    report_path: str | None = None
+    created_at: int
+    updated_at: int
+    completed_at: int | None = None
 
 
 class WorkflowNodeRecord(BaseModel):

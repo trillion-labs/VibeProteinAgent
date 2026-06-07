@@ -13,7 +13,7 @@ from vibeproteinagent.adapters.mpnn_to_protenix_input.adapter import (
     Mpnn2ProtenixInput,
     _parse_mpnn_fasta,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 _SAMPLE_FASTA = """>foo|input, num_residues=8
 MKAILVAA

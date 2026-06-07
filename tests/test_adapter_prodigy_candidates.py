@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+pytest.importorskip("freesasa")
+
 from vibeproteinagent.adapters.prodigy.adapter import ProdigyInput, ProdigyOutput, _prodigy_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate() -> dict:

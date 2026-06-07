@@ -15,6 +15,11 @@
       "items": {
         "type": "object",
         "required": ["job_id", "justification"],
+        "oneOf": [
+          {"required": ["candidate_id"], "not": {"anyOf": [{"required": ["index"]}, {"required": ["rank"]}]}},
+          {"required": ["index"], "not": {"anyOf": [{"required": ["candidate_id"]}, {"required": ["rank"]}]}},
+          {"required": ["rank"], "not": {"anyOf": [{"required": ["candidate_id"]}, {"required": ["index"]}]}}
+        ],
         "properties": {
           "job_id": {
             "type": "string",
@@ -25,14 +30,20 @@
           "candidate_id": {
             "type": "string",
             "minLength": 1,
-            "description": "Optional Candidate v1 identifier within the job's candidates list. Use when the job emitted multiple candidates and you want to pin one by ID.",
+            "description": "Candidate v1 identifier within the job's candidates list. Use exactly one selector: candidate_id, index, or rank.",
             "examples": ["cand_0", "design_4"]
           },
           "index": {
             "type": "integer",
             "minimum": 0,
-            "description": "Optional 0-indexed offset into the job's candidate list. Alternative to `candidate_id`; pick one form per entry.",
+            "description": "0-indexed offset into the job's candidate list. Use exactly one selector: candidate_id, index, or rank.",
             "examples": [0, 2]
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-indexed rank from a ranked candidate row, typically from rank_designs output. Use exactly one selector: candidate_id, index, or rank.",
+            "examples": [1, 3]
           },
           "justification": {
             "type": "string",
@@ -44,15 +55,15 @@
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "default": [],
-            "description": "Names of score fields that drove the selection. Stored verbatim in the submission record so reviewers know which metrics were decisive.",
-            "examples": [["ipsae", "plddt"], ["dG_binding", "polybasic_clusters"]]
+            "description": "Names of flat score fields or dotted score paths that drove the selection. Stored verbatim in the submission record so reviewers know which metrics were decisive.",
+            "examples": [["ipsae", "plddt"], ["boltz2_affinity.affinity_pred_value", "protein_qc.instability_index"]]
           }
         },
         "additionalProperties": false
       },
       "default": [],
       "description": "List of accepted candidates. Required non-empty when `outcome=accepted`; must be empty when `outcome=no_acceptable_candidate`.",
-      "examples": [[{"job_id": "job_abc123", "candidate_id": "cand_0", "justification": "best ipSAE"}], []]
+      "examples": [[{"job_id": "job_abc123", "candidate_id": "cand_0", "justification": "best ipSAE"}, {"job_id": "job_rank123", "rank": 1, "justification": "top ranked"}], []]
     },
     "reasoning": {
       "type": "string",

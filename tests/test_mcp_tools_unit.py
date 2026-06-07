@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
-from vibeproteinagent.core.errors import TimeoutError_
+from vibeproteinagent.core.errors import DaemonWorkspaceMismatchError, TimeoutError_
 from vibeproteinagent.mcp.tools import (
     SessionCtx,
     cancel_job,
@@ -20,18 +20,22 @@ from vibeproteinagent.mcp.tools import (
     get_logs,
     get_results,
     get_status,
+    get_trajectory_status,
     get_workflow_status,
     list_artifacts,
     list_tools,
     list_workflows,
     list_workspaces,
+    render_report,
     run_workflow,
+    start_trajectory,
     submit_job,
     tool_info,
+    wait_trajectory,
     wait_job,
     warm_tool,
 )
-from vibeproteinagent.workspace import JobState, Workspace
+from vibeproteinagent.workspace import JobState, JobStore, Workspace
 
 
 @pytest.fixture
@@ -53,6 +57,25 @@ def test_list_tools_can_include_internal_descriptors(ctx: SessionCtx) -> None:
     assert "noop" in names
 
 
+def test_list_tools_schema_only_skips_availability_and_keeps_merge_candidates(
+    ctx: SessionCtx,
+    monkeypatch,
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("availability probe should not run")
+
+    monkeypatch.setattr("vibeproteinagent.mcp.tools.attach_availability", _boom)
+
+    out = list_tools(ctx, schema_only=True)
+
+    names = {d["name"] for d in out}
+    assert "merge_candidates" in names
+    assert "noop" not in names
+    merge = next(d for d in out if d["name"] == "merge_candidates")
+    assert "input_schema_resolved" in merge
+    assert "availability_status" not in merge
+
+
 def test_list_tools_category_filter(ctx: SessionCtx) -> None:
     out = list_tools(ctx, category="protein_design")
     cats = {d["category"] for d in out}
@@ -63,6 +86,19 @@ def test_tool_info_known(ctx: SessionCtx) -> None:
     out = tool_info(ctx, "noop")
     assert out["name"] == "noop"
     assert out["version"] == "1.0.0"
+
+
+def test_tool_info_schema_only_skips_availability(ctx: SessionCtx, monkeypatch) -> None:
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("availability probe should not run")
+
+    monkeypatch.setattr("vibeproteinagent.mcp.tools.attach_availability", _boom)
+
+    out = tool_info(ctx, "noop", schema_only=True)
+
+    assert out["name"] == "noop"
+    assert "input_schema_resolved" in out
+    assert "availability_status" not in out
 
 
 def test_tool_info_unknown_returns_error_dict(ctx: SessionCtx) -> None:
@@ -90,6 +126,33 @@ def test_submit_job_returns_queued(ctx: SessionCtx) -> None:
     assert out["tool"] == "noop"
     assert out["workspace"] == ctx.workspace.name
     assert out["job_id"].startswith("job_")
+    assert out["daemon_running"] is False
+    assert out["execution_ready"] is False
+
+
+def test_submit_job_reports_daemon_workspace_mismatch(
+    ctx: SessionCtx,
+    monkeypatch,
+) -> None:
+    def _mismatch(self, workspace_name: str):
+        raise DaemonWorkspaceMismatchError(
+            "running supervisor is attached to a different workspace",
+            details={
+                "requested_workspace": workspace_name,
+                "supervisor_workspace": "other",
+            },
+        )
+
+    monkeypatch.setattr(
+        "vibeproteinagent.workers.supervisor_client.SupervisorClient.require_workspace",
+        _mismatch,
+    )
+
+    out = submit_job(ctx, tool="noop", params={"payload": "hi"})
+
+    assert out["ok"] is False
+    assert out["code"] == "E_DAEMON_WORKSPACE_MISMATCH"
+    assert out["details"]["requested_workspace"] == ctx.workspace.name
 
 
 def test_get_status_unknown(ctx: SessionCtx) -> None:
@@ -159,6 +222,106 @@ def test_current_workspace(ctx: SessionCtx, tmp_workspace: Workspace) -> None:
     assert Path(out["root"]) == tmp_workspace.root
 
 
+def test_mcp_trajectory_lifecycle_and_wait(ctx: SessionCtx) -> None:
+    started = start_trajectory(ctx, "design one")
+    trajectory_id = started["trajectory_id"]
+    rec = submit_job(
+        ctx,
+        tool="noop",
+        params={"payload": "hi"},
+        trajectory_id=trajectory_id,
+    )
+    JobStore(ctx.workspace).transition(rec["job_id"], JobState.CANCELLED)
+
+    waited = wait_trajectory(ctx, trajectory_id, timeout_ms=0)
+    status = get_trajectory_status(ctx, trajectory_id)["trajectory"]
+
+    assert waited["trajectory_id"] == trajectory_id
+    assert waited["execution_all_terminal"] is True
+    assert waited["trajectory_complete"] is False
+    assert status["job_count"] == 1
+    assert status["workflow_count"] == 0
+
+
+def test_mcp_render_report_records_trajectory_report(ctx: SessionCtx, tmp_path: Path) -> None:
+    started = start_trajectory(ctx, "report one")
+    trajectory_id = started["trajectory_id"]
+    store = JobStore(ctx.workspace)
+    job = store.submit(
+        "submit_candidate",
+        "1.0.0",
+        {},
+        trajectory_id=trajectory_id,
+    )
+    store.transition(job.job_id, JobState.QUEUED)
+    store.transition(job.job_id, JobState.RUNNING)
+    store.transition(
+        job.job_id,
+        JobState.COMPLETED,
+        output={
+            "submission_id": "sub_final",
+            "outcome": "no_acceptable_candidate",
+            "terminal": True,
+            "candidates_resolved": [],
+            "reasoning": "none passed",
+            "auto_selected": False,
+        },
+    )
+
+    out = render_report(ctx, trajectory_id, out=str(tmp_path / "report.html"))
+
+    assert out["report_html"].endswith("report.html")
+    assert out["trajectory"]["report_path"] == str(tmp_path / "report.html")
+    status = get_trajectory_status(ctx, trajectory_id)["trajectory"]
+    assert status["report_count"] == 1
+    assert status["report_matches_final_submit"] is True
+
+    duplicate = render_report(ctx, trajectory_id, out=str(tmp_path / "duplicate.html"))
+    assert duplicate["ok"] is False
+    assert duplicate["code"] == "E_CONFLICT"
+    assert not (tmp_path / "duplicate.html").exists()
+
+
+def test_mcp_render_report_relative_path_is_idempotent(
+    ctx: SessionCtx,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = start_trajectory(ctx, "relative report")
+    trajectory_id = started["trajectory_id"]
+    store = JobStore(ctx.workspace)
+    job = store.submit(
+        "submit_candidate",
+        "1.0.0",
+        {},
+        trajectory_id=trajectory_id,
+    )
+    store.transition(job.job_id, JobState.QUEUED)
+    store.transition(job.job_id, JobState.RUNNING)
+    store.transition(
+        job.job_id,
+        JobState.COMPLETED,
+        output={
+            "submission_id": "sub_final",
+            "outcome": "no_acceptable_candidate",
+            "terminal": True,
+            "candidates_resolved": [],
+            "reasoning": "none passed",
+            "auto_selected": False,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    first = render_report(ctx, trajectory_id, out="rel.html")
+    second = render_report(ctx, trajectory_id, out="rel.html")
+
+    assert first["report_html"] == str((tmp_path / "rel.html").resolve())
+    assert second["report_html"] == str((tmp_path / "rel.html").resolve())
+    status = get_trajectory_status(ctx, trajectory_id)["trajectory"]
+    assert status["report_path"] == str((tmp_path / "rel.html").resolve())
+    assert status["complete"] is True
+
+
 def test_list_workspaces_includes_session(ctx: SessionCtx) -> None:
     out = list_workspaces(ctx)
     assert isinstance(out, list)
@@ -204,10 +367,20 @@ def test_run_workflow_timeout_preserves_workflow_context(
     ctx: SessionCtx,
     monkeypatch,
 ) -> None:
+    class FakeSupervisor:
+        def is_running(self):
+            return True
+
+        def require_workspace(self, workspace_name):
+            return {"running": True, "workspace": workspace_name}
+
+        def runtime_info(self):
+            return {"running": True, "workspace": ctx.workspace.name}
+
     monkeypatch.setattr(
         SessionCtx,
         "supervisor",
-        staticmethod(lambda: type("FakeSupervisor", (), {"is_running": lambda self: True})()),
+        staticmethod(lambda: FakeSupervisor()),
     )
 
     def _timeout(self, workflow_id, *, max_wait_s=3600, poll_s=0.25):

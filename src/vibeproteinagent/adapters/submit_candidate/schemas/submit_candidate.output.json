@@ -9,6 +9,7 @@
     "candidates_resolved",
     "reasoning",
     "auto_selected",
+    "next_report_command",
     "runtime_ms"
   ],
   "properties": {
@@ -25,6 +26,11 @@
     "reasoning": {"type": "string", "minLength": 1},
     "supersedes": {"type": ["string", "null"]},
     "auto_selected": {"type": "boolean", "const": false},
+    "next_report_command": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Suggested follow-up command to render an HTML report for this submission job."
+    },
     "runtime_ms": {"type": "integer", "minimum": 0}
   },
   "additionalProperties": false

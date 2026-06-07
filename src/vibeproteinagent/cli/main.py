@@ -6,15 +6,23 @@ import sys
 import typer
 
 from vibeproteinagent._version import __version__
-from vibeproteinagent.cli.commands.agent import agent_app
 from vibeproteinagent.cli.commands.artifacts import artifacts, download, export
 from vibeproteinagent.cli.commands.daemon import daemon_app
 from vibeproteinagent.cli.commands.doctor import doctor
-from vibeproteinagent.cli.commands.jobs import cancel, logs, results, retry, status, wait
+from vibeproteinagent.cli.commands.jobs import (
+    cancel,
+    jobs_app,
+    logs,
+    results,
+    retry,
+    status,
+    wait,
+)
 from vibeproteinagent.cli.commands.mcp import mcp_app
 from vibeproteinagent.cli.commands.report import report
 from vibeproteinagent.cli.commands.run import run
 from vibeproteinagent.cli.commands.tools import tool_app, tools_app
+from vibeproteinagent.cli.commands.trajectory import trajectory_app
 from vibeproteinagent.cli.commands.visualize import visualize
 from vibeproteinagent.cli.commands.workflow import workflow_app
 from vibeproteinagent.cli.commands.workspace import workspace_app
@@ -26,7 +34,7 @@ from vibeproteinagent.install.cli import install_app
 
 app = typer.Typer(
     name="vpa",
-    help="vibeproteinagent — local-first GPU-first agentic protein design framework.",
+    help="vibeproteinagent — local-first GPU-ready protein design tool substrate.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -95,8 +103,9 @@ app.add_typer(workspace_app, name="workspace")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(mcp_app, name="mcp")
-app.add_typer(agent_app, name="agent")
 app.add_typer(install_app, name="install")
+app.add_typer(jobs_app, name="jobs")
+app.add_typer(trajectory_app, name="trajectory")
 
 
 # -- top-level commands ------------------------------------------------------

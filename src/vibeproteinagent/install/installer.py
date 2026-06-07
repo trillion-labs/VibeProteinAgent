@@ -656,18 +656,6 @@ def _credential_warnings(
                 ),
             }
         )
-    if selection.profile == "agent":
-        warnings.append(
-            {
-                "type": "agent_provider_credentials_runtime_only",
-                "env": ["OPENROUTER_API_KEY", "VPA_OPENROUTER_CREDENTIAL"],
-                "message": (
-                    "The agent profile does not require OpenRouter credentials to install. "
-                    "Set OPENROUTER_API_KEY (or VPA_OPENROUTER_CREDENTIAL) only when "
-                    "running with --provider openrouter."
-                ),
-            }
-        )
     return warnings
 
 

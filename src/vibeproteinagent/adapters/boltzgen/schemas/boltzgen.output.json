@@ -54,6 +54,12 @@
       "items": {"type": "object", "additionalProperties": true},
       "default": []
     },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Non-fatal recovery warnings, for example when BoltzGen analysis fails after refolded design structures have already been produced."
+    },
     "runtime_ms": {"type": "integer", "minimum": 0},
     "num_designs_returned": {"type": "integer", "minimum": 0},
     "seeds_used": {

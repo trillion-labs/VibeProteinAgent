@@ -64,7 +64,7 @@ CUDA_STACKS: dict[str, CudaStack] = {
         dgl_package=None,
         dgl_wheel_url=None,
         minimum_driver=None,
-        summary="CPU-only fallback for base, agent, and lightweight smoke checks",
+        summary="CPU-only fallback for base profile and lightweight smoke checks",
     ),
 }
 

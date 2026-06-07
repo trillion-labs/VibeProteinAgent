@@ -58,12 +58,7 @@ COMMANDS: list[tuple[str, list[str], bool]] = [
     # stdio mode actually starts a blocking MCP server (covered by the slow e2e test).
     # ws is documented as unimplemented and must surface E_DEPENDENCY.
     ("mcp serve ws",       ["mcp", "serve", "--transport", "ws", "--json"], False),
-    (
-        "agent run requires planner",
-        ["agent", "run", "run", "noop", "payload=hi", "--provider", "not-a-provider", "--json"],
-        False,
-    ),
-    ("agent runs",         ["agent", "runs", "--json"], True),
+    ("report missing",     ["report", "wf_missing", "--json"], False),
     ("doctor",             ["doctor", "--json"], True),
 ]
 
@@ -119,6 +114,12 @@ def test_command_returns_envelope(
 def test_command_count_matches_architecture_surface() -> None:
     """Guardrail: surface should cover the §11 commands."""
     assert len(COMMANDS) >= 30
+
+
+def test_agent_command_is_absent(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["agent", "--help"])
+
+    assert result.exit_code != 0
 
 
 def _substitute(s: str, env: dict[str, str]) -> str:

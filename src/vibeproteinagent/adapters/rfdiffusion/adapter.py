@@ -38,8 +38,8 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_position_range,
     resolve_positions,
 )
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
 _ADAPTER_DIR = Path(__file__).parent

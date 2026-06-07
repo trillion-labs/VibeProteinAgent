@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from jsonschema import ValidationError
 
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _valid_candidate(*, native_id: str | None = "P44612") -> dict:

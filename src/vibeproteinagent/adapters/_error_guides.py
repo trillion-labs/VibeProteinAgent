@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from vibeproteinagent.adapters.schema_affordance import matching_conditional_required_hints
 
 # Per-(tool_name, field_path) registry of recovery hints. Add an entry only
 # when an LLM frequently misuses a field AND there is a clearly better tool
@@ -42,6 +43,13 @@ FIELD_ERROR_GUIDES: dict[tuple[str, str], dict[str, Any]] = {
             "If you do not know an exact GO ID for the user's keyword, use "
             "interpro_sequences or literature_search to discover the right "
             "identifier instead of guessing or emitting a placeholder."
+        ),
+    },
+    ("protenix_v2", "msa_backend"): {
+        "fallback_hint": (
+            "`mmseqs2_gpu` is a VPA tool name, not a valid msa_backend value. "
+            "Use `auto`, `remote`, or `none`; run mmseqs2_gpu separately only "
+            "when you need an explicit MSA artifact."
         ),
     },
 }
@@ -178,6 +186,7 @@ def _format_root_schema_hint(
     field_path: str,
     raw_message: str,
     subschema: dict[str, Any] | None,
+    params: dict[str, Any] | None = None,
 ) -> str | None:
     if field_path != "<root>" or not isinstance(subschema, dict):
         return None
@@ -189,6 +198,9 @@ def _format_root_schema_hint(
     valid_fields = list(props) if isinstance(props, dict) else []
     required = _root_required_options(subschema)
     pieces: list[str] = []
+    if params:
+        conditional_hints = matching_conditional_required_hints(subschema, params)
+        pieces.extend(conditional_hints)
     if required:
         pieces.append("Root schema guidance: satisfy one required input set: " + "; ".join(required))
     if valid_fields:
@@ -236,6 +248,7 @@ def enrich_error_message(
     field_path: str,
     raw_message: str,
     subschema: dict[str, Any] | None,
+    params: dict[str, Any] | None = None,
 ) -> str:
     """Build a retry-friendly enriched error message.
 
@@ -255,6 +268,7 @@ def enrich_error_message(
         field_path=field_path,
         raw_message=raw_message,
         subschema=sub,
+        params=params,
     )
     if root_hint:
         parts.append(root_hint)
@@ -288,6 +302,7 @@ def enrich_errors(
     tool_name: str,
     schema: dict[str, Any],
     raw_errors: list[dict[str, Any]],
+    params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a new errors list with each `message` enriched and the original
     raw text retained under `raw_message`.
@@ -307,6 +322,7 @@ def enrich_errors(
             field_path=field_path,
             raw_message=raw_message,
             subschema=subschema,
+            params=params,
         )
         enriched.append(
             {

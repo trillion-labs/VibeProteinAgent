@@ -41,6 +41,40 @@ def _pick_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _child_pids(parent_pid: int) -> list[int]:
+    children: list[int] = []
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return children
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+            parts = stat.rsplit(")", 1)[1].strip().split()
+            ppid = int(parts[1])
+        except Exception:
+            continue
+        if ppid == parent_pid:
+            children.append(int(entry.name))
+    return children
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    seen: set[int] = set()
+    stack = [root_pid]
+    ordered: list[int] = []
+    while stack:
+        pid = stack.pop()
+        for child in _child_pids(pid):
+            if child in seen:
+                continue
+            seen.add(child)
+            ordered.append(child)
+            stack.append(child)
+    return ordered
+
+
 @dataclass(frozen=True)
 class _WorkerSpec:
     worker_id: int
@@ -183,24 +217,10 @@ class Supervisor:
     async def _async_main(self, gpu_ids: list[int], *, cpu_workers: int = 0) -> None:
         self._stop_event = asyncio.Event()
         # Spawn workers.
-        ctx = mp.get_context("spawn")
         spawn_started = time.monotonic()
         worker_specs = self._worker_specs(gpu_ids, cpu_workers)
         for spec in worker_specs:
-            proc = ctx.Process(
-                target=worker_main,
-                args=(spec.worker_id, spec.gpu_id, self.workspace_name),
-                name=f"vpa-worker-{spec.worker_id}",
-                daemon=False,
-            )
-            proc.start()
-            self._log.info(
-                "spawn_worker",
-                worker_id=spec.worker_id,
-                gpu_id=spec.gpu_id,
-                pid=proc.pid,
-            )
-            handle = _WorkerHandle(spec.gpu_id, proc, worker_id=spec.worker_id)
+            handle = self._spawn_worker(spec)
             self.workers.append(handle)
             self._submit_locks[handle.worker_id] = asyncio.Lock()
             self._worker_state[handle.worker_id] = self._synth_state(handle)
@@ -252,6 +272,114 @@ class Supervisor:
             with contextlib.suppress(FileNotFoundError):
                 pid_file.unlink()
             self._log.info("stopped")
+
+    def _spawn_worker(self, spec: _WorkerSpec) -> _WorkerHandle:
+        ctx = mp.get_context("spawn")
+        with contextlib.suppress(FileNotFoundError):
+            paths.worker_socket(spec.worker_id).unlink()
+        proc = ctx.Process(
+            target=worker_main,
+            args=(spec.worker_id, spec.gpu_id, self.workspace_name),
+            name=f"vpa-worker-{spec.worker_id}",
+            daemon=False,
+        )
+        proc.start()
+        self._log.info(
+            "spawn_worker",
+            worker_id=spec.worker_id,
+            gpu_id=spec.gpu_id,
+            pid=proc.pid,
+        )
+        return _WorkerHandle(spec.gpu_id, proc, worker_id=spec.worker_id)
+
+    async def _wait_one_worker_ready(
+        self,
+        handle: _WorkerHandle,
+        *,
+        timeout_s: float = 45.0,
+    ) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if handle.socket_path.exists():
+                return
+            await asyncio.sleep(0.1)
+        self._log.warn(
+            "worker_not_ready_after_respawn",
+            worker_id=handle.worker_id,
+            gpu_id=handle.gpu_id,
+        )
+
+    async def _replace_worker(self, handle: _WorkerHandle) -> _WorkerHandle:
+        spec = _WorkerSpec(worker_id=handle.worker_id, gpu_id=handle.gpu_id)
+        new_handle = self._spawn_worker(spec)
+        for idx, existing in enumerate(self.workers):
+            if existing.worker_id == handle.worker_id:
+                self.workers[idx] = new_handle
+                break
+        else:
+            self.workers.append(new_handle)
+        self._submit_locks.setdefault(new_handle.worker_id, asyncio.Lock())
+        self._worker_state[new_handle.worker_id] = self._synth_state(new_handle)
+        await self._wait_one_worker_ready(new_handle)
+        return new_handle
+
+    async def _terminate_worker_tree(
+        self,
+        handle: _WorkerHandle,
+        *,
+        reason: str,
+        term_timeout_s: float = 2.0,
+    ) -> None:
+        pid = handle.process.pid
+        if pid is None:
+            return
+        targets = list(reversed(_descendant_pids(pid))) + [pid]
+        self._log.warn(
+            "terminate_worker_tree",
+            worker_id=handle.worker_id,
+            gpu_id=handle.gpu_id,
+            pid=pid,
+            descendants=[p for p in targets if p != pid],
+            reason=reason,
+        )
+        for target in targets:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(target, signal.SIGTERM)
+        deadline = time.monotonic() + term_timeout_s
+        while time.monotonic() < deadline:
+            if not handle.process.is_alive():
+                break
+            await asyncio.sleep(0.05)
+        if handle.process.is_alive():
+            for target in targets:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(target, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            handle.process.join(timeout=2.0)
+
+    def _cancel_running_job_record(
+        self,
+        store: JobStore,
+        job_id: str,
+        *,
+        details: dict[str, Any],
+    ) -> None:
+        try:
+            rec = store.get(job_id)
+        except VPAError:
+            return
+        if rec.state is not JobState.RUNNING:
+            return
+        with contextlib.suppress(VPAError):
+            store.transition(
+                rec.job_id,
+                JobState.CANCELLED,
+                error_code=ErrorCode.CANCELLED,
+                error_message="job cancelled by user",
+                error_details=details,
+            )
+        with contextlib.suppress(Exception):
+            RunStore(self.workspace).finish_open_for_job(job_id, exit_state="cancelled")
 
     async def _wait_workers_ready(self, *, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s
@@ -747,6 +875,9 @@ class Supervisor:
             out.add(h.worker_id)
         return out
 
+    def _is_current_worker_handle(self, handle: _WorkerHandle) -> bool:
+        return any(h is handle for h in self.workers)
+
     def _decay_vram_blocklist(self) -> None:
         """Tick down the per-job worker exclusion entries by one each pass."""
         empty_jobs: list[str] = []
@@ -864,20 +995,22 @@ class Supervisor:
                 details={"gpu_id": handle.gpu_id, "exception": str(exc)},
             )
         finally:
-            handle.busy = False
-            handle.current_job_id = None
-            cached = self._worker_state.get(handle.worker_id)
-            if cached is not None:
-                cached["busy"] = False
-                cached["current_job_id"] = None
+            if self._is_current_worker_handle(handle):
+                handle.busy = False
+                handle.current_job_id = None
+                cached = self._worker_state.get(handle.worker_id)
+                if cached is not None:
+                    cached["busy"] = False
+                    cached["current_job_id"] = None
             if slaves:
                 for s in slaves:
-                    s.busy = False
-                    s.current_job_id = None
-                    cs = self._worker_state.get(s.worker_id)
-                    if cs is not None:
-                        cs["busy"] = False
-                        cs["current_job_id"] = None
+                    if self._is_current_worker_handle(s):
+                        s.busy = False
+                        s.current_job_id = None
+                        cs = self._worker_state.get(s.worker_id)
+                        if cs is not None:
+                            cs["busy"] = False
+                            cs["current_job_id"] = None
             duration_ms = int((time.monotonic() - dispatch_started) * 1000)
             # Re11: log fidelity — distinct event names per terminal state.
             # The Phase 7 code logged ``job_completed`` even when the job
@@ -1376,7 +1509,12 @@ class Supervisor:
                 return await self._op_warm(mid, body)
             if op == "worker_info":
                 return ipc.make_response(
-                    mid, {"workers": [self._worker_info(w) for w in self.workers]}
+                    mid,
+                    {
+                        "workspace": self.workspace.name,
+                        "workspace_root": str(self.workspace.root),
+                        "workers": [self._worker_info(w) for w in self.workers],
+                    },
                 )
             if op == "shutdown":
                 return ipc.make_response(mid, {"ok": True})
@@ -1427,7 +1565,73 @@ class Supervisor:
             )
         store = JobStore(self.workspace)
         rec = store.request_cancel(job_id)
-        return ipc.make_response(mid, {"job_id": rec.job_id, "state": rec.state.value})
+        if rec.state is not JobState.RUNNING:
+            return ipc.make_response(mid, {"job_id": rec.job_id, "state": rec.state.value})
+
+        owners = [
+            h for h in self.workers
+            if h.current_job_id == rec.job_id
+            or self._worker_state.get(h.worker_id, {}).get("current_job_id") == rec.job_id
+        ]
+        if not owners:
+            return ipc.make_response(
+                mid,
+                {
+                    "job_id": rec.job_id,
+                    "state": rec.state.value,
+                    "cancel_requested": True,
+                    "running_worker_found": False,
+                },
+            )
+
+        await asyncio.sleep(1.0)
+        refreshed = store.get(rec.job_id)
+        if refreshed.state in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED):
+            return ipc.make_response(
+                mid,
+                {
+                    "job_id": refreshed.job_id,
+                    "state": refreshed.state.value,
+                    "cancel_requested": True,
+                    "running_worker_found": True,
+                    "worker_restarted": False,
+                },
+            )
+
+        details = {
+            "reason": "user_cancel",
+            "worker_ids": [h.worker_id for h in owners],
+            "gpu_ids": [h.gpu_id for h in owners],
+            "policy": "cancel_requested_then_worker_tree_terminated",
+        }
+        for h in owners:
+            await self._terminate_worker_tree(h, reason="job_cancel")
+            h.busy = False
+            h.current_job_id = None
+            self._worker_state[h.worker_id] = self._synth_state(h)
+        self._cancel_running_job_record(store, rec.job_id, details=details)
+        replacements = []
+        for h in owners:
+            new_handle = await self._replace_worker(h)
+            replacements.append(
+                {
+                    "worker_id": new_handle.worker_id,
+                    "gpu_id": new_handle.gpu_id,
+                    "pid": new_handle.process.pid,
+                }
+            )
+        final = store.get(rec.job_id)
+        return ipc.make_response(
+            mid,
+            {
+                "job_id": final.job_id,
+                "state": final.state.value,
+                "cancel_requested": True,
+                "running_worker_found": True,
+                "worker_restarted": True,
+                "replacements": replacements,
+            },
+        )
 
     async def _op_status(self, mid: str, body: dict[str, Any]) -> dict[str, Any]:
         job_id = body.get("job_id")

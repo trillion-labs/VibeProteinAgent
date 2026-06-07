@@ -37,6 +37,7 @@ class WorkflowStore:
         version: str,
         descriptor_yaml: str,
         params: dict[str, Any],
+        trajectory_id: str | None = None,
     ) -> str:
         """Insert a workflow row in state ``submitted``, return its workflow_id."""
         workflow_id = f"wf_{uuid.uuid4().hex}"
@@ -47,12 +48,12 @@ class WorkflowStore:
                 """
                 INSERT INTO workflows (
                   workflow_id, name, version, descriptor, params_json,
-                  state, submitted_at
-                ) VALUES (?, ?, ?, ?, ?, 'submitted', ?)
+                  trajectory_id, state, submitted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?)
                 """,
                 (
                     workflow_id, name, version, descriptor_yaml,
-                    canonical_json(params), ts,
+                    canonical_json(params), trajectory_id, ts,
                 ),
             )
         finally:
@@ -287,6 +288,12 @@ class WorkflowStore:
                 )
             if "output_json" not in cols:
                 conn.execute("ALTER TABLE workflow_nodes ADD COLUMN output_json TEXT")
+            wf_cols = {
+                r[1]
+                for r in conn.execute("PRAGMA table_info(workflows)").fetchall()
+            }
+            if "trajectory_id" not in wf_cols:
+                conn.execute("ALTER TABLE workflows ADD COLUMN trajectory_id TEXT")
         finally:
             conn.close()
 
@@ -298,6 +305,7 @@ class WorkflowStore:
             version=row["version"],
             descriptor=row["descriptor"],
             params=json.loads(row["params_json"]),
+            trajectory_id=row["trajectory_id"] if "trajectory_id" in row.keys() else None,
             state=row["state"],
             submitted_at=int(row["submitted_at"]),
             finished_at=row["finished_at"],

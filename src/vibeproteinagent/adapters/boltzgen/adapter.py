@@ -37,8 +37,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.adapters.structure_analysis.adapter import _parse_structure
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.config import vpa_home
 from vibeproteinagent.core.errors import DependencyError, TimeoutError_
 
@@ -61,9 +62,21 @@ def _check_paths() -> None:
             f"BoltzGen source tree not found at {BOLTZGEN_TREE}. "
             f"Set $VPA_BOLTZGEN_TREE to a BoltzGen checkout (must contain src/boltzgen/)."
         )
+    main_py = BOLTZGEN_TREE / "src" / "boltzgen" / "cli" / "boltzgen.py"
+    if not main_py.is_file():
+        raise FileNotFoundError(
+            f"{main_py} not found; $VPA_BOLTZGEN_TREE does not look like "
+            "a BoltzGen source checkout."
+        )
+    if not BOLTZGEN_CACHE.is_dir():
+        raise FileNotFoundError(
+            f"BoltzGen cache directory not found at {BOLTZGEN_CACHE}. "
+            "Set $VPA_BOLTZGEN_CACHE to a directory pre-populated with "
+            "the boltzgen-1 HF snapshots."
+        )
 
 
-def availability_skip_reason() -> str | None:
+def availability_skip_reason() -> str | dict[str, Any] | None:
     try:
         _check_paths()
     except FileNotFoundError as exc:
@@ -86,24 +99,15 @@ def availability_skip_reason() -> str | None:
         timeout=60,
     )
     if probe.returncode == 0:
-        return None
+        return {
+            "available": True,
+            "checks": {"hf_token_present": _hf_token_present()},
+        }
     stderr = (probe.stderr or probe.stdout or "").strip()
     return (
         "BoltzGen analyze-stack import probe failed. Install BoltzGen shared "
         f"runtime dependencies in the active VPA env. Details: {stderr[-1000:]}"
     )
-    main_py = BOLTZGEN_TREE / "src" / "boltzgen" / "cli" / "boltzgen.py"
-    if not main_py.is_file():
-        raise FileNotFoundError(
-            f"{main_py} not found; $VPA_BOLTZGEN_TREE does not look like "
-            "a BoltzGen source checkout."
-        )
-    if not BOLTZGEN_CACHE.is_dir():
-        raise FileNotFoundError(
-            f"BoltzGen cache directory not found at {BOLTZGEN_CACHE}. "
-            "Set $VPA_BOLTZGEN_CACHE to a directory pre-populated with "
-            "the boltzgen-1 HF snapshots."
-        )
 
 
 # --------------------------------------------------------------------------- I/O models
@@ -165,6 +169,7 @@ class BoltzGenDesign(BaseModel):
 class BoltzGenOutput(BaseModel):
     designs: list[BoltzGenDesign]
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     runtime_ms: int
     num_designs_returned: int
     seeds_used: list[int] = Field(default_factory=list)
@@ -174,7 +179,7 @@ class BoltzGenOutput(BaseModel):
 
 
 def _design_candidate_id(index: int, cif_path: Path, sequence: str | None = None) -> str:
-    seed = f"{index}:{cif_path.name}:{sequence or ''}"
+    seed = f"{index}:{cif_path.name}:{sequence or ''}:{_file_digest(cif_path)}"
     token = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:10]
     return f"boltzgen:design_{index}:{token}"
 
@@ -226,6 +231,11 @@ class BoltzGenAdapter(ToolAdapter):
             json.dumps({"cmd": cmd, "cwd": str(job_outputs)}, indent=2, sort_keys=True)
             + "\n"
         )
+        warnings: list[str] = []
+        if not _hf_token_present(env):
+            warnings.append(
+                "HF_TOKEN is not set; BoltzGen may make unauthenticated HF Hub requests."
+            )
         try:
             with stdout_path.open("w") as stdout_fh, stderr_path.open("w") as stderr_fh:
                 subprocess.run(
@@ -240,6 +250,29 @@ class BoltzGenAdapter(ToolAdapter):
                 )
         except subprocess.CalledProcessError as exc:
             stage = _detect_failure_stage(stdout_path, stderr_path)
+            if stage == "analysis":
+                try:
+                    designs = _collect_designs(output_dir=job_outputs, params=params)
+                except RuntimeError:
+                    designs = []
+                if designs:
+                    warnings.append(
+                        "BoltzGen subprocess failed during analysis after producing "
+                        "refolded designs; returning recovered design candidates "
+                        "without analysis-derived BoltzGen scores."
+                    )
+                    ctx.emit_progress(0.92)
+                    runtime_ms = int((time.time() - t0) * 1000)
+                    ctx.emit_progress(1.0)
+                    seeds = [params.seed] if params.seed is not None else []
+                    return BoltzGenOutput(
+                        designs=designs,
+                        candidates=_boltzgen_candidates(params, designs),
+                        warnings=warnings,
+                        runtime_ms=runtime_ms,
+                        num_designs_returned=len(designs),
+                        seeds_used=seeds,
+                    )
             raise DependencyError(
                 f"BoltzGen subprocess failed with exit code {exc.returncode}",
                 details={
@@ -280,6 +313,7 @@ class BoltzGenAdapter(ToolAdapter):
         return BoltzGenOutput(
             designs=designs,
             candidates=_boltzgen_candidates(params, designs),
+            warnings=warnings,
             runtime_ms=runtime_ms,
             num_designs_returned=len(designs),
             seeds_used=seeds,
@@ -450,12 +484,26 @@ def _build_env(seed: int | None) -> dict[str, str]:
     src = str(BOLTZGEN_TREE / "src")
     env["PYTHONPATH"] = src
     env["HYDRA_FULL_ERROR"] = "1"
+    if not env.get("HF_TOKEN"):
+        for alias in ("VPA_HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"):
+            if env.get(alias):
+                env["HF_TOKEN"] = env[alias]
+                break
     # BoltzGen reads HF_HOME / HF_HUB_CACHE for some auxiliary downloads
     # (e.g. tokenizer). Point both at our cache.
     env["HF_HUB_CACHE"] = str(BOLTZGEN_CACHE)
     if seed is not None:
         env["PYTHONHASHSEED"] = str(seed)
     return env
+
+
+def _hf_token_present(env: dict[str, str] | None = None) -> bool:
+    env = env or os.environ
+    return bool(
+        env.get("HF_TOKEN")
+        or env.get("VPA_HF_TOKEN")
+        or env.get("HUGGINGFACE_HUB_TOKEN")
+    )
 
 
 def _tail(path: Path, *, limit: int = 4000) -> str:
@@ -500,13 +548,16 @@ def _collect_designs(
         metrics_by_id = _load_boltzgen_metrics(output_dir)
         for idx, cif in enumerate(sorted(fallback.glob("*.cif")), start=1):
             row = metrics_by_id.get(cif.stem, {})
-            sequence = row.get("sequence") or None
+            sequence = row.get("sequence") or _recover_design_sequence(cif, params)
+            length = _safe_int(row.get("design_length")) or (
+                len(sequence) if sequence else params.binder_length
+            )
             designs.append(
                 BoltzGenDesign(
                     candidate_id=_design_candidate_id(idx, cif, sequence),
                     cif_path=str(cif),
                     sequence=sequence,
-                    length=_safe_int(row.get("design_length")) or params.binder_length,
+                    length=length,
                     score=_safe_float(row.get("score")),
                     affinity_pred_value=_safe_float(row.get("affinity_pred_value")),
                     affinity_probability_binary=_safe_float(
@@ -531,14 +582,17 @@ def _collect_designs(
     for idx, cif in enumerate(sorted(final_set_dir.glob("*.cif")), start=1):
         stem = cif.stem
         row = metrics_by_id.get(stem, {})
-        sequence = row.get("sequence") or None
+        sequence = row.get("sequence") or _recover_design_sequence(cif, params)
+        length = _safe_int(row.get("design_length")) or (
+            len(sequence) if sequence else params.binder_length
+        )
         designs.append(
             BoltzGenDesign(
                 candidate_id=_design_candidate_id(idx, cif, sequence),
                 cif_path=str(cif),
                 pdb_path=None,
                 sequence=sequence,
-                length=_safe_int(row.get("design_length")) or params.binder_length,
+                length=length,
                 score=_safe_float(row.get("score")),
                 affinity_pred_value=_safe_float(row.get("affinity_pred_value")),
                 affinity_probability_binary=_safe_float(
@@ -566,6 +620,46 @@ def _load_boltzgen_metrics(output_dir: Path) -> dict[str, dict[str, str]]:
                 if key:
                     metrics_by_id[Path(key).stem] = row
     return metrics_by_id
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def _recover_design_sequence(cif_path: Path, params: BoltzGenInput) -> str | None:
+    try:
+        residues, _ligands = _parse_structure(cif_path)
+    except Exception:
+        return None
+    chains: dict[str, list[str]] = {}
+    for residue in residues:
+        if residue.aa == "X":
+            continue
+        chains.setdefault(residue.chain_id, []).append(residue.aa)
+    if not chains:
+        return None
+
+    if params.target_pdb:
+        target_chain = params.target_chain
+        non_target = {
+            chain_id: seq
+            for chain_id, seq in chains.items()
+            if chain_id != target_chain
+        }
+        if non_target:
+            chain_id, seq = min(
+                non_target.items(),
+                key=lambda item: (abs(len(item[1]) - params.binder_length), item[0]),
+            )
+            del chain_id
+            return "".join(seq)
+
+    chain_id, seq = max(chains.items(), key=lambda item: (len(item[1]), item[0]))
+    del chain_id
+    return "".join(seq)
 
 
 def _safe_int(s: str | None) -> int | None:

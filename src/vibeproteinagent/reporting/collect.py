@@ -8,24 +8,23 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from vibeproteinagent.agents.planning.candidate_merge import merge_candidate_records
+import yaml
+
+from vibeproteinagent.candidates.merge import merge_candidate_records
 from vibeproteinagent.core.errors import InvalidParamsError, NotFoundError, WorkspaceError
+from vibeproteinagent.reporting.enrich import REPORT_ENRICHMENT_CALL_ID_PREFIX
 from vibeproteinagent.workspace import Workspace
 from vibeproteinagent.workspace.types import (
     ArtifactRecord,
     JobRecord,
     JobState,
     Priority,
+    TrajectoryRecord,
     WorkflowNodeRecord,
     WorkflowRecord,
 )
 
 from .models import (
-    AgentDecision,
-    AgentMessage,
-    AgentStepSummary,
-    AgentToolCall,
-    AgentTranscript,
     MSABlock,
     ReportArtifact,
     ReportCandidate,
@@ -69,9 +68,16 @@ _SCORE_KEYS = (
     "plddt",
     "mean_plddt",
     "iptm",
+    "mean_iptm",
     "ptm",
+    "tm_score",
     "pae",
     "mean_pae",
+    "pae_interaction",
+    "ipae",
+    "iplddt",
+    "lddt",
+    "gpde",
     "dockq",
     "ipsae",
     # Binding / affinity (Boltz-2, RFdiffusion, etc.). Includes the
@@ -90,7 +96,6 @@ _SCORE_KEYS = (
     "binder_probability",
     "confidence_score",
     "ipsae_score",
-    "iplddt",
     # Sequence design
     "recovery",
     "seq_recovery",
@@ -115,60 +120,67 @@ _NESTED_SCORE_KEYS = ("confidence_scores", "metrics", "scores")
 
 def collect_report_model(workspace: Workspace, source_id: str, *, top_k: int = 5) -> ReportModel:
     del top_k  # top-k is a rendering concern; collection keeps the complete model.
-    if source_id.startswith("arun_"):
-        return _collect_agent_run(workspace, source_id)
+    if source_id.startswith("traj_"):
+        return _collect_trajectory(workspace, source_id)
     if source_id.startswith("wf_"):
         return _collect_workflow(workspace, source_id)
     if source_id.startswith("job_"):
         return _collect_job(workspace, source_id)
     raise InvalidParamsError(
-        "report id must start with arun_, job_, or wf_",
-        details={"id": source_id, "allowed_prefixes": ["arun_", "job_", "wf_"]},
+        "report id must start with traj_, job_, or wf_",
+        details={"id": source_id, "allowed_prefixes": ["traj_", "job_", "wf_"]},
     )
 
 
 def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
     job = _read_job_readonly(workspace, job_id)
+    if job.tool_name == "submit_candidate":
+        if job.workflow_id:
+            try:
+                return _collect_workflow(workspace, job.workflow_id)
+            except NotFoundError:
+                pass
+        return _collect_submit_candidate_trajectory(workspace, job)
+    return _collect_single_job(workspace, job)
+
+
+def _collect_single_job(workspace: Workspace, job: JobRecord) -> ReportModel:
     artifacts = _artifact_list(
         _read_artifacts_for_job_readonly(workspace, job.job_id),
         job_id=job.job_id,
     )
     node = _node_from_job(job, artifacts)
+    report_nodes = [node]
+    all_artifacts = list(artifacts)
     warnings = _warnings_from_job(job)
-    candidates = _candidate_archive_candidates(
-        workspace,
-        workflow_id=job.workflow_id,
-        run_id=None,
-        job_ids=[job.job_id],
-        node_ids=[node.node_id],
-        artifacts=artifacts,
+    params_by_node = {node.node_id: job.params if isinstance(job.params, dict) else {}}
+    enrichment_nodes, enrichment_artifacts, enrichment_warnings, enrichment_params = (
+        _report_enrichment_nodes(workspace, job.job_id, upstream=node.node_id)
     )
-    if not candidates:
-        candidates = _normalize_candidates(
-            [node],
-            artifacts,
-            node_params={node.node_id: job.params if isinstance(job.params, dict) else {}},
-        )
-    submissions = _submission_outputs([node])
+    report_nodes.extend(enrichment_nodes)
+    all_artifacts.extend(enrichment_artifacts)
+    warnings.extend(enrichment_warnings)
+    params_by_node.update(enrichment_params)
+    candidates = _normalize_candidates(
+        report_nodes,
+        all_artifacts,
+        node_params=params_by_node,
+    )
+    submissions = _submission_outputs(report_nodes)
     final_submission = _latest_final_submission(submissions)
-    final_candidates = _enrich_final_candidates_from_records(
-        workspace,
-        workflow_id=job.workflow_id,
-        run_id=None,
-        job_ids=[job.job_id],
-        node_ids=[node.node_id],
-        final_candidates=_candidates_from_submission(final_submission),
-        artifacts=artifacts,
+    final_candidates = _enrich_final_candidates_from_current_candidates(
+        _candidates_from_submission(final_submission),
+        candidates,
     )
     if not candidates:
         candidates = _structure_candidates(
-            artifacts,
+            all_artifacts,
             source={"kind": "job", "job_id": job.job_id},
         )
     msa_blocks = _collect_msa_blocks(
-        artifacts,
-        workflow_tools={job.tool_name.lower()},
-        tool_by_job={job.job_id: job.tool_name.lower()},
+        all_artifacts,
+        workflow_tools={(n.tool or "").lower() for n in report_nodes},
+        tool_by_job={n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id},
     )
     return ReportModel(
         summary=RunSummary(
@@ -182,89 +194,332 @@ def _collect_job(workspace: Workspace, job_id: str) -> ReportModel:
             finished_at=job.finished_at,
             runtime_ms=_duration_ms(job.submitted_at, job.finished_at),
         ),
-        graph=WorkflowGraph(workflow_id=job.workflow_id, nodes=[node]),
+        graph=WorkflowGraph(workflow_id=job.workflow_id, nodes=report_nodes),
         candidates=candidates,
         final_candidates=final_candidates,
         final_submission=final_submission,
         submissions=submissions,
-        artifacts=artifacts,
+        artifacts=all_artifacts,
         msa_blocks=msa_blocks,
         warnings=warnings,
         reproducibility=_reproducibility(
             source_id=job.job_id,
-            nodes=[node],
-            artifacts=artifacts,
+            nodes=report_nodes,
+            artifacts=all_artifacts,
             workspace=workspace.name,
         ),
-        agent_transcript=_collect_agent_transcript(
-            workspace, workflow_id=job.workflow_id, job_id=job.job_id,
-        ),
-        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes([node]),
-        empty_candidate_events=_empty_candidate_events_from_nodes([node]),
+        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes(report_nodes),
+        empty_candidate_events=_empty_candidate_events_from_nodes(report_nodes),
         candidate_capability_filter_events=(
-            _candidate_capability_filter_events_from_nodes([node])
+            _candidate_capability_filter_events_from_nodes(report_nodes)
         ),
-        candidate_merge_events=_candidate_merge_events_from_nodes([node]),
-        parameter_resolution_events=_parameter_resolution_events_from_nodes([node]),
-        raw_summary=_raw_job_summary(job, artifacts),
+        candidate_merge_events=_candidate_merge_events_from_nodes(report_nodes),
+        parameter_resolution_events=_parameter_resolution_events_from_nodes(report_nodes),
+        raw_summary=_raw_trajectory_summary(
+            source_job_id=job.job_id,
+            nodes=report_nodes,
+            artifacts=all_artifacts,
+        )
+        if enrichment_nodes
+        else _raw_job_summary(job, artifacts),
+    )
+
+
+def _collect_submit_candidate_trajectory(
+    workspace: Workspace,
+    final_job: JobRecord,
+) -> ReportModel:
+    """Report a direct-run query as one trajectory when its terminal submit job is reported.
+
+    Agents often run VPA as a sequence of direct ``vpa run`` calls and finish
+    with ``submit_candidate`` rather than compiling a ``wf_`` descriptor. In
+    that mode the submit job is the only stable report handle the agent has, so
+    ``vpa report job_<submit>`` should expand to the recorded workspace
+    trajectory up to that final selection instead of rendering a one-node
+    report.
+    """
+
+    jobs = _read_direct_trajectory_jobs_readonly(workspace, final_job)
+    if not any(job.job_id == final_job.job_id for job in jobs):
+        jobs.append(final_job)
+        jobs.sort(key=lambda job: (job.submitted_at, job.job_id))
+    enrichment_jobs = _read_report_enrichment_jobs_readonly(workspace, final_job.job_id)
+    if enrichment_jobs:
+        known_job_ids = {job.job_id for job in jobs}
+        jobs.extend(job for job in enrichment_jobs if job.job_id not in known_job_ids)
+        jobs.sort(key=lambda job: (job.submitted_at, job.job_id))
+
+    report_nodes: list[WorkflowNodeSummary] = []
+    all_artifacts: list[ReportArtifact] = []
+    warnings: list[ReportWarning] = []
+    params_by_node: dict[str, dict[str, Any]] = {}
+    previous_node_id: str | None = None
+    seen_node_ids: set[str] = set()
+
+    for index, job in enumerate(jobs, start=1):
+        artifacts = _artifact_list(
+            _read_artifacts_for_job_readonly(workspace, job.job_id),
+            job_id=job.job_id,
+        )
+        node = _node_from_job(job, artifacts)
+        node_id = _direct_trajectory_node_id(job, index, seen_node_ids)
+        seen_node_ids.add(node_id)
+        upstream = [previous_node_id] if previous_node_id else []
+        node = replace(
+            node,
+            node_id=node_id,
+            upstream=upstream,
+            workflow_id=None,
+        )
+        previous_node_id = node_id
+        report_nodes.append(node)
+        all_artifacts.extend(artifacts)
+        warnings.extend(_warnings_from_job(job, source=node_id))
+        if isinstance(job.params, dict):
+            params_by_node[node_id] = job.params
+
+    candidates = _normalize_candidates(
+        report_nodes,
+        all_artifacts,
+        node_params=params_by_node,
+    )
+    submissions = _submission_outputs(report_nodes)
+    final_submission = _latest_final_submission(submissions)
+    final_candidates = _enrich_final_candidates_from_current_candidates(
+        _candidates_from_submission(final_submission),
+        candidates,
+    )
+    if not candidates:
+        candidates = _structure_candidates(
+            all_artifacts,
+            source={"kind": "direct_trajectory", "job_id": final_job.job_id},
+        )
+    workflow_tools = {(n.tool or "").lower() for n in report_nodes}
+    tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
+    return ReportModel(
+        summary=RunSummary(
+            kind="job",
+            id=final_job.job_id,
+            workspace=workspace.name,
+            state=final_job.state.value,
+            name="direct-run trajectory",
+            version=final_job.tool_version,
+            submitted_at=jobs[0].submitted_at if jobs else final_job.submitted_at,
+            finished_at=final_job.finished_at,
+            runtime_ms=_duration_ms(
+                jobs[0].submitted_at if jobs else final_job.submitted_at,
+                final_job.finished_at,
+            ),
+        ),
+        graph=WorkflowGraph(workflow_id=None, nodes=report_nodes),
+        candidates=candidates,
+        final_candidates=final_candidates,
+        final_submission=final_submission,
+        submissions=submissions,
+        artifacts=all_artifacts,
+        msa_blocks=_collect_msa_blocks(
+            all_artifacts,
+            workflow_tools=workflow_tools,
+            tool_by_job=tool_by_job,
+        ),
+        warnings=warnings,
+        reproducibility=_reproducibility(
+            source_id=final_job.job_id,
+            nodes=report_nodes,
+            artifacts=all_artifacts,
+            workspace=workspace.name,
+        ),
+        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes(report_nodes),
+        empty_candidate_events=_empty_candidate_events_from_nodes(report_nodes),
+        candidate_capability_filter_events=(
+            _candidate_capability_filter_events_from_nodes(report_nodes)
+        ),
+        candidate_merge_events=_candidate_merge_events_from_nodes(report_nodes),
+        parameter_resolution_events=_parameter_resolution_events_from_nodes(report_nodes),
+        raw_summary=_raw_trajectory_summary(
+            source_job_id=final_job.job_id,
+            nodes=report_nodes,
+            artifacts=all_artifacts,
+        ),
+    )
+
+
+def _collect_trajectory(workspace: Workspace, trajectory_id: str) -> ReportModel:
+    trajectory = _read_trajectory_readonly(workspace, trajectory_id)
+    direct_jobs = _read_trajectory_direct_jobs_readonly(workspace, trajectory_id)
+    workflows = _read_trajectory_workflows_readonly(workspace, trajectory_id)
+
+    report_nodes: list[WorkflowNodeSummary] = []
+    all_artifacts: list[ReportArtifact] = []
+    warnings: list[ReportWarning] = []
+    params_by_node: dict[str, dict[str, Any]] = {}
+    seen_node_ids: set[str] = set()
+    top_level_events: list[dict[str, Any]] = []
+    direct_index = 0
+    events: list[tuple[int, str, str, JobRecord | WorkflowRecord]] = []
+    events.extend(
+        (int(job.submitted_at), "job", job.job_id, job)
+        for job in direct_jobs
+    )
+    events.extend(
+        (int(wf.submitted_at), "workflow", wf.workflow_id, wf)
+        for wf in workflows
+    )
+    events.sort(key=lambda e: (e[0], e[2]))
+
+    for _, kind, event_id, event in events:
+        if kind == "job":
+            job = event
+            assert isinstance(job, JobRecord)
+            direct_index += 1
+            artifacts = _artifact_list(
+                _read_artifacts_for_job_readonly(workspace, job.job_id),
+                job_id=job.job_id,
+            )
+            node = _node_from_job(job, artifacts)
+            node_id = _direct_trajectory_node_id(job, direct_index, seen_node_ids)
+            seen_node_ids.add(node_id)
+            node = replace(node, node_id=node_id, upstream=[], workflow_id=None)
+            report_nodes.append(node)
+            all_artifacts.extend(artifacts)
+            warnings.extend(_warnings_from_job(job, source=node_id))
+            if isinstance(job.params, dict):
+                params_by_node[node_id] = job.params
+            top_level_events.append(
+                {
+                    "kind": "job",
+                    "id": job.job_id,
+                    "submitted_at": job.submitted_at,
+                    "state": job.state.value,
+                    "tool": job.tool_name,
+                }
+            )
+        else:
+            wf = event
+            assert isinstance(wf, WorkflowRecord)
+            wf_nodes, wf_artifacts, wf_warnings, wf_params = _workflow_report_nodes(workspace, wf)
+            report_nodes.extend(wf_nodes)
+            all_artifacts.extend(wf_artifacts)
+            warnings.extend(wf_warnings)
+            params_by_node.update(wf_params)
+            top_level_events.append(
+                {
+                    "kind": "workflow",
+                    "id": wf.workflow_id,
+                    "submitted_at": wf.submitted_at,
+                    "state": wf.state,
+                    "workflow": wf.name,
+                }
+            )
+
+    candidates = _normalize_candidates(
+        report_nodes,
+        all_artifacts,
+        node_params=params_by_node,
+    )
+    submissions = _submission_outputs(report_nodes)
+    final_submission = _latest_final_submission(submissions)
+    final_candidates = _enrich_final_candidates_from_current_candidates(
+        _candidates_from_submission(final_submission),
+        candidates,
+    )
+    if not candidates:
+        candidates = _structure_candidates(
+            all_artifacts,
+            source={"kind": "trajectory", "trajectory_id": trajectory_id},
+        )
+    started = _min_not_none(
+        [j.submitted_at for j in direct_jobs]
+        + [w.submitted_at for w in workflows]
+        + [trajectory.created_at]
+    )
+    finished = _max_not_none(
+        [j.finished_at for j in direct_jobs if j.finished_at is not None]
+        + [w.finished_at for w in workflows if w.finished_at is not None]
+    )
+    all_job_terminal = all(j.state.value in {"completed", "failed", "cancelled"} for j in direct_jobs)
+    all_workflow_terminal = all(w.state in {"completed", "failed", "cancelled"} for w in workflows)
+    state = (
+        "completed"
+        if final_submission is not None and all_job_terminal and all_workflow_terminal
+        else "open"
+    )
+    workflow_tools = {(n.tool or "").lower() for n in report_nodes}
+    tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
+    return ReportModel(
+        summary=RunSummary(
+            kind="trajectory",
+            id=trajectory.trajectory_id,
+            workspace=workspace.name,
+            state=state,
+            name="adaptive trajectory",
+            version=None,
+            submitted_at=started,
+            finished_at=finished,
+            runtime_ms=_duration_ms(started, finished),
+        ),
+        graph=WorkflowGraph(workflow_id=None, nodes=report_nodes),
+        candidates=candidates,
+        final_candidates=final_candidates,
+        final_submission=final_submission,
+        submissions=submissions,
+        artifacts=all_artifacts,
+        msa_blocks=_collect_msa_blocks(
+            all_artifacts,
+            workflow_tools=workflow_tools,
+            tool_by_job=tool_by_job,
+        ),
+        warnings=warnings,
+        reproducibility=_reproducibility(
+            source_id=trajectory_id,
+            nodes=report_nodes,
+            artifacts=all_artifacts,
+            workspace=workspace.name,
+        ),
+        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes(report_nodes),
+        empty_candidate_events=_empty_candidate_events_from_nodes(report_nodes),
+        candidate_capability_filter_events=(
+            _candidate_capability_filter_events_from_nodes(report_nodes)
+        ),
+        candidate_merge_events=_candidate_merge_events_from_nodes(report_nodes),
+        parameter_resolution_events=_parameter_resolution_events_from_nodes(report_nodes),
+        raw_summary=_raw_trajectory_report_summary(
+            trajectory=trajectory,
+            nodes=report_nodes,
+            artifacts=all_artifacts,
+            top_level_events=top_level_events,
+        ),
     )
 
 
 def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
     wf = _read_workflow_readonly(workspace, workflow_id)
+    objective_context = _workflow_objective_context(wf)
     report_nodes, all_artifacts, warnings, params_by_node = _workflow_report_nodes(
         workspace,
         wf,
-        round_index=None,
     )
+    upstream = report_nodes[-1].node_id if report_nodes else None
+    enrichment_nodes, enrichment_artifacts, enrichment_warnings, enrichment_params = (
+        _report_enrichment_nodes(workspace, wf.workflow_id, upstream=upstream)
+    )
+    report_nodes.extend(enrichment_nodes)
+    all_artifacts.extend(enrichment_artifacts)
+    warnings.extend(enrichment_warnings)
+    params_by_node.update(enrichment_params)
 
-    candidates = _candidate_archive_candidates(
-        workspace,
-        workflow_id=wf.workflow_id,
-        run_id=None,
-        job_ids=[node.job_id for node in report_nodes if node.job_id],
-        node_ids=[node.node_id for node in report_nodes],
-        artifacts=all_artifacts,
+    candidates = _normalize_candidates(
+        report_nodes, all_artifacts, node_params=params_by_node,
     )
-    if not candidates:
-        candidates = _normalize_candidates(
-            report_nodes, all_artifacts, node_params=params_by_node,
-        )
-    submissions = [
-        *_submission_outputs(report_nodes),
-        *_agent_submission_outputs(
-            workspace, workflow_id=wf.workflow_id, job_id=None, run_id=None,
-        ),
-    ]
+    submissions = _submission_outputs(report_nodes)
     final_submission = _latest_final_submission(submissions)
-    final_candidates = _enrich_final_candidates_from_records(
-        workspace,
-        workflow_id=wf.workflow_id,
-        run_id=None,
-        job_ids=[n.job_id for n in report_nodes if n.job_id],
-        node_ids=[n.node_id for n in report_nodes],
-        final_candidates=_candidates_from_submission(final_submission),
-        artifacts=all_artifacts,
+    final_candidates = _enrich_final_candidates_from_current_candidates(
+        _candidates_from_submission(final_submission),
+        candidates,
     )
     if not candidates:
         candidates = _structure_candidates(
             all_artifacts, source={"kind": "workflow", "workflow_id": wf.workflow_id}
-        )
-    if (
-        final_submission is None
-        and candidates
-        and _agent_allows_auto_selection(workspace, wf.workflow_id)
-    ):
-        final_submission, final_candidates = _auto_submission_from_candidates(candidates)
-        warnings.append(
-            ReportWarning(
-                level="warning",
-                message=(
-                    "No explicit submit_candidate output was found; the report "
-                    "auto-selected the highest ranked available candidate."
-                ),
-                source="submit_candidate",
-            )
         )
     workflow_tools = {(n.tool or "").lower() for n in report_nodes}
     tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
@@ -296,9 +551,6 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
             artifacts=all_artifacts,
             workspace=workspace.name,
         ),
-        agent_transcript=_collect_agent_transcript(
-            workspace, workflow_id=wf.workflow_id,
-        ),
         satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes(report_nodes),
         empty_candidate_events=_empty_candidate_events_from_nodes(report_nodes),
         candidate_capability_filter_events=(
@@ -313,176 +565,15 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
             state=wf.state,
             nodes=report_nodes,
             artifacts=all_artifacts,
+            user_query=objective_context.get("user_query"),
+            objective=objective_context.get("objective"),
         ),
-    )
-
-
-def _collect_agent_run(workspace: Workspace, run_id: str) -> ReportModel:
-    try:
-        from vibeproteinagent.agents.session.store import AgentSessionStore
-
-        store = AgentSessionStore(workspace)
-        details = store.get_run_details(run_id)
-    except KeyError as exc:
-        raise NotFoundError("agent run not found", details={"run_id": run_id}) from exc
-    except Exception as exc:
-        raise WorkspaceError(
-            "could not load agent run for report",
-            details={"run_id": run_id, "error": str(exc)},
-        ) from exc
-
-    run = details.get("run") if isinstance(details.get("run"), dict) else {}
-    workflow_ids = [
-        str(value)
-        for value in (run.get("workflow_ids") or [])
-        if value not in (None, "")
-    ]
-    report_nodes: list[WorkflowNodeSummary] = []
-    all_artifacts: list[ReportArtifact] = []
-    warnings: list[ReportWarning] = []
-    params_by_node: dict[str, dict[str, Any]] = {}
-    workflows: list[WorkflowRecord] = []
-    for round_index, workflow_id in enumerate(workflow_ids):
-        try:
-            wf = _read_workflow_readonly(workspace, workflow_id)
-        except Exception as exc:
-            warnings.append(
-                ReportWarning(
-                    level="warning",
-                    message=f"Could not load workflow {workflow_id}: {exc}",
-                    source=workflow_id,
-                )
-            )
-            continue
-        workflows.append(wf)
-        nodes, artifacts, node_warnings, node_params = _workflow_report_nodes(
-            workspace,
-            wf,
-            round_index=round_index,
-        )
-        report_nodes.extend(nodes)
-        all_artifacts.extend(artifacts)
-        warnings.extend(node_warnings)
-        params_by_node.update(
-            {
-                f"{workflow_id}:{node_id}": params
-                for node_id, params in node_params.items()
-            }
-        )
-
-    job_ids = [node.job_id for node in report_nodes if node.job_id]
-    node_ids = [node.node_id for node in report_nodes]
-    candidates = _candidate_archive_candidates(
-        workspace,
-        workflow_id=None,
-        run_id=run_id,
-        job_ids=job_ids,
-        node_ids=node_ids,
-        artifacts=all_artifacts,
-    )
-    if not candidates:
-        candidates = _normalize_candidates(
-            report_nodes,
-            all_artifacts,
-            node_params={
-                node.node_id: params
-                for key, params in params_by_node.items()
-                for node_id in [key.rsplit(":", 1)[-1]]
-            },
-        )
-    submissions = [
-        *_submission_outputs(report_nodes),
-        *_agent_submission_outputs(
-            workspace, workflow_id=None, job_id=None, run_id=run_id,
-        ),
-    ]
-    final_submission = _latest_final_submission(submissions)
-    final_candidates = _enrich_final_candidates_from_records(
-        workspace,
-        workflow_id=None,
-        run_id=run_id,
-        job_ids=job_ids,
-        node_ids=node_ids,
-        final_candidates=_candidates_from_submission(final_submission),
-        artifacts=all_artifacts,
-    )
-    if not candidates:
-        candidates = _structure_candidates(
-            all_artifacts, source={"kind": "agent_run", "run_id": run_id}
-        )
-    workflow_tools = {(n.tool or "").lower() for n in report_nodes}
-    tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
-    started = _as_int(run.get("created_at"))
-    finished = _as_int(run.get("updated_at"))
-    return ReportModel(
-        summary=RunSummary(
-            kind="agent_run",
-            id=run_id,
-            workspace=workspace.name,
-            state=str(run.get("state") or "unknown"),
-            name=str(run.get("user_request") or "Agent run")[:96],
-            version=str(run.get("model") or "") or None,
-            submitted_at=started,
-            finished_at=finished,
-            runtime_ms=_duration_ms(started, finished),
-        ),
-        graph=WorkflowGraph(workflow_id=run_id, nodes=report_nodes),
-        candidates=candidates,
-        final_candidates=final_candidates,
-        final_submission=final_submission,
-        submissions=submissions,
-        artifacts=all_artifacts,
-        msa_blocks=_collect_msa_blocks(
-            all_artifacts, workflow_tools=workflow_tools, tool_by_job=tool_by_job,
-        ),
-        warnings=warnings,
-        reproducibility=_reproducibility(
-            source_id=run_id,
-            nodes=report_nodes,
-            artifacts=all_artifacts,
-            workspace=workspace.name,
-        ),
-        agent_transcript=_collect_agent_transcript(workspace, run_id=run_id),
-        satisfied_semantic_facets=_satisfied_semantic_facets_from_nodes(report_nodes),
-        empty_candidate_events=_empty_candidate_events_from_nodes(report_nodes),
-        candidate_capability_filter_events=(
-            _candidate_capability_filter_events_from_nodes(report_nodes)
-        ),
-        candidate_merge_events=_candidate_merge_events_from_nodes(report_nodes),
-        parameter_resolution_events=_parameter_resolution_events_from_nodes(report_nodes),
-        raw_summary={
-            "kind": "agent_run",
-            "run_id": run_id,
-            "workflow_ids": workflow_ids,
-            "workflows": [
-                _raw_workflow_summary(
-                    workflow_id=wf.workflow_id,
-                    name=wf.name,
-                    version=wf.version,
-                    state=wf.state,
-                    nodes=[
-                        node for node in report_nodes
-                        if node.workflow_id == wf.workflow_id
-                    ],
-                    artifacts=[
-                        artifact for artifact in all_artifacts
-                        if any(
-                            node.job_id == artifact.job_id and node.workflow_id == wf.workflow_id
-                            for node in report_nodes
-                        )
-                    ],
-                )
-                for wf in workflows
-            ],
-        },
     )
 
 
 def _workflow_report_nodes(
     workspace: Workspace,
     wf: WorkflowRecord,
-    *,
-    round_index: int | None,
 ) -> tuple[
     list[WorkflowNodeSummary],
     list[ReportArtifact],
@@ -523,7 +614,6 @@ def _workflow_report_nodes(
             state=node.state,
             job_id=node.job_id,
             workflow_id=wf.workflow_id,
-            round_index=round_index,
             upstream=node.upstream,
             params_hash=node.params_hash,
             params=params_by_node.get(node.node_id, {}),
@@ -969,10 +1059,91 @@ def _read_workflow_readonly(workspace: Workspace, workflow_id: str) -> WorkflowR
         version=row["version"],
         descriptor=row["descriptor"],
         params=_json_load(row["params_json"], default={}),
+        trajectory_id=row["trajectory_id"] if "trajectory_id" in row.keys() else None,
         state=row["state"],
         submitted_at=int(row["submitted_at"]),
         finished_at=row["finished_at"],
     )
+
+
+def _read_trajectory_readonly(workspace: Workspace, trajectory_id: str) -> TrajectoryRecord:
+    conn = _readonly_connection(workspace)
+    try:
+        row = conn.execute(
+            "SELECT * FROM trajectories WHERE trajectory_id = ?",
+            (trajectory_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise NotFoundError(
+            f"trajectory {trajectory_id!r} not found",
+            details={"trajectory_id": trajectory_id},
+        )
+    return TrajectoryRecord(
+        trajectory_id=row["trajectory_id"],
+        workspace=row["workspace"],
+        user_query=row["user_query"],
+        objective=row["objective"],
+        state=row["state"],
+        final_submit_job_id=row["final_submit_job_id"],
+        report_path=row["report_path"],
+        created_at=int(row["created_at"]),
+        updated_at=int(row["updated_at"]),
+        completed_at=row["completed_at"],
+    )
+
+
+def _read_trajectory_direct_jobs_readonly(
+    workspace: Workspace,
+    trajectory_id: str,
+) -> list[JobRecord]:
+    conn = _readonly_connection(workspace)
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM jobs
+             WHERE trajectory_id = ?
+               AND workflow_id IS NULL
+             ORDER BY submitted_at ASC, job_id ASC
+            """,
+            (trajectory_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_job_from_row(row) for row in rows]
+
+
+def _read_trajectory_workflows_readonly(
+    workspace: Workspace,
+    trajectory_id: str,
+) -> list[WorkflowRecord]:
+    conn = _readonly_connection(workspace)
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM workflows
+             WHERE trajectory_id = ?
+             ORDER BY submitted_at ASC, workflow_id ASC
+            """,
+            (trajectory_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        WorkflowRecord(
+            workflow_id=row["workflow_id"],
+            name=row["name"],
+            version=row["version"],
+            descriptor=row["descriptor"],
+            params=_json_load(row["params_json"], default={}),
+            trajectory_id=row["trajectory_id"] if "trajectory_id" in row.keys() else None,
+            state=row["state"],
+            submitted_at=int(row["submitted_at"]),
+            finished_at=row["finished_at"],
+        )
+        for row in rows
+    ]
 
 
 def _read_workflow_nodes_readonly(
@@ -998,6 +1169,140 @@ def _read_job_readonly(workspace: Workspace, job_id: str) -> JobRecord:
         conn.close()
     if row is None:
         raise NotFoundError(f"job {job_id!r} not found", details={"job_id": job_id})
+    return _job_from_row(row)
+
+
+def _read_direct_trajectory_jobs_readonly(
+    workspace: Workspace,
+    final_job: JobRecord,
+) -> list[JobRecord]:
+    conn = _readonly_connection(workspace)
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM jobs
+             WHERE workflow_id IS NULL
+               AND submitted_at <= ?
+             ORDER BY submitted_at ASC, job_id ASC
+            """,
+            (final_job.submitted_at,),
+        ).fetchall()
+    finally:
+        conn.close()
+    jobs = [_job_from_row(row) for row in rows]
+    cutoff = _direct_trajectory_cutoff_submission_time(jobs, final_job)
+    if cutoff is not None:
+        jobs = [job for job in jobs if job.submitted_at >= cutoff]
+    return jobs
+
+
+def _read_report_enrichment_jobs_readonly(
+    workspace: Workspace,
+    source_id: str,
+) -> list[JobRecord]:
+    prefix = f"{REPORT_ENRICHMENT_CALL_ID_PREFIX}_{_safe_enrichment_source(source_id)}_"
+    conn = _readonly_connection(workspace)
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM jobs
+             WHERE call_id LIKE ?
+             ORDER BY submitted_at ASC, job_id ASC
+            """,
+            (prefix + "%",),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_job_from_row(row) for row in rows]
+
+
+def _report_enrichment_nodes(
+    workspace: Workspace,
+    source_id: str,
+    *,
+    upstream: str | None,
+) -> tuple[
+    list[WorkflowNodeSummary],
+    list[ReportArtifact],
+    list[ReportWarning],
+    dict[str, dict[str, Any]],
+]:
+    nodes: list[WorkflowNodeSummary] = []
+    artifacts: list[ReportArtifact] = []
+    warnings: list[ReportWarning] = []
+    params: dict[str, dict[str, Any]] = {}
+    previous = upstream
+    seen_node_ids: set[str] = set()
+    for index, job in enumerate(_read_report_enrichment_jobs_readonly(workspace, source_id), start=1):
+        job_artifacts = _artifact_list(
+            _read_artifacts_for_job_readonly(workspace, job.job_id),
+            job_id=job.job_id,
+        )
+        node = _node_from_job(job, job_artifacts)
+        node_id = _direct_trajectory_node_id(job, index, seen_node_ids | {n.node_id for n in nodes})
+        seen_node_ids.add(node_id)
+        node = replace(
+            node,
+            node_id=node_id,
+            upstream=[previous] if previous else [],
+            workflow_id=None,
+        )
+        previous = node_id
+        nodes.append(node)
+        artifacts.extend(job_artifacts)
+        warnings.extend(_warnings_from_job(job, source=node_id))
+        if isinstance(job.params, dict):
+            params[node_id] = job.params
+    return nodes, artifacts, warnings, params
+
+
+def _safe_enrichment_source(source_id: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in source_id)
+
+
+def _direct_trajectory_cutoff_submission_time(
+    jobs: list[JobRecord],
+    final_job: JobRecord,
+) -> int | None:
+    final_output = final_job.output if isinstance(final_job.output, dict) else {}
+    superseded = {
+        str(final_output.get("supersedes"))
+    } if final_output.get("supersedes") else set()
+    current = set(superseded)
+    while current:
+        next_current: set[str] = set()
+        for job in jobs:
+            output = job.output if isinstance(job.output, dict) else {}
+            submission_id = output.get("submission_id")
+            if submission_id is None or str(submission_id) not in current:
+                continue
+            previous = output.get("supersedes")
+            if previous:
+                next_current.add(str(previous))
+        current = next_current - superseded
+        superseded.update(current)
+
+    prior_submits: list[JobRecord] = []
+    superseded_submit_times: list[int] = []
+    for job in jobs:
+        if job.job_id == final_job.job_id or job.tool_name != "submit_candidate":
+            continue
+        output = job.output if isinstance(job.output, dict) else {}
+        if output.get("terminal") is not True:
+            continue
+        submission_id = str(output.get("submission_id") or "")
+        if submission_id and submission_id in superseded:
+            superseded_submit_times.append(job.submitted_at)
+            continue
+        prior_submits.append(job)
+    if superseded_submit_times:
+        return min(superseded_submit_times)
+    if prior_submits:
+        return max(job.submitted_at for job in prior_submits) + 1
+    return None
+
+
+def _job_from_row(row: sqlite3.Row) -> JobRecord:
     keys = set(row.keys())
 
     def get(key: str, default: Any = None) -> Any:
@@ -1017,6 +1322,7 @@ def _read_job_readonly(workspace: Workspace, job_id: str) -> JobRecord:
         error_details=_json_load(get("error_details_json"), default=None),
         log_path=row["log_path"],
         workspace=row["workspace"],
+        trajectory_id=get("trajectory_id"),
         workflow_id=get("workflow_id"),
         workflow_node_id=get("workflow_node_id"),
         worker_id=get("worker_id"),
@@ -1030,6 +1336,22 @@ def _read_job_readonly(workspace: Workspace, job_id: str) -> JobRecord:
         finished_at=get("finished_at"),
         cache_hit=bool(get("cache_hit", False)),
     )
+
+
+def _direct_trajectory_node_id(
+    job: JobRecord,
+    index: int,
+    seen: set[str],
+) -> str:
+    base = job.workflow_node_id or job.tool_name or "tool"
+    candidate = base
+    if candidate not in seen:
+        return candidate
+    short_job = job.job_id[4:12] if job.job_id.startswith("job_") else job.job_id[:8]
+    candidate = f"{base}_{short_job}"
+    if candidate not in seen:
+        return candidate
+    return f"{base}_{index}"
 
 
 def _read_artifacts_for_job_readonly(
@@ -1101,831 +1423,73 @@ def _json_load(value: Any, *, default: Any) -> Any:
     if value in (None, ""):
         return default
     try:
-        return json.loads(value)
+        parsed = json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return default
+    return default if parsed is None else parsed
 
 
-_ARCHIVE_RECORD_TABLES = (
-    "agent_candidate_records",
-    "candidate_archive_records",
-    "candidate_archive",
-    "candidate_records",
-)
-_ARCHIVE_SNAPSHOT_TABLES = (
-    "agent_candidate_snapshots",
-    "candidate_archive_snapshots",
-    "candidate_archive_snapshot",
-    "candidate_snapshots",
-    "candidate_snapshot",
-)
-_ARCHIVE_RECORD_JSON_COLUMNS = (
-    "candidate_json",
-    "record_json",
-    "payload_json",
-    "data_json",
-)
-_ARCHIVE_SNAPSHOT_JSON_COLUMNS = (
-    "snapshot_json",
-    "candidates_json",
-    "records_json",
-    "payload_json",
-    "data_json",
-)
+def _workflow_objective_context(wf: WorkflowRecord) -> dict[str, str]:
+    """Natural-language context recorded on a workflow descriptor or params.
 
-
-def _candidate_archive_candidates(
-    workspace: Workspace,
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-    job_ids: list[str],
-    node_ids: list[str],
-    artifacts: list[ReportArtifact],
-) -> list[ReportCandidate]:
-    survivor_snapshot_records = _read_candidate_archive_snapshot(
-        workspace,
-        workflow_id=workflow_id,
-        run_id=run_id,
-        job_ids=job_ids,
-        node_ids=node_ids,
-        kind="survivor",
-    )
-    if survivor_snapshot_records:
-        current_snapshot_records = _read_candidate_archive_snapshot(
-            workspace,
-            workflow_id=workflow_id,
-            run_id=run_id,
-            job_ids=job_ids,
-            node_ids=node_ids,
-            kind="current_round",
-        )
-        if _should_use_current_round_archive_fallback(
-            survivor_snapshot_records,
-            current_snapshot_records,
-        ):
-            return _report_candidates_from_candidate_records(
-                current_snapshot_records,
-                artifacts,
-                source_kind="candidate_archive_snapshot",
-            )
-        return _report_candidates_from_candidate_records(
-            survivor_snapshot_records,
-            artifacts,
-            source_kind="candidate_archive_snapshot",
-        )
-
-    current_snapshot_records = _read_candidate_archive_snapshot(
-        workspace,
-        workflow_id=workflow_id,
-        run_id=run_id,
-        job_ids=job_ids,
-        node_ids=node_ids,
-        kind="current_round",
-    )
-    if current_snapshot_records:
-        return _report_candidates_from_candidate_records(
-            current_snapshot_records,
-            artifacts,
-            source_kind="candidate_archive_snapshot",
-        )
-
-    records = _read_candidate_archive_records(
-        workspace,
-        workflow_id=workflow_id,
-        run_id=run_id,
-        job_ids=job_ids,
-        node_ids=node_ids,
-    )
-    if records:
-        return _report_candidates_from_candidate_records(
-            records,
-            artifacts,
-            source_kind="candidate_archive_record",
-        )
-    return []
-
-
-def _read_candidate_archive_records(
-    workspace: Workspace,
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-    job_ids: list[str],
-    node_ids: list[str],
-) -> list[dict[str, Any]]:
-    conn = _readonly_connection(workspace)
-    try:
-        tables = _existing_tables(conn, _ARCHIVE_RECORD_TABLES)
-        records: list[dict[str, Any]] = []
-        for table in tables:
-            columns = _table_columns(conn, table)
-            if not columns:
-                continue
-            predicates, args = _archive_predicates(
-                columns,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                job_ids=job_ids,
-                node_ids=node_ids,
-            )
-            if not predicates:
-                continue
-            order = _archive_order_by(columns)
-            rows = conn.execute(
-                f"SELECT * FROM {table} WHERE {' OR '.join(predicates)}{order}",
-                args,
-            ).fetchall()
-            records.extend(
-                record
-                for row in rows
-                if (record := _candidate_record_from_archive_row(row, columns)) is not None
-            )
-        return [record for record in records if not _archive_record_is_rejected(record)]
-    finally:
-        conn.close()
-
-
-def _read_candidate_archive_snapshot(
-    workspace: Workspace,
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-    job_ids: list[str],
-    node_ids: list[str],
-    kind: str | None = None,
-) -> list[dict[str, Any]]:
-    conn = _readonly_connection(workspace)
-    try:
-        tables = _existing_tables(conn, _ARCHIVE_SNAPSHOT_TABLES)
-        for table in tables:
-            columns = _table_columns(conn, table)
-            if not columns:
-                continue
-            predicates, args = _archive_predicates(
-                columns,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                job_ids=job_ids,
-                node_ids=node_ids,
-            )
-            clauses: list[str] = []
-            query_args: list[Any] = []
-            if kind and "kind" in columns:
-                clauses.append("kind = ?")
-                query_args.append(kind)
-            if predicates:
-                clauses.append(f"({' OR '.join(predicates)})")
-                query_args.extend(args)
-            where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-            order = _snapshot_order_by(columns)
-            rows = conn.execute(
-                f"SELECT * FROM {table}{where}{order}",
-                query_args,
-            ).fetchall()
-            for row in rows:
-                if kind and "kind" in columns and str(row["kind"]) != kind:
-                    continue
-                if not _snapshot_row_matches_archive_scope(
-                    conn,
-                    row,
-                    columns,
-                    workflow_id=workflow_id,
-                    run_id=run_id,
-                ):
-                    continue
-                records = _candidate_records_from_snapshot_row(conn, row, columns)
-                records = [
-                    record for record in records
-                    if not _archive_record_is_rejected(record)
-                ]
-                records = _archive_records_in_scope(
-                    records,
-                    workflow_id=workflow_id,
-                    run_id=run_id,
-                    job_ids=job_ids,
-                    node_ids=node_ids,
-                )
-                if records:
-                    return records
-        return []
-    finally:
-        conn.close()
-
-
-def _existing_tables(conn: sqlite3.Connection, names: tuple[str, ...]) -> list[str]:
-    placeholders = ",".join("?" for _ in names)
-    rows = conn.execute(
-        f"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ({placeholders})",
-        names,
-    ).fetchall()
-    found = {str(row["name"]) for row in rows}
-    return [name for name in names if name in found]
-
-
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def _snapshot_row_matches_archive_scope(
-    conn: sqlite3.Connection,
-    row: sqlite3.Row,
-    columns: set[str],
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-) -> bool:
-    if run_id and "run_id" in columns and row["run_id"] not in (None, ""):
-        return str(row["run_id"]) == run_id
-    if not workflow_id:
-        return True
-    if "workflow_ids_json" in columns and row["workflow_ids_json"] is not None:
-        workflow_ids = _json_load(row["workflow_ids_json"], default=[])
-        if isinstance(workflow_ids, list) and workflow_ids:
-            return workflow_id in {str(value) for value in workflow_ids}
-    run_id = str(row["run_id"]) if "run_id" in columns and row["run_id"] else None
-    if run_id:
-        run_workflow_ids = _agent_run_workflow_ids(conn, run_id)
-        if run_workflow_ids:
-            return workflow_id in run_workflow_ids
-    return True
-
-
-def _agent_run_workflow_ids(conn: sqlite3.Connection, run_id: str) -> set[str]:
-    tables = _existing_tables(conn, ("agent_runs",))
-    if not tables:
-        return set()
-    columns = _table_columns(conn, "agent_runs")
-    if "workflow_ids_json" not in columns:
-        return set()
-    row = conn.execute(
-        "SELECT workflow_ids_json FROM agent_runs WHERE run_id = ?",
-        (run_id,),
-    ).fetchone()
-    if row is None:
-        return set()
-    workflow_ids = _json_load(row["workflow_ids_json"], default=[])
-    if not isinstance(workflow_ids, list):
-        return set()
-    return {str(value) for value in workflow_ids if value not in (None, "")}
-
-
-def _archive_predicates(
-    columns: set[str],
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-    job_ids: list[str],
-    node_ids: list[str],
-) -> tuple[list[str], list[Any]]:
-    predicates: list[str] = []
-    args: list[Any] = []
-    if run_id and "run_id" in columns:
-        predicates.append("run_id = ?")
-        args.append(run_id)
-    if workflow_id and "workflow_id" in columns:
-        predicates.append("workflow_id = ?")
-        args.append(workflow_id)
-    if job_ids and "job_id" in columns:
-        placeholders = ",".join("?" for _ in job_ids)
-        predicates.append(f"job_id IN ({placeholders})")
-        args.extend(job_ids)
-    node_column = "node_id" if "node_id" in columns else "workflow_node_id"
-    if node_ids and node_column in columns:
-        placeholders = ",".join("?" for _ in node_ids)
-        predicates.append(f"{node_column} IN ({placeholders})")
-        args.extend(node_ids)
-    return predicates, args
-
-
-def _archive_order_by(columns: set[str], *, descending: bool = False) -> str:
-    direction = " DESC" if descending else ""
-    for column in ("rank", "created_at", "updated_at", "id", "candidate_id"):
-        if column in columns:
-            return f" ORDER BY {column}{direction}"
-    return ""
-
-
-def _snapshot_order_by(columns: set[str]) -> str:
-    parts = [
-        f"{column} DESC"
-        for column in ("round_index", "created_at", "updated_at", "id", "snapshot_id")
-        if column in columns
-    ]
-    return f" ORDER BY {', '.join(parts)}" if parts else ""
-
-
-def _candidate_record_from_archive_row(
-    row: sqlite3.Row,
-    columns: set[str],
-) -> dict[str, Any] | None:
-    for column in _ARCHIVE_RECORD_JSON_COLUMNS:
-        if column not in columns:
-            continue
-        payload = _json_load(row[column], default=None)
-        if isinstance(payload, dict):
-            record = None
-            for key in ("candidate", "record"):
-                nested = payload.get(key)
-                if isinstance(nested, dict):
-                    record = dict(nested)
-                    break
-            if record is None:
-                record = dict(payload)
-            return _with_archive_row_metadata(record, row, columns)
-
-    record: dict[str, Any] = {}
-    for column in columns:
-        value = row[column]
-        if value is None:
-            continue
-        if column.endswith("_json"):
-            key = column.removesuffix("_json")
-            record[key] = _json_load(value, default=value)
-        else:
-            record[column] = value
-    return record if record.get("candidate_id") else None
-
-
-def _with_archive_row_metadata(
-    record: dict[str, Any],
-    row: sqlite3.Row,
-    columns: set[str],
-) -> dict[str, Any]:
-    for column in (
-        "round_index",
-        "workflow_id",
-        "node_id",
-        "workflow_node_id",
-        "job_id",
-        "source_node_id",
-        "source_job_id",
-        "status",
-        "snapshot_id",
-        "archive_snapshot_id",
-        "version_id",
-        "run_id",
-    ):
-        if column in columns and row[column] is not None:
-            record.setdefault(column, row[column])
-    if "raw_source_json" in columns and row["raw_source_json"] is not None:
-        raw_source = _json_load(row["raw_source_json"], default={})
-        if isinstance(raw_source, dict):
-            record.setdefault("raw_source", raw_source)
-    if "validation_errors_json" in columns and row["validation_errors_json"] is not None:
-        validation_errors = _json_load(row["validation_errors_json"], default=[])
-        if isinstance(validation_errors, list):
-            record.setdefault("validation_errors", validation_errors)
-    return record
-
-
-def _candidate_records_from_snapshot_row(
-    conn: sqlite3.Connection,
-    row: sqlite3.Row,
-    columns: set[str],
-) -> list[dict[str, Any]]:
-    records = _candidate_records_from_snapshot_refs(conn, row, columns)
-    if records:
-        return [_with_snapshot_row_metadata(record, row, columns) for record in records]
-    for column in _ARCHIVE_SNAPSHOT_JSON_COLUMNS:
-        if column not in columns:
-            continue
-        payload = _json_load(row[column], default=None)
-        records = _legacy_archive_snapshot_payload_records(payload)
-        if records:
-            return [_with_snapshot_row_metadata(record, row, columns) for record in records]
-    return []
-
-
-def _candidate_records_from_snapshot_refs(
-    conn: sqlite3.Connection,
-    row: sqlite3.Row,
-    columns: set[str],
-) -> list[dict[str, Any]]:
-    refs: list[Any] = []
-    exact_version_refs = False
-    if "candidate_refs_json" in columns:
-        parsed = _json_load(row["candidate_refs_json"], default=[])
-        if isinstance(parsed, list):
-            refs = parsed
-            exact_version_refs = bool(refs)
-    if not refs and "candidate_ids_json" in columns:
-        parsed = _json_load(row["candidate_ids_json"], default=[])
-        if isinstance(parsed, list):
-            refs = parsed
-    if not refs or "agent_candidate_records" not in _existing_tables(conn, _ARCHIVE_RECORD_TABLES):
-        return []
-
-    record_columns = _table_columns(conn, "agent_candidate_records")
-    snapshot_run_id = str(row["run_id"]) if "run_id" in columns and row["run_id"] else None
-    if not exact_version_refs:
-        return _hydrate_legacy_candidate_ids_for_report_only(
-            conn,
-            refs,
-            record_columns,
-            snapshot_run_id=snapshot_run_id,
-        )
-
-    records: list[dict[str, Any]] = []
-    for ref in refs:
-        row_record = _candidate_record_row_for_snapshot_ref(
-            conn,
-            ref,
-            record_columns,
-            exact_version_only=True,
-            snapshot_run_id=snapshot_run_id,
-        )
-        if row_record is None:
-            continue
-        record = _candidate_record_from_archive_row(row_record, record_columns)
-        if record is not None:
-            records.append(record)
-    return records
-
-
-def _hydrate_legacy_candidate_ids_for_report_only(
-    conn: sqlite3.Connection,
-    refs: list[Any],
-    columns: set[str],
-    *,
-    snapshot_run_id: str | None = None,
-) -> list[dict[str, Any]]:
-    """Hydrate old ``candidate_ids_json`` snapshots for reports only.
-
-    Executor materialization must use CandidateArchive exact ``candidate_refs``.
+    Current workflow reports are scoped to one user query, not one node/job.
+    The descriptor-level fields are preferred because they describe the whole
+    process; run params are accepted as a fallback for programmatic workflows.
     """
-    records: list[dict[str, Any]] = []
-    for ref in refs:
-        row_record = _candidate_record_row_for_snapshot_ref(
-            conn,
-            ref,
-            columns,
-            exact_version_only=False,
-            snapshot_run_id=snapshot_run_id,
-        )
-        if row_record is None:
-            continue
-        record = _candidate_record_from_archive_row(row_record, columns)
-        if record is not None:
-            records.append(record)
-    return records
 
-
-def _candidate_record_row_for_snapshot_ref(
-    conn: sqlite3.Connection,
-    ref: Any,
-    columns: set[str],
-    *,
-    exact_version_only: bool = False,
-    snapshot_run_id: str | None = None,
-) -> sqlite3.Row | None:
-    if isinstance(ref, dict):
-        version_id = _clean_ref_value(
-            ref.get("version_id")
-            or ref.get("candidate_version_id")
-            or ref.get("ref")
-        )
-        if version_id and "version_id" in columns:
-            clauses = ["version_id = ?"]
-            args: list[Any] = [version_id]
-            if snapshot_run_id and "run_id" in columns:
-                clauses.append("run_id = ?")
-                args.append(snapshot_run_id)
-            row = conn.execute(
-                f"SELECT * FROM agent_candidate_records WHERE {' AND '.join(clauses)}",
-                args,
-            ).fetchone()
-            return row
-        if exact_version_only:
-            return None
-        candidate_id = _clean_ref_value(ref.get("candidate_id") or ref.get("id"))
-    else:
-        if exact_version_only:
-            return None
-        candidate_id = _clean_ref_value(ref)
-    if not candidate_id or "candidate_id" not in columns:
-        return None
-    clauses = ["candidate_id = ?", "lower(status) != 'rejected'"]
-    args = [candidate_id]
-    if snapshot_run_id and "run_id" in columns:
-        clauses.append("run_id = ?")
-        args.append(snapshot_run_id)
-    return conn.execute(
-        f"""
-        SELECT * FROM agent_candidate_records
-        WHERE {' AND '.join(clauses)}
-        ORDER BY round_index DESC, created_at DESC
-        LIMIT 1
-        """,
-        args,
-    ).fetchone()
-
-
-def _clean_ref_value(value: Any) -> str | None:
-    if value in (None, ""):
-        return None
-    return str(value)
-
-
-def _with_snapshot_row_metadata(
-    record: dict[str, Any],
-    row: sqlite3.Row,
-    columns: set[str],
-) -> dict[str, Any]:
-    out = dict(record)
-    snapshot_id = row["snapshot_id"] if "snapshot_id" in columns else None
-    if snapshot_id is not None:
-        out.setdefault("archive_snapshot_id", snapshot_id)
-        out.setdefault("snapshot_id", snapshot_id)
-    if "kind" in columns and row["kind"] is not None:
-        kind = str(row["kind"])
-        out.setdefault("archive_snapshot_kind", kind)
-        out.setdefault("status", "survivor" if kind == "survivor" else "current")
-    if "round_index" in columns and row["round_index"] is not None:
-        out.setdefault("snapshot_round_index", row["round_index"])
-    for column in ("workflow_id", "node_id", "workflow_node_id", "job_id"):
-        if column in columns and row[column] is not None:
-            out.setdefault(column, row[column])
-    if "run_id" in columns and row["run_id"] is not None:
-        out.setdefault("archive_snapshot_run_id", row["run_id"])
-    if "workflow_ids_json" in columns and row["workflow_ids_json"] is not None:
-        workflow_ids = _json_load(row["workflow_ids_json"], default=[])
-        if isinstance(workflow_ids, list):
-            out.setdefault("archive_snapshot_workflow_ids", workflow_ids)
+    descriptor = _workflow_descriptor_mapping(wf.descriptor)
+    user_query = _first_text(
+        descriptor.get("user_query"),
+        wf.params.get("user_query") if isinstance(wf.params, dict) else None,
+        wf.params.get("query") if isinstance(wf.params, dict) else None,
+    )
+    objective = _first_text(
+        descriptor.get("objective"),
+        descriptor.get("design_objective"),
+        wf.params.get("objective") if isinstance(wf.params, dict) else None,
+        wf.params.get("design_objective") if isinstance(wf.params, dict) else None,
+    )
+    out: dict[str, str] = {}
+    if user_query:
+        out["user_query"] = user_query
+    if objective:
+        out["objective"] = objective
     return out
 
 
-def _legacy_archive_snapshot_payload_records(payload: Any) -> list[dict[str, Any]]:
-    """Report-only compatibility for old archive snapshot JSON payloads.
-
-    This helper is intentionally reached only from archive snapshot tables. It
-    must not be used for ``agent_summaries`` or executor materialization.
-    """
-    if isinstance(payload, list):
-        return [dict(item) for item in payload if isinstance(item, dict)]
-    if not isinstance(payload, dict):
-        return []
-    for key in (
-        "candidates",
-        "candidate_records",
-        "records",
-        "survivor_pool",
-        "current_round_candidates",
-    ):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return [dict(item) for item in value if isinstance(item, dict)]
-    for key in ("snapshot", "candidate_snapshot", "archive_snapshot"):
-        nested = payload.get(key)
-        if isinstance(nested, dict):
-            records = _legacy_archive_snapshot_payload_records(nested)
-            if records:
-                return records
-    return []
+def _workflow_descriptor_mapping(descriptor_yaml: str | None) -> dict[str, Any]:
+    if not descriptor_yaml:
+        return {}
+    try:
+        raw = yaml.safe_load(descriptor_yaml) or {}
+    except yaml.YAMLError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
 
 
-def _archive_record_is_rejected(record: dict[str, Any]) -> bool:
-    source = record.get("source") if isinstance(record.get("source"), dict) else {}
-    status = record.get("archive_status") or record.get("status") or source.get("archive_status")
-    return str(status or "").lower() == "rejected"
-
-
-def _archive_records_in_scope(
-    records: list[dict[str, Any]],
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-    job_ids: list[str],
-    node_ids: list[str],
-) -> list[dict[str, Any]]:
-    return [
-        record
-        for record in records
-        if _archive_record_matches_scope(
-            record,
-            workflow_id=workflow_id,
-            run_id=run_id,
-            job_ids=job_ids,
-            node_ids=node_ids,
-        )
-    ]
-
-
-def _archive_record_matches_scope(
-    record: dict[str, Any],
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-    job_ids: list[str],
-    node_ids: list[str],
-) -> bool:
-    if not workflow_id and not run_id and not job_ids and not node_ids:
-        return True
-    source = record.get("source") if isinstance(record.get("source"), dict) else {}
-    raw_source = record.get("raw_source") if isinstance(record.get("raw_source"), dict) else {}
-    if run_id:
-        run_values = {
-            str(value)
-            for value in (
-                record.get("run_id"),
-                record.get("archive_snapshot_run_id"),
-                source.get("run_id"),
-                source.get("archive_snapshot_run_id"),
-                raw_source.get("run_id"),
-            )
-            if value not in (None, "")
-        }
-        if run_values and run_id not in run_values:
-            return False
-    if workflow_id:
-        workflow_values = _archive_workflow_scope_values(record, source, raw_source)
-        if workflow_values:
-            return workflow_id in workflow_values
-    job_values = {
-        str(value)
-        for value in (
-            record.get("source_job_id"),
-            record.get("job_id"),
-            source.get("source_job_id"),
-            source.get("job_id"),
-            raw_source.get("job_id"),
-        )
-        if value not in (None, "")
-    }
-    if job_values.intersection(str(job_id) for job_id in job_ids):
-        return True
-    node_values = {
-        str(value)
-        for value in (
-            record.get("source_node_id"),
-            record.get("node_id"),
-            record.get("workflow_node_id"),
-            source.get("source_node_id"),
-            source.get("node_id"),
-            raw_source.get("node_id"),
-        )
-        if value not in (None, "")
-    }
-    if node_values.intersection(str(node_id) for node_id in node_ids):
-        return True
-    return False
-
-
-def _should_use_current_round_archive_fallback(
-    survivor_records: list[dict[str, Any]],
-    current_records: list[dict[str, Any]],
-) -> bool:
-    if not survivor_records or not current_records:
-        return False
-    survivor_run_ids = _archive_record_run_ids(survivor_records)
-    current_run_ids = _archive_record_run_ids(current_records)
-    if not survivor_run_ids or survivor_run_ids != current_run_ids:
-        return False
-    return not any(_record_has_scores(record) for record in survivor_records) and any(
-        _record_has_scores(record) for record in current_records
-    )
-
-
-def _archive_record_run_ids(records: list[dict[str, Any]]) -> set[str]:
-    return {
-        str(value)
-        for record in records
-        for value in (record.get("archive_snapshot_run_id"), record.get("run_id"))
-        if value not in (None, "")
-    }
-
-
-def _record_has_scores(record: dict[str, Any]) -> bool:
-    scores = record.get("scores")
-    if isinstance(scores, dict) and scores:
-        return True
-    candidate_scores = _candidate_score_map(record)
-    return bool(candidate_scores)
-
-
-def _archive_workflow_scope_values(
-    record: dict[str, Any],
-    source: dict[str, Any],
-    raw_source: dict[str, Any],
-) -> set[str]:
-    values: list[Any] = []
-    for payload in (record, source, raw_source):
-        values.extend(
-            [
-                payload.get("workflow_id"),
-                payload.get("source_workflow_id"),
-                payload.get("representative_workflow_id"),
-                payload.get("workflow_ids"),
-                payload.get("source_workflow_ids"),
-            ]
-        )
-    return set(_string_values(values))
-
-
-def _string_values(values: list[Any]) -> list[str]:
-    out: list[str] = []
-    pending = list(values)
-    while pending:
-        value = pending.pop(0)
-        if isinstance(value, (list, tuple, set)):
-            pending[0:0] = list(value)
-            continue
+def _first_text(*values: Any) -> str:
+    for value in values:
         if value in (None, ""):
             continue
-        out.append(str(value))
-    return out
-
-
-def _report_candidates_from_candidate_records(
-    records: list[dict[str, Any]],
-    artifacts: list[ReportArtifact],
-    *,
-    source_kind: str,
-) -> list[ReportCandidate]:
-    candidates: list[ReportCandidate] = []
-    for idx, record in enumerate(records):
-        if not isinstance(record, dict):
-            continue
-        if _archive_record_is_rejected(record):
-            continue
-        candidate = _report_candidate_from_candidate_record(
-            record,
-            idx,
-            artifacts,
-            source_kind=source_kind,
-        )
-        if candidate is not None:
-            candidates.append(candidate)
-    _attach_qc_and_analysis(candidates, [], merge_global_metrics=False)
-    return _dedupe_candidates(candidates)
-
-
-def _report_candidate_from_candidate_record(
-    record: dict[str, Any],
-    index: int,
-    artifacts: list[ReportArtifact],
-    *,
-    source_kind: str,
-) -> ReportCandidate | None:
-    candidate_id = str(record.get("candidate_id") or record.get("id") or "").strip()
-    if not candidate_id:
-        return None
-    structure_path = _first_str(
-        record,
-        *_STRUCTURE_PATH_KEYS,
-        "full_structure_path",
-        "backbone_path",
-    )
-    stable_structure_path = _stable_structure_path(structure_path, artifacts)
-    source = deepcopy(record.get("source")) if isinstance(record.get("source"), dict) else {}
-    raw_source = (
-        record.get("raw_source") if isinstance(record.get("raw_source"), dict) else {}
-    )
-    source_node_id = (
-        record.get("source_node_id")
-        or record.get("node_id")
-        or record.get("workflow_node_id")
-        or source.get("node_id")
-        or raw_source.get("node_id")
-    )
-    source_job_id = (
-        record.get("source_job_id")
-        or record.get("job_id")
-        or source.get("job_id")
-        or raw_source.get("job_id")
-    )
-    source.setdefault("kind", source_kind)
-    source.setdefault("round_index", record.get("round_index"))
-    source.setdefault("archive_status", record.get("archive_status") or record.get("status"))
-    source.setdefault(
-        "archive_snapshot_id",
-        record.get("archive_snapshot_id") or record.get("snapshot_id"),
-    )
-    source.setdefault("source_node_id", source_node_id)
-    source.setdefault("source_job_id", source_job_id)
-    source.setdefault("node_id", source_node_id)
-    source.setdefault("job_id", source_job_id or source.get("source_job_id"))
-    source.setdefault("tool", record.get("tool") or record.get("source_tool"))
-    return ReportCandidate(
-        candidate_id=candidate_id,
-        rank=_as_int(record.get("rank")) or index + 1,
-        score=_as_float(record.get("score") or record.get("ranking_score")),
-        sequence=_first_str(record, "sequence", "designed_sequence"),
-        structure_path=stable_structure_path,
-        scores=_candidate_score_map(record),
-        qc_flags=_string_list(record.get("qc_flags") or record.get("flags")),
-        liabilities=_list(record.get("liabilities")),
-        source=source,
-        artifacts=_candidate_record_artifacts(record, stable_structure_path, artifacts),
-    )
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
 
 
 def _candidate_score_map(record: dict[str, Any]) -> dict[str, Any]:
     scores = record.get("scores")
     if isinstance(scores, dict):
         out = deepcopy(scores)
+        for namespace, block in list(out.items()):
+            if not isinstance(block, dict):
+                continue
+            normalized = _score_map(block)
+            if normalized:
+                out[namespace] = {**block, **normalized}
         for key, value in _score_map(record).items():
-            out.setdefault(key, value)
+            if key not in out:
+                out[key] = value
         return out
     return _score_map(record)
 
@@ -2136,44 +1700,14 @@ def _candidates_from_submission(
     return out
 
 
-def _enrich_final_candidates_from_records(
-    workspace: Workspace,
-    *,
-    workflow_id: str | None,
-    run_id: str | None,
-    job_ids: list[str],
-    node_ids: list[str],
+def _enrich_final_candidates_from_current_candidates(
     final_candidates: list[ReportCandidate],
-    artifacts: list[ReportArtifact],
+    current_candidates: list[ReportCandidate],
 ) -> list[ReportCandidate]:
-    """Backfill final picks with their full recorded per-candidate evidence.
-
-    ``submit_candidate`` persists a lossy candidate row (often just ``score`` +
-    ``plddt``), so a final pick reconstructed from the submission can be missing
-    the protein-QC / structure-analysis metrics the engine *did* record on the
-    same design's ``agent_candidate_records`` row. Join by ``candidate_id`` and
-    merge the richer record's scores, flags, liabilities, and artifacts back in
-    — never overriding the submission's own values, and never touching the
-    candidate's ``source`` (so it stays recognised as the final pick). The
-    result: a final pick surfaces the same evidence as any survivor from the
-    run, instead of looking like it skipped the evaluators that actually ran.
-    """
+    """Backfill final picks from candidates already collected for this report."""
     if not final_candidates:
         return final_candidates
-    records = _read_candidate_archive_records(
-        workspace,
-        workflow_id=workflow_id,
-        run_id=run_id,
-        job_ids=job_ids,
-        node_ids=node_ids,
-    )
-    if not records:
-        return final_candidates
-    by_id: dict[str, ReportCandidate] = {}
-    for rich in _report_candidates_from_candidate_records(
-        records, artifacts, source_kind="candidate_archive_record",
-    ):
-        by_id.setdefault(rich.candidate_id, rich)
+    by_id = {candidate.candidate_id: candidate for candidate in current_candidates}
     enriched: list[ReportCandidate] = []
     for candidate in final_candidates:
         rich = by_id.get(candidate.candidate_id)
@@ -2192,34 +1726,6 @@ def _enrich_final_candidates_from_records(
             )
         )
     return enriched
-
-
-def _auto_submission_from_candidates(
-    candidates: list[ReportCandidate],
-) -> tuple[dict[str, Any], list[ReportCandidate]]:
-    candidate = candidates[0]
-    submission = {
-        "submission_id": "auto_selected",
-        "outcome": "accepted",
-        "terminal": True,
-        "reasoning": (
-            "Auto-selected highest ranked available candidate because no explicit "
-            "submit_candidate output was produced."
-        ),
-        "supersedes": None,
-        "auto_selected": True,
-    }
-    final = replace(
-        candidate,
-        source={
-            **candidate.source,
-            "kind": "final_submission",
-            "submission_id": "auto_selected",
-            "reasoning": submission["reasoning"],
-            "auto_selected": True,
-        },
-    )
-    return submission, [final]
 
 
 # Field names adapters use to surface a structure artifact path on a
@@ -2765,8 +2271,10 @@ def _raw_workflow_summary(
     state: str,
     nodes: list[WorkflowNodeSummary],
     artifacts: list[ReportArtifact],
+    user_query: str | None = None,
+    objective: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    summary = {
         "workflow_id": workflow_id,
         "name": name,
         "version": version,
@@ -2786,6 +2294,133 @@ def _raw_workflow_summary(
         ],
         "artifacts": [_artifact_summary(a) for a in artifacts],
     }
+    if user_query:
+        summary["user_query"] = user_query
+    if objective:
+        summary["objective"] = objective
+    return summary
+
+
+def _raw_trajectory_summary(
+    *,
+    source_job_id: str,
+    nodes: list[WorkflowNodeSummary],
+    artifacts: list[ReportArtifact],
+) -> dict[str, Any]:
+    context = _trajectory_objective_context(nodes)
+    summary = {
+        "source_job_id": source_job_id,
+        "scope": "direct_workspace_until_submit_candidate",
+        "nodes": [
+            {
+                "node_id": node.node_id,
+                "tool": node.tool,
+                "state": node.state,
+                "job_id": node.job_id,
+                "upstream": node.upstream,
+                "output": _compact(node.output),
+                "artifacts": [_artifact_summary(a) for a in node.artifacts],
+                "error_code": node.error_code,
+                "error_message": node.error_message,
+            }
+            for node in nodes
+        ],
+        "artifacts": [_artifact_summary(a) for a in artifacts],
+    }
+    summary.update(context)
+    return summary
+
+
+def _raw_trajectory_report_summary(
+    *,
+    trajectory: TrajectoryRecord,
+    nodes: list[WorkflowNodeSummary],
+    artifacts: list[ReportArtifact],
+    top_level_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    context = _trajectory_objective_context(nodes)
+    summary = {
+        "trajectory_id": trajectory.trajectory_id,
+        "scope": "trajectory",
+        "workspace": trajectory.workspace,
+        "user_query": trajectory.user_query,
+        "objective": trajectory.objective,
+        "top_level_events": top_level_events or [],
+        "nodes": [
+            {
+                "node_id": node.node_id,
+                "tool": node.tool,
+                "state": node.state,
+                "job_id": node.job_id,
+                "workflow_id": node.workflow_id,
+                "upstream": node.upstream,
+                "output": _compact(node.output),
+                "artifacts": [_artifact_summary(a) for a in node.artifacts],
+                "error_code": node.error_code,
+                "error_message": node.error_message,
+            }
+            for node in nodes
+        ],
+        "artifacts": [_artifact_summary(a) for a in artifacts],
+    }
+    if "user_query" not in context:
+        context["user_query"] = trajectory.user_query
+    if trajectory.objective and "objective" not in context:
+        context["objective"] = trajectory.objective
+    summary.update(context)
+    return summary
+
+
+def _min_not_none(values: list[int | None]) -> int | None:
+    present = [int(v) for v in values if v is not None]
+    return min(present) if present else None
+
+
+def _max_not_none(values: list[int | None]) -> int | None:
+    present = [int(v) for v in values if v is not None]
+    return max(present) if present else None
+
+
+def _trajectory_objective_context(nodes: list[WorkflowNodeSummary]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for node in nodes:
+        params = node.params if isinstance(node.params, dict) else {}
+        output = node.output if isinstance(node.output, dict) else {}
+        query = _first_text(
+            params.get("user_query"),
+            params.get("natural_language_request"),
+            params.get("request"),
+            params.get("query") if _looks_like_user_query(params.get("query")) else None,
+            output.get("user_query"),
+        )
+        if query and "user_query" not in out:
+            out["user_query"] = query
+        objective = _first_text(
+            params.get("objective"),
+            params.get("design_objective"),
+            output.get("objective"),
+            output.get("design_objective"),
+        )
+        if objective and "objective" not in out:
+            out["objective"] = objective
+        for key in ("thresholds", "acceptance_criteria", "success_criteria"):
+            value = params.get(key)
+            if value not in (None, "", {}, []) and key not in out:
+                out[key] = value
+        if "user_query" in out and "objective" in out:
+            break
+    return out
+
+
+def _looks_like_user_query(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("/", "{", "[")):
+        return False
+    return bool(" " in stripped or len(stripped) > 32)
 
 
 def _artifact_summary(artifact: ReportArtifact) -> dict[str, Any]:
@@ -2843,6 +2478,12 @@ def _score_map(row: dict[str, Any]) -> dict[str, Any]:
         nested = row.get(nested_key)
         if isinstance(nested, dict):
             out.update(_score_map(nested))
+    for key, nested in row.items():
+        if key in _NESTED_SCORE_KEYS or not isinstance(nested, dict):
+            continue
+        nested_keys = set(nested)
+        if nested_keys & (set(_SCORE_KEYS) | set(_NESTED_SCORE_KEYS)):
+            out.update(_score_map(nested))
     for key in _SCORE_KEYS:
         if key not in row:
             continue
@@ -2854,6 +2495,15 @@ def _score_map(row: dict[str, Any]) -> dict[str, Any]:
     # Normalize aliases so downstream renderers can look up a single name.
     if "plddt" not in out and "mean_plddt" in out:
         out["plddt"] = out["mean_plddt"]
+    if "iptm" not in out and "mean_iptm" in out:
+        out["iptm"] = out["mean_iptm"]
+    if "ipsae" not in out:
+        for alias in ("ipsae_score", "ipsae_max", "interface_pae"):
+            if alias in out:
+                out["ipsae"] = out[alias]
+                break
+    if "ptm" not in out and "tm_score" in out:
+        out["ptm"] = out["tm_score"]
     if "pae" not in out and "mean_pae" in out:
         out["pae"] = out["mean_pae"]
     return out
@@ -2919,8 +2569,29 @@ def _report_candidate_from_merged_record(
         if isinstance(artifact, ReportArtifact)
     ]
     positions = _report_candidate_merge_positions(record, len(candidates))
+    structure_path = (
+        record.get("structure_path")
+        if isinstance(record.get("structure_path"), str)
+        else representative.structure_path
+    )
+    if not structure_path:
+        for position in positions:
+            if 0 <= position < len(candidates) and candidates[position].structure_path:
+                structure_path = candidates[position].structure_path
+                break
+    if not artifacts:
+        seen_artifacts: set[str] = set()
+        for position in positions:
+            if position < 0 or position >= len(candidates):
+                continue
+            for artifact in candidates[position].artifacts:
+                if artifact.path in seen_artifacts:
+                    continue
+                seen_artifacts.add(artifact.path)
+                artifacts.append(artifact)
     return replace(
         representative,
+        structure_path=structure_path,
         scores=dict(record.get("scores") or {}),
         qc_flags=_merged_report_qc_flags(positions, candidates),
         liabilities=_merged_report_liabilities(positions, candidates),
@@ -3104,308 +2775,6 @@ def _compact(value: Any, *, depth: int = 0) -> Any:
             for key, item in list(value.items())[:50]
         }
     return str(value)
-
-
-# --------------------------------------------------------------------------- agent transcript
-
-
-def _collect_agent_transcript(
-    workspace: Workspace,
-    *,
-    run_id: str | None = None,
-    workflow_id: str | None = None,
-    job_id: str | None = None,
-) -> AgentTranscript | None:
-    """Pull the LLM-agent conversation that produced this workflow / job.
-
-    Looks up the ``agent_runs`` row whose ``workflow_ids_json`` /
-    ``job_ids_json`` contains the given id, then loads the message log,
-    last validated plan, and final report. Returns ``None`` when:
-
-    * no agent run is associated with this workflow / job (e.g. it was
-      submitted as a direct-tool call), OR
-    * the associated run carries no user message and no assistant
-      message (purely-prevalidated submission with nothing to show).
-
-    Failures (DB errors, malformed rows) are swallowed and return
-    ``None`` — the rest of the report still renders.
-    """
-    if not run_id and not workflow_id and not job_id:
-        return None
-    try:
-        # Local import to avoid a circular dependency at module-load time
-        # (the agents.session module pulls in heavier deps that the
-        # reporting layer should not require for non-agent runs).
-        from vibeproteinagent.agents.session.store import AgentSessionStore
-
-        store = AgentSessionStore(workspace)
-        run = store.get_run(run_id) if run_id else _find_agent_run_for(
-            store, workflow_id=workflow_id, job_id=job_id,
-        )
-        if run is None:
-            return None
-        details = store.get_run_details(run.run_id)
-    except Exception:
-        return None
-
-    messages_raw = details.get("messages") or []
-    tool_calls_raw = details.get("tool_calls") or []
-    plans_raw = details.get("plans") or []
-    decisions_raw = details.get("decisions") or []
-    summaries_raw = details.get("summaries") or []
-    run_record = details.get("run") or {}
-
-    messages: list[AgentMessage] = []
-    for row in messages_raw:
-        if not isinstance(row, dict):
-            continue
-        content = str(row.get("content") or "").strip()
-        if not content:
-            continue
-        messages.append(
-            AgentMessage(
-                role=str(row.get("role") or "assistant"),
-                content=content,
-                timestamp_ms=_as_int(row.get("created_at")),
-                model=row.get("model"),
-                token_count=_as_int(row.get("token_count")),
-            )
-        )
-
-    tool_calls: list[AgentToolCall] = []
-    for row in tool_calls_raw:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("tool_name") or "").strip()
-        if not name:
-            continue
-        args = row.get("args")
-        tool_calls.append(
-            AgentToolCall(
-                tool_name=name,
-                args=args if isinstance(args, dict) else {},
-                result=row.get("result"),
-                ok=bool(row.get("ok", True)),
-                timestamp_ms=_as_int(row.get("created_at")),
-            )
-        )
-
-    decisions: list[AgentDecision] = []
-    for row in decisions_raw:
-        if not isinstance(row, dict):
-            continue
-        decision_obj = row.get("decision") if isinstance(row.get("decision"), dict) else {}
-        next_round_raw = decision_obj.get("next_round")
-        next_round = next_round_raw if isinstance(next_round_raw, dict) else {}
-        notes_raw = decision_obj.get("notes")
-        decisions.append(
-            AgentDecision(
-                round_index=int(row.get("round_index") or 0),
-                decision_label=str(decision_obj.get("decision") or "decision"),
-                next_round_recommended=bool(next_round.get("recommended", False)),
-                reason=str(next_round.get("reason") or ""),
-                notes=notes_raw if isinstance(notes_raw, list) else [],
-                metrics_used=[
-                    str(m) for m in (decision_obj.get("metrics_used") or [])
-                    if isinstance(m, (str, int, float))
-                ],
-                raw=decision_obj,
-                timestamp_ms=_as_int(row.get("created_at")),
-            )
-        )
-
-    step_summaries: list[AgentStepSummary] = []
-    for row in summaries_raw:
-        if not isinstance(row, dict):
-            continue
-        body = row.get("summary") if isinstance(row.get("summary"), dict) else {}
-        is_workflow = bool(body.get("workflow_id")) and "nodes" in body
-        error = body.get("error") if isinstance(body.get("error"), dict) else None
-        step_summaries.append(
-            AgentStepSummary(
-                kind="workflow" if is_workflow else "job",
-                workflow_id=row.get("workflow_id") or body.get("workflow_id"),
-                job_id=row.get("job_id") or body.get("job_id"),
-                tool=body.get("tool"),
-                state=body.get("state"),
-                name=body.get("name"),
-                error_message=(error or {}).get("message") or body.get("error_message"),
-                metrics_used=[
-                    str(m) for m in (body.get("metrics_used") or [])
-                    if isinstance(m, (str, int, float))
-                ],
-                raw=body,
-                timestamp_ms=_as_int(row.get("created_at")),
-            )
-        )
-
-    # User query: prefer the first explicit user message; fall back to
-    # ``agent_runs.user_request`` so we still have something when the
-    # message log was pruned.
-    user_query = ""
-    for m in messages:
-        if m.role == "user":
-            user_query = m.content
-            break
-    if not user_query:
-        user_query = str(run_record.get("user_request") or "").strip()
-    if not user_query and not any(m.role == "assistant" for m in messages):
-        # Nothing useful to surface.
-        return None
-
-    # Plan: pick the most-recently-validated plan; fall back to the last
-    # plan of any status so we still show *something* even mid-run.
-    plan_structured: dict[str, Any] | None = None
-    validated_statuses = {"validated", "validated_next_round", "submitted"}
-    for entry in reversed(plans_raw):
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("status") in validated_statuses:
-            plan_structured = entry.get("plan") if isinstance(entry.get("plan"), dict) else None
-            break
-    if plan_structured is None:
-        for entry in reversed(plans_raw):
-            if isinstance(entry, dict) and isinstance(entry.get("plan"), dict):
-                plan_structured = entry["plan"]
-                break
-
-    # Plan text: take the *last assistant message before the final*
-    # — that's typically where the agent explains the plan it generated.
-    plan_text: str | None = None
-    assistant_msgs = [m for m in messages if m.role == "assistant"]
-    if len(assistant_msgs) >= 2:
-        plan_text = assistant_msgs[0].content
-    elif assistant_msgs and not plan_structured:
-        # Only one assistant message exists; treat it as the plan
-        # unless it clearly reads as a final wrap-up.
-        plan_text = assistant_msgs[0].content
-
-    # Final response: prefer agent_runs.final_report_json text; fall
-    # back to the last assistant message.
-    final_response: str | None = None
-    final_report = run_record.get("final_report")
-    if isinstance(final_report, dict):
-        for key in ("summary", "final_response", "narrative", "answer", "text"):
-            value = final_report.get(key)
-            if isinstance(value, str) and value.strip():
-                final_response = value.strip()
-                break
-    if not final_response and len(assistant_msgs) >= 2:
-        final_response = assistant_msgs[-1].content
-
-    return AgentTranscript(
-        run_id=str(run_record.get("run_id") or run.run_id),
-        user_query=user_query,
-        plan_text=plan_text,
-        plan_structured=plan_structured,
-        final_response=final_response,
-        messages=messages,
-        tool_calls=tool_calls,
-        decisions=decisions,
-        step_summaries=step_summaries,
-        model=run_record.get("model"),
-        provider=run_record.get("provider"),
-        started_at_ms=_as_int(run_record.get("created_at")),
-        finished_at_ms=_as_int(run_record.get("updated_at")),
-    )
-
-
-def _find_agent_run_for(
-    store: Any,
-    *,
-    workflow_id: str | None,
-    job_id: str | None,
-) -> Any | None:
-    """Scan recent agent runs for one whose workflow/job lists contain our id.
-
-    ``agent_runs`` doesn't have a reverse index from workflow → run, so we
-    list the most-recent N runs and match in Python. This is O(N) but N is
-    bounded (typical workspace has a small handful of agent runs); the
-    sample data uses ≤3 runs per session.
-    """
-    try:
-        runs = store.list_runs(limit=200)
-    except Exception:
-        return None
-    for run in runs:
-        wf_ids = getattr(run, "workflow_ids", None) or []
-        job_ids = getattr(run, "job_ids", None) or []
-        if workflow_id and workflow_id in wf_ids:
-            return run
-        if job_id and job_id in job_ids:
-            return run
-    return None
-
-
-def _agent_allows_auto_selection(workspace: Workspace, workflow_id: str) -> bool:
-    """Return true only for agent runs that explicitly exhausted round budget.
-
-    Report collection is also used for direct workflows and one-off jobs. Those
-    should show explored candidates, but not invent a final answer. The agent
-    controller sets this marker only when max_rounds is reached without a
-    submit_candidate result.
-    """
-    try:
-        from vibeproteinagent.agents.session.store import AgentSessionStore
-
-        store = AgentSessionStore(workspace)
-        run = _find_agent_run_for(store, workflow_id=workflow_id, job_id=None)
-        if run is None:
-            return False
-        details = store.get_run_details(run.run_id)
-    except Exception:
-        return False
-
-    for row in reversed(details.get("decisions") or []):
-        if not isinstance(row, dict):
-            continue
-        decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
-        fallback = decision.get("fallback_final_selection")
-        if isinstance(fallback, dict):
-            return fallback.get("auto_select") is True
-    return False
-
-
-def _agent_submission_outputs(
-    workspace: Workspace,
-    *,
-    workflow_id: str | None,
-    job_id: str | None,
-    run_id: str | None = None,
-) -> list[dict[str, Any]]:
-    try:
-        from vibeproteinagent.agents.session.store import AgentSessionStore
-
-        store = AgentSessionStore(workspace)
-        run = store.get_run(run_id) if run_id else _find_agent_run_for(
-            store, workflow_id=workflow_id, job_id=job_id,
-        )
-        if run is None:
-            return []
-        details = store.get_run_details(run.run_id)
-    except Exception:
-        return []
-
-    submissions: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in details.get("decisions") or []:
-        if not isinstance(row, dict):
-            continue
-        decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
-        submission = decision.get("submission")
-        if not isinstance(submission, dict) or submission.get("terminal") is not True:
-            continue
-        submission_id = str(submission.get("submission_id") or "")
-        key = submission_id or json.dumps(submission, sort_keys=True, default=str)
-        if key in seen:
-            continue
-        seen.add(key)
-        row_submission = dict(submission)
-        if decision.get("submit_job_id"):
-            row_submission.setdefault("job_id", decision.get("submit_job_id"))
-        row_submission.setdefault("node_id", "post_round_decision")
-        submissions.append(row_submission)
-    return submissions
 
 
 __all__ = ["collect_report_model"]

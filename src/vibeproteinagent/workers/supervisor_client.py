@@ -8,6 +8,7 @@ from typing import Any
 
 from vibeproteinagent.core.errors import (
     DaemonUnavailableError,
+    DaemonWorkspaceMismatchError,
     ErrorCode,
     VPAError,
 )
@@ -96,6 +97,49 @@ class SupervisorClient:
 
     def worker_info(self) -> dict[str, Any]:
         return self._call({"op": "worker_info"})
+
+    def runtime_info(self) -> dict[str, Any]:
+        """Best-effort supervisor metadata, including workspace ownership."""
+        if not self.is_running():
+            return {
+                "running": False,
+                "pid": self.pid(),
+                "socket": str(self.socket_path),
+                "workspace": None,
+                "workspace_root": None,
+            }
+        info = self.worker_info()
+        return {
+            "running": True,
+            "pid": self.pid(),
+            "socket": str(self.socket_path),
+            "workspace": info.get("workspace"),
+            "workspace_root": info.get("workspace_root"),
+            "workers": info.get("workers", []),
+        }
+
+    def require_workspace(self, workspace_name: str) -> dict[str, Any]:
+        """Return runtime info, or fail if the live daemon owns another workspace."""
+        info = self.runtime_info()
+        if not info.get("running"):
+            return info
+        actual = info.get("workspace")
+        if isinstance(actual, str) and actual and actual != workspace_name:
+            raise DaemonWorkspaceMismatchError(
+                "running supervisor is attached to a different workspace",
+                details={
+                    "requested_workspace": workspace_name,
+                    "supervisor_workspace": actual,
+                    "supervisor_workspace_root": info.get("workspace_root"),
+                    "pid": info.get("pid"),
+                    "socket": info.get("socket"),
+                    "hint": (
+                        "use the supervisor workspace, stop/restart the daemon "
+                        "for the requested workspace, or choose a separate runtime dir"
+                    ),
+                },
+            )
+        return info
 
     def warm(
         self,

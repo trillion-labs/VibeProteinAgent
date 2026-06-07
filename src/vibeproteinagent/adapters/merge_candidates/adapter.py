@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
-from vibeproteinagent.agents.planning.candidate_merge import merge_candidate_records
+from vibeproteinagent.candidates.schema import validate_candidate_v1
+from vibeproteinagent.candidates.merge import merge_candidate_records
 
 
 class MergeCandidatesInput(BaseModel):

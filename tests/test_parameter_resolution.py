@@ -23,6 +23,23 @@ def _candidate(structure_path: str, sequence: str = "ACDE") -> dict:
     }
 
 
+def _protenix_candidate(cif_path: str, pdb_path: str | None, sequence: str = "ACDE") -> dict:
+    return {
+        "schema_version": "candidate_v1",
+        "candidate_id": "cand_protenix",
+        "source": {"tool": "protenix_v2"},
+        "structure_path": cif_path,
+        "sequence": sequence,
+        "scores": {"protenix_v2": {"plddt": 91.0}},
+        "artifacts": {
+            "protenix_v2": {
+                "predicted_cif": cif_path,
+                "predicted_pdb": pdb_path,
+            }
+        },
+    }
+
+
 def _pdb(tmp_path) -> str:
     path = tmp_path / "complex.pdb"
     path.write_text(
@@ -68,6 +85,79 @@ def test_downstream_proteinmpnn_derives_path_and_chains(tmp_path) -> None:
     assert provenance["pdb_path"] == "upstream_candidate"
     assert provenance["chains"] == "runtime_derived"
     assert {event["field"] for event in events} >= {"pdb_path", "chains"}
+
+
+def test_pdb_only_downstream_prefers_protenix_predicted_pdb() -> None:
+    candidate = _protenix_candidate("/tmp/predicted.cif", "/tmp/predicted.pdb")
+
+    inputs, provenance, _events = normalize_tool_parameters(
+        tool="proteinmpnn",
+        inputs={"candidates": [candidate], "num_designs": 2},
+        provenance={"candidates": "compiled_wiring", "num_designs": "planner_literal"},
+        original_inputs={"candidates": "${outputs.protenix.candidates}"},
+    )
+
+    assert inputs["pdb_path"] == "/tmp/predicted.pdb"
+    assert provenance["pdb_path"] == "upstream_candidate"
+
+
+def test_true_pdb_only_downstream_rejects_cif_without_predicted_pdb() -> None:
+    candidate = _protenix_candidate("/tmp/predicted.cif", None)
+
+    with pytest.raises(InvalidParamsError) as exc_info:
+        normalize_tool_parameters(
+            tool="ligandmpnn",
+            inputs={"candidates": [candidate], "num_designs": 2},
+            provenance={"candidates": "compiled_wiring", "num_designs": "planner_literal"},
+            original_inputs={"candidates": "${outputs.protenix.candidates}"},
+        )
+
+    event = exc_info.value.details["parameter_conflict_event"]
+    assert event["field"] == "pdb_path"
+    assert event["status"] == "failed_missing_pdb_artifact"
+    assert event["structure_path"] == "/tmp/predicted.cif"
+
+
+def test_proteinmpnn_keeps_cif_fallback_when_no_predicted_pdb() -> None:
+    candidate = _protenix_candidate("/tmp/predicted.cif", None)
+
+    inputs, provenance, _events = normalize_tool_parameters(
+        tool="proteinmpnn",
+        inputs={"candidates": [candidate], "num_designs": 2},
+        provenance={"candidates": "compiled_wiring", "num_designs": "planner_literal"},
+        original_inputs={"candidates": "${outputs.protenix.candidates}"},
+    )
+
+    assert inputs["pdb_path"] == "/tmp/predicted.cif"
+    assert provenance["pdb_path"] == "upstream_candidate"
+
+
+def test_pyrosetta_derives_predicted_pdb_from_candidate_stream() -> None:
+    candidate = _protenix_candidate("/tmp/predicted.cif", "/tmp/predicted.pdb")
+
+    inputs, provenance, _events = normalize_tool_parameters(
+        tool="pyrosetta",
+        inputs={"candidates": [candidate], "mode": "score"},
+        provenance={"candidates": "compiled_wiring", "mode": "planner_literal"},
+        original_inputs={"candidates": "${outputs.protenix.candidates}"},
+    )
+
+    assert inputs["pdb_path"] == "/tmp/predicted.pdb"
+    assert provenance["pdb_path"] == "upstream_candidate"
+
+
+def test_cif_capable_downstream_keeps_protenix_cif() -> None:
+    candidate = _protenix_candidate("/tmp/predicted.cif", "/tmp/predicted.pdb")
+
+    inputs, provenance, _events = normalize_tool_parameters(
+        tool="protein_qc",
+        inputs={"candidates": [candidate], "metrics": ["plddt"]},
+        provenance={"candidates": "compiled_wiring", "metrics": "planner_literal"},
+        original_inputs={"candidates": "${outputs.protenix.candidates}"},
+    )
+
+    assert inputs["pdb_path"] == "/tmp/predicted.cif"
+    assert provenance["pdb_path"] == "upstream_candidate"
 
 
 def test_user_explicit_chains_are_preserved_when_compatible(tmp_path) -> None:
@@ -162,7 +252,7 @@ def test_runtime_candidate_stream_is_allowed_when_wired() -> None:
         tool="rank_designs",
         inputs={"candidates": [], "top_k": 1},
         provenance={"candidates": "compiled_wiring", "top_k": "planner_literal"},
-        original_inputs={"candidates": "${outputs.prior_round.candidates}", "top_k": 1},
+        original_inputs={"candidates": "${outputs.external_candidates.candidates}", "top_k": 1},
     )
 
     assert inputs["candidates"] == []

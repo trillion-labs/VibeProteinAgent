@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibeproteinagent.agents.planning.parameter_ownership import (
+from vibeproteinagent.workflows.parameter_policies import (
     fallback_policy,
     planner_ownership_hints,
     policy_for,

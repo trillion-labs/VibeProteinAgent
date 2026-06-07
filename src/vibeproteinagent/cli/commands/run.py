@@ -27,6 +27,7 @@ from vibeproteinagent.workspace import (
     Workspace,
     now_us,
 )
+from vibeproteinagent.workers.supervisor_client import SupervisorClient
 
 
 def run(
@@ -59,6 +60,7 @@ def run(
         ),
     ),
     workspace: str | None = typer.Option(None, "--workspace", help="Workspace name."),
+    trajectory: str | None = typer.Option(None, "--trajectory", help="Trajectory id (traj_*)."),
     timeout_ms: int | None = typer.Option(None, "--timeout-ms", help="Server-side timeout."),
     retry: int = typer.Option(0, "--retry", help="Max auto-retries on retryable errors."),
     json_: bool = typer.Option(False, "--json"),
@@ -69,7 +71,12 @@ def run(
         registry.discover()
         descriptor, _ = registry.get(tool, "*")
         ws = _ensure_workspace(workspace)
+        runtime_info = SupervisorClient().require_workspace(ws.name)
         store = JobStore(ws)
+        if trajectory is not None:
+            from vibeproteinagent.workspace import TrajectoryStore
+
+            TrajectoryStore(ws).get(trajectory)
 
         salt = resolve_salt(force_new)
 
@@ -84,6 +91,7 @@ def run(
                     priority=priority,
                     call_id=None,  # call_id is per-job; leave unset for batch
                     workspace_name=ws.name,
+                    trajectory_id=trajectory,
                     max_retries=retry,
                     salt=salt,
                 )
@@ -97,7 +105,10 @@ def run(
                 )
                 return
             print_envelope_ok(
-                {"jobs": [_job_to_dict(j) for j in jobs]},
+                {
+                    "jobs": [_job_to_dict(j) for j in jobs],
+                    **_execution_payload(ws.name, runtime_info),
+                },
                 json_mode=json_,
             )
             return
@@ -110,6 +121,7 @@ def run(
             priority=priority,
             call_id=call_id,
             workspace_name=ws.name,
+            trajectory_id=trajectory,
             max_retries=retry,
             salt=salt,
         )
@@ -129,8 +141,10 @@ def run(
             "version": rec.tool_version,
             "params_hash": rec.params_hash,
             "workspace": rec.workspace,
+            "trajectory_id": rec.trajectory_id,
             "submitted_at": rec.submitted_at,
             "queued_at": rec.queued_at,
+            **_execution_payload(ws.name, runtime_info),
         }
         if idempotent_hit:
             payload["idempotent_hit"] = True
@@ -159,6 +173,28 @@ def _build_params(params_file: str | None, kv_pairs: list[str] | None) -> dict[s
     return base
 
 
+def _execution_payload(workspace_name: str, runtime_info: dict[str, Any]) -> dict[str, Any]:
+    daemon_running = bool(runtime_info.get("running"))
+    supervisor_workspace = runtime_info.get("workspace")
+    return {
+        "daemon_running": daemon_running,
+        "requested_workspace": workspace_name,
+        "supervisor_workspace": supervisor_workspace,
+        "workspace_match": (
+            daemon_running
+            and isinstance(supervisor_workspace, str)
+            and supervisor_workspace == workspace_name
+        ),
+        "execution_ready": (
+            daemon_running
+            and (
+                supervisor_workspace is None
+                or str(supervisor_workspace) == workspace_name
+            )
+        ),
+    }
+
+
 def _submit_one(
     store: JobStore,
     descriptor: ToolDescriptor,
@@ -167,6 +203,7 @@ def _submit_one(
     priority: str,
     call_id: str | None,
     workspace_name: str,
+    trajectory_id: str | None = None,
     max_retries: int = 0,
     salt: str | None = None,
 ) -> tuple[JobRecord, bool]:
@@ -192,6 +229,7 @@ def _submit_one(
         call_id=call_id,
         priority=priority,
         workspace_name=workspace_name,
+        trajectory_id=trajectory_id,
         max_retries=int(max_retries),
         salt=salt,
         input_schema=resolve_input_schema_dict(descriptor),
@@ -219,6 +257,7 @@ def _job_to_dict(rec: JobRecord) -> dict[str, Any]:
         "version": rec.tool_version,
         "params_hash": rec.params_hash,
         "workspace": rec.workspace,
+        "trajectory_id": rec.trajectory_id,
         "submitted_at": rec.submitted_at,
         "queued_at": rec.queued_at,
     }
@@ -242,9 +281,10 @@ def _follow_many(
     import json as _json
     from pathlib import Path
 
-    from vibeproteinagent.workers.supervisor_client import SupervisorClient
-
-    supervisor_running = SupervisorClient().is_running()
+    runtime_info = SupervisorClient().runtime_info()
+    supervisor_running = bool(runtime_info.get("running"))
+    supervisor_workspace = runtime_info.get("workspace")
+    requested_workspace = store.workspace.name
 
     deadline = time.time() + (timeout_ms / 1000.0 if timeout_ms else 60.0)
     last_states: dict[str, str] = {}
@@ -391,6 +431,9 @@ def _follow_many(
                             "ts": now_us() / 1_000_000,
                             "payload": {
                                 "state": r.state.value,
+                                "daemon_running": supervisor_running,
+                                "requested_workspace": requested_workspace,
+                                "supervisor_workspace": supervisor_workspace,
                                 "hint": "supervisor not running; "
                                         "start it with `vpa daemon start`",
                             },
@@ -411,6 +454,9 @@ def _follow_many(
                     "ts": now_us() / 1_000_000,
                     "payload": {
                         "state": cur,
+                        "daemon_running": supervisor_running,
+                        "requested_workspace": requested_workspace,
+                        "supervisor_workspace": supervisor_workspace,
                         "hint": "follow timed out",
                     },
                 }

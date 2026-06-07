@@ -4,132 +4,147 @@
 [![Use: Non-commercial](https://img.shields.io/badge/use-non--commercial-cc0980.svg)](#license)
 [![Python: 3.11+](https://img.shields.io/badge/python-3.11%2B-1a1535.svg)](pyproject.toml)
 
-**VibeProteinAgent (VPA)** is a local-first, GPU-ready protein design
-framework. It lets an agent install and run protein design tools, keep durable
-workspace evidence, and produce inspectable reports from natural-language
-protein requests.
+**VibeProteinAgent (VPA)** helps coding agents run local protein-design tools
+for you. You describe the installation task or protein-design goal in natural
+language; Codex or Claude Code agents choose the VPA tools,
+runs them, checks the evidence, and gives you an inspectable HTML report.
 
-<!-- ![VPA framework](assets/readme/vpa_framework.png) -->
 ![VPA report snapshot](assets/readme/vpa-report-snapshot.svg)
 
 ## Why Use VPA?
 
-- **One interface for many protein tools.** VPA wraps retrieval, sequence
-  analysis, backbone and binder design, structure prediction, docking, QC,
-  ranking, and reporting behind one `vpa` command surface.
-- **Agent-first workflow.** Codex, Claude Code, or another coding agent reads
-  the repo instructions, chooses the right VPA workflow, runs it, checks
-  evidence, and reports the result.
-- **Local-first execution.** Workspaces, logs, candidate records, artifacts,
-  caches, and reports stay on your machine or cluster storage.
-- **GPU-tool friendly.** Persistent workers and sidecars reduce cold starts for
-  heavyweight protein models.
-- **Reportable results.** Completed agent runs, workflows, and direct jobs can
-  be rendered as HTML or bundle reports for inspection and replay.
+- **One interface for many tools.** Retrieval, sequence analysis, backbone and
+  binder design, structure prediction, docking, QC, ranking, and reporting all
+  sit behind a single `vpa` command surface.
+- **Agent-first.** Codex or Claude Code reads the repo skills,
+  picks the tools that fit your objective, runs them, and analyzes the evidence.
+- **Local-first, no design-API bills.** Models run on your own GPUs; once you
+  have a coding agent you can run autonomous protein design without subscribing
+  to a hosted protein-design service. (First-party code is source-available for
+  non-commercial use — see [License](#license).)
+- **Built for GPU tools.** Persistent workers and warm sidecars keep heavyweight
+  models resident, cutting cold starts across repeated jobs.
+- **Inspectable reports.** Every run produces a self-contained HTML report with
+  interactive 3D structure rendering, per-candidate statistics, comparison
+  tables, and rankings.
+
+## Requirements
+
+- **Hugging Face token.** ESM3 requires gated downloads; export
+  `HF_TOKEN` before installing so VPA can fetch them when needed.
+- **OS / GPU.** Linux with NVIDIA GPU(s). Each GPU tool runs one model per GPU;
+  the heaviest single tool needs ~24 GiB VRAM (most need 1–20 GiB), so any modern
+  ≥24 GiB card runs the full tool set (Reference install: 8× NVIDIA B200).
+- **CUDA / Python.** Driver supporting CUDA 12.8 (the env ships
+  `torch 2.7.1+cu128`); Python 3.11+.
+- **Disk.** The Python/PyTorch environment is about 14 GB. Protein tools also
+  download their own sidecars and model checkpoints/weights as needed, and
+  those are usually the large part. For the full GPU profile, plan for well over
+  100 GB and leave room for growth as you enable more tools (the reference
+  weight/checkpoint cache is ~256 GB). A focused subset of tools needs much
+  less.
+
+## Activate The Installed Runtime
+
+Full GPU tool readiness is defined by the installed VPA runtime. After
+installation, activate the runtime before asking Codex or Claude Code to run
+protein-design jobs:
+
+```bash
+export VPA_HOME=/path/to/your/.vibeproteinagent
+source "$VPA_HOME/env.sh"
+```
+
+Then verify the same shell sees the expected command and tools:
+
+```bash
+vpa version
+vpa tools --json
+```
+
+For a full-profile install, heavyweight tools such as `boltzgen`, `bindcraft`,
+`pxdesign`, `protenix_v2`, and `boltz2_affinity` should report
+`available=true`. If they do not, run `vpa install doctor --profile full` from
+that activated shell and repair the reported tool/runtime gap before launching
+long jobs.
+
+## How It Feels To Use
+
+You do not need to memorize VPA commands for normal use. Ask your coding agent
+for the result you want:
+
+```text
+Install VPA into /vpa and check that the full GPU profile is ready.
+```
+
+or:
+
+```text
+Design 50-80 aa soluble mini-protein binders to chain A of `/path/to/target.pdb`.
+Return the strongest candidates with structures, quality check, ranking, a final submission decision, and an HTML report.
+```
+
+The external agent reads the skills in this repo, decides the command boundary,
+derives objective thresholds, runs the tools/workflows, analyzes the outputs, and generates the HTML summary report.
 
 ## Use With Codex
 
-Open this repository in Codex and ask it to install VPA:
+Open this repository in Codex and ask in natural language. For example:
 
 ```text
 Install VibeProteinAgent into /vpa.
-Use VPA_HOME=/vpa, install the full profile with CUDA auto-detection, run
-vpa install doctor --profile full, and tell me whether VPA is ready.
+Use the full profile with CUDA auto-detection, run doctor, and tell me whether
+VPA is ready.
 ```
 
 Then send a protein request:
 
 ```text
-Run this VPA query in workspace [workspace name]:
-Design 50-80 aa soluble mini-protein binders to chain A of `[your_folder]/target.pdb`.
-Return the top 5 candidates with structures, QC, ranking, and an HTML report.
+Design 50-80 aa soluble mini-protein binders to chain A of `/path/to/target.pdb`.
+Return the strongest candidates with structures, quality check, ranking, a final submission decision, and an HTML report.
 ```
 
-Codex reads [AGENTS.md](AGENTS.md) and [skills.md](skills.md) from this repo, so
-plain natural language is the portable interface. Codex custom slash prompts are
-local to `~/.codex/prompts`; this repository does not rely on them.
+Codex uses [AGENTS.md](AGENTS.md) and the [`skills/`](skills) directory to
+decide what to run. The portable interface is plain language.
 
 ## Use With Claude Code
 
-Open this repository in Claude Code. You can use the same natural-language
-prompts as above, or use the project command included in this repo:
+In Claude Code, use the project command included in this repo:
 
 ```text
-/vpa Install VibeProteinAgent into /vpa. Use the full profile, CUDA
-auto-detection, and run doctor when done.
+/vpa Install VibeProteinAgent into /vpa. Use the full profile with CUDA
+auto-detection, run doctor, and report readiness.
 ```
 
-Then run a query:
+Then run a protein request through the same command:
 
 ```text
-/vpa Run this VPA query in workspace [workspace name]:
-Design 50-80 aa soluble mini-protein binders to chain A of `[your_folder]/target.pdb`.
-Return the top 5 candidates with structures, QC, ranking, and an HTML report.
+Design 50-80 aa soluble mini-protein binders to chain A of `/path/to/target.pdb`.
+Return the strongest candidates with structures, quality check, ranking, a final submission decision, and an HTML report.
 ```
 
 The `/vpa` command is defined at [.claude/commands/vpa.md](.claude/commands/vpa.md).
-It is a Claude Code convenience wrapper around the same repo instructions.
+It is a convenience wrapper around the same repo skills used by Codex.
 
-## What The Agent Runs
+## How Results Are Decided
 
-For installation, the agent should run the equivalent of:
-
-```bash
-export VPA_HOME=/vpa
-npx vibeproteinagent install --profile full --cuda-profile auto --yes
-source /vpa/env.sh
-vpa install doctor --profile full
-```
-
-If your environment needs gated model downloads, provide the needed token first:
-
-```bash
-export HF_TOKEN=<huggingface-access-token>
-```
-
-## Example Protein Queries
-
-After installation, include the target file, goal, constraints, and what you want
-back.
+For protein-design work, the external agent makes the objective and acceptance
+thresholds explicit, then *explores*: it tries different tools and approaches,
+compares the evidence, and iterates to push the objective as high as it can
+before finishing with a recorded submission. The aim is the strongest candidate;
+let the evidence decide when the returns plateau.
 
 ```text
-Run this VPA query in workspace [workspace name]:
-Design 50-80 aa soluble mini-protein binders to chain A of `[your_folder]/target.pdb`.
-Return the top 5 candidates with structures, QC, ranking, and an HTML report.
+objective -> thresholds -> explore tools/workflows -> evidence -> rank
+   ^                                                                |
+   +------------------ iterate to maximize the objective -----------+
+-> submit -> report
 ```
 
-For retrieval or analysis:
-
-```text
-Run this VPA query in workspace [workspace name]:
-Find representative proteins for this GO term, screen sequence liabilities,
-rank the strongest candidates, and generate a report.
-```
-
-For a sequence-only check:
-
-```text
-Run this VPA query in workspace [workspace name]:
-Analyze this sequence for basic developability risks and report the evidence:
-ACDEFGHIKLMNPQRSTVWY
-```
-
-Or provide a FASTA file path instead of pasting the sequence:
-
-```text
-Run this VPA query in workspace [workspace name]:
-Analyze the FASTA file at `[your_folder]/sequences.fasta` for basic developability
-risks and report the evidence.
-```
-
-The agent should handle workspace setup, workers, planning, execution, ranking,
-submission or answer selection, and report generation through VPA's repo
-instructions in [AGENTS.md](AGENTS.md), [skills.md](skills.md), and
-[agent_workflows/](agent_workflows/).
+VPA itself stays a stateless, deterministic substrate; the external agent owns
+the exploration loop and runs as many jobs as the objective warrants.
 
 ## Cite
-
-If you use VPA in research, cite:
 
 ```bibtex
 @software{vpa2026vibeproteinagent,
@@ -142,8 +157,6 @@ If you use VPA in research, cite:
 ```
 
 Citation metadata is also available in [CITATION.cff](CITATION.cff).
-
-Questions about VPA can be directed to Hyunjin Seo at bella72@kaist.ac.kr.
 
 ## License
 

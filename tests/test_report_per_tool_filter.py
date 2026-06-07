@@ -15,13 +15,14 @@ from pathlib import Path
 
 from vibeproteinagent.reporting.models import ReportCandidate, WorkflowNodeSummary
 from vibeproteinagent.reporting.render import (
-    _PerToolCand,
     _extract_chains_from_structure,
     _node_candidate_map,
     _node_details,
+    _PerToolCand,
     _score_bars,
     _search_sequence_widget,
     _slice_node_output_for_candidate,
+    _structure_analysis_widget,
     _structure_has_plddt,
     _tool_display_name,
     _viewer_block,
@@ -194,6 +195,7 @@ def test_slice_swaps_in_per_candidate_structure_analysis_artifacts():
                 "interface": {"ligand_contact_count": 4},
                 "secondary_structure": {"helix": 49, "sheet": 0, "loop": 11},
                 "ligand_contacts": {"contact_count": 4},
+                "ligand_pocket": {"ligand_buried_fraction": 0.5},
                 "liability_count": 2,
             }
         },
@@ -211,6 +213,7 @@ def test_slice_swaps_in_per_candidate_structure_analysis_artifacts():
             "liabilities": [{"type": "node_level_leak"}],
             "secondary_structure": {"helix": 1, "sheet": 1, "loop": 1},
             "ligand_contacts": {"contact_count": 0},
+            "ligand_pocket": {"ligand_buried_fraction": 0.0},
             "candidates": [cand],
         },
     )
@@ -222,6 +225,7 @@ def test_slice_swaps_in_per_candidate_structure_analysis_artifacts():
     # can't be loaded).
     assert sliced["burial"]["buried"] == 7
     assert sliced["interface"]["ligand_contact_count"] == 4
+    assert sliced["ligand_pocket"]["ligand_buried_fraction"] == 0.5
     # The node-level aggregates must NOT leak into this candidate's panel.
     assert "liabilities" not in sliced
     assert "secondary_structure" not in sliced
@@ -252,6 +256,21 @@ def test_slice_keeps_node_artifacts_when_candidate_has_none():
     sliced = _slice_node_output_for_candidate(node.output, cand)
     assert sliced["artifacts"] == node_arts
     assert sliced["burial"]["buried"] == 5
+
+
+def test_structure_analysis_widget_uses_corrected_ligand_contact_residue_count():
+    html = _structure_analysis_widget(
+        {
+            "artifacts": {},
+            "interface": {"ligand_contact_count": 1},
+            "ligand_pocket": {"ligand_buried_fraction": 0.5},
+        }
+    )
+
+    assert "Ligand contacts" in html
+    assert "Ligand buried" in html
+    assert ">1</text>" in html
+    assert ">50</text>" in html
 
 
 # --------------------------------------------------------------------------- #

@@ -68,7 +68,12 @@ nodes:
 
 
 def test_round_trip_python_builder_to_yaml(tmp_path: Path) -> None:
-    wf = Workflow(name="rt", version="0.1.0")
+    wf = Workflow(
+        name="rt",
+        version="0.1.0",
+        user_query="Design fixed-backbone sequences for chain A.",
+        objective="Find low-risk sequences that satisfy the recorded thresholds.",
+    )
     wf.node("a", tool="noop", inputs={"payload": "${params.msg}"})
     wf.node("b", tool="noop", inputs={"payload": "${outputs.a.payload}-b"})
 
@@ -78,6 +83,8 @@ def test_round_trip_python_builder_to_yaml(tmp_path: Path) -> None:
 
     assert loaded.name == wf.name
     assert loaded.version == wf.version
+    assert loaded.user_query == wf.user_query
+    assert loaded.objective == wf.objective
     assert [n.id for n in loaded.nodes] == ["a", "b"]
     assert loaded.nodes[1].inputs == {"payload": "${outputs.a.payload}-b"}
 

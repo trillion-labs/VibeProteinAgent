@@ -1,7 +1,7 @@
 name: interpro_sequences
 version: "1.0.0"
 category: retrieval
-description: "Legacy/internal InterPro-specific UniProt sequence retrieval used by search_sequence. Directly callable for exact InterPro debug workflows, but normal agent planning should use search_sequence."
+description: "Legacy/internal InterPro-specific UniProt sequence retrieval used by search_sequence. Directly callable for exact InterPro debug workflows."
 runtime: python
 backend: numpy
 gpu_required: false

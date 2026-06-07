@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 from vibeproteinagent.adapters._confidence import normalize_plddt
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 _AA3_TO_1 = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",

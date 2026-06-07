@@ -201,7 +201,10 @@ def test_build_cmd_runs_generation_pipeline_without_filter(tmp_path):
     joined = " ".join(cmd)
     assert "sampling_steps=10" in joined
 
-def test_build_env_hygiene():
+def test_build_env_hygiene(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("VPA_HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
     env = _build_env(seed=None)
     assert env["PYTHONNOUSERSITE"] == "1"
     assert "PYTHONPATH" not in env or env["PYTHONPATH"].endswith("/src")
@@ -209,6 +212,13 @@ def test_build_env_hygiene():
     assert env["HYDRA_FULL_ERROR"] == "1"
     env_seed = _build_env(seed=7)
     assert env_seed["PYTHONHASHSEED"] == "7"
+
+
+def test_build_env_promotes_hf_token_alias(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("VPA_HF_TOKEN", "hf_test")
+    env = _build_env(seed=None)
+    assert env["HF_TOKEN"] == "hf_test"
 
 
 def test_detect_failure_stage_from_logs(tmp_path):
@@ -257,6 +267,45 @@ def test_boltzgen_subprocess_failure_records_artifact_paths(monkeypatch, tmp_pat
     assert details["stdout_path"].endswith("boltzgen.stdout.log")
     assert details["stderr_path"].endswith("boltzgen.stderr.log")
     assert "hydride" in details["stderr_tail"]
+
+
+def test_boltzgen_analysis_failure_recovers_refolded_designs(monkeypatch, tmp_path):
+    pdb = tmp_path / "target.pdb"
+    pdb.write_text("END\n")
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter._check_paths", lambda: None)
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.BOLTZGEN_CACHE", tmp_path / "cache")
+    (tmp_path / "cache").mkdir()
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.BOLTZGEN_TREE", tmp_path)
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.torch.cuda.is_available", lambda: True)
+
+    def fake_run(cmd, **kwargs):
+        out = tmp_path / "job" / "outputs" / "intermediate_designs_inverse_folded" / "refold_cif"
+        out.mkdir(parents=True)
+        (out / "design_00.cif").write_text("# fake")
+        (out / "design_01.cif").write_text("# fake")
+        kwargs["stdout"].write("Computed metrics successfully for 0 out of 2.\n")
+        kwargs["stderr"].write("AssertionError during analysis\n")
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr("vibeproteinagent.adapters.boltzgen.adapter.subprocess.run", fake_run)
+    adapter = object.__new__(BoltzGenAdapter)
+    adapter.device = None
+
+    out = adapter.run(
+        BoltzGenInput(
+            target_pdb=str(pdb),
+            binder_length=42,
+            num_designs=2,
+            num_diffusion_steps=5,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.num_designs_returned == 2
+    assert len(out.candidates) == 2
+    assert all(d.length == 42 for d in out.designs)
+    assert out.warnings
+    assert any("analysis" in warning for warning in out.warnings)
 
 
 def test_collect_designs_reads_refolded_outputs(tmp_path):

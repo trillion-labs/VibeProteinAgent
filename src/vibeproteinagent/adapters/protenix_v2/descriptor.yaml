@@ -1,7 +1,7 @@
 name: protenix_v2
 version: "1.0.0"
 category: structure_prediction
-description: "AlphaFold3-class state-of-the-art 3D structure prediction for proteins, complexes, nucleic acids, and small molecules from a Protenix-format input JSON. Optional MSA/templates and configurable sampling/recycling. Use `boltz2_affinity` when binding affinity is also needed."
+description: "AlphaFold3-class 3D structure prediction for proteins, complexes, nucleic acids, and small molecules from a Protenix-format input JSON. Optional MSA/templates and configurable sampling/recycling. Use `boltz2_affinity` when binding affinity is also needed."
 runtime: python
 backend: pytorch
 gpu_required: true

@@ -10,9 +10,11 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from vibeproteinagent.adapters._confidence import normalize_plddt, plddt_unit_score
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.workspace import JobStore, Workspace
 
 
 class RankDesignsInput(BaseModel):
+    job_ids: list[str] = Field(default_factory=list)
     predictions: list[dict[str, Any]] = Field(default_factory=list)
     analyses: list[dict[str, Any]] = Field(default_factory=list)
     qc_results: list[dict[str, Any]] = Field(default_factory=list)
@@ -42,6 +44,7 @@ class RankDesignsOutput(BaseModel):
     ranked_candidates: list[dict[str, Any]]
     ranked_json: str
     ranked_tsv: str
+    warnings: list[str] = Field(default_factory=list)
     runtime_ms: int
 
 
@@ -84,6 +87,238 @@ def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if value is not None}
 
 
+def _candidate_rows_from_output(output: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = output.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        rows = [item for item in candidates if isinstance(item, dict)]
+        if (
+            rows
+            and len(rows) == len(candidates)
+            and all(_is_canonical_candidate(row) for row in rows)
+        ):
+            return [_row_from_canonical_candidate(row) for row in rows]
+    rows: list[dict[str, Any]] = []
+    for key in (
+        "ranked_candidates",
+        "top_candidates",
+        "top_designs",
+        "designs",
+        "predictions",
+        "representative_sequences",
+    ):
+        rows.extend(item for item in _as_list(output.get(key)) if isinstance(item, dict))
+    if not rows and output:
+        rows.append(dict(output))
+    return rows
+
+
+def _canonical_candidates_from_output(output: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = output.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return []
+    rows = [item for item in candidates if isinstance(item, dict)]
+    if len(rows) != len(candidates) or not all(_is_canonical_candidate(row) for row in rows):
+        return []
+    return rows
+
+
+def _source_value(row: dict[str, Any], key: str) -> Any:
+    source = row.get("source") if isinstance(row.get("source"), dict) else {}
+    return source.get(key)
+
+
+def _meaningful_identity_keys(row: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    for name in ("candidate_id", "name", "id", "seed", "header"):
+        value = row.get(name)
+        if value not in (None, ""):
+            keys.append(f"{name}:{value}")
+    for name in ("local_id", "native_id"):
+        value = _source_value(row, name)
+        if value not in (None, ""):
+            keys.append(f"source.{name}:{value}")
+    for name in ("structure_path", "predicted_cif", "predicted_pdb", "pdb_path", "cif_path"):
+        value = row.get(name)
+        if value not in (None, ""):
+            keys.append(f"structure:{Path(str(value)).name}")
+    sequence = row.get("sequence")
+    if sequence not in (None, ""):
+        keys.append(f"sequence:{sequence}")
+    return keys
+
+
+def _merge_mapping(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(left)
+    for key, value in right.items():
+        if value in (None, "", [], {}):
+            continue
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_mapping(current, value)
+        elif current in (None, "", [], {}):
+            merged[key] = value
+        elif current == value:
+            continue
+        elif key in {"source_job_id", "source_tool"}:
+            plural = f"{key}s"
+            values = merged.setdefault(plural, [])
+            if isinstance(values, list):
+                for item in (current, value):
+                    if item not in values:
+                        values.append(item)
+        else:
+            continue
+    return merged
+
+
+def _join_rows_by_identity(
+    *,
+    predictions: list[dict[str, Any]],
+    analyses: list[dict[str, Any]],
+    qc_results: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, dict[str, Any]]], list[str]]:
+    groups: list[dict[str, dict[str, Any]]] = []
+    key_to_group: dict[str, int] = {}
+    warnings: list[str] = []
+
+    for bucket, rows in (
+        ("prediction", predictions),
+        ("analysis", analyses),
+        ("qc", qc_results),
+        ("candidate", candidates),
+    ):
+        for index, row in enumerate(rows):
+            meaningful_keys = _meaningful_identity_keys(row)
+            position_key = f"position:{index}"
+            lookup_keys = meaningful_keys or [position_key]
+            group_index = next(
+                (key_to_group[key] for key in lookup_keys if key in key_to_group),
+                None,
+            )
+            if group_index is None:
+                group_index = len(groups)
+                groups.append({})
+            group = groups[group_index]
+            if bucket in group:
+                group[bucket] = _merge_mapping(group[bucket], row)
+            else:
+                group[bucket] = dict(row)
+            for key in [*meaningful_keys, position_key]:
+                key_to_group.setdefault(key, group_index)
+
+    for index, group in enumerate(groups, start=1):
+        if not group.get("prediction") and not group.get("candidate"):
+            buckets = ", ".join(sorted(group))
+            warnings.append(
+                f"rank_designs could not match {buckets} evidence group {index} "
+                "to a prediction or candidate; ranked it as standalone evidence."
+            )
+    return groups, warnings
+
+
+def _bucket_for_tool(tool_name: str) -> str:
+    if tool_name in {"protenix_v2", "boltzgen", "esm3", "esm2"}:
+        return "predictions"
+    if tool_name in {
+        "ipsae",
+        "prodigy",
+        "tmalign",
+        "structure_analysis",
+        "boltz2_affinity",
+    }:
+        return "analyses"
+    if tool_name in {"protein_qc", "sequence_analysis"}:
+        return "qc_results"
+    return "candidates"
+
+
+def _rows_from_jobs(
+    ctx: AdapterRunContext,
+    job_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    if not job_ids:
+        return {"predictions": [], "analyses": [], "qc_results": [], "candidates": []}
+    workspace = Workspace(ctx.workspace_root.name, ctx.workspace_root)
+    store = JobStore(workspace)
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "predictions": [],
+        "analyses": [],
+        "qc_results": [],
+        "candidates": [],
+    }
+    canonical_candidates: list[dict[str, Any]] = []
+    evidence_by_candidate_id: dict[str, dict[str, set[str]]] = {}
+    for job_id in job_ids:
+        job = store.get(job_id)
+        output = job.output if isinstance(job.output, dict) else {}
+        canonical_rows = _canonical_candidates_from_output(output)
+        if canonical_rows:
+            for candidate in canonical_rows:
+                canonical_candidates.append(candidate)
+                candidate_id = str(candidate.get("candidate_id") or "")
+                if candidate_id:
+                    evidence = evidence_by_candidate_id.setdefault(
+                        candidate_id,
+                        {"job_ids": set(), "tools": set()},
+                    )
+                    evidence["job_ids"].add(job.job_id)
+                    evidence["tools"].add(job.tool_name)
+            continue
+        bucket = _bucket_for_tool(job.tool_name)
+        for row in _candidate_rows_from_output(output):
+            row.setdefault("source_job_id", job.job_id)
+            row.setdefault("source_tool", job.tool_name)
+            buckets[bucket].append(row)
+    if canonical_candidates:
+        merged = _merge_rank_canonical_candidates(canonical_candidates)
+        for candidate in merged:
+            candidate_id = str(candidate.get("candidate_id") or "")
+            evidence = evidence_by_candidate_id.get(candidate_id, {})
+            row = _row_from_canonical_candidate(candidate)
+            row["evidence_job_ids"] = sorted(evidence.get("job_ids") or [])
+            row["evidence_tools"] = sorted(evidence.get("tools") or [])
+            buckets["candidates"].append(row)
+    return buckets
+
+
+def _merge_rank_canonical_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for candidate in candidates:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            candidate_id = f"position:{len(order)}"
+        if candidate_id not in groups:
+            order.append(candidate_id)
+        groups.setdefault(candidate_id, []).append(candidate)
+
+    merged: list[dict[str, Any]] = []
+    for candidate_id in order:
+        group = groups[candidate_id]
+        current = dict(group[0])
+        current["scores"] = dict(group[0].get("scores") or {})
+        current["artifacts"] = dict(group[0].get("artifacts") or {})
+        current["capabilities"] = dict(group[0].get("capabilities") or {})
+        for candidate in group[1:]:
+            for key in ("sequence", "structure_path", "backbone_path", "full_structure_path"):
+                if candidate.get(key):
+                    current[key] = candidate[key]
+            for namespace, payload in (candidate.get("scores") or {}).items():
+                current.setdefault("scores", {}).setdefault(namespace, payload)
+            for namespace, payload in (candidate.get("artifacts") or {}).items():
+                current.setdefault("artifacts", {}).setdefault(namespace, payload)
+            for key, value in (candidate.get("capabilities") or {}).items():
+                current.setdefault("capabilities", {})[key] = (
+                    bool(current["capabilities"].get(key)) or bool(value)
+                )
+        merged.append(current)
+    return merged
+
+
 def _metric(row: dict[str, Any], key: str) -> float | None:
     value = row.get(key)
     if value is None and isinstance(row.get("metrics"), dict):
@@ -122,11 +357,15 @@ def _first_value(*rows: dict[str, Any], keys: tuple[str, ...]) -> Any:
 def _candidate_id(
     idx: int,
     prediction: dict[str, Any],
+    analysis: dict[str, Any],
+    qc: dict[str, Any],
     candidate: dict[str, Any],
 ) -> str:
     value = _first_value(
         candidate,
         prediction,
+        analysis,
+        qc,
         keys=("candidate_id", "name", "id", "seed", "header"),
     )
     if value:
@@ -176,7 +415,17 @@ def _score(
     )
     iptm = _first_metric(_metric(prediction, "iptm"), _metric(candidate, "iptm"))
     ptm = _first_metric(_metric(prediction, "ptm"), _metric(candidate, "ptm"))
+    ipsae = _first_metric(
+        _aliased_metric(analysis, "ipsae_score", "ipsae", "ipsae_max", "interface_pae"),
+        _aliased_metric(candidate, "ipsae_score", "ipsae", "ipsae_max", "interface_pae"),
+    )
     candidate_qc = _score_namespace(candidate, "protein_qc")
+    candidate_boltz2 = _score_namespace(candidate, "boltz2_affinity")
+    candidate_protenix = _score_namespace(candidate, "protenix_v2")
+    candidate_structure = _score_namespace(candidate, "structure_analysis")
+    candidate_ipsae = _score_namespace(candidate, "ipsae")
+    candidate_prodigy = _score_namespace(candidate, "prodigy")
+    candidate_boltzgen = _score_namespace(candidate, "boltzgen")
     candidate_family = _score_namespace(candidate, "family_profile")
     family_profile_score = _aliased_metric(
         candidate_family,
@@ -195,6 +444,10 @@ def _score(
         if isinstance(analysis.get("liabilities"), list)
         else []
     )
+    liability_count = len(liabilities)
+    structure_liability_count = _metric(candidate_structure, "liability_count")
+    if structure_liability_count is not None:
+        liability_count = int(structure_liability_count)
     qc_flags = qc.get("flags") if isinstance(qc.get("flags"), list) else None
     if qc_flags is None:
         qc_flags = (
@@ -202,34 +455,94 @@ def _score(
         )
 
     score = 0.0
+    boltz2_probability = _aliased_metric(
+        candidate_boltz2,
+        "affinity_probability_binary",
+        "binder_probability",
+        "binding_probability",
+    )
+    boltz2_affinity = _aliased_metric(
+        candidate_boltz2,
+        "affinity_pred_value",
+        "predicted_affinity",
+        "affinity",
+    )
+    boltzgen_score = _aliased_metric(candidate_boltzgen, "score", "ranking_score")
+    structure_ligand_contacts = None
+    ligand_contacts = candidate_structure.get("ligand_contacts")
+    if isinstance(ligand_contacts, dict):
+        structure_ligand_contacts = _aliased_metric(
+            ligand_contacts,
+            "contact_residue_count",
+            "contact_count",
+        )
     if ranking_score is not None:
         score += ranking_score
-    plddt_score = plddt_unit_score(_first_metric(plddt, qc_plddt, candidate_qc_plddt))
+    elif boltzgen_score is not None:
+        score += boltzgen_score
+    plddt_score = plddt_unit_score(
+        _first_metric(
+            plddt,
+            qc_plddt,
+            candidate_qc_plddt,
+            _aliased_metric(candidate_protenix, "plddt", "mean_plddt"),
+        )
+    )
     if plddt_score is not None:
         score += plddt_score
     if iptm is not None:
         score += 0.5 * iptm
+    if ipsae is not None:
+        score += 0.5 * ipsae
     if ptm is not None:
         score += 0.25 * ptm
     if family_profile_score is not None:
         score += 0.25 * family_profile_score
-    score -= 0.05 * len(liabilities)
+    if boltz2_probability is not None:
+        score += boltz2_probability
+    if structure_ligand_contacts is not None:
+        score += min(structure_ligand_contacts, 20.0) / 100.0
+    score -= 0.05 * liability_count
     score -= 0.10 * len(qc_flags)
 
-    reported_plddt = normalize_plddt(_first_metric(plddt, qc_plddt, candidate_qc_plddt))
+    reported_plddt = normalize_plddt(
+        _first_metric(
+            plddt,
+            qc_plddt,
+            candidate_qc_plddt,
+            _aliased_metric(candidate_protenix, "plddt", "mean_plddt"),
+        )
+    )
     details = {
         "candidate_score": candidate_score,
         "ranking_score": ranking_score,
         "plddt": reported_plddt,
-        "iptm": iptm,
-        "ptm": ptm,
+        "iptm": _first_metric(iptm, _aliased_metric(candidate_protenix, "iptm")),
+        "ptm": _first_metric(ptm, _aliased_metric(candidate_protenix, "ptm")),
+        "ipsae": _first_metric(
+            ipsae,
+            _aliased_metric(candidate_ipsae, "ipsae_score", "ipsae", "ipsae_max"),
+        ),
+        "affinity_pred_value": boltz2_affinity,
+        "affinity_probability_binary": boltz2_probability,
+        "ligand_contact_residue_count": structure_ligand_contacts,
         "family_profile_score": family_profile_score,
-        "liability_count": len(liabilities),
+        "liability_count": liability_count,
         "qc_flag_count": len(qc_flags),
         "qc_flags": qc_flags,
         "structure_path": _path(prediction) or _path(candidate),
         "sequence": _sequence(candidate, prediction),
+        "evidence_job_ids": candidate.get("evidence_job_ids") or [],
+        "evidence_tools": candidate.get("evidence_tools") or [],
     }
+    if candidate_prodigy:
+        details["prodigy_delta_g"] = _aliased_metric(
+            candidate_prodigy,
+            "delta_g_kcal_mol",
+            "delta_g",
+            "dg",
+        )
+        details["prodigy_kd_nm"] = _aliased_metric(candidate_prodigy, "kd_nm", "kd")
     if isinstance(candidate.get("scores"), dict):
         details["scores"] = dict(candidate["scores"])
     return score, details
@@ -242,29 +555,40 @@ class RankDesignsAdapter(ToolAdapter):
 
     def run(self, params: RankDesignsInput, ctx: AdapterRunContext) -> RankDesignsOutput:
         t0 = time.time()
-        predictions = _as_list(params.predictions)
-        analyses = _as_list(params.analyses)
-        qc_results = _as_list(params.qc_results)
-        candidates = _as_list(params.candidates)
-        count = max(len(predictions), len(analyses), len(qc_results), len(candidates))
-        if count == 0:
+        job_rows = _rows_from_jobs(ctx, params.job_ids)
+        predictions = [*job_rows["predictions"], *_as_list(params.predictions)]
+        analyses = [*job_rows["analyses"], *_as_list(params.analyses)]
+        qc_results = [*job_rows["qc_results"], *_as_list(params.qc_results)]
+        candidates = [*job_rows["candidates"], *_as_list(params.candidates)]
+        groups, warnings = _join_rows_by_identity(
+            predictions=predictions,
+            analyses=analyses,
+            qc_results=qc_results,
+            candidates=candidates,
+        )
+        if not groups:
             raise ValueError(
                 "rank_designs requires at least one prediction, analysis, "
                 "qc result, or candidate"
             )
 
         ranked: list[dict[str, Any]] = []
-        for idx in range(count):
-            prediction = predictions[idx] if idx < len(predictions) else {}
-            analysis = analyses[idx] if idx < len(analyses) else {}
-            qc = qc_results[idx] if idx < len(qc_results) else {}
-            candidate = candidates[idx] if idx < len(candidates) else {}
+        for idx, group in enumerate(groups):
+            prediction = group.get("prediction") or {}
+            analysis = group.get("analysis") or {}
+            qc = group.get("qc") or {}
+            candidate = group.get("candidate") or {}
             score, details = _score(prediction, analysis, qc, candidate)
+            candidate_id = _candidate_id(idx, prediction, analysis, qc, candidate)
             ranked.append(
                 {
                     "rank": 0,
-                    "candidate_id": _candidate_id(idx, prediction, candidate),
+                    "candidate_id": candidate_id,
                     "score": round(score, 6),
+                    "candidate_ref": {
+                        "candidate_id": candidate_id,
+                        "source_job_ids": details.get("evidence_job_ids") or [],
+                    },
                     **details,
                 }
             )
@@ -282,22 +606,24 @@ class RankDesignsAdapter(ToolAdapter):
         with tsv_path.open("w") as fh:
             fh.write(
                 "rank\tcandidate_id\tscore\tranking_score\tplddt\tiptm\tptm\t"
-                "liability_count\tqc_flag_count\tstructure_path\n"
+                "ipsae\tliability_count\tqc_flag_count\tstructure_path\n"
             )
             for row in selected:
                 fh.write(
                     f"{row['rank']}\t{row['candidate_id']}\t{row['score']}\t"
                     f"{row.get('ranking_score') or ''}\t{row.get('plddt') or ''}\t"
                     f"{row.get('iptm') or ''}\t{row.get('ptm') or ''}\t"
+                    f"{row.get('ipsae') or ''}\t"
                     f"{row['liability_count']}\t{row['qc_flag_count']}\t"
                     f"{row.get('structure_path') or ''}\n"
                 )
         ctx.emit_progress(1.0)
         return RankDesignsOutput(
-            candidate_count=count,
+            candidate_count=len(groups),
             ranked_candidates=selected,
             ranked_json=str(json_path),
             ranked_tsv=str(tsv_path),
+            warnings=warnings,
             runtime_ms=int((time.time() - t0) * 1000),
         )
 

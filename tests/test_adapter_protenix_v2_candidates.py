@@ -13,7 +13,7 @@ from vibeproteinagent.adapters.protenix_v2.adapter import (
     _protenix_v2_candidates,
     _write_protenix_input_json_from_candidates,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate(sequence: str = "ACDE") -> dict:
@@ -79,6 +79,7 @@ def _record(index: int = 0) -> ProtenixV2PredictionRecord:
         seed=101,
         rank=index,
         cif_path=f"/tmp/protenix_{index}.cif",
+        pdb_path=f"/tmp/protenix_{index}.pdb",
         summary_json=f"/tmp/protenix_{index}.json",
         pae_path=f"/tmp/protenix_{index}_pae.json",
         full_confidence_json=f"/tmp/protenix_{index}_full.json",
@@ -95,6 +96,7 @@ def _pxdesign_record(index: int = 0) -> ProtenixV2PredictionRecord:
         seed=101,
         rank=0,
         cif_path=f"/tmp/protenix_{index}.cif",
+        pdb_path=f"/tmp/protenix_{index}.pdb",
         summary_json=f"/tmp/protenix_{index}.json",
         pae_path=f"/tmp/protenix_{index}_pae.json",
         full_confidence_json=f"/tmp/protenix_{index}_full.json",
@@ -114,6 +116,8 @@ def test_protenix_v2_emits_canonical_candidates() -> None:
     validate_candidate_v1(candidates[0])
     assert candidates[0]["sequence"] == "MKKL"
     assert candidates[0]["structure_path"] == "/tmp/protenix_0.cif"
+    assert candidates[0]["artifacts"]["protenix_v2"]["predicted_cif"] == "/tmp/protenix_0.cif"
+    assert candidates[0]["artifacts"]["protenix_v2"]["predicted_pdb"] == "/tmp/protenix_0.pdb"
     assert candidates[0]["scores"]["protenix_v2"]["ranking_score"] == 0.9
 
 
@@ -152,6 +156,7 @@ def test_protenix_v2_output_preserves_legacy_fields() -> None:
     assert dumped["pae_path"] == "/tmp/protenix_0_pae.json"
     assert dumped["metrics"]["ranking_score"] == 0.9
     assert dumped["all_predictions"][0]["cif_path"] == "/tmp/protenix_0.cif"
+    assert dumped["all_predictions"][0]["pdb_path"] == "/tmp/protenix_0.pdb"
 
 
 def test_protenix_v2_consumes_canonical_candidates(tmp_path) -> None:

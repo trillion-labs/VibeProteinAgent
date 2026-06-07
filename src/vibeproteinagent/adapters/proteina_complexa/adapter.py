@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field, model_validator
 from vibeproteinagent.adapters import _proteina_complexa_common as common
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.proteina_complexa import availability_skip_reason
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
@@ -70,8 +70,8 @@ class ProteinaComplexaInput(BaseModel):
         default=None,
         min_length=1,
         description=(
-            "Protein target PDB for protein_binder, or ligand-only PDB for "
-            "ligand_binder."
+            "Protein target PDB for protein_binder, or a structure containing "
+            "the ligand pocket for ligand_binder."
         ),
     )
     candidates: list[dict[str, Any]] = Field(default_factory=list)

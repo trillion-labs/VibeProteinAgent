@@ -3,6 +3,16 @@
   "$id": "https://vibeproteinagent.dev/schemas/rank_designs.input.json",
   "type": "object",
   "properties": {
+    "job_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(job_[A-Za-z0-9]+|[A-Za-z][A-Za-z0-9_.-]*)$"
+      },
+      "default": [],
+      "description": "Optional job ids or call ids from the current workspace. rank_designs reads their completed outputs and places structure predictors in predictions, interface/scoring tools in analyses, QC tools in qc_results, and other candidate producers in candidates.",
+      "examples": [["job_predict_0", "job_ipsae_0", "job_qc_0"]]
+    },
     "predictions": {
       "$ref": "#/$defs/rows",
       "default": [],

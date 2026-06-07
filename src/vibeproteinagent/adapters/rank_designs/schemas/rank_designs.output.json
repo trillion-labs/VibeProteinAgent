@@ -17,6 +17,12 @@
     },
     "ranked_json": {"type": "string", "minLength": 1},
     "ranked_tsv": {"type": "string", "minLength": 1},
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Runtime warnings about unmatched evidence rows when ranking outputs from job_ids."
+    },
     "runtime_ms": {"type": "integer", "minimum": 0}
   },
   "additionalProperties": false

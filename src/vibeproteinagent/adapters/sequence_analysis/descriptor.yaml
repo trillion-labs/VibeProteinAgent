@@ -1,7 +1,7 @@
 name: sequence_analysis
 version: "1.0.0"
 category: analysis
-description: "Sequence-only analysis: composition, charge (pH-dependent), regions/motifs, per-residue biochemical annotations, and simple liabilities for a raw sequence or FASTA. CPU; no structure required. For structural environment use `structure_analysis`."
+description: "Sequence-only analysis: composition, charge (pH-dependent), regions/motifs, per-residue biochemical annotations, and simple liabilities for a raw sequence or FASTA."
 runtime: python
 backend: biopython
 gpu_required: false

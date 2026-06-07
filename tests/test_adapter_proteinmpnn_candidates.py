@@ -14,7 +14,7 @@ from vibeproteinagent.adapters.proteinmpnn.adapter import (
     _canonical_candidate_from_design,
     _materialize_mpnn_pdb_input,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate() -> dict:

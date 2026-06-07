@@ -1,23 +1,25 @@
 ---
-description: Install or run VibeProteinAgent from a natural-language protein request
-argument-hint: "<install or protein workflow request>"
+description: Use VibeProteinAgent from a natural-language install or protein request
+argument-hint: "<install, report, workflow, or protein design request>"
 ---
 
-Read `AGENTS.md` and `skills.md` first.
+Read `skills/vpa-command-router/SKILL.md` first.
 
-If the user asks to install or prepare VPA, follow
-`agent_workflows/vpa_installation.md`. Use `/vpa` as the default VPA home when
-the user did not specify another path:
+Respect the active installed runtime first. If `VPA_HOME` is already set and
+`$VPA_HOME/env.sh` exists, source it before checking `vpa`. If `vpa` is then on
+PATH, use it as-is. Only choose an install root when the user asks for
+install/repair or no working VPA command exists.
+
+Fallback install root, only when one is needed:
 
 ```bash
-export VPA_HOME=/vpa
+export VPA_HOME=${VPA_HOME:-/vpa}
+test -f "$VPA_HOME/env.sh" && source "$VPA_HOME/env.sh"
 ```
 
-If the user asks to run, validate, rank, submit, report, or otherwise execute a
-protein workflow, follow the VPA Protein Design Workflow Operating Protocol in
-`skills.md`, using `agent_workflows/protein_design_skill.md`,
-`agent_workflows/vpa_execution_environment.md`, and
-`agent_workflows/vpa_contracts.md` as needed.
+Route the request through VPA install, direct tool, explicit workflow, MCP, or
+report commands. The external Claude Code session owns objective extraction,
+thresholds, tool selection, execution analysis, and next action.
 
 User request:
 

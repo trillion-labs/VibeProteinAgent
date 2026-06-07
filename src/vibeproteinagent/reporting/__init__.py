@@ -2,6 +2,12 @@
 
 from .collect import collect_report_model
 from .models import ReportModel
-from .render import render_report_html, write_report
+from .render import render_report_html, resolve_report_output_path, write_report
 
-__all__ = ["ReportModel", "collect_report_model", "render_report_html", "write_report"]
+__all__ = [
+    "ReportModel",
+    "collect_report_model",
+    "render_report_html",
+    "resolve_report_output_path",
+    "write_report",
+]

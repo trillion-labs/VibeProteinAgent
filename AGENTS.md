@@ -1,15 +1,31 @@
 # Agent Instructions
 
-For protein or VPA work, read [skills.md](skills.md) first.
+For protein or VPA work, read `skills/vpa-command-router/SKILL.md` first.
 
-Use normal conversation for open-ended protein discussion. When the user asks to
-run, validate, rank, submit, report, inspect existing `job_`/`wf_`/`arun_`
-state, or otherwise execute protein work, switch to the VPA Protein Design
-Workflow Operating Protocol in `skills.md`.
+VPA is a deterministic tool substrate. External Codex/Claude agents choose the
+objective, acceptance criteria, tool/workflow boundary, analysis, and next
+action.
 
-The assistant chooses the VPA command boundary before invoking the runtime:
-direct tool/debug work uses explicit `vpa run` and job/status/result commands;
-explicit workflow descriptors use `vpa workflow run`; reports use `vpa report`;
-LLM-authored scientific workflow planning uses `vpa agent run`. Do not rely on
-`vpa agent run` to infer direct tool, status, report, or workflow mode from free
-text.
+Default posture: explore to maximize the objective. Try alternative tools and
+approaches, compare the evidence, and iterate as the objective warrants. VPA is
+stateless and does not model rounds, so the external agent owns the exploration
+loop and runs as many jobs as it needs.
+
+## Routing map
+
+Claude Code auto-selects a skill from its description. Codex does not, so use
+this map directly:
+
+- Install / repair / CUDA / weights / binaries / credentials ->
+  `skills/vpa-install-and-readiness/SKILL.md`
+- Protein design objective (design, rank, submit, optimize) ->
+  `skills/vpa-protein-design-orchestration/SKILL.md`
+- Launch a known tool or explicit YAML workflow ->
+  `skills/vpa-run-and-workspace/SKILL.md`
+- Inspect existing `traj_`/`job_`/`wf_` state or render a report ->
+  `skills/vpa-state-reporting/SKILL.md`
+- Edit VPA code, author workflows, debug candidate flow ->
+  `skills/vpa-runtime-contracts/SKILL.md`
+- Expose tools over MCP -> `vpa mcp serve`, then let the agent choose tools.
+
+Follow references one level deep; do not chain skill to skill to skill.

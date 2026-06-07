@@ -10,7 +10,7 @@ from vibeproteinagent.adapters.descriptor import (
     drop_optional_none_params,
     resolve_input_schema_dict,
 )
-from vibeproteinagent.agents.planning.canonical_tools import (
+from vibeproteinagent.candidates.capabilities import (
     CANONICAL_CONSUMERS,
     CANONICAL_TERM_CONSUMERS,
     annotate_candidate_capabilities,
@@ -381,11 +381,13 @@ class WorkflowExecutor:
         registry: ToolRegistry,
         supervisor: Any | None = None,
         *,
+        trajectory_id: str | None = None,
         virtual_outputs: dict[str, Any] | None = None,
     ) -> None:
         self.workspace = workspace
         self.registry = registry
         self.supervisor = supervisor  # SupervisorClient or None (skip-execution mode)
+        self.trajectory_id = trajectory_id
         self.store = WorkflowStore(workspace)
         self.jobs = JobStore(workspace)
         self.virtual_outputs = dict(virtual_outputs or {})
@@ -420,6 +422,7 @@ class WorkflowExecutor:
             version=workflow.version,
             descriptor_yaml=serialize_workflow(workflow),
             params=merged,
+            trajectory_id=self.trajectory_id,
         )
         # Insert one row per (declared) node. foreach expansion happens at runtime
         # because the iterable may depend on upstream outputs.
@@ -890,6 +893,7 @@ class WorkflowExecutor:
                         resolved,
                         priority=rt.desc.priority,
                         workspace_name=self.workspace.name,
+                        trajectory_id=self.trajectory_id,
                         workflow_id=workflow_id,
                         workflow_node_id=rt.runtime_id,
                         max_retries=int(rt.desc.max_retries),

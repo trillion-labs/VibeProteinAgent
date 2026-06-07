@@ -9,7 +9,7 @@ from vibeproteinagent.reporting.models import (
 from vibeproteinagent.reporting.render import render_report_html
 
 
-def test_search_sequence_report_shows_source_summaries_and_empty_facets() -> None:
+def test_search_sequence_report_omits_per_tool_appendix_widget() -> None:
     model = ReportModel(
         summary=RunSummary(
             kind="workflow",
@@ -61,13 +61,9 @@ def test_search_sequence_report_shows_source_summaries_and_empty_facets() -> Non
 
     html = render_report_html(model)
 
-    assert "Sequence retrieval" in html
-    assert "NAD(P)HX repair proteins" in html
-    # Per-source yield bars: GO contributed (1 resolved term), InterPro is marked
-    # empty / unresolved rather than hidden.
-    assert 'seqret-yield-label">GO' in html
-    assert "1 term" in html
-    assert "is-empty" in html
-    assert "no_terms" in html
-    assert "20 / 40" in html
-    assert "InterPro family" in html
+    assert "Workflow execution graph" in html
+    assert "search_sequence" in html
+    assert "Sequence retrieval" not in html
+    assert 'seqret-yield-label">GO' not in html
+    assert "Per-tool results" not in html
+    assert 'id="appendix"' not in html

@@ -4,17 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from vibeproteinagent.adapters.proteina_complexa.adapter import ProteinaComplexaDesign, ProteinaComplexaInput, ProteinaComplexaOutput, _proteina_complexa_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
-from vibeproteinagent.agents.planning.compiler import compile_planner_ir
-from vibeproteinagent.agents.planning.fixup import StructuredFixup
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate() -> dict:
     return {"schema_version": "candidate_v1", "candidate_id": "cand_struct", "source": {"tool": "upstream", "node_id": None, "job_id": None, "local_id": "struct_0000", "native_id": None, "index": 0}, "structure_path": "/tmp/a.pdb", "sequence": "ACDE", "scores": {}, "artifacts": {}}
-
-
-def _ir(inputs: dict | None = None) -> dict:
-    return {"version": "planner_ir_v1", "goal": "x", "assumptions": [], "missing_inputs": [], "nodes": [{"id": "n", "tool": "proteina_complexa", "intent": "x", "inputs": inputs or {}, "upstream": []}]}
 
 
 def test_proteina_complexa_emits_canonical_candidates() -> None:
@@ -44,11 +38,3 @@ def test_proteina_complexa_consumes_canonical_legacy_and_rejects_mixed() -> None
     assert ProteinaComplexaInput(mode="protein_binder", target_pdb="/tmp/a.pdb").target_pdb == "/tmp/a.pdb"
     with pytest.raises(ValidationError, match="Mixed canonical and legacy"):
         ProteinaComplexaInput(mode="protein_binder", candidates=[_candidate(), {"target_pdb": "/tmp/b.pdb"}])
-
-
-def test_proteina_complexa_explicit_mode_enforcement() -> None:
-    with pytest.raises(StructuredFixup):
-        compile_planner_ir(_ir())
-    assert compile_planner_ir(_ir({"mode": "motif"}))["workflow_plan"]["nodes"][0]["inputs"]["mode"] == "motif"
-    with pytest.raises(StructuredFixup):
-        compile_planner_ir(_ir({"mode": "bad"}))

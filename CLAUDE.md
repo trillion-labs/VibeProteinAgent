@@ -1,9 +1,13 @@
 # Claude Code Instructions
 
-For protein or VPA work, read [skills.md](skills.md) first.
+For protein or VPA work, read `skills/vpa-command-router/SKILL.md` first.
 
-Use normal conversation for open-ended protein discussion. When the user asks to
-run, validate, rank, submit, report, or otherwise execute an end-to-end protein
-workflow, switch to the VPA Protein Design Workflow Operating Protocol in
-`skills.md`.
+VPA is a deterministic, stateless substrate; you own the objective, acceptance
+criteria, tool/workflow choice, analysis, and next action. Default posture:
+explore to maximize — generate alternatives, compare evidence with
+`rank_designs`, iterate, and finish with `submit_candidate` and one trajectory
+report.
+Don't stop at the first candidate.
 
+Use VPA through install, direct tool, explicit workflow, MCP, and report
+commands. Do not look for an internal VPA LLM-agent command.

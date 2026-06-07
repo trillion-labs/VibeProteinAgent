@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 
 def test_stable_candidate_id_is_deterministic() -> None:

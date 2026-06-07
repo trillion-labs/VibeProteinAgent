@@ -43,7 +43,7 @@ from vibeproteinagent.adapters.msa_policy import (
     strip_prepared_msa,
     yaml_file_has_prepared_msa,
 )
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.compat import ensure_rdkit_allchem_descriptors
 from vibeproteinagent.core.config import vpa_home
 from vibeproteinagent.core.torch_compat import allow_full_torch_load
@@ -533,14 +533,26 @@ def _boltz2_affinity_candidates(
     predicted_cif: str,
     scores: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    source = params.candidates[-1] if params.candidates else {}
+    source = _select_source_candidate(params)
     sequence = source.get("sequence") if isinstance(source, dict) else None
-    local_id = _source_local_id(source, "boltz2_affinity_0000") if isinstance(source, dict) else "boltz2_affinity_0000"
+    local_id = (
+        _source_local_id(source, "boltz2_affinity_0000")
+        if isinstance(source, dict)
+        else "boltz2_affinity_0000"
+    )
     if _is_canonical_candidate(source):
         candidate = {
             key: value
             for key, value in source.items()
-            if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
+            if key
+            in {
+                "schema_version",
+                "candidate_id",
+                "source",
+                "sequence",
+                "structure_path",
+                "capabilities",
+            }
         }
         candidate["scores"] = dict(source.get("scores") or {})
         candidate["artifacts"] = dict(source.get("artifacts") or {})
@@ -570,7 +582,77 @@ def _boltz2_affinity_candidates(
         if sequence:
             candidate["sequence"] = sequence
     candidate.setdefault("scores", {})["boltz2_affinity"] = scores
+    candidate.setdefault("artifacts", {})["boltz2_affinity"] = {
+        "predicted_cif": predicted_cif,
+    }
     return [candidate]
+
+
+def _select_source_candidate(params: Boltz2AffinityInput) -> dict[str, Any]:
+    candidates = [item for item in params.candidates if _is_canonical_candidate(item)]
+    if not candidates:
+        return {}
+    if len(candidates) == 1:
+        return candidates[0]
+
+    sequence_matches = _candidate_sequence_matches(params, candidates)
+    if len(sequence_matches) == 1:
+        return sequence_matches[0]
+    if len(sequence_matches) > 1:
+        raise ValueError(
+            "boltz2_affinity could not select upstream candidate: multiple "
+            "canonical candidates match the protein sequences from sequences/input_yaml"
+        )
+    raise ValueError(
+        "boltz2_affinity multiple canonical candidates require a unique sequence "
+        "match from sequences/input_yaml"
+    )
+
+
+def _candidate_sequence_matches(
+    params: Boltz2AffinityInput,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    protein_sequences = _protein_sequences_from_params(params)
+    if not protein_sequences:
+        return []
+    return [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate.get("sequence"), str)
+        and candidate["sequence"] in protein_sequences
+    ]
+
+
+def _protein_sequences_from_params(params: Boltz2AffinityInput) -> set[str]:
+    sequences: set[str] = set()
+    for entry in params.sequences or []:
+        if entry.get("type") != "protein":
+            continue
+        sequence = entry.get("sequence")
+        if isinstance(sequence, str) and sequence:
+            sequences.add(sequence)
+    if sequences or params.input_yaml is None:
+        return sequences
+
+    src = Path(params.input_yaml).expanduser()
+    try:
+        with src.open("r") as fh:
+            doc = yaml.safe_load(fh)
+    except OSError:
+        return sequences
+    if not isinstance(doc, dict):
+        return sequences
+    for entry in doc.get("sequences") or []:
+        if not isinstance(entry, dict):
+            continue
+        protein = entry.get("protein")
+        if not isinstance(protein, dict):
+            continue
+        sequence = protein.get("sequence")
+        if isinstance(sequence, str) and sequence:
+            sequences.add(sequence)
+    return sequences
 
 
 def _source_local_id(candidate: dict[str, Any], fallback: str) -> str:

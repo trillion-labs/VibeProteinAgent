@@ -33,9 +33,6 @@ from .metrics import (
     pretty_metric_name as _pretty_metric_name,
 )
 from .models import (
-    AgentMessage,
-    AgentToolCall,
-    AgentTranscript,
     CandidateEvidenceBundle,
     CandidateStatus,
     EvidenceStep,
@@ -51,7 +48,7 @@ from .models import (
     WorkflowType,
     WorkflowNodeSummary,
 )
-from .plots import PLDDT_HOVER_JS, build_plots
+from .plots import PLDDT_HOVER_JS
 from .review import build_review_model, classify_tool_role
 from .view_models import (
     AgentRationaleViewModel,
@@ -64,6 +61,24 @@ from .view_models import (
     WorkflowReviewPreset,
     build_report_view_model,
 )
+
+
+def resolve_report_output_path(
+    out_path: str | Path,
+    *,
+    report_format: str = "html",
+) -> Path:
+    if report_format not in {"html", "bundle"}:
+        raise InvalidParamsError(
+            f"unknown report format {report_format!r}",
+            details={"format": report_format, "allowed": ["html", "bundle"]},
+        )
+    if report_format == "bundle":
+        root = Path(out_path).expanduser().resolve()
+        if root.suffix:
+            root = root.with_suffix("")
+        return root / "report.html"
+    return Path(out_path).expanduser().resolve()
 
 
 def write_report(
@@ -80,24 +95,16 @@ def write_report(
             f"unknown viewer mode {viewer_mode!r}",
             details={"viewer_mode": viewer_mode, "allowed": ["offline", "online"]},
         )
-    if report_format not in {"html", "bundle"}:
-        raise InvalidParamsError(
-            f"unknown report format {report_format!r}",
-            details={"format": report_format, "allowed": ["html", "bundle"]},
-        )
 
+    html_path = resolve_report_output_path(out_path, report_format=report_format)
     if report_format == "bundle":
-        root = Path(out_path).expanduser().resolve()
-        if root.suffix:
-            root = root.with_suffix("")
+        root = html_path.parent
         root.mkdir(parents=True, exist_ok=True)
         (root / "assets").mkdir(exist_ok=True)
         (root / "structures").mkdir(exist_ok=True)
         (root / "plots").mkdir(exist_ok=True)
         model = _bundle_model(model, root)
-        html_path = root / "report.html"
     else:
-        html_path = Path(out_path).expanduser().resolve()
         html_path.parent.mkdir(parents=True, exist_ok=True)
 
     html_text = render_report_html(
@@ -412,10 +419,10 @@ def _board_card(bundle: CandidateEvidenceBundle, row: CandidateBoardRow | None =
     dom = _structure_dom_id(cand.candidate_id)
     status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
     is_final = bundle.status == CandidateStatus.FINAL
-    display_rank = bundle.display_rank if bundle.display_rank is not None else cand.rank
-    if is_final:
-        rank_cell = '<span class="crow-rank-final" title="Final / submitted">&#10003;</span>'
-    elif display_rank is not None:
+    display_rank = row.rank if row and row.rank is not None else (
+        bundle.display_rank if bundle.display_rank is not None else cand.rank
+    )
+    if display_rank is not None:
         rank_cell = f'<span class="crow-rank-num">{display_rank}</span>'
     else:
         rank_cell = '<span class="crow-rank-num crow-rank-dash">&middot;</span>'
@@ -488,7 +495,7 @@ def _board_group_display_title(status: str, fallback: str) -> str:
     if status == CandidateStatus.FINAL:
         return "Recommended"
     if status == CandidateStatus.RANKED_ALTERNATIVE:
-        return "Strong Alternatives"
+        return "Alternatives"
     if status == CandidateStatus.INCOMPLETE_EVIDENCE:
         return "Missing Evidence"
     if status == CandidateStatus.FAILED_QC:
@@ -782,13 +789,14 @@ def _dossier_verdict(
 ) -> str:
     status_label, _status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
     plddt = _metric_float(_bundle_metric(bundle, "pLDDT"))
+    ipsae = _metric_float(_bundle_metric(bundle, "ipSAE"))
     iptm = _metric_float(_bundle_metric(bundle, "ipTM"))
     ptm = _metric_float(_bundle_metric(bundle, "pTM"))
     missing = _bundle_missing_evidence_labels(bundle, preset)
     if bundle.status == CandidateStatus.FINAL:
         lead = "Recommended final candidate"
     elif bundle.status == CandidateStatus.RANKED_ALTERNATIVE:
-        lead = "Strong alternative"
+        lead = "Alternative"
     elif bundle.status == CandidateStatus.FAILED_QC:
         lead = "Failed QC candidate"
     elif bundle.status == CandidateStatus.INCOMPLETE_EVIDENCE:
@@ -796,9 +804,18 @@ def _dossier_verdict(
     else:
         lead = f"{status_label} candidate"
     workflow_type = preset.workflow_type if preset else bundle.workflow_type
-    if workflow_type == WorkflowType.BINDER and iptm is not None and iptm >= 0.70:
+    if ipsae is not None:
+        strong_interface = ipsae >= 0.50
+        usable_interface = ipsae >= 0.30
+    elif iptm is not None:
+        strong_interface = iptm >= 0.70
+        usable_interface = iptm >= 0.50
+    else:
+        strong_interface = False
+        usable_interface = False
+    if workflow_type == WorkflowType.BINDER and strong_interface:
         lead += " with strong recorded binding-interface evidence"
-    elif workflow_type == WorkflowType.BINDER and iptm is not None and iptm >= 0.50:
+    elif workflow_type == WorkflowType.BINDER and usable_interface:
         lead += " with usable recorded binding-interface evidence"
     elif workflow_type == WorkflowType.RETRIEVAL and (bundle.score_groups or bundle.artifacts or bundle.msa_blocks):
         lead += " with recorded retrieval evidence"
@@ -1013,13 +1030,13 @@ def _saas_overview_section(vm: OverviewViewModel) -> str:
   <header class="card-header saas-title-row">
     <div>
       <p class="card-eyebrow">Executive Summary</p>
-      <h2 class="card-title">Design Review Summary</h2>
+      <h2 class="card-title">Design review summary</h2>
       <p class="saas-section-subtitle">High-level overview of the design run and key outcomes.</p>
     </div>
   </header>
   <div class="saas-overview-grid">
     {_overview_summary_card("User Query", vm.design_objective, "quote")}
-    {_overview_summary_card("Agent Interpretation", vm.agent_interpretation, "spark")}
+    {_overview_summary_card("Agent Objective", vm.agent_objective, "spark")}
     <div class="saas-card saas-stats">{counts}</div>
     {caveat}
   </div>
@@ -1028,13 +1045,14 @@ def _saas_overview_section(vm: OverviewViewModel) -> str:
 
 
 def _overview_summary_card(title: str, body: str, icon_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.strip().lower()).strip("-") or "summary"
     return (
-        '<div class="saas-card saas-icon-card">'
+        f'<div class="saas-card saas-icon-card overview-summary-card overview-summary-card-{_attr(slug)}">'
         '<div class="saas-icon-card-head">'
         f'<span class="overview-card-icon">{_icon_svg(icon_name)}</span>'
         f'<p class="saas-card-kicker">{_h(title)}</p>'
         '</div>'
-        f'<p>{_h(body)}</p>'
+        f'<p class="overview-summary-body">{_h(body)}</p>'
         '</div>'
     )
 
@@ -1248,22 +1266,154 @@ def _comparison_metric_cell(chip: Any | None) -> str:
     )
 
 
+def _structure_comparison_bundles(
+    review: ReportReviewModel,
+    *,
+    limit: int | None = None,
+) -> list[CandidateEvidenceBundle]:
+    bundles: list[CandidateEvidenceBundle] = []
+    seen: set[str] = set()
+    for bundle in _review_ordered_bundles(review):
+        candidate = bundle.candidate
+        if not candidate.structure_path:
+            continue
+        if not Path(candidate.structure_path).is_file():
+            continue
+        key = candidate.candidate_id or str(candidate.structure_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        bundles.append(bundle)
+        if limit is not None and len(bundles) >= limit:
+            break
+    return bundles
+
+
+def _review_ordered_bundles(review: ReportReviewModel) -> list[CandidateEvidenceBundle]:
+    bundles: list[CandidateEvidenceBundle] = []
+    for group in review.board_groups:
+        bundles.extend(group.bundles)
+    represented = {id(bundle) for bundle in bundles}
+    bundles.extend(bundle for bundle in review.bundles if id(bundle) not in represented)
+    return bundles
+
+
+def _comparison_structure_dom_id(candidate_id: str, index: int) -> str:
+    return f"{_structure_dom_id(candidate_id)}__compare_{index}"
+
+
+def _structure_comparison_section(
+    review: ReportReviewModel,
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
+    bundles = _structure_comparison_bundles(review)
+    if not bundles:
+        return ""
+    cards = "".join(
+        _structure_comparison_card(bundle, index, preset)
+        for index, bundle in enumerate(bundles, start=1)
+    )
+    return f"""<section id="structure-comparison" class="card saas-section structure-comparison-panel">
+  <header class="structure-comparison-head">
+    <div>
+      <p class="card-eyebrow">Structure Comparison</p>
+      <h2 class="card-title">Compare candidate structures side by side</h2>
+      <div class="structure-comparison-subtitle-row">
+        <p class="saas-section-subtitle">Drag candidate panels to reorder them for direct visual comparison.</p>
+        <button type="button" class="structure-comparison-fullscreen-btn"
+                data-structure-comparison-fullscreen aria-label="Expand structure comparison"
+                title="Expand all candidate structures (press Esc to exit)">&#x2922; Expand comparison</button>
+      </div>
+    </div>
+    <div class="structure-comparison-actions">
+      <span>{len(bundles)} structures · 3 visible</span>
+    </div>
+  </header>
+  <div class="structure-comparison-intro">
+    <p>Use this panel like a bench comparison surface: keep candidate 1 beside candidate 9, or drag any other structure into the order that makes the biological question easiest to inspect.</p>
+    <span>{_h(preset.scientific_question if preset else "Compare candidates by structure, confidence, and recorded metrics.")}</span>
+  </div>
+  <div class="structure-comparison-grid" data-structure-compare-grid>{cards}</div>
+</section>"""
+
+
+def _structure_comparison_card(
+    bundle: CandidateEvidenceBundle,
+    index: int,
+    preset: WorkflowReviewPreset | None,
+) -> str:
+    candidate = bundle.candidate
+    dom_id = _comparison_structure_dom_id(candidate.candidate_id, index)
+    metrics = "".join(
+        _structure_comparison_metric(bundle, label)
+        for label in _structure_comparison_metric_labels(preset)
+    )
+    metrics = metrics or '<span class="structure-compare-metric is-missing">No scalar metrics</span>'
+    status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
+    open_target = _structure_dom_id(candidate.candidate_id)
+    return (
+        f'<article class="structure-compare-card" draggable="true" data-structure-compare-card data-compare-index="{index}">'
+        '<header class="structure-compare-head">'
+        f'<div><span class="structure-compare-rank">#{_h(index)}</span>'
+        f'<h3>{_h(candidate.candidate_id)}</h3></div>'
+        f'<span class="status-badge status-{_attr(status_cls)}">{_h(status_label)}</span>'
+        '</header>'
+        f'<div class="structure-compare-metrics">{metrics}</div>'
+        f'{_viewer_block(candidate, _chain_context_for(candidate), dom_id=dom_id, compact=True)}'
+        '<footer class="structure-compare-foot">'
+        f'<a href="#candidates" data-open-cand="{_attr(open_target)}">Open full dossier</a>'
+        f'{_download_link(candidate.structure_path or "", "structure", kind="structure", css="asset-pill is-on asset-download-link") if candidate.structure_path else ""}'
+        '</footer>'
+        '</article>'
+    )
+
+
+def _structure_comparison_metric_labels(
+    preset: WorkflowReviewPreset | None,
+) -> list[str]:
+    if preset is not None and preset.workflow_type == WorkflowType.BINDER:
+        return ["ipSAE", "ipTM", "pLDDT", "pTM"]
+    if preset is not None and preset.workflow_type == WorkflowType.DENOVO:
+        return ["pLDDT", "pTM", "GRAVY", "Instability"]
+    return ["pLDDT", "pTM", "ipTM", "GRAVY"]
+
+
+def _structure_comparison_metric(
+    bundle: CandidateEvidenceBundle,
+    label: str,
+) -> str:
+    metric = _bundle_metric(bundle, label)
+    if metric is None:
+        return ""
+    value, unit, source, _provenance = metric
+    unit_text = f" {unit}" if unit else ""
+    return (
+        '<span class="structure-compare-metric">'
+        f'<b>{_h(_metric_label_for_display(label))}</b>'
+        f'<strong>{_h(value)}{_h(unit_text)}</strong>'
+        f'<em>{_h(source)}</em>'
+        '</span>'
+    )
+
+
 def _saas_candidate_dossiers_section(
     dossiers: list[CandidateDossierViewModel],
     preset: WorkflowReviewPreset | None = None,
 ) -> str:
     cards = "".join(
         _evidence_snapshot_card(d, preset)
-        for d in dossiers[:6]
+        for d in dossiers[:1]
     ) or '<p class="empty">No candidate dossiers are available.</p>'
+    top_msa = _top_candidate_msa_block(dossiers)
     return f"""<section id="candidate-dossiers" class="card saas-section">
   <header class="card-header">
     <div>
       <p class="card-eyebrow">Evidence Summary</p>
       <h2 class="card-title">Top candidate evidence at a glance</h2>
-      <p class="saas-section-subtitle">Overview of the leading evidence packages before opening the full candidate review board. Structure inspection, risks, downloads, and provenance remain in Candidate Review dossiers.</p>
+      <p class="saas-section-subtitle">Overview of the leading candidate evidence package before opening the full candidate review board. Structure inspection, risks, downloads, and provenance remain in Candidate Review dossiers.</p>
     </div>
   </header>
+  {top_msa}
   <div class="evidence-snapshot-grid">{cards}</div>
 </section>"""
 
@@ -1278,11 +1428,12 @@ def _evidence_snapshot_card(
     )
     primary_value = _chip_numeric_value(primary)
     score = _snapshot_score_percent(primary.label if primary else "", primary_value)
-    score_text = f"{score:.0f}" if score is not None else "--"
+    score_text = str(primary.value) if primary is not None and primary_value is not None else "--"
     score_style = f"--score:{score:.0f}" if score is not None else "--score:0"
     bars = "".join(
-        _evidence_metric_bar(dossier, label, preset)
-        for label in _snapshot_metric_labels(preset)
+        bar
+        for label in _snapshot_metric_labels(dossier, preset)
+        if (bar := _evidence_metric_bar(dossier, label, preset))
     )
     missing_label = (
         f"{len(dossier.missing_evidence)} missing"
@@ -1310,20 +1461,50 @@ def _evidence_snapshot_card(
     )
 
 
+def _top_candidate_msa_block(dossiers: list[CandidateDossierViewModel]) -> str:
+    if not dossiers or not dossiers[0].msa_blocks:
+        return ""
+    top = dossiers[0]
+    block = top.msa_blocks[0]
+    stats = f"{block.sequence_count} sequences"
+    if block.mean_identity:
+        stats += f" · {block.mean_identity * 100:.0f}% mean identity"
+    return (
+        '<div class="top-candidate-msa-block">'
+        '<h3>Top candidate MSA context</h3>'
+        '<details class="evidence-snapshot-msa" open>'
+        f'<summary><span>{_h(top.candidate_id)} MSA context</span><em>{_h(stats)}</em></summary>'
+        f'{_msa_html([block])}'
+        '</details>'
+        '</div>'
+    )
+
+
 def _snapshot_primary_metric_label(preset: WorkflowReviewPreset | None = None) -> str:
     if preset is not None and preset.workflow_type == WorkflowType.BINDER:
-        return "ipTM"
+        return "ipSAE"
     if preset is not None and preset.workflow_type == WorkflowType.RETRIEVAL:
         return "QC"
     return "pLDDT"
 
 
-def _snapshot_metric_labels(preset: WorkflowReviewPreset | None = None) -> list[str]:
+def _snapshot_metric_labels(
+    dossier: CandidateDossierViewModel,
+    preset: WorkflowReviewPreset | None = None,
+) -> list[str]:
     if preset is not None and preset.workflow_type == WorkflowType.BINDER:
-        return ["ipTM", "pLDDT", "pTM", "GRAVY", "QC"]
-    if preset is not None and preset.workflow_type == WorkflowType.RETRIEVAL:
-        return ["QC", "MSA mean identity", "Seq recovery", "GRAVY"]
-    return ["pLDDT", "pTM", "GRAVY", "Net charge", "QC"]
+        preferred = ["ipSAE", "ipTM", "pLDDT", "pTM", "GRAVY", "Net charge", "Instability", "pI"]
+    elif preset is not None and preset.workflow_type == WorkflowType.RETRIEVAL:
+        preferred = ["MSA mean identity", "Seq recovery", "GRAVY", "Net charge"]
+    else:
+        preferred = ["pLDDT", "pTM", "ipTM", "ipSAE", "GRAVY", "Net charge", "Instability", "pI"]
+    observed = [
+        chip.label
+        for chip in dossier.metric_chips
+        if _metric_label_for_display(chip.label) != "QC"
+        and _chip_numeric_value(chip) is not None
+    ]
+    return list(dict.fromkeys([*preferred, *observed]))[:7]
 
 
 def _dossier_metric_chip(dossier: CandidateDossierViewModel, label: str) -> Any | None:
@@ -1349,8 +1530,18 @@ def _snapshot_score_percent(label: str, value: float | None) -> float | None:
     normalized = _metric_label_for_display(label)
     if normalized == "pLDDT":
         return max(0.0, min(100.0, value))
-    if normalized in {"ipTM", "pTM", "Affinity", "MSA mean identity", "Seq recovery"}:
+    if normalized in {"ipTM", "pTM", "ipSAE", "Affinity", "MSA mean identity", "Seq recovery"}:
         return max(0.0, min(100.0, value * 100.0 if value <= 1.5 else value))
+    if normalized == "Instability":
+        return max(0.0, min(100.0, 100.0 - value))
+    if normalized == "GRAVY":
+        return max(0.0, min(100.0, (value + 2.0) / 4.0 * 100.0))
+    if normalized == "Net charge":
+        return max(0.0, min(100.0, (value + 10.0) / 20.0 * 100.0))
+    if normalized == "pI":
+        return max(0.0, min(100.0, value / 14.0 * 100.0))
+    if normalized in {"Delta G", "Interface contacts"}:
+        return max(0.0, min(100.0, abs(value)))
     return None
 
 
@@ -1362,14 +1553,9 @@ def _evidence_metric_bar(
     chip = _dossier_metric_chip(dossier, label)
     value = _chip_numeric_value(chip)
     pct = _snapshot_score_percent(label, value)
-    if chip and _metric_label_for_display(label) == "QC":
-        pct = 100.0 if str(chip.value).lower() == "pass" else 42.0
     title = _cross_candidate_metric_title(label, preset)
     if chip is None or pct is None:
-        return (
-            '<div class="snapshot-bar is-missing">'
-            f'<span>{_h(title)}</span><em><i style="width:0%"></i></em><b>--</b></div>'
-        )
+        return ""
     unit = chip.unit or ""
     return (
         '<div class="snapshot-bar">'
@@ -1381,7 +1567,7 @@ def _evidence_metric_bar(
 def _saas_cross_candidate_section(
     dossiers: list[CandidateDossierViewModel], preset: WorkflowReviewPreset | None = None
 ) -> str:
-    lengths = [len(d.sequence or "") for d in dossiers if d.sequence]
+    length_title, lengths = _cross_candidate_length_values(dossiers, preset)
     status_counts: dict[str, int] = {}
     missing_counts: dict[str, int] = {}
     qc_counts: dict[str, int] = {}
@@ -1391,12 +1577,13 @@ def _saas_cross_candidate_section(
         qc_counts[qc_label] = qc_counts.get(qc_label, 0) + 1
         for item in d.missing_evidence:
             missing_counts[item.label] = missing_counts.get(item.label, 0) + 1
-    length_card = _saas_hist_card("Length (aa)", lengths)
+    length_card = _saas_hist_card(length_title, lengths)
     status_card = _saas_count_card("Review Status", status_counts)
     missing_card = _saas_count_card("Missing Evidence", missing_counts)
     qc_card = _saas_count_card("QC Summary", qc_counts)
     metric_cards: list[str] = []
     missing_metric_labels: list[str] = []
+    filter_metric_labels: list[str] = []
     for label in (
         preset.cross_candidate_metrics
         if preset
@@ -1405,7 +1592,8 @@ def _saas_cross_candidate_section(
         values = _metric_values_from_dossiers(dossiers, label)
         if values:
             title = _cross_candidate_metric_title(label, preset)
-            metric_cards.append(_saas_range_card(title, values))
+            metric_cards.append(_saas_filter_metric_card(label, title, values))
+            filter_metric_labels.append(title)
         else:
             missing_metric_labels.append(_cross_candidate_metric_title(label, preset))
     missing_metrics_card = (
@@ -1414,6 +1602,7 @@ def _saas_cross_candidate_section(
         else ""
     )
     diversity = _diversity_notice(dossiers)
+    filter_panel = _cross_candidate_filter_panel(dossiers, filter_metric_labels, preset)
     return f"""<section id="cross-candidate-analysis" class="card saas-section">
   <header class="card-header">
     <div>
@@ -1423,8 +1612,22 @@ def _saas_cross_candidate_section(
     </div>
   </header>
   <div class="saas-pattern-grid">{length_card}{status_card}{qc_card}{missing_card}{''.join(metric_cards)}{missing_metrics_card}</div>
+  {filter_panel}
   <div class="saas-insight-note">{diversity}{_prov_chip(Provenance.DERIVED)}</div>
 </section>"""
+
+
+def _cross_candidate_length_values(
+    dossiers: list[CandidateDossierViewModel],
+    preset: WorkflowReviewPreset | None = None,
+) -> tuple[str, list[int]]:
+    lengths = [len(d.sequence or "") for d in dossiers if d.sequence]
+    if preset is None or preset.workflow_type != WorkflowType.BINDER or not lengths:
+        return "Length (aa)", lengths
+    ordered = sorted(lengths)
+    median = ordered[len(ordered) // 2]
+    binder_lengths = [length for length in lengths if length <= median * 1.5]
+    return "Binder length (aa)", binder_lengths or lengths
 
 
 def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> str:
@@ -1434,32 +1637,31 @@ def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> s
         or final_submission.get("candidate_id")
         or final_submission.get("submitted_candidates")
     )
-    round_groups = _workflow_audit_round_groups(model.graph.nodes)
-    stages = _workflow_audit_round_flow_html(
-        round_groups,
+    stages = _workflow_audit_stage_flow_html(
+        model.graph.nodes,
         workflow_type=vm.workflow_type,
         has_final=has_final,
     )
     completed = str(model.summary.state or "completed").strip().lower()
     status_label = "Completed" if completed in {"", "completed", "success"} else completed.replace("_", " ").title()
     status_cls = "is-complete" if completed in {"", "completed", "success"} else "is-recorded"
-    round_count = max(1, len(round_groups))
-    run_shape = f"{round_count} round{'s' if round_count != 1 else ''}"
+    node_count = len(model.graph.nodes)
+    tool_calls = _workflow_audit_tool_call_list(model.graph.nodes)
     return f"""<section id="workflow-audit" class="card saas-section workflow-audit-section">
   <header class="workflow-audit-header">
     <div>
       <p class="card-eyebrow">Secondary Audit</p>
-      <h2 class="card-title">Workflow Execution Graph</h2>
+      <h2 class="card-title">Workflow execution graph</h2>
       <p class="saas-section-subtitle">A compact left-to-right audit view of the recorded process for this user query.</p>
     </div>
     <div class="workflow-audit-meta">
       <span class="workflow-status-pill {status_cls}">{_h(status_label)}</span>
-      <span>{_h(run_shape)}</span>
-      <span>{_h(str(len(model.graph.nodes)))} nodes</span>
+      <span>{_h(str(node_count))} nodes</span>
     </div>
   </header>
   <div class="workflow-graph-panel">
-    <ol class="audit-stage-strip audit-stage-round-flow">{stages}</ol>
+    <ol class="audit-stage-strip audit-stage-flow">{stages}</ol>
+    {tool_calls}
     <div class="workflow-graph-legend">
       <span><i class="legend-dot is-complete"></i>Completed</span>
       <span><i class="legend-dot is-skipped"></i>Not recorded</span>
@@ -1469,23 +1671,28 @@ def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> s
 </section>"""
 
 
-def _workflow_audit_round_groups(
-    nodes: list[WorkflowNodeSummary],
-) -> list[tuple[int, list[WorkflowNodeSummary]]]:
+def _workflow_audit_tool_call_list(nodes: list[WorkflowNodeSummary]) -> str:
     if not nodes:
-        return [(0, [])]
-    has_rounds = any(node.round_index is not None for node in nodes)
-    groups: dict[int, list[WorkflowNodeSummary]] = {}
-    for index, node in enumerate(nodes):
-        round_index = node.round_index if has_rounds and node.round_index is not None else 0
-        if has_rounds and node.round_index is None:
-            round_index = index
-        groups.setdefault(round_index, []).append(node)
-    return sorted(groups.items(), key=lambda item: item[0])
+        return ""
+    rows = "".join(
+        '<li>'
+        f'<span>{idx}</span>'
+        f'<strong>{_h(_compact_tool_name(node.tool))}</strong>'
+        f'<code>{_h(node.node_id)}</code>'
+        f'<em class="state-{_state_class(node.state)}">{_h(str(node.state or "recorded"))}</em>'
+        '</li>'
+        for idx, node in enumerate(nodes, start=1)
+    )
+    return (
+        '<details class="workflow-tool-call-list" open>'
+        '<summary><strong>Recorded tool calls</strong><em>Exact node order from the run</em></summary>'
+        f'<ol>{rows}</ol>'
+        '</details>'
+    )
 
 
-def _workflow_audit_round_flow_html(
-    round_groups: list[tuple[int, list[WorkflowNodeSummary]]],
+def _workflow_audit_stage_flow_html(
+    nodes: list[WorkflowNodeSummary],
     *,
     workflow_type: str,
     has_final: bool,
@@ -1501,32 +1708,28 @@ def _workflow_audit_round_flow_html(
         )
     ]
     step_index = 2
-    for group_position, (round_index, nodes) in enumerate(round_groups, start=1):
-        is_last_round = group_position == len(round_groups)
-        band_html, used_steps = _workflow_audit_round_band_html(
-            round_index,
-            step_index,
-            nodes,
-            workflow_type=workflow_type,
-            has_final=has_final and is_last_round,
-        )
-        pieces.append(band_html)
-        step_index += used_steps
+    band_html, used_steps = _workflow_audit_stage_band_html(
+        step_index,
+        nodes,
+        workflow_type=workflow_type,
+        has_final=has_final,
+    )
+    pieces.append(band_html)
+    step_index += used_steps
     pieces.append(
         _workflow_audit_endpoint_html(
             step_index,
             key="completed",
             title="Completed",
             icon="flag",
-            state_label="Success" if has_final or round_groups else "Recorded",
+            state_label="Success" if has_final or nodes else "Recorded",
             tool_label="Report ready",
         )
     )
     return "".join(pieces)
 
 
-def _workflow_audit_round_band_html(
-    round_index: int,
+def _workflow_audit_stage_band_html(
     start_index: int,
     nodes: list[WorkflowNodeSummary],
     *,
@@ -1570,21 +1773,20 @@ def _workflow_audit_round_band_html(
         local_index += 1
     if not cards:
         cards.append(
-            _workflow_audit_empty_round_html(
+            _workflow_audit_empty_stage_html(
                 local_index,
                 workflow_type=workflow_type,
             )
         )
         local_index += 1
-    round_label = f"Round {round_index + 1}"
     step_count = local_index - start_index
     return (
-        '<li class="audit-round-band">'
-        '<div class="audit-round-head">'
-        f'<span>{_h(round_label)}</span>'
+        '<li class="audit-stage-band">'
+        '<div class="audit-stage-head">'
+        '<span>Recorded steps</span>'
         f'<em>{_h(str(step_count))} step{"s" if step_count != 1 else ""}</em>'
         '</div>'
-        f'<ol class="audit-round-stages">{"".join(cards)}</ol>'
+        f'<ol class="audit-stage-group">{"".join(cards)}</ol>'
         '</li>',
         step_count,
     )
@@ -1732,7 +1934,10 @@ def _workflow_audit_recorded_stage_html(
     else:
         state_cls = "is-complete" if stage.failed_count == 0 else "has-failures"
         state_label = "Completed" if stage.failed_count == 0 else "Needs review"
-        tools = [_compact_tool_name(tool) for tool in stage.tools if tool][:4]
+        compact_tools = [_compact_tool_name(tool) for tool in stage.tools if tool]
+        tools = compact_tools[:6]
+        if len(compact_tools) > len(tools):
+            tools.append(f"+{len(compact_tools) - len(tools)} more")
     tool_html = "".join(
         f'<span class="audit-tool-chip">{_h(tool)}</span>'
         for tool in tools
@@ -1751,13 +1956,13 @@ def _workflow_audit_recorded_stage_html(
     )
 
 
-def _workflow_audit_empty_round_html(index: int, *, workflow_type: str) -> str:
+def _workflow_audit_empty_stage_html(index: int, *, workflow_type: str) -> str:
     label = "Evidence not recorded" if workflow_type == WorkflowType.RETRIEVAL else "No tools recorded"
     return (
-        f'<li class="audit-stage is-skipped" data-stage="empty-round">'
+        f'<li class="audit-stage is-skipped" data-stage="empty-stage">'
         f'<span class="audit-stage-number">{index}</span>'
         f'<span class="audit-stage-icon">{_icon_svg("search")}</span>'
-        '<strong>Recorded round</strong>'
+        '<strong>Recorded step</strong>'
         '<span class="audit-stage-status">Not recorded</span>'
         f'<div class="audit-tool-row"><span class="audit-tool-chip is-muted">{_h(label)}</span></div>'
         "</li>"
@@ -2002,6 +2207,153 @@ def _saas_range_card(title: str, values: list[float]) -> str:
     return _saas_distribution_card(title, values, value_formatter=_fmt_range_value)
 
 
+def _saas_filter_metric_card(label: str, title: str, values: list[float]) -> str:
+    if not values:
+        return _saas_empty_pattern_card(title, "Metric not recorded.")
+    lo = min(values)
+    hi = max(values)
+    avg = sum(values) / len(values)
+    bins = _distribution_bins(values, bucket_count=8)
+    max_count = max(bins) or 1
+    bars = "".join(
+        f'<span style="height:{max(8, int(count / max_count * 64))}px" title="{_attr(count)} candidate(s)"></span>'
+        for count in bins
+    )
+    step = _metric_filter_step(lo, hi)
+    disabled = " disabled" if hi <= lo else ""
+    return (
+        f'<div class="saas-pattern-card metric-range-card metric-filter-card" '
+        f'data-filter-card data-metric="{_attr(title)}" '
+        f'data-default-min="{_attr(_fmt_filter_value(lo))}" '
+        f'data-default-max="{_attr(_fmt_filter_value(hi))}">'
+        f'<h3>{_h(title)}</h3>'
+        f'<div class="saas-bars saas-bars-distribution">{bars}</div>'
+        '<div class="range-filter-control">'
+        '<div class="range-filter-track"><span class="range-filter-window"></span></div>'
+        f'<input class="metric-filter-min" type="range" min="{_attr(_fmt_filter_value(lo))}" max="{_attr(_fmt_filter_value(hi))}" step="{_attr(step)}" value="{_attr(_fmt_filter_value(lo))}" aria-label="{_attr(title)} minimum"{disabled}>'
+        f'<input class="metric-filter-max" type="range" min="{_attr(_fmt_filter_value(lo))}" max="{_attr(_fmt_filter_value(hi))}" step="{_attr(step)}" value="{_attr(_fmt_filter_value(hi))}" aria-label="{_attr(title)} maximum"{disabled}>'
+        '</div>'
+        f'<p><span class="range-filter-label"><b>{_h(_fmt_range_value(lo))}</b> to <b>{_h(_fmt_range_value(hi))}</b></span> · avg {_h(_fmt_range_value(avg))}</p>'
+        '</div>'
+    )
+
+
+def _cross_candidate_filter_panel(
+    dossiers: list[CandidateDossierViewModel],
+    metric_labels: list[str],
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
+    metric_labels = list(dict.fromkeys(metric_labels))
+    result_dossiers = [dossier for dossier in dossiers if dossier.structure_path]
+    result_dossiers.sort(
+        key=lambda dossier: _filter_result_sort_key(dossier, metric_labels, preset),
+        reverse=True,
+    )
+    result_cards = "".join(
+        _cross_candidate_filter_result(dossier, metric_labels, preset)
+        for dossier in result_dossiers
+    )
+    if not metric_labels or not result_cards:
+        return ""
+    return (
+        '<div class="candidate-range-filter" data-candidate-range-filter>'
+        '<div class="candidate-range-filter-head">'
+        '<div><h3>Filter candidates by metric ranges</h3>'
+        '<p>Move the min and max handles for any metric. Matching candidates must satisfy every adjusted range, and structure downloads appear below.</p></div>'
+        '<span class="candidate-filter-count" data-filter-count></span>'
+        '</div>'
+        f'<div class="candidate-filter-results" data-filter-results>{result_cards}</div>'
+        '<p class="candidate-filter-empty" data-filter-empty hidden>No structure-linked candidates match the current metric ranges.</p>'
+        '</div>'
+    )
+
+
+def _cross_candidate_filter_result(
+    dossier: CandidateDossierViewModel,
+    metric_labels: list[str],
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
+    metrics: dict[str, float] = {}
+    for chip in dossier.metric_chips:
+        value = _chip_numeric_value(chip)
+        if value is None:
+            continue
+        title = _cross_candidate_metric_title(chip.label, preset)
+        if title in metric_labels:
+            metrics[title] = value
+    metric_summary = "".join(
+        '<span class="candidate-filter-primary-metric">'
+        f'{_h(metric_labels[0])} {_h(_fmt_range_value(metrics[metric_labels[0]]))}</span>'
+        if metric_labels and label == metric_labels[0]
+        else f'<span>{_h(label)} {_h(_fmt_range_value(value))}</span>'
+        for label, value in metrics.items()
+    )
+    download = (
+        _download_link(
+            dossier.structure_path,
+            "structure",
+            kind=Path(dossier.structure_path).suffix.lstrip(".") or "structure",
+            css="asset-pill is-on asset-download-link",
+        )
+        if dossier.structure_path
+        else ""
+    )
+    return (
+        f'<article class="candidate-filter-result" data-filter-result '
+        f'data-metrics="{_attr(json.dumps(metrics, separators=(",", ":")))}">'
+        f'<div><strong>{_h(dossier.candidate_id)}</strong>'
+        f'<span>{_h(dossier.status_label)}</span></div>'
+        f'<div class="candidate-filter-result-metrics">{metric_summary}</div>'
+        f'{download}'
+        '</article>'
+    )
+
+
+def _filter_result_sort_key(
+    dossier: CandidateDossierViewModel,
+    metric_labels: list[str],
+    preset: WorkflowReviewPreset | None = None,
+) -> tuple[int, float, int, str]:
+    primary = metric_labels[0] if metric_labels else ""
+    value = _dossier_metric_value_by_title(dossier, primary, preset)
+    is_recommended = 1 if dossier.status_label == "Recommended" else 0
+    return (
+        1 if value is not None else 0,
+        value if value is not None else float("-inf"),
+        is_recommended,
+        dossier.candidate_id,
+    )
+
+
+def _dossier_metric_value_by_title(
+    dossier: CandidateDossierViewModel,
+    title: str,
+    preset: WorkflowReviewPreset | None = None,
+) -> float | None:
+    for chip in dossier.metric_chips:
+        if _cross_candidate_metric_title(chip.label, preset) != title:
+            continue
+        return _chip_numeric_value(chip)
+    return None
+
+
+def _metric_filter_step(lo: float, hi: float) -> str:
+    span = abs(hi - lo)
+    if span <= 0:
+        return "1"
+    if span <= 1:
+        return "0.01"
+    if span <= 10:
+        return "0.1"
+    return "1"
+
+
+def _fmt_filter_value(value: float) -> str:
+    if abs(value) >= 10:
+        return f"{value:.4g}"
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
 def _saas_empty_pattern_card(title: str, message: str) -> str:
     return (
         f'<div class="saas-pattern-card saas-pattern-card-empty">'
@@ -2166,7 +2518,6 @@ def render_report_html(
     review = build_review_model(deduped)
     saas_vm = build_report_view_model(deduped, review)
     model = _flatten_candidate_view(deduped)
-    plots = build_plots(model)
     title = f"VPA report · {model.summary.id}"
 
     # Keep the removed product-stage "Why this workflow?" trace out of the
@@ -2174,10 +2525,7 @@ def render_report_html(
     # Appendix so node-level execution remains inspectable without making the
     # appendix feel like a workflow debugger.
     show_workflow_audit = bool(model.graph.nodes)
-    show_plots = bool(plots)
-    show_msa = bool(model.msa_blocks)
     show_candidates = bool(model.final_submission or model.final_candidates or model.candidates)
-    show_conversation = model.agent_transcript is not None
     # The "Candidate Merge Audit" section is suppressed entirely per user
     # request — it duplicated information already conveyed by the Candidates
     # section and read as redundant noise.
@@ -2187,35 +2535,20 @@ def render_report_html(
     # no-op parameter-default audit noise and added little to the report.
     show_availability = False
 
-    # The report follows a candidate-first SaaS hierarchy. Per-tool widgets
-    # remain available below the primary review surfaces so auditability is
-    # preserved. The raw workflow DAG is a secondary audit section, not an
-    # Appendix item.
+    # The report follows a candidate-first SaaS hierarchy. Low-level per-tool
+    # widgets and appendix panels are intentionally suppressed; the raw
+    # workflow DAG remains as the audit surface.
     nav_items: list[tuple[str | None, str, str]] = [("overview", "Overview", "overview")]
     if show_candidates:
         nav_items.append(("candidate-dossiers", "Evidence Summary", "dossier"))
         nav_items.append(("candidates", "Candidate Review", "candidate"))
+        if _structure_comparison_bundles(review):
+            nav_items.append(("structure-comparison", "Structure Comparison", "structure"))
         nav_items.append(("candidate-comparison", "Candidate Comparison", "compare"))
         nav_items.append(("cross-candidate-analysis", "Cross-Candidate Analysis", "analytics"))
     if show_workflow_audit:
         nav_items.append(("workflow-audit", "Workflow Audit", "workflow"))
     nav_items.append(("agent-rationale", "Agent Rationale", "agent"))
-    nav_items.append(("reproducibility", "Reproducibility", "repro"))
-    appendix_items: list[tuple[str, str, str]] = []
-    if show_plots:
-        appendix_items.append(("plots", "Plots", "plot"))
-    if show_msa:
-        appendix_items.append(("msa", "MSA", "msa"))
-    appendix_items.append(("details", "Per-tool results", "tools"))
-    if show_availability:
-        appendix_items.append(("availability", "Availability", "availability"))
-    if show_merge_audit:
-        appendix_items.append(("merge-audit", "Merge audit", "merge"))
-    if show_conversation:
-        appendix_items.append(("conversation", "Full Transcript", "transcript"))
-    if appendix_items:
-        nav_items.append((None, "Appendix", ""))
-        nav_items.extend(appendix_items)
 
     def _nav_item_html(anchor: str | None, label: str, glyph: str) -> str:
         if anchor is None:
@@ -2233,15 +2566,18 @@ def render_report_html(
     # candidate's viewer lazily from this shared <script> block, so every board
     # card (not just the top-k) resolves to a real viewer when clicked. Dedup by
     # candidate_id to avoid embedding the same file twice.
-    _viewer_candidates: list[ReportCandidate] = []
+    _viewer_entries: list[tuple[ReportCandidate, str]] = []
     _seen_viewer_ids: set[str] = set()
     for _bundle in review.bundles:
         _c = _bundle.candidate
         if _c.candidate_id in _seen_viewer_ids:
             continue
         _seen_viewer_ids.add(_c.candidate_id)
-        _viewer_candidates.append(_c)
-    viewer_payloads = _collect_viewer_payloads(_viewer_candidates)
+        _viewer_entries.append((_c, _structure_dom_id(_c.candidate_id)))
+    for _index, _bundle in enumerate(_structure_comparison_bundles(review), start=1):
+        _c = _bundle.candidate
+        _viewer_entries.append((_c, _comparison_structure_dom_id(_c.candidate_id, _index)))
+    viewer_payloads = _collect_viewer_payloads(_viewer_entries)
     viewer_data_script = (
         f'<script id="vpa-structures" type="application/json">{_script_json(viewer_payloads)}</script>'
         if viewer_payloads
@@ -2261,12 +2597,6 @@ def render_report_html(
     overview_section = _saas_overview_section(saas_vm.overview)
     agent_rationale_section = _saas_agent_rationale_section(saas_vm.agent_rationale)
 
-    # ----- Conversation section (LLM-agent runs only) -----
-    conversation_section = (
-        _agent_transcript_section(model.agent_transcript)
-        if show_conversation
-        else ""
-    )
     availability_section = (
         _candidate_availability_section(model) if show_availability else ""
     )
@@ -2290,6 +2620,11 @@ def render_report_html(
         if show_candidates
         else ""
     )
+    structure_comparison_section = (
+        _structure_comparison_section(review, saas_vm.review_preset)
+        if show_candidates
+        else ""
+    )
     cross_candidate_section = (
         _saas_cross_candidate_section(saas_vm.candidate_dossiers, saas_vm.review_preset)
         if show_candidates
@@ -2299,24 +2634,6 @@ def render_report_html(
         _workflow_audit_section(model, saas_vm.workflow_trace)
         if show_workflow_audit
         else ""
-    )
-
-    plots_section = (
-        f"""<details id="plots" class="card appendix-panel">
-  <summary><span>Plots</span><small>Detailed analytic charts</small></summary>
-  <header class="card-header"><div><p class="card-eyebrow">Analytics</p><h2 class="card-title">Plots</h2></div></header>
-  {_plots_html(plots)}
-</details>"""
-        if show_plots else ""
-    )
-
-    msa_section = (
-        f"""<details id="msa" class="card appendix-panel">
-  <summary><span>MSA / Sequence Context</span><small>Alignment evidence and homolog context</small></summary>
-  <header class="card-header"><div><p class="card-eyebrow">Homologs</p><h2 class="card-title">MSA / Sequence Context</h2></div></header>
-  {_msa_html(model.msa_blocks)}
-</details>"""
-        if show_msa else ""
     )
 
     return f"""<!doctype html>
@@ -2359,34 +2676,13 @@ def render_report_html(
     {overview_section}
     {candidate_dossiers_section}
     {candidates_section}
+    {structure_comparison_section}
     {candidate_comparison_section}
     {cross_candidate_section}
     {workflow_audit_section}
     {agent_rationale_section}
-    <section id="reproducibility" class="card saas-section">
-      <header class="card-header">
-        <div><p class="card-eyebrow">Reproducibility</p><h2 class="card-title">Replay and audit package</h2></div>
-        <span class="card-meta">Stored run results</span>
-      </header>
-      {_repro_html(model)}
-    </section>
-    <section id="appendix" class="appendix-divider">
-      <span class="appendix-divider-label">Appendix · full run detail</span>
-      <p class="appendix-divider-note">Supporting evidence behind the candidate review above — analytics, per-tool widgets, the agent's reasoning, artifact audit, and replay info.</p>
-    </section>
-    {plots_section}
-    {msa_section}
-    <details id="details" class="card appendix-panel">
-      <summary><span>Per-tool results</span><small>Raw tool widgets and candidate-filtered evidence</small></summary>
-      <header class="card-header">
-        <div><p class="card-eyebrow">Tool results</p><h2 class="card-title">Per-tool widgets</h2></div>
-      </header>
-      <p class="widget-explainer">These panels are organised by <strong>workflow node</strong> (one tool execution). Use the <strong>sample selector</strong> to filter every panel to a single candidate — the cards inside each block are then rebuilt from <strong>that design's own</strong> metrics, so this section tracks your candidate selection just like the review console above. A node that never processed the selected sample says so, and input / retrieval steps with no per-sample result stay visible for all. The raw JSON output is collapsed at the bottom of each panel for reference.</p>
-      {_node_details(model.graph.nodes, _per_tool_cand_order(review))}
-    </details>
     {availability_section}
     {merge_audit_section}
-    {conversation_section}
   </main>
   {threedmol_script}
   {viewer_data_script}
@@ -3109,7 +3405,7 @@ def _state_clause(model: ReportModel) -> str:
 # ----------------------------------------------------------------- candidates
 
 
-def _collect_viewer_payloads(candidates: list[ReportCandidate]) -> list[dict[str, Any]]:
+def _collect_viewer_payloads(entries: list[tuple[ReportCandidate, str]]) -> list[dict[str, Any]]:
     """Build inline structure payloads — once per top candidate, JSON-embedded.
 
     Each payload includes PDB/CIF text content plus pre-computed pLDDT
@@ -3118,7 +3414,11 @@ def _collect_viewer_payloads(candidates: list[ReportCandidate]) -> list[dict[str
     block.
     """
     payloads: list[dict[str, Any]] = []
-    for candidate in candidates:
+    seen_ids: set[str] = set()
+    for candidate, dom_id in entries:
+        if dom_id in seen_ids:
+            continue
+        seen_ids.add(dom_id)
         if not candidate.structure_path:
             continue
         path = Path(candidate.structure_path)
@@ -3136,7 +3436,7 @@ def _collect_viewer_payloads(candidates: list[ReportCandidate]) -> list[dict[str
         content = _normalize_structure_for_viewer(content, fmt)
         payloads.append(
             {
-                "id": _structure_dom_id(candidate.candidate_id),
+                "id": dom_id,
                 "candidate_id": candidate.candidate_id,
                 "format": fmt,
                 "filename": path.name,
@@ -3942,7 +4242,7 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
        final picks is the same physical protein at a different pipeline
        stage — showing it again as a separate card is what made one protein
        look like three. Those are removed.
-    3. **Collapse remaining duplicates.** Among the survivors, keep a single
+    3. **Collapse remaining duplicates.** Among the remaining candidates, keep a single
        richest-scored representative per ``candidate_id`` and per sequence,
        then restore rank order for display.
 
@@ -4040,12 +4340,25 @@ def _structure_confidence_tool(candidate: ReportCandidate) -> str | None:
     for tool in _PLDDT_SOURCE_TOOLS:
         if tool in present:
             return tool
+    for key in present:
+        prefix, sep, metric = key.partition(":")
+        if sep and metric.lower() in {"plddt", "mean_plddt", "atom_plddts", "atom_plddt"}:
+            prefix = prefix.strip().lower()
+            if prefix in _PLDDT_SOURCE_TOOLS:
+                return prefix
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    source_tool = str(source.get("tool") or "").strip().lower()
+    if source_tool in _PLDDT_SOURCE_TOOLS:
+        return source_tool
     return None
 
 
 def _viewer_block(
     candidate: ReportCandidate,
     chain_context: _ChainContext | None = None,
+    *,
+    dom_id: str | None = None,
+    compact: bool = False,
 ) -> str:
     """Inline 3Dmol.js viewer block per the per-candidate structure file.
 
@@ -4067,7 +4380,7 @@ def _viewer_block(
             f"<div class='viewer-empty'>Structure file not accessible: "
             f"<code>{_h(_short(str(path), 60))}</code></div>"
         )
-    dom_id = _structure_dom_id(candidate.candidate_id)
+    dom_id = dom_id or _structure_dom_id(candidate.candidate_id)
     fmt = path.suffix.lower().lstrip(".")
     structure_label = path.name
     # Explain (generalisably) when some or all chains are backbone-only, so a
@@ -4121,7 +4434,9 @@ def _viewer_block(
         spectrum_option = '<option value="spectrum" selected>N to C spectrum</option>'
     else:
         plddt_option = f'<option value="plddt" selected>{_h(plddt_label)}</option>'
-    if is_complex:
+    if compact:
+        hint_text = "Compare orientation, confidence colour, chains, and gross interface geometry."
+    elif is_complex:
         # Explicit complex-composition hint that subsumes the generic
         # Pick-mode pointer. Reads more naturally than two separate hints.
         hint_text = (
@@ -4161,14 +4476,38 @@ def _viewer_block(
         )
     else:
         plddt_note = ""
-    return f"""<section class="structure-section" data-target="{_attr(dom_id)}" data-format="{_attr(fmt)}"
+    sequence_track = "" if compact else _structure_sequence_track(sequence_str, dom_id, chain_context)
+    residue_info = (
+        ""
+        if compact
+        else f"""<aside class="structure-residue-info" data-target="{_attr(dom_id)}" hidden>
+    <div class="sri-title">{_h(candidate.candidate_id)}</div>
+    <div class="sri-detail">
+      <span class="sri-source">{_h(structure_label)}</span>
+      <span class="sri-sep">·</span>
+      <span class="sri-chain sri-placeholder">Chain &mdash;</span>
+      <span class="sri-sep">·</span>
+      <span class="sri-resi sri-placeholder"><strong>&mdash;</strong></span>
+      <span class="sri-sep">·</span>
+      <span class="sri-seqpos sri-placeholder">seq &mdash;</span>
+    </div>
+  </aside>"""
+    )
+    pick_button = (
+        ""
+        if compact
+        else f"""<button type="button" class="structure-control structure-picker-btn"
+            data-target="{_attr(dom_id)}" aria-pressed="false"
+            title="Pick mode: hover residues for an instant residue card (RCSB-style)">&#x2316; Pick</button>"""
+    )
+    return f"""<section class="structure-section{' structure-section-compact' if compact else ''}" data-target="{_attr(dom_id)}" data-format="{_attr(fmt)}"
          data-candidate-id="{_attr(candidate.candidate_id)}"
          data-structure-name="{_attr(structure_label)}"
          data-sequence="{_attr(sequence_str)}"
          data-binder-chain="{_attr(binder_chain_attr)}"
          data-default-colour="{_attr(default_colour)}">
   <header class="structure-header">
-    <span class="structure-title">3D structure</span>
+    <span class="structure-title">{_h('Compare structure' if compact else '3D structure')}</span>
     <span class="structure-hint">{_h(hint_text)}</span>
     <label class="structure-control"><span>Colour</span>
       <select class="structure-color" data-target="{_attr(dom_id)}">
@@ -4181,16 +4520,14 @@ def _viewer_block(
       <input type="checkbox" class="structure-sidechains" data-target="{_attr(dom_id)}" />
       Sidechains
     </label>
-    <button type="button" class="structure-control structure-picker-btn"
-            data-target="{_attr(dom_id)}" aria-pressed="false"
-            title="Pick mode: hover residues for an instant residue card (RCSB-style)">&#x2316; Pick</button>
+    {pick_button}
     <button type="button" class="structure-control structure-fullscreen-btn"
             data-target="{_attr(dom_id)}" aria-label="Toggle fullscreen"
             title="Expand (press Esc to exit)">&#x2922; Expand</button>
   </header>
   {coverage_note}
   {plddt_note}
-  {_structure_sequence_track(sequence_str, dom_id, chain_context)}
+  {sequence_track}
   <div class="structure-viewer" id="{_attr(dom_id)}" data-structure-id="{_attr(dom_id)}"></div>
   <div class="structure-health" data-target="{_attr(dom_id)}" hidden>
     <strong>Structure viewer unavailable.</strong>
@@ -4201,18 +4538,7 @@ def _viewer_block(
     <span class="legend-gradient"></span>
     <span class="legend-text">Very high</span>
   </div>
-  <aside class="structure-residue-info" data-target="{_attr(dom_id)}" hidden>
-    <div class="sri-title">{_h(candidate.candidate_id)}</div>
-    <div class="sri-detail">
-      <span class="sri-source">{_h(structure_label)}</span>
-      <span class="sri-sep">·</span>
-      <span class="sri-chain sri-placeholder">Chain &mdash;</span>
-      <span class="sri-sep">·</span>
-      <span class="sri-resi sri-placeholder"><strong>&mdash;</strong></span>
-      <span class="sri-sep">·</span>
-      <span class="sri-seqpos sri-placeholder">seq &mdash;</span>
-    </div>
-  </aside>
+  {residue_info}
 </section>"""
 
 
@@ -4774,14 +5100,6 @@ def _workflow_composition(model: ReportModel) -> str:
     if kind == "tool":
         mode_key, mode_label = "tool", "Single tool run"
         lead = "This run executed a single tool."
-    elif kind == "agent" or name.lower().startswith("agent"):
-        mode_key, mode_label = "agent", "LLM agent-composed"
-        lead = (
-            "An LLM agent selected and ordered these steps automatically — no "
-            "explicit user plan is recorded with the run. The steps below are "
-            "listed in execution order; each shows the input parameters "
-            "recovered from its output."
-        )
     else:
         mode_key, mode_label = "workflow", "Predefined workflow"
         lead = (
@@ -5106,7 +5424,7 @@ def _slice_node_output_for_candidate(
         sliced["flags"] = pq.get("flags") or []
     sa = scores.get("structure_analysis")
     if isinstance(sa, dict):
-        for key in ("burial", "interface"):
+        for key in ("burial", "interface", "ligand_pocket"):
             if isinstance(sa.get(key), dict):
                 sliced[key] = sa[key]
         # Swap the node-level artifact bundle for THIS candidate's own. The
@@ -5124,7 +5442,14 @@ def _slice_node_output_for_candidate(
             # aggregates) would otherwise gap-fill into this candidate's panel
             # when its own summary_json omits a key. Drop them so the per-
             # candidate bundle is the single source of truth.
-            for leak_key in ("liabilities", "secondary_structure", "ligand_contacts"):
+            for leak_key in (
+                "liabilities",
+                "secondary_structure",
+                "ligand_contacts",
+                "ligand_pocket",
+            ):
+                if leak_key == "ligand_pocket" and isinstance(sa.get(leak_key), dict):
+                    continue
                 sliced.pop(leak_key, None)
     seq_an = scores.get("sequence_analysis")
     if isinstance(seq_an, dict):
@@ -6528,12 +6853,24 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
     # ``output`` itself sometimes carries the canonical summary at the top
     # level (e.g. burial / interface dicts) — merge those keys in last so
     # they win over the file's older snapshot.
-    for key in ("burial", "interface", "chains", "liabilities", "annotation_scope"):
+    for key in (
+        "burial",
+        "interface",
+        "ligand_pocket",
+        "chains",
+        "liabilities",
+        "annotation_scope",
+    ):
         if key not in summary and key in output:
             summary[key] = output[key]
 
     burial = summary.get("burial") if isinstance(summary.get("burial"), dict) else {}
     interface = summary.get("interface") if isinstance(summary.get("interface"), dict) else {}
+    ligand_pocket = (
+        summary.get("ligand_pocket")
+        if isinstance(summary.get("ligand_pocket"), dict)
+        else {}
+    )
     chains = summary.get("chains") if isinstance(summary.get("chains"), list) else []
     liabilities = summary.get("liabilities") if isinstance(summary.get("liabilities"), list) else []
     scope = summary.get("annotation_scope") if isinstance(summary.get("annotation_scope"), dict) else {}
@@ -6611,6 +6948,20 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
                 "neutral",
                 gauge={"value": n_lc, "lo": 0.0, "hi": max(20.0, n_lc * 2)},
             ))
+        buried_fraction = (
+            ligand_pocket.get("ligand_buried_fraction")
+            if isinstance(ligand_pocket, dict)
+            else None
+        )
+        if buried_fraction is not None:
+            n_bf = _num(buried_fraction)
+            if n_bf is not None:
+                cards.append(_score_card(
+                    "Ligand buried", f"{n_bf * 100:.0f}%",
+                    "Fraction of ligand heavy atoms with at least one protein heavy-atom contact.",
+                    "neutral",
+                    gauge={"value": n_bf * 100, "lo": 0.0, "hi": 100.0},
+                ))
         interface_residues = interface.get("interface_residue_count")
         if interface_residues:
             n_ir = _num(interface_residues) or 0.0
@@ -9725,7 +10076,6 @@ def _repro_html(model: ReportModel) -> str:
     support_cards = (
         '<div class="repro-support-grid">'
         '<a class="repro-support-card" href="#details"><span>Technical provenance</span><strong>Per-tool results</strong></a>'
-        '<a class="repro-support-card" href="#conversation"><span>Agent record</span><strong>Full agent transcript</strong></a>'
         "</div>"
     )
     return (
@@ -9986,933 +10336,6 @@ def _warning_list(model: ReportModel) -> str:
             for w in model.warnings
         )
         + "</div>"
-    )
-
-
-# --------------------------------------------------------------------------- agent transcript
-#
-# Three-tier panel for LLM-agent runs: original user query (You),
-# plan / planning response (Agent plan), final answer (Final response),
-# plus a collapsible full transcript at the bottom for users who want
-# every assistant / tool turn. Renders nothing when the run wasn't
-# LLM-planned (``model.agent_transcript is None``).
-
-# Role icons for the chat-bubble transcript. Kept small and monochrome
-# so the panel reads as a polished product, not a chat-app pastiche.
-_AGENT_ROLE_BADGES: dict[str, tuple[str, str]] = {
-    "user":      ("You",    "❝"),
-    "assistant": ("Agent",  "✦"),
-    "system":    ("System", "⚙"),
-    "tool":      ("Tool",   "⌬"),
-}
-
-
-def _agent_transcript_section(transcript: AgentTranscript) -> str:
-    """Top-level "Conversation" card for an LLM-agent run.
-
-    Layout (top to bottom):
-      1. Card header with eyebrow + title + meta chips
-         (model, message count, tool-call count, round count).
-      2. **You** — the user's original natural-language query.
-      3. **Agent plan** — the plan response (structured + prose).
-      4. **Final response** — the agent's wrap-up answer.
-      5. **Full transcript** — collapsed ``<details>`` with every
-         message AND tool call interleaved chronologically. This single
-         chronological view replaced the older standalone execution
-         timeline and decision-audit sections (they duplicated what the
-         transcript already shows step by step).
-    """
-    user_html = _agent_user_block(transcript.user_query)
-    plan_html = _agent_plan_block(transcript)
-    final_html = _agent_final_block(transcript.final_response)
-    # ``submit_candidate`` is a terminal action, not a per-round verdict —
-    # keep it out of the round count chip below.
-    round_decisions = [
-        d for d in transcript.decisions if not _is_submit_candidate(d.decision_label)
-    ]
-    transcript_html = _agent_full_transcript_block(
-        transcript.messages, transcript.tool_calls,
-    )
-
-    meta_chips: list[str] = []
-    if transcript.model:
-        meta_chips.append(
-            f'<span class="conv-meta-chip">model · <b>{_h(transcript.model)}</b></span>'
-        )
-    if transcript.provider:
-        meta_chips.append(
-            f'<span class="conv-meta-chip">{_h(transcript.provider)}</span>'
-        )
-    # Count only what the transcript actually renders (system/infra messages
-    # and submit_candidate tool calls are filtered out downstream).
-    msg_count = sum(1 for m in transcript.messages if m.role.strip().lower() != "system")
-    if msg_count:
-        meta_chips.append(
-            f'<span class="conv-meta-chip">{msg_count} message{"s" if msg_count != 1 else ""}</span>'
-        )
-    tc_count = sum(1 for tc in transcript.tool_calls if not _is_submit_candidate(tc.tool_name))
-    if tc_count:
-        meta_chips.append(
-            f'<span class="conv-meta-chip">{tc_count} tool call{"s" if tc_count != 1 else ""}</span>'
-        )
-    round_count = len(round_decisions)
-    if round_count > 1:
-        meta_chips.append(
-            f'<span class="conv-meta-chip">{round_count} rounds</span>'
-        )
-    meta_html = (
-        f'<div class="conv-meta">{"".join(meta_chips)}</div>'
-        if meta_chips
-        else ""
-    )
-
-    return f"""<details id="conversation" class="card card-conversation appendix-panel">
-  <summary><span>Full Agent Transcript</span><small>Prompt, plan, final answer, messages, and tool calls</small></summary>
-  <header class="card-header">
-    <div>
-      <p class="card-eyebrow">Conversation</p>
-      <h2 class="card-title">Agent transcript</h2>
-    </div>
-    {meta_html}
-  </header>
-  <p class="widget-explainer">This run was orchestrated by an LLM agent — the prompt below was translated into the workflow you see in the rest of the report. The plan and final response are the agent's own narrative; the full transcript exposes every step the agent took along the way.</p>
-  {user_html}
-  {plan_html}
-  {final_html}
-  {transcript_html}
-</details>"""
-
-
-def _agent_user_block(query: str) -> str:
-    if not query:
-        return ""
-    return f"""<div class="conv-block conv-block-user">
-  <div class="conv-block-head">
-    <span class="conv-role-badge conv-role-badge-user">❝ You</span>
-  </div>
-  <blockquote class="conv-user-quote">{_render_agent_prose(query)}</blockquote>
-</div>"""
-
-
-# Friendly humanised labels for the decision_label strings emitted by the
-# planner / DecisionEngine. Mapped on lookup; unknown labels fall back to
-# a snake_case → "Sentence case" best effort via :func:`_pretty_field_name`.
-_DECISION_LABEL_FRIENDLY: dict[str, str] = {
-    "completed_no_additional_round_recommended": "Workflow completed",
-    "completed_review_metrics":                   "Completed · review metrics",
-    "needs_next_round":                           "Needs another round",
-    "workflow_not_completed":                     "Workflow did not complete",
-    "tool_selection":                             "Tool selection",
-}
-
-
-def _humanize_decision_label(label: str) -> str:
-    if not label:
-        return ""
-    key = label.strip().lower()
-    if key in _DECISION_LABEL_FRIENDLY:
-        return _DECISION_LABEL_FRIENDLY[key]
-    return _pretty_field_name(label)
-
-
-def _plan_text_is_dump_of(plan_text: str, plan_structured: dict[str, Any] | None) -> bool:
-    """Return True when ``plan_text`` is just a JSON dump of the same plan
-    we already rendered structurally — in that case the prose render
-    would be a duplicate noise block at the bottom. Tolerant to whitespace
-    and key-order variations."""
-    if not plan_text or not isinstance(plan_structured, dict):
-        return False
-    stripped = plan_text.strip()
-    if not (stripped.startswith("{") or stripped.startswith("[")):
-        return False
-    try:
-        parsed = json.loads(stripped)
-    except (ValueError, TypeError):
-        return False
-    if not isinstance(parsed, dict):
-        return False
-    # If parsed shares >=2 keys with plan_structured, treat as the same payload.
-    shared = set(parsed.keys()) & set(plan_structured.keys())
-    return len(shared) >= 2 or parsed == plan_structured
-
-
-def _agent_plan_block(transcript: AgentTranscript) -> str:
-    """Render the agent's plan as a tight product-style summary card.
-
-    Layout principle: the "core" (goal · planned steps · tool chips)
-    stays prominent; everything else (assumptions, missing inputs,
-    success criteria, plan rationale) collapses into one expandable
-    "Plan details" element so the visible surface stays focused.
-
-    If ``plan_text`` is a JSON dump of the same plan we already
-    structured we skip the prose render entirely — otherwise we keep it
-    as the agent's free-form narrative.
-    """
-    structured_html = ""
-    if isinstance(transcript.plan_structured, dict):
-        structured_html = _render_plan_structured(transcript.plan_structured)
-    prose_html = ""
-    if transcript.plan_text and not _plan_text_is_dump_of(
-        transcript.plan_text, transcript.plan_structured,
-    ):
-        # Free-form narrative — keep it, but only if it doesn't start with a
-        # raw JSON character (which would also be a serialised payload we
-        # can't structurally lay out from plan_structured).
-        stripped = transcript.plan_text.strip()
-        if not stripped.startswith(("{", "[")):
-            prose_html = (
-                '<div class="conv-plan-prose">'
-                f'{_render_agent_prose(transcript.plan_text)}'
-                '</div>'
-            )
-    if not structured_html and not prose_html:
-        return ""
-    return f"""<div class="conv-block conv-block-plan">
-  <div class="conv-block-head">
-    <span class="conv-role-badge conv-role-badge-agent">✦ Agent plan</span>
-  </div>
-  {prose_html}
-  {structured_html}
-</div>"""
-
-
-def _render_plan_structured(plan: dict[str, Any]) -> str:
-    """Render the ``agent_plans.plan_json`` dict as a tight, focused card.
-
-    By deliberate product choice the plan card surfaces only the two
-    things a reader actually wants to confirm about the agent's plan:
-
-    1. **Required tools** — the tools the agent committed to running,
-       as a chip strip (with the warm-in-advance set when distinct).
-    2. **Assumptions** — the premises the agent stated it was operating
-       under.
-
-    Everything else the planner records (goal restatement, per-step
-    plan, rationale, mode, deliverable contract, metadata, source kind,
-    and any other bookkeeping fields) is intentionally *not* shown here —
-    the workflow DAG already documents what ran, and the rest is internal
-    audit noise for a human reading the report.
-    """
-    blocks: list[str] = []
-
-    # ---- (1) Tool chips — required + warm in advance ----
-    # ``candidate_tools`` is a synonym for ``required_tools`` emitted by the
-    # tool-selection mode of the planner. Prefer the explicit required_tools
-    # when both are present; otherwise candidate_tools takes its place.
-    required = plan.get("required_tools")
-    if not (isinstance(required, list) and required):
-        required = plan.get("candidate_tools")
-    warm = plan.get("warm_tools")
-    tool_groups: list[tuple[str, list[Any]]] = []
-    if isinstance(required, list) and required:
-        tool_groups.append(("Required tools", required))
-    if isinstance(warm, list) and warm and warm != required:
-        tool_groups.append(("Warm in advance", warm))
-    if tool_groups:
-        cols = []
-        for label, items in tool_groups:
-            chips = "".join(
-                f'<code class="conv-plan-tool-chip">{_h(str(item))}</code>'
-                for item in items if item
-            )
-            if chips:
-                cols.append(
-                    '<div class="conv-plan-tools-col">'
-                    f'<h5 class="conv-plan-list-head">{_h(label)}</h5>'
-                    f'<div class="conv-plan-tool-chips">{chips}</div>'
-                    '</div>'
-                )
-        if cols:
-            blocks.append(
-                f'<div class="conv-plan-tools-row">{"".join(cols)}</div>'
-            )
-
-    # ---- (2) Assumptions ----
-    assumptions = plan.get("assumptions")
-    if isinstance(assumptions, list) and assumptions:
-        lis = "".join(
-            f"<li>{_render_agent_prose(_stringify_final_item(item))}</li>"
-            for item in assumptions if item
-        )
-        if lis:
-            blocks.append(
-                '<div class="conv-plan-list">'
-                '<h5 class="conv-plan-list-head">Assumptions</h5>'
-                f'<ul class="conv-plan-detail-list">{lis}</ul>'
-                '</div>'
-            )
-
-    return "".join(blocks)
-
-
-def _agent_final_block(final: str | None) -> str:
-    if not final:
-        return ""
-    return f"""<div class="conv-block conv-block-final">
-  <div class="conv-block-head">
-    <span class="conv-role-badge conv-role-badge-final">✓ Final response</span>
-  </div>
-  <div class="conv-final-body">{_render_agent_final_payload(final)}</div>
-</div>"""
-
-
-# Field-name aliases the structured-final renderer recognises. Agents that
-# don't follow our canonical names still land in the right section as long
-# as one of these synonyms shows up. Lowercase + underscore — the renderer
-# normalises keys before matching.
-_FINAL_DECISION_KEYS  = ("decision", "verdict", "status", "outcome")
-_FINAL_REASON_KEYS    = ("reason", "reasoning", "summary", "narrative", "explanation", "rationale", "message")
-_FINAL_CHANGES_KEYS   = ("changes", "recommendations", "action_items", "next_steps", "actions", "todo")
-_FINAL_NOTES_KEYS     = ("notes", "caveats", "warnings", "observations")
-_FINAL_METRICS_KEYS   = ("metrics_used", "metrics", "metrics_evaluated", "criteria_evaluated")
-_FINAL_NEXT_ROUND_KEYS = ("next_round", "recommendation", "next")
-
-
-def _render_agent_final_payload(text: str) -> str:
-    """Render the agent's final response with structured-JSON detection.
-
-    When ``text`` parses as a JSON object carrying any of the recognised
-    field names (decision / next_round / reason / changes / notes /
-    metrics_used / ...), we lay it out as a polished structured card
-    instead of dumping the raw JSON string. Free-form prose responses
-    fall through to ``_render_agent_prose`` unchanged.
-    """
-    stripped = (text or "").strip()
-    if stripped.startswith("{") or stripped.startswith("["):
-        try:
-            data = json.loads(stripped)
-        except (ValueError, TypeError):
-            data = None
-        if isinstance(data, dict) and _looks_like_structured_final(data):
-            return _render_structured_final(data)
-    return _render_agent_prose(text)
-
-
-def _looks_like_structured_final(data: dict[str, Any]) -> bool:
-    """Return True iff ``data`` has at least one key the structured
-    renderer knows how to lay out. Keeps free-form JSON-like blobs from
-    being misidentified as structured payloads."""
-    known = {
-        *_FINAL_DECISION_KEYS, *_FINAL_REASON_KEYS, *_FINAL_CHANGES_KEYS,
-        *_FINAL_NOTES_KEYS, *_FINAL_METRICS_KEYS, *_FINAL_NEXT_ROUND_KEYS,
-    }
-    return any(k in data for k in known)
-
-
-def _pick_first(data: dict[str, Any], keys: tuple[str, ...]) -> Any:
-    """Return ``data[k]`` for the first ``k`` in ``keys`` that's present."""
-    for k in keys:
-        if k in data:
-            return data[k]
-    return None
-
-
-def _render_structured_final(data: dict[str, Any]) -> str:
-    """Lay out a structured final-response payload as readable HTML.
-
-    Five logical sections, each rendered only when its data is present:
-      1. Header bar: decision verdict + next-round action pill
-      2. Reason / summary prose
-      3. Recommended changes — bulleted list
-      4. Notes / caveats — callout list
-      5. Metrics evaluated — chip strip
-      6. Anything else — collapsed key-value rows so nothing is silently dropped.
-    """
-    parts: list[str] = []
-
-    # ---- Header: decision label + next-round status ----
-    decision_label = _pick_first(data, _FINAL_DECISION_KEYS)
-    next_round = _pick_first(data, _FINAL_NEXT_ROUND_KEYS)
-    nr_pill = ""
-    nr_reason = ""
-    if isinstance(next_round, dict):
-        recommended = bool(next_round.get("recommended", False))
-        if recommended:
-            nr_pill = (
-                '<span class="conv-final-pill conv-final-pill-action">'
-                '↻ Next round recommended</span>'
-            )
-        else:
-            nr_pill = (
-                '<span class="conv-final-pill conv-final-pill-done">'
-                '✓ No further rounds needed</span>'
-            )
-        nr_reason_raw = next_round.get("reason")
-        if isinstance(nr_reason_raw, str) and nr_reason_raw.strip():
-            nr_reason = nr_reason_raw.strip()
-    header_bits: list[str] = []
-    if isinstance(decision_label, str) and decision_label.strip():
-        human = _humanize_decision_label(decision_label.strip())
-        # Humanised label as the eye-catching chip; raw underscore form
-        # lives in the title= for engineers who need the audit string.
-        header_bits.append(
-            f'<span class="conv-final-decision" title="{_attr(decision_label.strip())}">'
-            f'{_h(human)}</span>'
-        )
-    if nr_pill:
-        header_bits.append(nr_pill)
-    if header_bits:
-        parts.append(f'<div class="conv-final-header">{"".join(header_bits)}</div>')
-
-    # ---- Reason / summary prose ----
-    reason = nr_reason
-    if not reason:
-        candidate = _pick_first(data, _FINAL_REASON_KEYS)
-        if isinstance(candidate, str) and candidate.strip():
-            reason = candidate.strip()
-    if reason:
-        parts.append(
-            '<div class="conv-final-section">'
-            f'<h5 class="conv-final-section-head">{"Reason" if next_round else "Summary"}</h5>'
-            f'<div class="conv-final-section-body">{_render_agent_prose(reason)}</div>'
-            '</div>'
-        )
-
-    # ---- Recommended changes / action items ----
-    changes_value = _pick_first(data, _FINAL_CHANGES_KEYS)
-    if isinstance(changes_value, list) and changes_value:
-        lis = "".join(
-            f'<li>{_render_agent_prose(_stringify_final_item(item))}</li>'
-            for item in changes_value
-            if item not in (None, "")
-        )
-        if lis:
-            parts.append(
-                '<div class="conv-final-section">'
-                '<h5 class="conv-final-section-head">Recommended changes</h5>'
-                f'<ul class="conv-final-list">{lis}</ul>'
-                '</div>'
-            )
-
-    # ---- Notes / caveats ----
-    notes_value = _pick_first(data, _FINAL_NOTES_KEYS)
-    if isinstance(notes_value, list) and notes_value:
-        note_lis: list[str] = []
-        for n in notes_value:
-            if isinstance(n, dict):
-                level = str(n.get("level") or "note").lower()
-                msg = str(n.get("message") or n.get("text") or "").strip()
-                if not msg:
-                    continue
-                note_lis.append(
-                    f'<li class="conv-final-note conv-final-note-{_h(level)}">'
-                    f'<strong>{_h(level)}</strong> {_render_agent_prose(msg)}'
-                    '</li>'
-                )
-            else:
-                s = _stringify_final_item(n)
-                if s:
-                    note_lis.append(f'<li class="conv-final-note">{_render_agent_prose(s)}</li>')
-        if note_lis:
-            parts.append(
-                '<div class="conv-final-section">'
-                '<h5 class="conv-final-section-head">Notes &amp; caveats</h5>'
-                f'<ul class="conv-final-list conv-final-notes">{"".join(note_lis)}</ul>'
-                '</div>'
-            )
-
-    # ---- Metrics evaluated — chip strip ----
-    metrics_value = _pick_first(data, _FINAL_METRICS_KEYS)
-    if isinstance(metrics_value, list) and metrics_value:
-        chips = "".join(
-            f'<code class="conv-final-metric">{_h(str(m))}</code>'
-            for m in metrics_value[:60]
-            if m not in (None, "")
-        )
-        more = ""
-        if len(metrics_value) > 60:
-            more = (
-                f'<span class="conv-final-metric-more">+{len(metrics_value) - 60} more</span>'
-            )
-        if chips:
-            parts.append(
-                '<div class="conv-final-section">'
-                '<h5 class="conv-final-section-head">Metrics evaluated</h5>'
-                f'<div class="conv-final-metrics">{chips}{more}</div>'
-                '</div>'
-            )
-
-    # ---- Submission decision — the submit_candidate payload, prettified ----
-    # ``submit_candidate`` is the internal terminal tool's argument blob; we
-    # never dump it as raw JSON (it reads as noise). Instead we surface the
-    # one thing a reader cares about: which candidate was submitted and the
-    # agent's justification for it.
-    submission_html = _render_submission_decision(data.get("submit_candidate"))
-    if submission_html:
-        parts.append(submission_html)
-
-    # ---- Anything else — key/value rows so nothing is silently dropped ----
-    known_keys: set[str] = {"submit_candidate"}
-    for ks in (_FINAL_DECISION_KEYS, _FINAL_REASON_KEYS, _FINAL_CHANGES_KEYS,
-               _FINAL_NOTES_KEYS, _FINAL_METRICS_KEYS, _FINAL_NEXT_ROUND_KEYS):
-        known_keys.update(ks)
-    extras_rows: list[str] = []
-    for k, v in data.items():
-        if k in known_keys:
-            continue
-        rendered = _render_extra_value(v)
-        if rendered:
-            extras_rows.append(
-                f'<dt>{_h(_pretty_field_name(k))}</dt><dd>{rendered}</dd>'
-            )
-    if extras_rows:
-        parts.append(
-            '<div class="conv-final-section">'
-            '<h5 class="conv-final-section-head">Additional</h5>'
-            f'<dl class="conv-final-dl">{"".join(extras_rows)}</dl>'
-            '</div>'
-        )
-
-    if not parts:
-        # No recognised fields produced output — fall back to a pretty-
-        # printed JSON code block so at minimum the raw payload reads
-        # cleanly instead of as a single overflowing line.
-        return (
-            f'<code class="conv-codeblock">{_h(_pretty_json(data))}</code>'
-        )
-    return "".join(parts)
-
-
-def _render_submission_decision(value: Any) -> str:
-    """Prettify the ``submit_candidate`` argument blob from a final response.
-
-    Expected shape (tolerant of missing keys)::
-
-        {"candidates": [
-            {"candidate_id": "cand_…", "justification": "…",
-             "scores_to_highlight": ["esm3", "protein_qc"], "job_id": "…"}
-        ]}
-
-    Renders one row per submitted candidate — the candidate id as a code
-    chip, the agent's justification as prose, and any highlighted score
-    groups as small chips. Returns "" when there's nothing usable so the
-    caller can skip the section entirely.
-    """
-    if not isinstance(value, dict):
-        return ""
-    cands = value.get("candidates")
-    if not isinstance(cands, list):
-        # Some agents inline a single candidate dict rather than a list.
-        cands = [value] if value.get("candidate_id") else []
-    rows: list[str] = []
-    for cand in cands:
-        if not isinstance(cand, dict):
-            continue
-        cid = str(cand.get("candidate_id") or "").strip()
-        justification = str(cand.get("justification") or "").strip()
-        highlight = cand.get("scores_to_highlight")
-        head_bits: list[str] = []
-        if cid:
-            head_bits.append(f'<code class="conv-submit-id">{_h(cid)}</code>')
-        if isinstance(highlight, list) and highlight:
-            chips = "".join(
-                f'<code class="conv-final-metric">{_h(str(s))}</code>'
-                for s in highlight if s
-            )
-            if chips:
-                head_bits.append(f'<span class="conv-submit-chips">{chips}</span>')
-        head_html = (
-            f'<div class="conv-submit-head">{"".join(head_bits)}</div>'
-            if head_bits else ""
-        )
-        just_html = (
-            f'<div class="conv-submit-just">{_render_agent_prose(justification)}</div>'
-            if justification else ""
-        )
-        if head_html or just_html:
-            rows.append(f'<div class="conv-submit-row">{head_html}{just_html}</div>')
-    if not rows:
-        return ""
-    return (
-        '<div class="conv-final-section">'
-        '<h5 class="conv-final-section-head">Submission decision</h5>'
-        f'<div class="conv-submit-list">{"".join(rows)}</div>'
-        '</div>'
-    )
-
-
-def _stringify_final_item(item: Any) -> str:
-    """Coerce a list-item value to a short readable string."""
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        # Prefer ``message`` / ``text`` / ``description`` over JSON dump.
-        for k in ("message", "text", "description", "summary", "name"):
-            v = item.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        return _pretty_json(item, max_len=400)
-    return str(item)
-
-
-def _render_extra_value(value: Any) -> str:
-    """Render an unknown extras value as HTML — short scalars inline,
-    medium lists as comma-joined, anything bigger as a code block."""
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return _h("yes" if value else "no")
-    if isinstance(value, (str, int, float)):
-        s = str(value).strip()
-        if not s:
-            return ""
-        return _h(s)
-    if isinstance(value, list):
-        if not value:
-            return ""
-        if all(isinstance(x, (str, int, float, bool)) for x in value) and len(value) <= 12:
-            return _h(", ".join(str(x) for x in value))
-        return f'<code class="conv-final-extra-payload">{_h(_pretty_json(value, max_len=600))}</code>'
-    if isinstance(value, dict):
-        if not value:
-            return ""
-        return f'<code class="conv-final-extra-payload">{_h(_pretty_json(value, max_len=600))}</code>'
-    return _h(str(value))
-
-
-def _pretty_field_name(key: str) -> str:
-    """Convert a snake_case key into a Sentence-case label."""
-    tokens = [t for t in str(key).replace("-", "_").split("_") if t]
-    if not tokens:
-        return str(key)
-    return " ".join(
-        t.upper() if t.isupper() and len(t) <= 4 else t.capitalize()
-        for t in tokens
-    )
-
-
-def _agent_full_transcript_block(
-    messages: list[AgentMessage],
-    tool_calls: list[AgentToolCall] | None = None,
-) -> str:
-    """Collapsible transcript at the bottom: chat bubbles interleaved with tool-call chips.
-
-    Messages and tool calls are merged into one chronological stream
-    using ``timestamp_ms``; missing timestamps sort first (so they stay
-    at the top in append order). Each tool call renders as a compact
-    pill chip with the tool name, ok/fail badge, and a click-to-expand
-    ``<details>`` showing pretty-printed args / result.
-    """
-    tool_calls = tool_calls or []
-    # ``system`` messages are the planner/infra prompt (full tool registry,
-    # "do not add submit_candidate nodes", ...) — pure noise in a human-facing
-    # transcript. ``submit_candidate`` tool calls are the terminal submission,
-    # surfaced in the Candidates section instead. Drop both here.
-    messages = [m for m in messages if m.role.strip().lower() != "system"]
-    tool_calls = [tc for tc in tool_calls if not _is_submit_candidate(tc.tool_name)]
-    if not messages and not tool_calls:
-        return ""
-
-    # Chronological merge. Use enumeration index as a tiebreaker so two
-    # events sharing a timestamp keep their original order.
-    events: list[tuple[int, int, str, Any]] = []
-    for idx, msg in enumerate(messages):
-        events.append((msg.timestamp_ms or 0, idx, "msg", msg))
-    for idx, tc in enumerate(tool_calls):
-        events.append((tc.timestamp_ms or 0, 10_000_000 + idx, "tool", tc))
-    events.sort(key=lambda e: (e[0], e[1]))
-
-    pieces: list[str] = []
-    for _ts, _ord, kind, payload in events:
-        if kind == "msg":
-            pieces.append(_agent_message_bubble(payload))
-        else:
-            pieces.append(_agent_tool_call_chip(payload))
-
-    return f"""<details class="conv-transcript-details">
-  <summary class="conv-transcript-summary">
-    <span class="conv-transcript-summary-label">Full transcript</span>
-    <span class="conv-transcript-summary-meta">{len(messages)} message{"s" if len(messages) != 1 else ""}{f", {len(tool_calls)} tool call{'s' if len(tool_calls) != 1 else ''}" if tool_calls else ""}</span>
-  </summary>
-  <div class="conv-transcript-body">
-    {"".join(pieces)}
-  </div>
-</details>"""
-
-
-def _agent_message_bubble(msg: AgentMessage) -> str:
-    """Single chat bubble for one message in the full transcript."""
-    label, glyph = _AGENT_ROLE_BADGES.get(
-        msg.role.lower(),
-        (msg.role.title(), "•"),
-    )
-    role_cls = msg.role.lower().replace(" ", "-")
-    model_chip = (
-        f'<span class="conv-bubble-model">{_h(msg.model)}</span>'
-        if msg.model and msg.role.lower() == "assistant"
-        else ""
-    )
-    return (
-        f'<article class="conv-bubble conv-bubble-{_h(role_cls)}">'
-        f'<header class="conv-bubble-head">'
-        f'<span class="conv-role-badge conv-role-badge-{_h(role_cls)}">'
-        f'{_h(glyph)} {_h(label)}</span>'
-        f'{model_chip}'
-        '</header>'
-        f'<div class="conv-bubble-body">{_render_agent_message_content(msg.content)}</div>'
-        '</article>'
-    )
-
-
-def _agent_tool_call_chip(tc: AgentToolCall) -> str:
-    """Compact inline chip for a single tool invocation in the transcript.
-
-    Shows the tool name + ok/fail badge by default; click-to-expand
-    reveals pretty-printed args (JSON) and a compact result preview.
-    Lives in the same chronological stream as message bubbles but reads
-    as a single-line audit row rather than a chat bubble — that visual
-    distinction is the cue "this is the agent doing, not saying."
-    """
-    status_cls = "ok" if tc.ok else "fail"
-    status_glyph = "✓" if tc.ok else "✕"
-    args_html = ""
-    if tc.args:
-        args_html = (
-            '<div class="conv-tool-section">'
-            '<div class="conv-tool-section-head">args</div>'
-            f'<code class="conv-tool-payload">{_h(_pretty_json(tc.args))}</code>'
-            '</div>'
-        )
-    result_html = ""
-    if tc.result is not None and tc.result != "":
-        result_html = (
-            '<div class="conv-tool-section">'
-            '<div class="conv-tool-section-head">result</div>'
-            f'<code class="conv-tool-payload">{_h(_pretty_json(tc.result))}</code>'
-            '</div>'
-        )
-    body_html = args_html + result_html
-    summary_html = (
-        f'<summary class="conv-tool-summary">'
-        f'<span class="conv-tool-glyph conv-tool-glyph-{status_cls}">{status_glyph}</span>'
-        f'<span class="conv-tool-label">Tool</span>'
-        f'<code class="conv-tool-name">{_h(tc.tool_name)}</code>'
-        + (
-            '<span class="conv-tool-state conv-tool-state-fail">failed</span>'
-            if not tc.ok else ""
-        )
-        + '</summary>'
-    )
-    if not body_html:
-        # No payload to show — render as a plain (non-collapsible) chip.
-        return (
-            f'<div class="conv-tool-chip conv-tool-chip-{status_cls} conv-tool-chip-plain">'
-            f'<span class="conv-tool-glyph conv-tool-glyph-{status_cls}">{status_glyph}</span>'
-            f'<span class="conv-tool-label">Tool</span>'
-            f'<code class="conv-tool-name">{_h(tc.tool_name)}</code>'
-            + (
-                '<span class="conv-tool-state conv-tool-state-fail">failed</span>'
-                if not tc.ok else ""
-            )
-            + '</div>'
-        )
-    return (
-        f'<details class="conv-tool-chip conv-tool-chip-{status_cls}">'
-        f'{summary_html}'
-        f'<div class="conv-tool-body">{body_html}</div>'
-        '</details>'
-    )
-
-
-# ``submit_candidate`` is an internal terminal/control action, not an analysis
-# tool. It is surfaced once as the "Final pick / submission decision" in the
-# Candidates section; everywhere else in the agent transcript (execution
-# timeline, decision audit, tool-call chips) it is filtered out as noise.
-_SUBMIT_CANDIDATE_TOOL = "submit_candidate"
-
-
-def _is_submit_candidate(name: str | None) -> bool:
-    return (name or "").strip().lower() == _SUBMIT_CANDIDATE_TOOL
-
-
-def _pretty_json(value: Any, *, max_len: int = 2_000) -> str:
-    """Pretty-print arbitrary JSON-compatible data with a length cap.
-
-    Lists/dicts get 2-space indent. Strings render verbatim. The cap
-    keeps massive tool results (e.g. base64 blobs) from blowing up the
-    transcript size — the trailing slice is dropped with an ellipsis.
-    """
-    if isinstance(value, str):
-        s = value
-    else:
-        try:
-            import json as _json
-            s = _json.dumps(value, indent=2, ensure_ascii=False, sort_keys=False, default=str)
-        except Exception:
-            s = repr(value)
-    if len(s) > max_len:
-        s = s[:max_len].rstrip() + f"\n… [{len(s) - max_len} more chars truncated]"
-    return s
-
-
-def _render_agent_prose(text: str) -> str:
-    """Escape + lightly format an agent's text content for HTML.
-
-    Preserves paragraph breaks (double newline) and inline newlines
-    (single newline → ``<br>``). Code fences ``` ``` ``` are rendered as
-    monospace blocks. Nothing fancy — the goal is faithful prose
-    rendering, not a markdown parser.
-    """
-    if not text:
-        return ""
-    s = str(text).strip()
-    # Split out triple-backtick fenced blocks first.
-    parts: list[str] = []
-    buf: list[str] = []
-    in_code = False
-    code_buf: list[str] = []
-    for line in s.split("\n"):
-        if line.strip().startswith("```"):
-            if in_code:
-                parts.append("<para>" + "\n".join(buf) + "</para>" if buf else "")
-                buf = []
-                parts.append(
-                    "<code class='conv-codeblock'>"
-                    + _h("\n".join(code_buf))
-                    + "</code>"
-                )
-                code_buf = []
-                in_code = False
-            else:
-                if buf:
-                    parts.append("<para>" + "\n".join(buf) + "</para>")
-                    buf = []
-                in_code = True
-            continue
-        if in_code:
-            code_buf.append(line)
-        else:
-            buf.append(line)
-    if in_code and code_buf:
-        # Unterminated fence — render what we have as a code block.
-        parts.append(
-            "<code class='conv-codeblock'>" + _h("\n".join(code_buf)) + "</code>"
-        )
-    elif buf:
-        parts.append("<para>" + "\n".join(buf) + "</para>")
-
-    html_parts: list[str] = []
-    for chunk in parts:
-        if not chunk:
-            continue
-        if chunk.startswith("<code"):
-            html_parts.append(chunk)
-            continue
-        # Strip our <para> sentinel and split on blank lines for paragraphs.
-        inner = chunk[len("<para>"):-len("</para>")]
-        for paragraph in inner.split("\n\n"):
-            paragraph = paragraph.strip("\n")
-            if not paragraph:
-                continue
-            # Within a paragraph, single newlines become <br>.
-            escaped = _h(paragraph).replace("\n", "<br>")
-            html_parts.append(f"<p>{escaped}</p>")
-    return "".join(html_parts)
-
-
-def _clip_text(value: str, limit: int) -> str:
-    """Single-line truncation with an ellipsis for inline summaries."""
-    s = " ".join(str(value).split())
-    if len(s) <= limit:
-        return s
-    return s[: limit - 1].rstrip() + "…"
-
-
-def _describe_json_payload(data: Any) -> str:
-    """Build a short, escaped HTML gist of a parsed JSON object/array.
-
-    Used to replace wall-of-text JSON message bubbles (e.g. the tool
-    registry the planner is handed) with a one-line headline plus a few
-    key facts. Lists of named objects are summarised by their names so a
-    reader sees "12 tools (rfdiffusion, proteinmpnn, …)" instead of a
-    multi-kilobyte blob.
-    """
-    def _names(items: list[Any]) -> list[str]:
-        out: list[str] = []
-        for it in items:
-            if isinstance(it, dict):
-                name = it.get("name") or it.get("id") or it.get("tool")
-                if name:
-                    out.append(str(name))
-        return out
-
-    facets: list[str] = []
-    if isinstance(data, dict):
-        n = len(data)
-        headline = f"Structured message · {n} field{'s' if n != 1 else ''}"
-        for key, val in data.items():
-            label = _h(str(key))
-            if isinstance(val, list):
-                names = _names(val)
-                if names:
-                    shown = ", ".join(_h(x) for x in names[:6])
-                    extra = f" +{len(names) - 6} more" if len(names) > 6 else ""
-                    facets.append(
-                        f"<li><b>{label}</b>: {len(val)} ({shown}{extra})</li>"
-                    )
-                else:
-                    facets.append(
-                        f"<li><b>{label}</b>: {len(val)} "
-                        f"item{'s' if len(val) != 1 else ''}</li>"
-                    )
-            elif isinstance(val, dict):
-                facets.append(
-                    f"<li><b>{label}</b>: {{{len(val)} "
-                    f"field{'s' if len(val) != 1 else ''}}}</li>"
-                )
-            elif val is None or val == "":
-                facets.append(f"<li><b>{label}</b>: —</li>")
-            else:
-                facets.append(f"<li><b>{label}</b>: {_h(_clip_text(str(val), 90))}</li>")
-    elif isinstance(data, list):
-        n = len(data)
-        names = _names(data)
-        if names:
-            shown = ", ".join(_h(x) for x in names[:8])
-            extra = f" +{len(names) - 8} more" if len(names) > 8 else ""
-            headline = f"List · {n} entr{'ies' if n != 1 else 'y'} ({shown}{extra})"
-        else:
-            headline = f"List · {n} item{'s' if n != 1 else ''}"
-    else:
-        headline = "Structured payload"
-
-    ul = (
-        f"<ul class='conv-json-facets'>{''.join(facets)}</ul>" if facets else ""
-    )
-    return f"<span class='conv-json-headline'>{headline}</span>{ul}"
-
-
-def _render_agent_message_content(text: str) -> str:
-    """Render a transcript message body, summarising raw-JSON payloads.
-
-    Most messages are prose and pass straight through ``_render_agent_prose``.
-    But some bubbles (notably the tool-registry the planner receives) carry a
-    single large JSON object/array as their entire content — a wall of text
-    that buries the conversation. When the whole content parses as JSON we
-    render a compact summary headline plus a click-to-expand raw view instead.
-    Small JSON (<= 300 chars) is just pretty-printed inline; non-JSON prose is
-    untouched.
-    """
-    s = (text or "").strip()
-    if not s or s[0] not in "{[":
-        return _render_agent_prose(text)
-    try:
-        data = json.loads(s)
-    except Exception:
-        return _render_agent_prose(text)
-    if not isinstance(data, (dict, list)):
-        return _render_agent_prose(text)
-
-    pretty = json.dumps(data, indent=2, ensure_ascii=False)
-    if len(pretty) <= 300:
-        return f"<code class='conv-json-inline'>{_h(pretty)}</code>"
-    summary_html = _describe_json_payload(data)
-    return (
-        "<details class='conv-json-block'>"
-        f"<summary class='conv-json-summary'>{summary_html}"
-        "<span class='conv-json-toggle'>show raw JSON</span></summary>"
-        f"<code class='conv-json-raw'>{_h(pretty)}</code>"
-        "</details>"
     )
 
 
@@ -11417,640 +10840,6 @@ body {
 }
 /* Drop the historical accent-tinted card-candidates variant — every card is now identical. */
 .card-candidates { background:var(--panel); border:1px solid var(--line); box-shadow:var(--shadow-card); }
-
-/* ==========================================================================
-   Conversation panel — three-tier transcript for LLM-agent runs.
-   Mirrors the visual weight of the executive-summary card while staying
-   visually distinct: the user/agent/final tiers each have a coloured left
-   border + soft tint so a reader can scan the conversation at a glance.
-   ========================================================================== */
-.card-conversation .card-header-pills,
-.conv-meta { display:flex; gap:7px; flex-wrap:wrap; }
-.conv-meta-chip {
-  font-size:11.5px; color:var(--muted);
-  background:var(--panel); border:1px solid var(--line);
-  border-radius:var(--radius-pill); padding:3px 11px;
-}
-.conv-meta-chip b {
-  color:var(--ink); font-weight:600;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.conv-block {
-  margin:14px 0; padding:16px 18px 14px;
-  border-radius:12px; border:1px solid var(--line);
-  background:#ffffff; box-shadow:var(--shadow-tile);
-  position:relative; overflow:hidden;
-}
-.conv-block::before {
-  content:""; position:absolute; left:0; top:0; bottom:0; width:4px;
-}
-.conv-block-user::before  { background:var(--accent); }
-.conv-block-plan::before  { background:#5b8def; }   /* sky-indigo for "thinking" */
-.conv-block-final::before { background:var(--good); }
-.conv-block-head {
-  display:flex; align-items:center; justify-content:space-between; gap:10px;
-  margin-bottom:10px;
-}
-.conv-role-badge {
-  display:inline-flex; align-items:center; gap:6px;
-  font-size:11px; font-weight:700;
-  text-transform:uppercase; letter-spacing:0.07em;
-  padding:4px 11px; border-radius:var(--radius-pill);
-  border:1px solid var(--line); background:#fbfafe; color:var(--ink);
-}
-.conv-role-badge-user,
-.conv-role-badge-user.conv-role-badge {
-  color:var(--accent); background:var(--accent-soft); border-color:#d9cef3;
-}
-.conv-role-badge-agent,
-.conv-role-badge-assistant,
-.conv-role-badge-assistant.conv-role-badge {
-  color:#1e40af; background:#e7efff; border-color:#bfd4ff;
-}
-.conv-role-badge-final,
-.conv-role-badge-final.conv-role-badge {
-  color:var(--good); background:var(--good-soft); border-color:var(--good-line);
-}
-.conv-role-badge-system { color:var(--muted); background:#f7f5fb; }
-.conv-role-badge-tool   { color:#7c2d12; background:#fcebdd; border-color:#f3d3b8; }
-
-/* The user quote leans on the brand serif accent so it reads as
-   prose — a customer-quote treatment rather than a code block. */
-.conv-user-quote {
-  margin:0; padding:0 0 0 14px;
-  border-left:3px solid var(--accent-soft);
-  color:var(--ink); font-size:16px; line-height:1.65;
-}
-.conv-user-quote p { margin:0 0 8px; }
-.conv-user-quote p:last-child { margin-bottom:0; }
-
-/* Plan tier: structured outline + optional prose. */
-.conv-plan-dl { margin:0 0 12px; }
-.conv-plan-dl dt {
-  font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em;
-  color:var(--subtle); margin-bottom:4px;
-}
-.conv-plan-dl dd {
-  margin:0; padding:0; font-size:14px; color:var(--ink); line-height:1.55;
-}
-.conv-plan-list { margin:10px 0; }
-.conv-plan-list-head {
-  margin:0 0 6px; font-size:11px; font-weight:700;
-  text-transform:uppercase; letter-spacing:0.08em; color:var(--subtle);
-}
-.conv-plan-list ul, .conv-plan-list ol {
-  margin:0; padding-left:20px; font-size:13.5px; color:var(--ink); line-height:1.6;
-}
-.conv-plan-list li { margin:3px 0; }
-.conv-plan-list-steps ol { padding-left:22px; }
-.conv-plan-list-steps li {
-  display:flex; align-items:baseline; gap:10px;
-  padding:5px 0;
-}
-.conv-plan-tool {
-  flex-shrink:0;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:12px; font-weight:700; color:var(--accent);
-  background:var(--accent-soft); border-radius:5px; padding:1px 8px;
-}
-.conv-plan-reason { color:var(--muted); font-size:13.5px; }
-.conv-plan-prose { margin-top:10px; color:var(--ink); font-size:14px; line-height:1.65; }
-.conv-plan-prose p { margin:0 0 8px; }
-.conv-plan-prose p:last-child { margin-bottom:0; }
-
-/* Goal as a lede paragraph — slightly larger, calm ink colour, no
-   list / dl chrome. Reads as the headline of the card. */
-.conv-plan-goal {
-  margin:0 0 14px;
-  font-size:14.5px; line-height:1.6; color:var(--ink);
-}
-.conv-plan-goal p { margin:0; }
-
-/* Required-tools + Warm chip strips in a side-by-side row. Falls back
-   to stacked when narrow. */
-.conv-plan-tools-row {
-  display:flex; flex-wrap:wrap; gap:18px 28px; margin:12px 0;
-}
-.conv-plan-tools-col {
-  flex:1 1 220px; min-width:0;
-}
-.conv-plan-tool-chips { display:flex; flex-wrap:wrap; gap:5px; }
-.conv-plan-tool-chip {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11.5px; font-weight:600; color:var(--accent);
-  background:var(--accent-soft); border:1px solid #d9cef3;
-  border-radius:5px; padding:2px 9px;
-}
-
-/* Collapsible "Plan details" drawer carrying assumptions, missing
-   inputs, success criteria, rationale, mode, extras. Default-closed
-   keeps the visible surface focused on goal + planned steps + tools. */
-.conv-plan-details {
-  margin-top:14px; padding-top:12px; border-top:1px dashed #f0eef8;
-}
-.conv-plan-details-summary {
-  cursor:pointer; user-select:none;
-  display:inline-flex; align-items:center; gap:10px;
-  padding:5px 10px; border-radius:7px;
-  font-size:12.5px; color:var(--muted);
-  list-style:none;
-}
-.conv-plan-details-summary::-webkit-details-marker { display:none; }
-.conv-plan-details-summary::before {
-  content:"▸"; color:var(--subtle); font-size:10px;
-  transition:transform 0.15s;
-}
-.conv-plan-details[open] > .conv-plan-details-summary::before {
-  transform:rotate(90deg); display:inline-block;
-}
-.conv-plan-details-summary:hover { background:#f7f5fb; color:var(--accent); }
-.conv-plan-details-label { font-weight:600; color:var(--ink); }
-.conv-plan-details-meta { color:var(--subtle); font-size:11.5px; }
-.conv-plan-details-body { margin-top:10px; }
-.conv-plan-detail-section { margin:10px 0; }
-.conv-plan-detail-section:first-child { margin-top:0; }
-.conv-plan-detail-list {
-  margin:0; padding-left:20px; font-size:13.5px; color:var(--ink); line-height:1.6;
-}
-.conv-plan-detail-list li { margin:3px 0; }
-.conv-plan-rationale {
-  font-size:13.5px; color:var(--ink); line-height:1.6;
-}
-.conv-plan-rationale p { margin:0 0 6px; }
-.conv-plan-rationale p:last-child { margin-bottom:0; }
-.conv-plan-meta {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11.5px; color:var(--ink);
-  background:#fbfafe; border:1px solid var(--line);
-  border-radius:5px; padding:2px 8px;
-}
-
-/* Final tier: prose, slightly heavier weight to read as the "answer". */
-.conv-final-body { font-size:14.5px; line-height:1.65; color:var(--ink); }
-.conv-final-body p { margin:0 0 10px; }
-.conv-final-body p:last-child { margin-bottom:0; }
-
-/* Structured final-response layout (when the agent emits a decision /
-   recommendation JSON payload instead of free-form prose). Visual goal:
-   read as a polished product summary — header pills for the verdict,
-   section subheads for reason / changes / notes / metrics, no raw JSON
-   dump. */
-.conv-final-header {
-  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
-  margin:0 0 12px;
-}
-.conv-final-decision {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:12px; font-weight:700;
-  background:var(--good-soft); color:var(--good);
-  border:1px solid var(--good-line);
-  border-radius:5px; padding:2px 9px;
-}
-.conv-final-pill {
-  font-size:11px; font-weight:700;
-  text-transform:uppercase; letter-spacing:0.06em;
-  padding:3px 11px; border-radius:var(--radius-pill);
-  border:1px solid transparent;
-}
-.conv-final-pill-action {
-  color:#92400e; background:#fef3c7; border-color:#fde68a;
-}
-.conv-final-pill-done {
-  color:var(--good); background:var(--good-soft); border-color:var(--good-line);
-}
-.conv-final-section { margin:12px 0; }
-.conv-final-section:first-of-type { margin-top:0; }
-.conv-final-section-head {
-  margin:0 0 6px; font-size:10.5px; font-weight:700;
-  text-transform:uppercase; letter-spacing:0.08em;
-  color:var(--subtle);
-}
-.conv-final-section-body {
-  font-size:14px; line-height:1.65; color:var(--ink);
-}
-.conv-final-section-body p { margin:0 0 8px; }
-.conv-final-section-body p:last-child { margin-bottom:0; }
-.conv-final-list {
-  margin:0; padding-left:20px; font-size:13.5px; color:var(--ink);
-  line-height:1.6;
-}
-.conv-final-list li { margin:4px 0; }
-.conv-final-list li p { margin:0; }
-.conv-final-notes li { color:var(--muted); }
-.conv-final-note strong {
-  text-transform:uppercase; font-size:10.5px; font-weight:700;
-  letter-spacing:0.06em; margin-right:5px; color:var(--subtle);
-}
-.conv-final-note-warning strong { color:var(--warn); }
-.conv-final-note-error   strong { color:var(--poor); }
-.conv-final-metrics {
-  display:flex; flex-wrap:wrap; gap:5px;
-}
-.conv-final-metric {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11px; color:var(--ink);
-  background:#fbfafe; border:1px solid var(--line);
-  border-radius:5px; padding:2px 8px;
-}
-.conv-final-metric-more {
-  font-size:11px; color:var(--subtle); align-self:center;
-  padding:2px 4px;
-}
-.conv-submit-list { display:flex; flex-direction:column; gap:10px; }
-.conv-submit-row {
-  border:1px solid var(--line); border-radius:8px;
-  padding:10px 12px; background:#fbfafe;
-}
-.conv-submit-head {
-  display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:6px;
-}
-.conv-submit-id {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:12px; font-weight:600; color:var(--ink);
-  background:#fff; border:1px solid var(--line);
-  border-radius:5px; padding:2px 8px;
-}
-.conv-submit-chips { display:inline-flex; flex-wrap:wrap; gap:5px; }
-.conv-submit-just {
-  font-size:13.5px; line-height:1.6; color:var(--ink);
-}
-.conv-submit-just p { margin:0; }
-.conv-final-dl { margin:0; }
-.conv-final-dl dt {
-  font-size:10.5px; font-weight:700;
-  text-transform:uppercase; letter-spacing:0.06em;
-  color:var(--subtle); margin-bottom:2px;
-}
-.conv-final-dl dt + dt { margin-top:8px; }
-.conv-final-dl dd {
-  margin:0 0 8px; font-size:13.5px; color:var(--ink);
-  word-break:break-word;
-}
-.conv-final-extra-payload {
-  display:block; white-space:pre-wrap; word-break:break-word;
-  padding:8px 10px; max-height:200px; overflow:auto;
-  background:#0f0a1f; color:#ede9fe;
-  border-radius:6px; font-size:11.5px; line-height:1.5;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-/* Inline code block inside any agent prose. */
-.conv-codeblock {
-  display:block; white-space:pre; overflow-x:auto;
-  margin:10px 0; padding:10px 12px;
-  background:#0f0a1f; color:#ede9fe;
-  border-radius:8px; font-size:12.5px; line-height:1.55;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-/* Transcript JSON payloads — a summarised, collapsible alternative to dumping
-   a multi-kilobyte blob (e.g. the tool registry) straight into a chat bubble.
-   The summary headline + key-fact list reads at a glance; the raw JSON stays
-   one click away. */
-.conv-json-inline {
-  display:block; white-space:pre-wrap; word-break:break-word;
-  margin:4px 0; padding:8px 10px;
-  background:color-mix(in srgb, var(--ink) 4%, var(--panel));
-  border:1px solid var(--line); border-radius:8px;
-  font-size:12px; line-height:1.5;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--ink);
-}
-.conv-json-block { margin:2px 0; }
-.conv-json-summary {
-  cursor:pointer; user-select:none; list-style:none;
-  display:flex; flex-wrap:wrap; align-items:baseline; gap:8px;
-  padding:8px 10px; border-radius:8px;
-  background:color-mix(in srgb, var(--accent) 5%, var(--panel));
-  border:1px solid var(--line);
-}
-.conv-json-summary::-webkit-details-marker { display:none; }
-.conv-json-headline {
-  font-weight:600; font-size:13px; color:var(--ink);
-}
-.conv-json-toggle {
-  margin-left:auto; font-size:11px; font-weight:600; letter-spacing:0.03em;
-  text-transform:uppercase; color:var(--accent);
-}
-.conv-json-block[open] .conv-json-toggle::after { content:' (hide)'; }
-.conv-json-facets {
-  flex-basis:100%; margin:6px 0 0; padding:0 0 0 2px;
-  list-style:none; display:flex; flex-direction:column; gap:3px;
-}
-.conv-json-facets li {
-  font-size:12px; color:var(--muted); line-height:1.5;
-}
-.conv-json-facets li b { color:var(--ink); font-weight:600; }
-.conv-json-raw {
-  display:block; white-space:pre; overflow-x:auto;
-  margin:8px 0 2px; padding:10px 12px;
-  background:#0f0a1f; color:#ede9fe;
-  border-radius:8px; font-size:12px; line-height:1.55;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-/* Full-transcript: collapsible chat-bubble list. */
-.conv-transcript-details {
-  margin-top:16px; border-top:1px solid var(--line); padding-top:14px;
-}
-.conv-transcript-summary {
-  cursor:pointer; user-select:none; padding:6px 10px;
-  display:inline-flex; align-items:center; gap:10px;
-  border-radius:8px; color:var(--muted); font-size:13px;
-  list-style:none;
-}
-.conv-transcript-summary::-webkit-details-marker { display:none; }
-.conv-transcript-summary::before {
-  content:"▸"; color:var(--subtle); transition:transform 0.15s;
-}
-.conv-transcript-details[open] > .conv-transcript-summary::before {
-  transform:rotate(90deg); display:inline-block;
-}
-.conv-transcript-summary:hover { background:#f7f5fb; color:var(--accent); }
-.conv-transcript-summary-label { font-weight:600; color:var(--ink); }
-.conv-transcript-summary-meta { color:var(--subtle); font-size:12px; }
-.conv-transcript-body {
-  margin-top:12px;
-  display:flex; flex-direction:column; gap:10px;
-}
-.conv-bubble {
-  padding:12px 14px;
-  border-radius:10px; border:1px solid var(--line);
-  background:#ffffff;
-}
-.conv-bubble-user { background:var(--accent-soft); border-color:#d9cef3; }
-.conv-bubble-assistant { background:#f4f7ff; border-color:#bfd4ff; }
-.conv-bubble-system { background:#fafafa; }
-.conv-bubble-tool { background:#fcebdd; border-color:#f3d3b8; }
-.conv-bubble-head {
-  display:flex; align-items:center; justify-content:space-between;
-  gap:10px; margin-bottom:6px;
-}
-.conv-bubble-model {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:10.5px; color:var(--subtle);
-}
-.conv-bubble-body {
-  font-size:13.5px; line-height:1.6; color:var(--ink);
-}
-.conv-bubble-body p { margin:0 0 6px; }
-.conv-bubble-body p:last-child { margin-bottom:0; }
-
-/* -------- Execution timeline -------- */
-/* Distinguishes the timeline block from the user/plan/final tiers via
-   a calmer slate-tinted left rail so the eye groups "what the agent
-   DID" separately from "what the agent SAID". */
-.conv-block-timeline::before { background:#94a3b8; }
-.conv-role-badge-timeline {
-  color:#475569; background:#eef2f7; border-color:#dbe3ec;
-}
-.conv-timeline { list-style:none; margin:8px 0 0; padding:0; }
-.conv-timeline-row {
-  display:grid; grid-template-columns:38px 1fr; gap:10px;
-  padding:7px 0; position:relative;
-}
-.conv-timeline-row + .conv-timeline-row { border-top:1px dashed #f0eef8; }
-.conv-timeline-marker {
-  display:flex; flex-direction:column; align-items:center; gap:3px;
-  padding-top:4px; color:var(--subtle);
-}
-.conv-timeline-bullet {
-  width:9px; height:9px; border-radius:50%;
-  background:var(--accent-3); box-shadow:0 0 0 3px #fbfafe;
-}
-.conv-timeline-row-completed .conv-timeline-bullet,
-.conv-timeline-row-cached    .conv-timeline-bullet { background:var(--good); }
-.conv-timeline-row-failed    .conv-timeline-bullet { background:var(--poor); }
-.conv-timeline-row-running   .conv-timeline-bullet { background:var(--accent-bright); }
-.conv-timeline-index {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:10.5px; color:var(--subtle); font-variant-numeric:tabular-nums;
-}
-.conv-timeline-card { min-width:0; }
-.conv-timeline-title {
-  font-size:14px; font-weight:600; color:var(--ink); line-height:1.4;
-}
-.conv-timeline-title code {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:12px; color:var(--accent);
-  background:var(--accent-soft); border-radius:5px; padding:1px 7px;
-}
-.conv-timeline-meta {
-  font-size:12px; color:var(--muted); margin-top:3px;
-  display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center;
-}
-.conv-timeline-state {
-  display:inline-block; font-size:10.5px; font-weight:700;
-  text-transform:uppercase; letter-spacing:0.05em;
-  padding:1px 8px; border-radius:var(--radius-pill);
-  background:#fbfafe; border:1px solid var(--line); color:var(--muted);
-}
-.conv-timeline-state.state-completed,
-.conv-timeline-state.state-cached {
-  background:var(--good-soft); color:var(--good); border-color:var(--good-line);
-}
-.conv-timeline-state.state-failed {
-  background:var(--poor-soft); color:var(--poor); border-color:var(--poor-line);
-}
-.conv-timeline-metrics {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11.5px;
-}
-.conv-timeline-meta-extra { color:var(--subtle); }
-.conv-timeline-meta-id code {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11px; color:var(--subtle); background:transparent;
-  border:none; padding:0;
-}
-.conv-timeline-error {
-  margin-top:5px; padding:6px 10px; border-radius:6px;
-  background:var(--poor-soft); border:1px solid var(--poor-line);
-  color:var(--poor); font-size:12.5px;
-}
-
-/* -------- Decision audit -------- */
-.conv-block-decisions::before { background:#d97706; }   /* amber for "the agent decided" */
-.conv-role-badge-decisions {
-  color:#92400e; background:#fef3c7; border-color:#fde68a;
-}
-.conv-decisions { list-style:none; margin:8px 0 0; padding:0; }
-.conv-decision-row {
-  padding:9px 0;
-}
-.conv-decision-row + .conv-decision-row { border-top:1px dashed #f0eef8; }
-.conv-decision-head {
-  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-}
-.conv-decision-round {
-  font-size:11px; font-weight:700; text-transform:uppercase;
-  letter-spacing:0.07em; color:var(--subtle);
-  font-variant-numeric:tabular-nums;
-}
-.conv-decision-label {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:12px; color:var(--ink);
-  background:#fbfafe; border:1px solid var(--line);
-  border-radius:5px; padding:1px 8px;
-}
-.conv-decision-verdict {
-  font-size:11px; font-weight:700; text-transform:uppercase;
-  letter-spacing:0.05em; padding:2px 9px; border-radius:var(--radius-pill);
-}
-.conv-decision-verdict-go {
-  color:#1e40af; background:#e7efff; border:1px solid #bfd4ff;
-}
-.conv-decision-verdict-stop {
-  color:#475569; background:#eef2f7; border:1px solid #dbe3ec;
-}
-.conv-decision-reason {
-  margin:6px 0 0; color:var(--ink); font-size:13.5px; line-height:1.55;
-}
-.conv-decision-reason p { margin:0 0 5px; }
-.conv-decision-reason p:last-child { margin-bottom:0; }
-.conv-decision-metrics {
-  margin-top:5px; font-size:12px; color:var(--muted);
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.conv-decision-metrics-head {
-  font-family:Inter, system-ui, sans-serif;
-  text-transform:uppercase; font-size:10.5px; letter-spacing:0.07em;
-  color:var(--subtle); margin-right:4px;
-}
-.conv-decision-notes {
-  margin:6px 0 0; padding-left:18px; font-size:12.5px; color:var(--muted);
-}
-.conv-decision-note { margin:2px 0; }
-.conv-decision-note strong { text-transform:uppercase; font-size:10.5px; letter-spacing:0.05em; }
-.conv-decision-note-warning strong { color:var(--warn); }
-.conv-decision-note-error   strong { color:var(--poor); }
-.conv-decision-note-code {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11px; color:var(--subtle);
-}
-
-/* Humanised verdict label (e.g. "Workflow completed"). Sits between
-   the round number and the continue/stop pill in the row head; raw
-   underscore form lives in the title= tooltip + the collapsed
-   "More detail" drawer. */
-.conv-decision-label-friendly {
-  font-size:13.5px; font-weight:600; color:var(--ink);
-  letter-spacing:-0.005em;
-}
-
-/* Collapsible "More detail" drawer per decision row — carries the raw
-   label, weighed metrics, and notes when present. Default-closed
-   keeps the row to a clean two-line summary. */
-.conv-decision-details {
-  margin-top:6px;
-}
-.conv-decision-details-summary {
-  cursor:pointer; user-select:none;
-  display:inline-flex; align-items:center; gap:6px;
-  padding:3px 8px; border-radius:6px;
-  font-size:11.5px; color:var(--muted);
-  list-style:none;
-}
-.conv-decision-details-summary::-webkit-details-marker { display:none; }
-.conv-decision-details-summary::before {
-  content:"▸"; color:var(--subtle); font-size:9px;
-  transition:transform 0.15s;
-}
-.conv-decision-details[open] > .conv-decision-details-summary::before {
-  transform:rotate(90deg); display:inline-block;
-}
-.conv-decision-details-summary:hover { background:#f7f5fb; color:var(--accent); }
-.conv-decision-details-body {
-  margin:6px 0 0; padding:6px 10px;
-  background:#fbfafe; border-radius:6px;
-}
-.conv-decision-detail-row {
-  display:flex; align-items:baseline; gap:10px;
-  padding:3px 0; font-size:12.5px;
-  flex-wrap:wrap;
-}
-.conv-decision-detail-row + .conv-decision-detail-row {
-  border-top:1px dashed #f0eef8;
-}
-.conv-decision-detail-label {
-  flex-shrink:0; min-width:110px;
-  font-size:10.5px; font-weight:700;
-  text-transform:uppercase; letter-spacing:0.06em;
-  color:var(--subtle);
-}
-.conv-decision-raw {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11.5px; color:var(--ink);
-  background:#ffffff; border:1px solid var(--line);
-  border-radius:5px; padding:1px 8px;
-}
-.conv-decision-metrics-list {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:11.5px; color:var(--muted);
-  word-break:break-word;
-}
-
-/* -------- Tool-call chip (interleaved in full transcript) -------- */
-.conv-tool-chip {
-  display:block; margin:4px 0;
-  border:1px solid var(--line); border-radius:8px;
-  background:#fbfafe;
-  font-size:12.5px;
-}
-.conv-tool-chip[open] { box-shadow:var(--shadow-tile); }
-.conv-tool-chip-plain {
-  padding:6px 11px;
-  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
-}
-.conv-tool-summary {
-  cursor:pointer; user-select:none;
-  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
-  padding:6px 11px; border-radius:8px;
-  list-style:none;
-}
-.conv-tool-summary::-webkit-details-marker { display:none; }
-.conv-tool-summary::after {
-  content:"▸"; color:var(--subtle); margin-left:auto;
-  transition:transform 0.15s; font-size:10px;
-}
-.conv-tool-chip[open] > .conv-tool-summary::after { transform:rotate(90deg); }
-.conv-tool-summary:hover { background:#f7f5fb; }
-.conv-tool-chip-ok    { border-left:3px solid var(--good); }
-.conv-tool-chip-fail  { border-left:3px solid var(--poor); background:var(--poor-soft); }
-.conv-tool-glyph {
-  display:inline-flex; align-items:center; justify-content:center;
-  width:18px; height:18px; border-radius:50%; font-size:11px; font-weight:700;
-}
-.conv-tool-glyph-ok   { background:var(--good-soft); color:var(--good); }
-.conv-tool-glyph-fail { background:#fee2e2;          color:var(--poor); }
-.conv-tool-label {
-  font-size:10.5px; font-weight:700; text-transform:uppercase;
-  letter-spacing:0.07em; color:var(--subtle);
-}
-.conv-tool-name {
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:12.5px; font-weight:700; color:var(--ink);
-  background:transparent;
-}
-.conv-tool-state {
-  font-size:10.5px; font-weight:700; text-transform:uppercase;
-  letter-spacing:0.05em; padding:1px 7px; border-radius:var(--radius-pill);
-}
-.conv-tool-state-fail { background:#fee2e2; color:var(--poor); }
-.conv-tool-body {
-  padding:0 11px 10px;
-  border-top:1px solid var(--line);
-}
-.conv-tool-section { margin-top:9px; }
-.conv-tool-section-head {
-  font-size:10px; font-weight:700; text-transform:uppercase;
-  letter-spacing:0.07em; color:var(--subtle); margin-bottom:4px;
-}
-.conv-tool-payload {
-  display:block; white-space:pre-wrap; word-break:break-word;
-  padding:8px 10px; max-height:300px; overflow:auto;
-  background:#0f0a1f; color:#ede9fe;
-  border-radius:6px; font-size:11.5px; line-height:1.5;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-}
 
 .pill {
   border:1px solid var(--line); border-radius:var(--radius-pill); padding:4px 11px;
@@ -14441,7 +13230,7 @@ body { background:var(--saas-bg); }
   background:var(--saas-violet); border-color:var(--saas-violet); color:#fff;
   box-shadow:0 8px 18px rgba(91,53,230,.18);
 }
-.content { max-width:1500px; padding:24px 28px 56px; }
+.content { max-width:1680px; padding:24px 28px 56px; }
 .saas-section { border-radius:8px; padding:18px 20px; }
 .saas-section-subtitle { margin:4px 0 0; color:var(--muted); font-size:13.5px; }
 .saas-overview { background:transparent; border:none; box-shadow:none; padding:0; }
@@ -14453,6 +13242,9 @@ body { background:var(--saas-bg); }
 .saas-card {
   background:#fff; border:1px solid var(--line-strong); border-radius:8px;
   padding:14px 15px; box-shadow:0 1px 2px rgba(15,23,42,.035);
+}
+.overview-summary-card .overview-summary-body {
+  max-height:150px; overflow-y:auto; overscroll-behavior:contain; padding-right:4px;
 }
 .saas-card p { margin:0; font-size:13.5px; line-height:1.55; color:var(--ink); }
 .saas-icon-card-head {
@@ -14540,6 +13332,11 @@ body { background:var(--saas-bg); }
 .comparison-summary-card strong { color:var(--saas-violet); font-size:20px; line-height:1; }
 .comparison-matrix-wrap {
   border:1px solid var(--line); border-radius:9px; background:#fff;
+  max-height:clamp(360px, 55vh, 680px);
+  overflow:auto;
+}
+.candidate-comparison-matrix thead th {
+  position:sticky; top:0; z-index:2; background:#fff;
 }
 .candidate-comparison-matrix th,
 .candidate-comparison-matrix td { white-space:nowrap; }
@@ -14583,7 +13380,7 @@ body { background:var(--saas-bg); }
 .saas-pattern-card h3 { margin:0 0 10px; font-size:13px; }
 .saas-pattern-card p { margin:8px 0 0; color:var(--muted); font-size:12px; }
 .saas-bars { height:72px; display:flex; align-items:flex-end; gap:4px; border-bottom:1px solid var(--line); }
-.saas-bars span {
+.saas-bars > span {
   flex:1; min-width:5px; border-radius:4px 4px 0 0;
   background:linear-gradient(180deg,#7c5cff,#2aa7a0);
 }
@@ -14609,6 +13406,112 @@ body { background:var(--saas-bg); }
   margin-top:12px; border:1px solid #ded8ff; border-radius:8px; background:#fbfaff;
   padding:10px 12px; color:#3b3268; font-size:12.5px; line-height:1.45;
 }
+.structure-comparison-panel { overflow:hidden; }
+.structure-comparison-panel:fullscreen {
+  display:flex; flex-direction:column; width:100vw; height:100vh;
+  max-width:none; border-radius:0; border:none; padding:18px; background:#fff;
+}
+.structure-comparison-panel:fullscreen .structure-comparison-grid {
+  flex:1 1 auto; max-height:none; min-height:0;
+  align-content:start; grid-auto-rows:minmax(1040px, auto); overflow-y:auto;
+}
+.structure-comparison-panel:fullscreen .structure-compare-card {
+  display:flex; flex-direction:column; min-height:1040px;
+}
+.structure-comparison-panel:fullscreen .structure-compare-card .structure-section {
+  flex:1 1 auto; min-height:0;
+}
+.structure-comparison-panel:fullscreen .structure-section-compact .structure-viewer {
+  flex:1 1 auto; min-height:820px; height:auto;
+}
+.structure-comparison-head {
+  display:flex; align-items:center; justify-content:space-between; gap:14px;
+  margin-bottom:12px;
+}
+.structure-comparison-actions {
+  display:flex; align-items:center; gap:10px; flex:0 0 auto;
+}
+.structure-comparison-actions > span {
+  color:#667085; font-size:12px; font-style:normal; font-weight:760; white-space:nowrap;
+}
+.structure-comparison-subtitle-row {
+  display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin-top:4px;
+}
+.structure-comparison-subtitle-row .saas-section-subtitle { margin:0; }
+.structure-comparison-fullscreen-btn {
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  min-height:36px; padding:0 13px; border:1px solid #d9d2ff;
+  border-radius:9px; background:#f7f4ff; color:var(--primary-700);
+  font-size:12.5px; font-weight:850; cursor:pointer;
+  box-shadow:0 6px 14px rgba(91,53,230,.10);
+}
+.structure-comparison-fullscreen-btn:hover {
+  border-color:var(--primary); background:var(--primary); color:#fff;
+  box-shadow:0 10px 20px rgba(91,53,230,.20);
+}
+.structure-comparison-intro {
+  display:flex; align-items:flex-start; justify-content:space-between; gap:16px;
+  margin:14px 0 16px; padding:12px 14px; border:1px solid var(--border);
+  border-radius:var(--radius-md); background:#fbfcff;
+}
+.structure-comparison-intro p {
+  margin:0; color:#344054; font-size:13px; line-height:1.45; max-width:72ch;
+}
+.structure-comparison-intro span {
+  color:#667085; font-size:12px; font-weight:760; text-align:right;
+}
+.structure-comparison-grid {
+  display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:14px;
+  max-height:clamp(500px, 68vh, 620px);
+  overflow-y:auto; overscroll-behavior:contain; padding-right:6px;
+}
+.structure-compare-card {
+  min-width:0; border:1px solid var(--border); border-radius:var(--radius-lg);
+  background:#fff; overflow:hidden; cursor:grab;
+}
+.structure-compare-card:active { cursor:grabbing; }
+.structure-compare-card.is-dragging { opacity:.62; border-color:var(--primary); box-shadow:var(--shadow-md); }
+.structure-compare-head,
+.structure-compare-foot {
+  display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px;
+}
+.structure-compare-head { border-bottom:1px solid var(--border); }
+.structure-compare-head h3 {
+  margin:2px 0 0; color:#172033; font-size:14px; line-height:1.2; word-break:break-word;
+}
+.structure-compare-rank {
+  color:#667085; font-size:11px; font-weight:820; text-transform:uppercase;
+}
+.structure-compare-metrics {
+  display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; padding:10px 12px 0;
+}
+.structure-compare-metric {
+  min-width:0; padding:7px 8px; border:1px solid var(--border); border-radius:8px; background:#f8fafc;
+}
+.structure-compare-metric b,
+.structure-compare-metric em {
+  display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.structure-compare-metric b {
+  color:#667085; font-size:10.5px; text-transform:uppercase;
+}
+.structure-compare-metric strong {
+  display:block; margin-top:2px; color:#172033; font-size:13px;
+}
+.structure-compare-metric em {
+  color:#667085; font-size:10px; font-style:normal;
+}
+.structure-compare-metric.is-missing { color:#667085; font-size:12px; }
+.structure-compare-card .structure-section { margin:10px 12px 12px; }
+.structure-section-compact .structure-header { gap:8px; }
+.structure-section-compact .structure-hint,
+.structure-section-compact .structure-coverage-note { display:none; }
+.structure-section-compact .structure-viewer { min-height:320px; }
+.structure-section-compact .structure-legend { margin-top:8px; }
+.structure-compare-foot { border-top:1px solid var(--border); }
+.structure-compare-foot a {
+  color:var(--primary-700); text-decoration:none; font-size:12px; font-weight:820;
+}
 .saas-trace {
   display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;
   list-style:none; padding:0; margin:0;
@@ -14626,7 +13529,7 @@ body { background:var(--saas-bg); }
 .saas-trace-stage p { margin:5px 0; color:var(--muted); font-size:12px; }
 .saas-trace-stage small { color:var(--subtle); font-size:11px; }
 .candidate-review-board-layout {
-  grid-template-columns:minmax(520px, .82fr) minmax(720px, 1.18fr);
+  grid-template-columns:minmax(620px, .9fr) minmax(840px, 1.25fr);
   gap:20px;
 }
 .card-console {
@@ -14642,7 +13545,10 @@ body { background:var(--saas-bg); }
   padding:0 0 12px; border-bottom:none;
 }
 .candidate-review-board {
-  max-height:none; overflow:visible; padding:14px;
+  max-height:clamp(760px, 84vh, 1120px);
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding:14px;
   border:1px solid var(--line-strong); border-radius:10px; background:#fff;
   box-shadow:0 8px 28px rgba(15,23,42,.04);
 }
@@ -14742,10 +13648,10 @@ body { background:var(--saas-bg); }
   border:1px solid var(--line); border-radius:8px; background:#fff; overflow:hidden;
 }
 .dossier-structure-primary .structure-section {
-  border:none; border-radius:0; min-height:560px;
+  border:none; border-radius:0; min-height:720px;
 }
 .dossier-structure-primary .structure-viewer {
-  min-height:420px; height:clamp(420px, 48vh, 640px);
+  min-height:580px; height:clamp(580px, 64vh, 840px);
 }
 .dossier-evidence-primary {
   border:1px solid var(--line); border-radius:8px; background:#fff; padding:14px;
@@ -14819,6 +13725,7 @@ body { background:var(--saas-bg); }
   .saas-stats { grid-column:1 / -1; }
   .saas-rationale-grid, .saas-pattern-grid { grid-template-columns:1fr 1fr; }
   .candidate-review-board-layout, .candidate-dossier-primary { grid-template-columns:1fr; }
+  .candidate-review-board { max-height:420px; }
   .dossier-summary-panel { grid-template-columns:1fr; }
 }
 @media (max-width: 720px) {
@@ -15160,7 +14067,7 @@ body.sidebar-collapsed .sidebar-foot {
 }
 
 .content {
-  max-width:1540px;
+  max-width:1720px;
   padding:26px 30px 64px;
   min-width:0;
 }
@@ -15301,12 +14208,15 @@ body {
 }
 
 .candidate-review-board-layout {
-  grid-template-columns:minmax(500px,.76fr) minmax(680px,1.24fr);
-  gap:22px;
+  grid-template-columns:minmax(640px,.92fr) minmax(860px,1.24fr);
+  gap:24px;
   align-items:start;
 }
 .candidate-review-board {
   padding:16px;
+  max-height:clamp(760px, 84vh, 1120px);
+  overflow-y:auto;
+  overscroll-behavior:contain;
   border-radius:var(--radius-lg);
   border-color:var(--border);
   background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
@@ -15455,9 +14365,12 @@ body {
 }
 .dossier-structure-primary .structure-section {
   background:#ffffff;
+  min-height:720px;
 }
 .dossier-structure-primary .structure-viewer {
   border-top-color:var(--border);
+  min-height:580px;
+  height:clamp(580px, 64vh, 840px);
 }
 .dossier-structure-primary .downloads,
 .cand-tabpanel[data-tab="structure"] > .downloads {
@@ -15614,10 +14527,18 @@ body {
   color:var(--primary);
 }
 .comparison-matrix-wrap {
-  overflow:hidden;
+  max-height:clamp(360px, 55vh, 680px);
+  overflow:auto;
+  overscroll-behavior:contain;
 }
 .candidate-comparison-matrix {
   min-width:1080px;
+}
+.candidate-comparison-matrix thead th {
+  position:sticky;
+  top:0;
+  z-index:2;
+  background:#fff;
 }
 .saas-table th {
   background:#fbfcff;
@@ -15734,7 +14655,7 @@ body {
   gap:5px;
   padding:0 2px;
 }
-.saas-bars span {
+.saas-bars > span {
   background:linear-gradient(180deg,#7c5cff 0%,#2fb7ad 100%);
   box-shadow:inset 0 -1px 0 rgba(15,23,42,.08);
   border-radius:5px 5px 0 0;
@@ -15751,6 +14672,165 @@ body {
 .metric-range-card p {
   font-size:11.5px;
   font-weight:650;
+}
+.range-filter-control {
+  position:relative;
+  height:34px;
+  margin:12px 2px 6px;
+}
+.range-filter-track {
+  position:absolute;
+  left:0;
+  right:0;
+  top:14px;
+  height:8px;
+  border-radius:999px;
+  background:linear-gradient(90deg,#ede9fe 0%,#d6f5ee 52%,#5eead4 100%);
+  overflow:hidden;
+}
+.range-filter-window {
+  position:absolute;
+  top:0;
+  bottom:0;
+  left:0;
+  right:0;
+  border-radius:inherit;
+  background:rgba(91,53,230,.18);
+  box-shadow:inset 0 0 0 1px rgba(91,53,230,.18);
+}
+.range-filter-control input[type="range"] {
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:34px;
+  margin:0;
+  appearance:none;
+  -webkit-appearance:none;
+  background:transparent;
+  pointer-events:none;
+}
+.range-filter-control input[type="range"]::-webkit-slider-thumb {
+  appearance:none;
+  -webkit-appearance:none;
+  width:20px;
+  height:20px;
+  border-radius:999px;
+  border:4px solid #ffffff;
+  background:var(--primary);
+  box-shadow:0 0 0 2px rgba(91,53,230,.35), 0 2px 7px rgba(16,24,40,.18);
+  pointer-events:auto;
+  cursor:pointer;
+}
+.range-filter-control input[type="range"]::-moz-range-thumb {
+  width:14px;
+  height:14px;
+  border-radius:999px;
+  border:4px solid #ffffff;
+  background:var(--primary);
+  box-shadow:0 0 0 2px rgba(91,53,230,.35), 0 2px 7px rgba(16,24,40,.18);
+  pointer-events:auto;
+  cursor:pointer;
+}
+.candidate-range-filter {
+  margin-top:14px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  background:#fff;
+  padding:14px;
+}
+.candidate-range-filter-head {
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:flex-start;
+  margin-bottom:12px;
+}
+.candidate-range-filter-head h3 {
+  margin:0 0 4px;
+  font-size:14px;
+}
+.candidate-range-filter-head p,
+.candidate-filter-empty {
+  margin:0;
+  color:#667085;
+  font-size:12.5px;
+  line-height:1.45;
+}
+.candidate-filter-count {
+  white-space:nowrap;
+  border:1px solid #d6bbfb;
+  border-radius:999px;
+  background:#f4ebff;
+  color:#6941c6;
+  padding:5px 9px;
+  font-size:11.5px;
+  font-weight:820;
+}
+.candidate-filter-results {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+  gap:10px;
+}
+.candidate-filter-result {
+  display:grid;
+  gap:8px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-md);
+  background:#fbfcff;
+  padding:11px;
+}
+.candidate-filter-result[hidden] {
+  display:none;
+}
+.candidate-filter-result > div:first-child {
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  align-items:center;
+}
+.candidate-filter-result strong {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12.5px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.candidate-filter-result > div:first-child span {
+  color:#667085;
+  font-size:11px;
+  font-weight:760;
+}
+.candidate-filter-result-metrics {
+  display:flex;
+  flex-wrap:wrap;
+  gap:5px;
+}
+.candidate-range-filter .candidate-filter-result-metrics > span {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  flex:0 0 auto;
+  width:auto;
+  min-width:0;
+  height:24px;
+  min-height:24px;
+  max-height:24px;
+  border:1px solid #e4defb;
+  border-radius:999px;
+  background:#fbf9ff;
+  color:#5b35e6;
+  padding:0 8px;
+  font-size:10.5px;
+  line-height:1;
+  font-weight:760;
+  white-space:nowrap;
+  box-sizing:border-box;
+  align-self:flex-start;
+}
+.candidate-range-filter .candidate-filter-result-metrics > .candidate-filter-primary-metric {
+  border-color:#7c5cff;
+  background:#f0ebff;
+  color:#3b237e;
+  font-weight:900;
 }
 .saas-count-card {
   display:flex;
@@ -15894,6 +14974,55 @@ body {
   text-decoration:none;
   font-weight:820;
 }
+.top-candidate-msa-block {
+  margin:0 0 18px;
+  padding:14px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  background:#fbfcff;
+}
+.top-candidate-msa-block h3 {
+  margin:0 0 10px;
+  color:#172033;
+  font-size:15px;
+  line-height:1.25;
+}
+.evidence-snapshot-msa {
+  margin:0 0 10px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-md);
+  background:#fff;
+  overflow:hidden;
+}
+.evidence-snapshot-msa > summary {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:8px 10px;
+  cursor:pointer;
+  list-style:none;
+  color:#3b3268;
+  font-size:12px;
+  font-weight:820;
+}
+.evidence-snapshot-msa > summary::-webkit-details-marker {
+  display:none;
+}
+.evidence-snapshot-msa > summary em {
+  color:#667085;
+  font-size:11px;
+  font-style:normal;
+  font-weight:700;
+}
+.evidence-snapshot-msa .msa-section {
+  margin:0;
+  border-top:1px solid var(--border);
+  padding:10px;
+}
+.evidence-snapshot-msa .msa-grid-wrap {
+  max-height:190px;
+}
 
 .workflow-audit-section {
   background:#ffffff;
@@ -16022,7 +15151,7 @@ body {
   transform:rotate(45deg);
   z-index:2;
 }
-.audit-round-band {
+.audit-stage-band {
   position:relative;
   flex:0 0 auto;
   min-width:180px;
@@ -16032,7 +15161,7 @@ body {
   background:linear-gradient(180deg,rgba(255,255,255,.92),rgba(248,250,252,.92));
   box-shadow:0 12px 30px rgba(16,24,40,.04);
 }
-.audit-round-band:not(:last-child)::after {
+.audit-stage-band:not(:last-child)::after {
   content:"";
   position:absolute;
   top:50%;
@@ -16042,7 +15171,7 @@ body {
   background:#aeb8cf;
   z-index:1;
 }
-.audit-round-band:not(:last-child)::before {
+.audit-stage-band:not(:last-child)::before {
   content:"";
   position:absolute;
   top:calc(50% - 4px);
@@ -16054,21 +15183,21 @@ body {
   transform:rotate(45deg);
   z-index:2;
 }
-.audit-round-head {
+.audit-stage-head {
   display:flex;
   align-items:center;
   justify-content:space-between;
   gap:12px;
   margin-bottom:12px;
 }
-.audit-round-head span {
+.audit-stage-head span {
   color:#3b3268;
   font-size:12px;
   font-weight:880;
   letter-spacing:.05em;
   text-transform:uppercase;
 }
-.audit-round-head em {
+.audit-stage-head em {
   padding:4px 8px;
   border:1px solid #e4e7ec;
   border-radius:999px;
@@ -16078,7 +15207,7 @@ body {
   font-style:normal;
   font-weight:760;
 }
-.audit-round-stages {
+.audit-stage-group {
   display:flex;
   align-items:stretch;
   gap:18px;
@@ -16086,14 +15215,14 @@ body {
   margin:0;
   padding:0;
 }
-.audit-round-stages .audit-stage {
+.audit-stage-group .audit-stage {
   min-height:138px;
 }
-.audit-round-stages .audit-stage-icon {
+.audit-stage-group .audit-stage-icon {
   width:48px;
   height:48px;
 }
-.audit-round-stages .audit-stage-icon svg {
+.audit-stage-group .audit-stage-icon svg {
   width:22px;
   height:22px;
 }
@@ -16220,6 +15349,80 @@ body {
   font-size:11.5px;
   font-weight:720;
 }
+.workflow-tool-call-list {
+  margin:12px 0;
+  border:1px solid rgba(228,231,236,.9);
+  border-radius:12px;
+  background:rgba(255,255,255,.78);
+  overflow:hidden;
+}
+.workflow-tool-call-list > summary {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:10px 12px;
+  cursor:pointer;
+  list-style:none;
+}
+.workflow-tool-call-list > summary::-webkit-details-marker {
+  display:none;
+}
+.workflow-tool-call-list > summary strong {
+  font-size:12.5px;
+  color:#111827;
+}
+.workflow-tool-call-list > summary em {
+  color:#667085;
+  font-size:11.5px;
+  font-style:normal;
+}
+.workflow-tool-call-list ol {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:8px;
+  margin:0;
+  padding:0 12px 12px;
+  list-style:none;
+  max-height:clamp(240px, 34vh, 520px);
+  overflow-y:auto;
+  overscroll-behavior:contain;
+}
+.workflow-tool-call-list li {
+  display:grid;
+  grid-template-columns:24px minmax(0,.8fr) minmax(0,1fr);
+  gap:7px;
+  align-items:center;
+  border:1px solid #edf0f5;
+  border-radius:8px;
+  background:#fff;
+  padding:8px;
+}
+.workflow-tool-call-list li > span {
+  display:inline-flex;
+  justify-content:center;
+  color:#667085;
+  font-size:11px;
+  font-weight:820;
+}
+.workflow-tool-call-list li strong {
+  font-size:12px;
+  color:#2f1c72;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.workflow-tool-call-list li code {
+  color:#667085;
+  font-size:11px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.workflow-tool-call-list li em {
+  grid-column:2 / -1;
+  color:#667085;
+  font-size:10.5px;
+  font-style:normal;
+}
 .workflow-graph-legend span {
   display:inline-flex;
   align-items:center;
@@ -16252,7 +15455,7 @@ body {
   .audit-stage-strip {
     padding-bottom:14px;
   }
-  .audit-round-stages .audit-stage,
+  .audit-stage-group .audit-stage,
   .audit-stage-strip > .audit-stage {
     flex-basis:150px;
   }
@@ -16892,6 +16095,114 @@ def _js() -> str:
     }
   });
 
+  // ----- Cross-candidate metric range filters -----
+  document.querySelectorAll('[data-candidate-range-filter]').forEach((panel) => {
+    const section = panel.closest('section') || document;
+    const cards = Array.from(section.querySelectorAll('[data-filter-card]'));
+    const results = Array.from(panel.querySelectorAll('[data-filter-result]'));
+    const countEl = panel.querySelector('[data-filter-count]');
+    const emptyEl = panel.querySelector('[data-filter-empty]');
+
+    function num(value) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    function nearlyEqual(a, b) {
+      return Math.abs(a - b) < 1e-9;
+    }
+    function fmtRangeValue(value) {
+      if (!Number.isFinite(value)) return '';
+      if (Math.abs(value) >= 10) return value.toFixed(1).replace(/\\.0$/,'');
+      return value.toFixed(3).replace(/\\.?0+$/,'');
+    }
+    function updateCard(card) {
+      const minInput = card.querySelector('.metric-filter-min');
+      const maxInput = card.querySelector('.metric-filter-max');
+      if (!minInput || !maxInput) return null;
+      let lo = num(minInput.value);
+      let hi = num(maxInput.value);
+      const absMin = num(minInput.min);
+      const absMax = num(maxInput.max);
+      if (lo === null || hi === null || absMin === null || absMax === null) return null;
+      if (lo > hi) {
+        if (document.activeElement === minInput) {
+          hi = lo;
+          maxInput.value = String(hi);
+        } else {
+          lo = hi;
+          minInput.value = String(lo);
+        }
+      }
+      const span = Math.max(absMax - absMin, 1e-9);
+      const left = Math.max(0, Math.min(100, (lo - absMin) / span * 100));
+      const right = Math.max(0, Math.min(100, (absMax - hi) / span * 100));
+      const windowEl = card.querySelector('.range-filter-window');
+      if (windowEl) {
+        windowEl.style.left = left + '%';
+        windowEl.style.right = right + '%';
+      }
+      const label = card.querySelector('.range-filter-label');
+      if (label) {
+        label.innerHTML = '<b>' + fmtRangeValue(lo) + '</b> to <b>'
+                        + fmtRangeValue(hi) + '</b>';
+      }
+      const defaultMin = num(card.dataset.resolvedDefaultMin || card.dataset.defaultMin);
+      const defaultMax = num(card.dataset.resolvedDefaultMax || card.dataset.defaultMax);
+      const wasTouched = card.dataset.filterTouched === 'true';
+      const active = wasTouched && defaultMin !== null && defaultMax !== null
+        && (!nearlyEqual(lo, defaultMin) || !nearlyEqual(hi, defaultMax));
+      return { metric: card.dataset.metric || '', lo, hi, active };
+    }
+    function readFilters() {
+      return cards.map(updateCard).filter(Boolean).filter((f) => f.active);
+    }
+    function metricsFor(result) {
+      try {
+        const parsed = JSON.parse(result.dataset.metrics || '{}');
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch (e) {
+        return {};
+      }
+    }
+    function applyFilters() {
+      const active = readFilters();
+      let shown = 0;
+      for (const result of results) {
+        const metrics = metricsFor(result);
+        const keep = active.every((filter) => {
+          const value = num(metrics[filter.metric]);
+          return value !== null && value >= filter.lo && value <= filter.hi;
+        });
+        result.hidden = !keep;
+        if (keep) shown += 1;
+      }
+      if (countEl) {
+        countEl.textContent = shown + ' matching structure' + (shown === 1 ? '' : 's');
+      }
+      if (emptyEl) {
+        emptyEl.hidden = shown !== 0;
+      }
+    }
+    for (const card of cards) {
+      const inputs = Array.from(card.querySelectorAll('input[type="range"]'));
+      const minInput = card.querySelector('.metric-filter-min');
+      const maxInput = card.querySelector('.metric-filter-max');
+      if (minInput && maxInput) {
+        card.dataset.resolvedDefaultMin = minInput.value;
+        card.dataset.resolvedDefaultMax = maxInput.value;
+        card.dataset.filterTouched = 'false';
+      }
+      inputs.forEach((input) => {
+        input.addEventListener('input', () => {
+          card.dataset.filterTouched = 'true';
+          applyFilters();
+        });
+      });
+      updateCard(card);
+    }
+    applyFilters();
+  });
+
   // ----- Inline 3D protein viewer (3Dmol.js, offline vendored) -----
   // Implements the spec at docs/agent_layer.md "3D 단백질 시각화":
   // createViewer → addModel → cartoon spectrum + HET stick/sphere → click
@@ -16955,12 +16266,85 @@ def _js() -> str:
   // viewers already present in the live DOM (templates are inert and skipped).
   window.__vpaSetupViewer = setupViewer;
   for (const payload of structurePayloads) {
-    if (document.getElementById(payload.id)) setupViewer(payload);
+    const el = document.getElementById(payload.id);
+    if (el && !el.closest('[data-structure-compare-grid]')) {
+      setupViewer(payload);
+    }
+  }
+  document.querySelectorAll('[data-structure-compare-grid]').forEach((grid) => {
+    const viewers = Array.from(grid.querySelectorAll('.structure-viewer'));
+    if ('IntersectionObserver' in window) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          const payload = payloadMap[entry.target.id];
+          if (payload) setupViewer(payload);
+          observer.unobserve(entry.target);
+        });
+      }, { root: grid, rootMargin: '160px 0px', threshold: 0.01 });
+      viewers.forEach((el) => observer.observe(el));
+    } else {
+      viewers.slice(0, 6).forEach((el) => {
+        const payload = payloadMap[el.id];
+        if (payload) setupViewer(payload);
+      });
+    }
+    setupStructureCompareGrid(grid);
+  });
+
+  function setupStructureCompareGrid(grid) {
+    let dragged = null;
+    const panel = grid.closest('.structure-comparison-panel');
+    const panelFullscreenBtn = panel ? panel.querySelector('[data-structure-comparison-fullscreen]') : null;
+    if (panel && panelFullscreenBtn) {
+      panelFullscreenBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleStructureComparisonFullscreen(panel);
+      });
+      panel.addEventListener('fullscreenchange', () => {
+        grid.querySelectorAll('.structure-viewer').forEach((el) => {
+          const payload = payloadMap[el.id];
+          if (payload) setupViewer(payload);
+        });
+        window.setTimeout(() => {
+          try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+        }, 80);
+      });
+    }
+    grid.querySelectorAll('[data-structure-compare-card]').forEach((card) => {
+      card.addEventListener('dragstart', () => {
+        dragged = card;
+        card.classList.add('is-dragging');
+      });
+      card.addEventListener('dragend', () => {
+        card.classList.remove('is-dragging');
+        dragged = null;
+      });
+    });
+    grid.addEventListener('dragover', (event) => {
+      if (!dragged) return;
+      event.preventDefault();
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-structure-compare-card]');
+      if (!target || target === dragged || target.parentElement !== grid) return;
+      const rect = target.getBoundingClientRect();
+      const before = event.clientY < rect.top + rect.height / 2;
+      grid.insertBefore(dragged, before ? target : target.nextSibling);
+    });
+  }
+
+  function toggleStructureComparisonFullscreen(panel) {
+    if (document.fullscreenElement === panel) {
+      document.exitFullscreen();
+    } else if (panel.requestFullscreen) {
+      panel.requestFullscreen().catch((e) => console.warn('structure comparison fullscreen denied', e));
+    }
   }
 
   function setupViewer(payload) {
     const container = document.getElementById(payload.id);
     if (!container) return;
+    if (container.dataset.viewerModelLoaded === 'true') return;
     container.innerHTML = '<div class="structure-status">Loading structure...</div>';
     const fmtRaw = (payload.format || 'pdb').toLowerCase();
     const fmt = (fmtRaw === 'mmcif' || fmtRaw === 'cif') ? 'cif'
@@ -17623,4 +17007,4 @@ def _js() -> str:
 """ + PLDDT_HOVER_JS
 
 
-__all__ = ["render_report_html", "write_report"]
+__all__ = ["render_report_html", "resolve_report_output_path", "write_report"]

@@ -58,6 +58,10 @@ def serialize_workflow(wf: Workflow) -> str:
     }
     if wf.description is not None:
         body["description"] = wf.description
+    if wf.user_query is not None:
+        body["user_query"] = wf.user_query
+    if wf.objective is not None:
+        body["objective"] = wf.objective
     if wf.params:
         body["params"] = {k: _param_to_dict(v) for k, v in wf.params.items()}
     body["nodes"] = [_node_to_dict(n) for n in wf.nodes]

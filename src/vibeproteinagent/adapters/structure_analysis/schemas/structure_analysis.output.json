@@ -11,6 +11,12 @@
     "burial": {"type": "object", "additionalProperties": {"type": "integer"}},
     "interface": {"type": "object", "additionalProperties": {"type": "integer"}},
     "ligand_contacts": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "ligand_pocket": {
+      "type": "object",
+      "additionalProperties": {"type": "number"},
+      "default": {},
+      "description": "Heavy-atom ligand pocket metrics derived from protein-ligand contacts."
+    },
     "liabilities": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
     "annotation_scope": {"type": "object", "additionalProperties": true},
     "artifacts": {"type": "object", "additionalProperties": {"type": "string"}},

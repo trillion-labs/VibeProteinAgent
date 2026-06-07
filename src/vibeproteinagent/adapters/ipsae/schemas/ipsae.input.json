@@ -27,7 +27,7 @@
       "type": "array",
       "items": {"type": "object", "additionalProperties": true},
       "default": [],
-      "description": "Canonical Candidate[] from an upstream structure predictor (e.g. Boltz, Protenix). Promotes the first item's structure_path into `pdb_path` when omitted.",
+      "description": "Canonical Candidate[] from an upstream structure predictor (e.g. Boltz, Protenix). Promotes the first item's structure_path into `pdb_path` when omitted; `pae_path` must still be wired separately from the matching predictor output.",
       "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "protenix_v2", "local_id": "0"}, "structure_path": "/abs/pred.cif"}]]
     },
     "chain_a": {

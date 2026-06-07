@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from vibeproteinagent.adapters import null_context
 from vibeproteinagent.adapters.protein_qc.adapter import ProteinQCAdapter, ProteinQCInput
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate(sequence: str = "MKKK", candidate_id: str = "cand_qc", index: int = 0) -> dict:

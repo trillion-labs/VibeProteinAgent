@@ -18,7 +18,7 @@ from vibeproteinagent.adapters.profile_guidance import (
     profile_guidance_metadata,
     proteinmpnn_bias_applicability,
 )
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.errors import DependencyError
 
 # Project root is parents[4] from this file:

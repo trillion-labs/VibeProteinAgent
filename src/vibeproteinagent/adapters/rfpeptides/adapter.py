@@ -38,14 +38,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_structure_residue_refs,
     resolve_position_range,
     resolve_positions,
 )
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
 # --------------------------------------------------------------------------- paths

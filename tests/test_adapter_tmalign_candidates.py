@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from vibeproteinagent.adapters.tmalign.adapter import TMalignInput, TMalignOutput, _tmalign_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate(candidate_id: str, path: str, index: int) -> dict:

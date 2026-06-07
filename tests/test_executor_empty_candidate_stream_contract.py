@@ -8,7 +8,7 @@ import pytest
 
 from vibeproteinagent.adapters import ToolRegistry
 from vibeproteinagent.adapters.context import null_context
-from vibeproteinagent.agents.planning.canonical_tools import CandidateCapabilityContract
+from vibeproteinagent.candidates.capabilities import CandidateCapabilityContract
 from vibeproteinagent.workflows.descriptor import WorkflowNode
 from vibeproteinagent.workflows.state import NodeRuntime
 from vibeproteinagent.workflows import Workflow, WorkflowExecutor, load_workflow
@@ -91,7 +91,7 @@ def test_empty_candidate_stream_skips_only_candidate_consumers(
     wf.node(
         "sequence_metrics",
         tool="sequence_analysis",
-        inputs={"candidates": "${outputs.prior_round.candidates}"},
+        inputs={"candidates": "${outputs.external_candidates.candidates}"},
     )
     wf.node(
         "literature",
@@ -103,7 +103,7 @@ def test_empty_candidate_stream_skips_only_candidate_consumers(
         tmp_workspace,
         tmp_path,
         wf,
-        virtual_outputs={"prior_round": {"candidates": []}},
+        virtual_outputs={"external_candidates": {"candidates": []}},
         supervisor=inline_supervisor,
     )
 
@@ -122,7 +122,7 @@ def test_runtime_capability_gate_skips_before_adapter_execution(
     wf.node(
         "struct_metrics",
         tool="structure_analysis",
-        inputs={"candidates": "${outputs.prior_round.candidates}"},
+        inputs={"candidates": "${outputs.external_candidates.candidates}"},
     )
 
     states, outputs, workflow_state = _run_without_worker(
@@ -130,7 +130,7 @@ def test_runtime_capability_gate_skips_before_adapter_execution(
         tmp_path,
         wf,
         virtual_outputs={
-            "prior_round": {
+            "external_candidates": {
                 "candidates": [
                     {
                         "schema_version": "candidate_v1",
@@ -176,7 +176,7 @@ def test_runtime_capability_gate_filters_mixed_candidate_stream(
     wf.node(
         "sequence_metrics",
         tool="sequence_analysis",
-        inputs={"candidates": "${outputs.prior_round.candidates}"},
+        inputs={"candidates": "${outputs.external_candidates.candidates}"},
     )
 
     states, outputs, workflow_state = _run_without_worker(
@@ -184,7 +184,7 @@ def test_runtime_capability_gate_filters_mixed_candidate_stream(
         tmp_path,
         wf,
         virtual_outputs={
-            "prior_round": {
+            "external_candidates": {
                 "candidates": [
                     {
                         "schema_version": "candidate_v1",
@@ -230,78 +230,6 @@ def test_runtime_capability_gate_filters_mixed_candidate_stream(
     assert outputs["sequence_metrics"]["representative_sequences"][0]["sequence"] == "ACDEFGHIK"
 
 
-def test_memory_bank_summarizes_empty_facets_and_capability_filter_events() -> None:
-    from vibeproteinagent.agents.execution.memory_bank import MemoryBank
-
-    bank = MemoryBank()
-    workflow_summary = {
-        "workflow_id": "wf_test",
-        "state": "completed",
-        "nodes": [
-            {
-                "node_id": "resolver",
-                "tool": "function_term_resolver",
-                "state": "completed",
-                "output": {
-                    "empty_facets": [
-                        {
-                            "event_type": "empty_candidate_event",
-                            "intent_id": "facet_b",
-                        }
-                    ]
-                },
-            },
-            {
-                "node_id": "sequence_metrics",
-                "tool": "sequence_analysis",
-                "state": "completed",
-                "output": {
-                    "candidate_capability_filter_event": {
-                        "status": "partitioned",
-                        "filtered_candidates": [{"candidate_id": "cand_backbone"}],
-                    }
-                },
-            },
-            {
-                "node_id": "struct_metrics",
-                "tool": "structure_analysis",
-                "state": "skipped",
-                "output": {
-                    "status": "skipped_missing_candidate_capability",
-                    "candidate_capability_filter_event": {
-                        "status": "all_incompatible",
-                        "filtered_candidates": [{"candidate_id": "cand_seq"}],
-                        "compatible_candidate_count": 0,
-                        "skipped_candidate_count": 1,
-                    },
-                },
-            },
-        ],
-    }
-    bank.record_round_raw(
-        run_id="arun_test",
-        round_index=0,
-        workflow_id="wf_test",
-        workflow_summary_raw=workflow_summary,
-        candidate_snapshot_id="csnap_current",
-        survivor_snapshot_id="csnap_survivor",
-    )
-    record = bank.latest_round_record()
-    assert record is not None
-    record["current_round_candidate_summary"] = {"count": 0, "items": [], "truncated": False}
-    record["survivor_pool_summary"] = {"count": 0, "items": [], "truncated": False}
-
-    assert record["empty_candidate_events"][0]["intent_id"] == "facet_b"
-    assert record["candidate_capability_filter_events"][0]["node_id"] == "sequence_metrics"
-    assert record["candidate_capability_filter_events"][1]["status"] == "all_incompatible"
-    digest = bank.bounded_digest()
-    statuses = {
-        event["status"]
-        for event in digest["recent_rounds"][0]["candidate_capability_filter_events"]
-    }
-    assert {"partitioned", "all_incompatible"} <= statuses
-
-
 def test_empty_candidate_cascade_allows_non_candidate_dependents_to_consume_skip_status(
     tmp_workspace: Workspace,
     tmp_path: Path,
@@ -311,7 +239,7 @@ def test_empty_candidate_cascade_allows_non_candidate_dependents_to_consume_skip
     wf.node(
         "sequence_metrics",
         tool="sequence_analysis",
-        inputs={"candidates": "${outputs.prior_round.candidates}"},
+        inputs={"candidates": "${outputs.external_candidates.candidates}"},
     )
     wf.node(
         "dependent_status",
@@ -323,7 +251,7 @@ def test_empty_candidate_cascade_allows_non_candidate_dependents_to_consume_skip
         tmp_workspace,
         tmp_path,
         wf,
-        virtual_outputs={"prior_round": {"candidates": []}},
+        virtual_outputs={"external_candidates": {"candidates": []}},
         supervisor=inline_supervisor,
     )
 
@@ -348,7 +276,7 @@ def test_runtime_item_count_gate_skips_single_candidate_stream(
     wf.node(
         "pair_consumer",
         tool="noop",
-        inputs={"candidates": "${outputs.prior_round.candidates}"},
+        inputs={"candidates": "${outputs.external_candidates.candidates}"},
     )
 
     states, outputs, workflow_state = _run_without_worker(
@@ -356,7 +284,7 @@ def test_runtime_item_count_gate_skips_single_candidate_stream(
         tmp_path,
         wf,
         virtual_outputs={
-            "prior_round": {
+            "external_candidates": {
                 "candidates": [
                     {
                         "schema_version": "candidate_v1",
@@ -398,7 +326,7 @@ def test_runtime_item_count_gate_allows_two_candidate_stream(
         desc=WorkflowNode(
             id="pair_consumer",
             tool="noop",
-            inputs={"candidates": "${outputs.prior_round.candidates}"},
+            inputs={"candidates": "${outputs.external_candidates.candidates}"},
         ),
         runtime_id="pair_consumer",
     )

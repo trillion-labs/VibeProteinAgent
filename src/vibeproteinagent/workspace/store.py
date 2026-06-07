@@ -30,6 +30,8 @@ from .types import (
     JobState,
     Priority,
     RunRecord,
+    TrajectoryRecord,
+    WorkflowRecord,
 )
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -85,6 +87,7 @@ def _submission_diff(
     tool: str,
     version: str,
     params_hash: str,
+    trajectory_id: str | None,
     workflow_id: str | None,
     workflow_node_id: str | None,
 ) -> dict[str, dict[str, Any]]:
@@ -99,6 +102,7 @@ def _submission_diff(
         ("tool_name", existing.tool_name, tool),
         ("tool_version", existing.tool_version, version),
         ("params_hash", existing.params_hash, params_hash),
+        ("trajectory_id", existing.trajectory_id, trajectory_id),
         ("workflow_id", existing.workflow_id, workflow_id),
         ("workflow_node_id", existing.workflow_node_id, workflow_node_id),
     )
@@ -116,6 +120,7 @@ def _assert_call_id_match(
     tool: str,
     version: str,
     params_hash: str,
+    trajectory_id: str | None,
     workflow_id: str | None,
     workflow_node_id: str | None,
 ) -> JobRecord:
@@ -129,6 +134,7 @@ def _assert_call_id_match(
     diff = _submission_diff(
         existing,
         tool=tool, version=version, params_hash=params_hash,
+        trajectory_id=trajectory_id,
         workflow_id=workflow_id, workflow_node_id=workflow_node_id,
     )
     if diff:
@@ -302,13 +308,59 @@ class Workspace:
                     )
                 conn.execute("PRAGMA user_version = 3")
             if uv < 4:
-                # Agent-layer reproducibility tables. Kept in the workspace DB
-                # so LLM classifications, plans, summaries and decisions travel
-                # with the scientific jobs/workflows they produced.
-                from vibeproteinagent.agents.session.store import _create_agent_tables
-
-                _create_agent_tables(conn)
+                # v4 retired active agent-session tables.
                 conn.execute("PRAGMA user_version = 4")
+            if uv < 5:
+                job_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()
+                }
+                if "trajectory_id" not in job_cols:
+                    conn.execute("ALTER TABLE jobs ADD COLUMN trajectory_id TEXT")
+                wf_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(workflows)").fetchall()
+                }
+                if "trajectory_id" not in wf_cols:
+                    conn.execute("ALTER TABLE workflows ADD COLUMN trajectory_id TEXT")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS trajectories (
+                      trajectory_id       TEXT PRIMARY KEY,
+                      workspace           TEXT NOT NULL,
+                      user_query          TEXT NOT NULL,
+                      objective           TEXT,
+                      state               TEXT NOT NULL DEFAULT 'open'
+                        CHECK (state IN ('open','completed')),
+                      final_submit_job_id TEXT,
+                      report_path         TEXT,
+                      created_at          INTEGER NOT NULL,
+                      updated_at          INTEGER NOT NULL,
+                      completed_at        INTEGER
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_jobs_traj ON jobs(trajectory_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_workflows_traj ON workflows(trajectory_id)"
+                )
+                conn.execute("PRAGMA user_version = 5")
+            if uv < 6:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS trajectory_reports (
+                      trajectory_id        TEXT PRIMARY KEY,
+                      report_path          TEXT NOT NULL,
+                      source_id            TEXT NOT NULL,
+                      format               TEXT NOT NULL,
+                      final_submit_job_id  TEXT,
+                      created_at           INTEGER NOT NULL,
+                      FOREIGN KEY (trajectory_id) REFERENCES trajectories(trajectory_id)
+                        ON DELETE CASCADE
+                    )
+                    """
+                )
+                conn.execute("PRAGMA user_version = 6")
         finally:
             conn.close()
 
@@ -333,6 +385,7 @@ class JobStore:
         call_id: str | None = None,
         priority: str | Priority = Priority.NORMAL,
         workspace_name: str | None = None,
+        trajectory_id: str | None = None,
         workflow_id: str | None = None,
         workflow_node_id: str | None = None,
         max_retries: int = 0,
@@ -343,8 +396,8 @@ class JobStore:
 
         Per **Architecture v1 — Errata 2** (Codex round-4 RC1): the ``job_id``
         is derived from ``sha256(canonical_submission)``, so the same
-        ``(tool, version, params, workspace, workflow_id, workflow_node_id,
-        salt)`` always resolves to the same id. This collapses the original
+        ``(tool, version, params, workspace, trajectory_id, workflow_id,
+        workflow_node_id, salt)`` always resolves to the same id. This collapses the original
         idempotency guarantee (``call_id``) and the deterministic-naming
         guarantee promised by the brief into a single mechanism:
 
@@ -379,7 +432,8 @@ class JobStore:
 
         derived_id = derive_job_id(
             tool=tool, version=version, params=normalized, workspace=ws_name,
-            workflow_id=workflow_id, workflow_node_id=workflow_node_id,
+            trajectory_id=trajectory_id, workflow_id=workflow_id,
+            workflow_node_id=workflow_node_id,
             salt=salt,
         )
 
@@ -395,6 +449,7 @@ class JobStore:
                     existing_alias,
                     call_id=call_id,
                     tool=tool, version=version, params_hash=ph,
+                    trajectory_id=trajectory_id,
                     workflow_id=workflow_id, workflow_node_id=workflow_node_id,
                 )
                 target_id = existing_alias.job_id
@@ -431,14 +486,14 @@ class JobStore:
                     INSERT INTO jobs (
                       job_id, call_id, state, tool_name, tool_version,
                       params_json, params_hash, log_path, workspace,
-                      workflow_id, workflow_node_id, priority,
+                      trajectory_id, workflow_id, workflow_node_id, priority,
                       max_retries, submitted_at
-                    ) VALUES (?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         target_id, call_id, tool, version,
                         canonical_json(params), ph, log_path, ws_name,
-                        workflow_id, workflow_node_id, prio.value,
+                        trajectory_id, workflow_id, workflow_node_id, prio.value,
                         int(max_retries), ts,
                     ),
                 )
@@ -457,6 +512,7 @@ class JobStore:
                             existing_alias,
                             call_id=call_id,
                             tool=tool, version=version, params_hash=ph,
+                            trajectory_id=trajectory_id,
                             workflow_id=workflow_id,
                             workflow_node_id=workflow_node_id,
                         )
@@ -680,6 +736,7 @@ class JobStore:
         state: str | JobState | None = None,
         tool: str | None = None,
         workflow_id: str | None = None,
+        trajectory_id: str | None = None,
         since: int | None = None,
         limit: int = 100,
         order: str = "submitted_at_desc",
@@ -697,6 +754,9 @@ class JobStore:
         if workflow_id is not None:
             where.append("workflow_id = ?")
             args.append(workflow_id)
+        if trajectory_id is not None:
+            where.append("trajectory_id = ?")
+            args.append(trajectory_id)
         if since is not None:
             where.append("submitted_at >= ?")
             args.append(int(since))
@@ -765,6 +825,38 @@ class JobStore:
         if row is None:
             return False
         return bool(row["cancel_requested"])
+
+    def cancel_running_for_shutdown(self, *, reason: str = "daemon_stopped") -> list[str]:
+        """Mark running jobs cancelled when their owning daemon is stopped."""
+        ts = now_us()
+        conn = self.workspace.connect()
+        try:
+            rows = conn.execute(
+                "SELECT job_id FROM jobs WHERE state = 'running'",
+            ).fetchall()
+            job_ids = [str(r["job_id"]) for r in rows]
+            if job_ids:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                       SET state = 'cancelled',
+                           cancel_requested = 1,
+                           finished_at = ?,
+                           error_code = ?,
+                           error_message = ?,
+                           error_details_json = ?
+                     WHERE state = 'running'
+                    """,
+                    (
+                        ts,
+                        "E_CANCELLED",
+                        "daemon stopped before job completed",
+                        canonical_json({"reason": reason}),
+                    ),
+                )
+        finally:
+            conn.close()
+        return job_ids
 
     # ------------------------------------------------------------ claim/retry
 
@@ -969,6 +1061,7 @@ class JobStore:
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> JobRecord:
+        keys = set(row.keys())
         # error_details_json was added in user_version 3; older rows or
         # rows from a pre-migration read may not have the column.
         try:
@@ -990,6 +1083,7 @@ class JobStore:
             error_details=error_details,
             log_path=row["log_path"],
             workspace=row["workspace"],
+            trajectory_id=row["trajectory_id"] if "trajectory_id" in keys else None,
             workflow_id=row["workflow_id"],
             workflow_node_id=row["workflow_node_id"],
             worker_id=row["worker_id"],
@@ -1003,6 +1097,356 @@ class JobStore:
             finished_at=row["finished_at"],
             cache_hit=bool(row["cache_hit"]),
         )
+
+
+# ---------------------------------------------------------------- ArtifactStore
+
+
+class TrajectoryStore:
+    """CRUD and accounting for one user-query trajectory."""
+
+    def __init__(self, workspace: Workspace) -> None:
+        self.workspace = workspace
+
+    def create(self, *, user_query: str, objective: str | None = None) -> TrajectoryRecord:
+        user_query = str(user_query or "").strip()
+        if not user_query:
+            raise InvalidParamsError(
+                "trajectory user_query must be non-empty",
+                details={"field": "user_query"},
+            )
+        trajectory_id = f"traj_{uuid.uuid4().hex}"
+        ts = now_us()
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO trajectories (
+                  trajectory_id, workspace, user_query, objective, state,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'open', ?, ?)
+                """,
+                (trajectory_id, self.workspace.name, user_query, objective, ts, ts),
+            )
+        finally:
+            conn.close()
+        return self.get(trajectory_id)
+
+    def get(self, trajectory_id: str) -> TrajectoryRecord:
+        conn = self.workspace.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trajectories WHERE trajectory_id = ?",
+                (trajectory_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFoundError(
+                f"trajectory {trajectory_id!r} not found",
+                details={"trajectory_id": trajectory_id},
+            )
+        return self._row_to_record(row)
+
+    def list_jobs(self, trajectory_id: str) -> list[JobRecord]:
+        self.get(trajectory_id)
+        return JobStore(self.workspace).list(
+            trajectory_id=trajectory_id,
+            limit=10000,
+            order="submitted_at_asc",
+        )
+
+    def list_workflows(self, trajectory_id: str) -> list[WorkflowRecord]:
+        self.get(trajectory_id)
+        conn = self.workspace.connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM workflows
+                 WHERE trajectory_id = ?
+                 ORDER BY submitted_at ASC, workflow_id ASC
+                """,
+                (trajectory_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [self._workflow_from_row(r) for r in rows]
+
+    def record_report(
+        self,
+        trajectory_id: str,
+        report_path: str,
+        *,
+        source_id: str | None = None,
+        format: str = "html",
+        replace: bool = False,
+    ) -> TrajectoryRecord:
+        rec = self.get(trajectory_id)
+        preflight = self.preflight_report(
+            trajectory_id,
+            report_path,
+            format=format,
+            replace=replace,
+        )
+        final_submit_job_id = preflight["final_submit_job_id"]
+        ts = now_us()
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO trajectory_reports (
+                  trajectory_id, report_path, source_id, format,
+                  final_submit_job_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trajectory_id) DO UPDATE SET
+                  report_path = excluded.report_path,
+                  source_id = excluded.source_id,
+                  format = excluded.format,
+                  final_submit_job_id = excluded.final_submit_job_id,
+                  created_at = excluded.created_at
+                """,
+                (
+                    trajectory_id,
+                    report_path,
+                    source_id or trajectory_id,
+                    format,
+                    final_submit_job_id,
+                    ts,
+                ),
+            )
+        finally:
+            conn.close()
+        status = self.status(trajectory_id)
+        completed = bool(status["complete"])
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                UPDATE trajectories
+                   SET report_path = ?,
+                       final_submit_job_id = ?,
+                       state = ?,
+                       updated_at = ?,
+                       completed_at = ?
+                 WHERE trajectory_id = ?
+                """,
+                (
+                    report_path,
+                    status["final_submit_job_id"],
+                    "completed" if completed else "open",
+                    ts,
+                    ts if completed else None,
+                    trajectory_id,
+                ),
+            )
+        finally:
+            conn.close()
+        return self.get(rec.trajectory_id)
+
+    def preflight_report(
+        self,
+        trajectory_id: str,
+        report_path: str,
+        *,
+        format: str = "html",
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        status = self.status(trajectory_id)
+        final_submit_job_id = status["final_submit_job_id"]
+        existing = self.report_record(trajectory_id)
+        if existing is not None and not replace:
+            same_path = existing["report_path"] == report_path
+            same_final = existing.get("final_submit_job_id") == final_submit_job_id
+            if not (same_path and same_final):
+                raise ConflictError(
+                    f"trajectory {trajectory_id!r} already has a final report",
+                    details={
+                        "trajectory_id": trajectory_id,
+                        "existing_report_path": existing["report_path"],
+                        "submitted_report_path": report_path,
+                        "existing_final_submit_job_id": existing.get("final_submit_job_id"),
+                        "submitted_final_submit_job_id": final_submit_job_id,
+                        "existing_format": existing.get("format"),
+                        "submitted_format": format,
+                        "hint": "rerun with --replace-report to replace the recorded final report",
+                    },
+                )
+        return {
+            "trajectory_id": trajectory_id,
+            "report_path": report_path,
+            "format": format,
+            "replace": replace,
+            "existing_report": existing,
+            "final_submit_job_id": final_submit_job_id,
+            "idempotent": bool(
+                existing is not None
+                and existing["report_path"] == report_path
+                and existing.get("final_submit_job_id") == final_submit_job_id
+            ),
+        }
+
+    def report_record(self, trajectory_id: str) -> dict[str, Any] | None:
+        self.get(trajectory_id)
+        conn = self.workspace.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trajectory_reports WHERE trajectory_id = ?",
+                (trajectory_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "trajectory_id": row["trajectory_id"],
+            "report_path": row["report_path"],
+            "source_id": row["source_id"],
+            "format": row["format"],
+            "final_submit_job_id": row["final_submit_job_id"],
+            "created_at": int(row["created_at"]),
+        }
+
+    def status(
+        self,
+        trajectory_id: str,
+        *,
+        report_path: str | None = None,
+    ) -> dict[str, Any]:
+        rec = self.get(trajectory_id)
+        jobs = self.list_jobs(trajectory_id)
+        workflows = self.list_workflows(trajectory_id)
+        unfinished_jobs = [j for j in jobs if j.state not in TERMINAL_STATES]
+        unfinished_workflows = [
+            w for w in workflows if w.state not in {"completed", "failed", "cancelled"}
+        ]
+        submit_jobs = [
+            j for j in jobs
+            if j.tool_name == "submit_candidate"
+            and j.state is JobState.COMPLETED
+            and isinstance(j.output, dict)
+            and j.output.get("terminal") is True
+        ]
+        final_submit = submit_jobs[-1] if submit_jobs else None
+        report_record = self.report_record(trajectory_id)
+        legacy_report_count = 1 if report_record is None and rec.report_path else 0
+        report_count = (1 if report_record is not None else 0) + legacy_report_count
+        report_final_submit_job_id = (
+            report_record.get("final_submit_job_id") if report_record else None
+        )
+        report_matches_final_submit = (
+            final_submit is not None
+            and report_record is not None
+            and report_final_submit_job_id == final_submit.job_id
+        )
+        stale_report = (
+            final_submit is not None
+            and report_record is not None
+            and report_final_submit_job_id != final_submit.job_id
+        )
+        effective_report = (
+            report_path
+            or (report_record["report_path"] if report_record is not None else None)
+            or rec.report_path
+        )
+        complete = (
+            not unfinished_jobs
+            and not unfinished_workflows
+            and final_submit is not None
+            and report_count == 1
+            and bool(effective_report)
+            and report_matches_final_submit
+        )
+        execution_all_terminal = not unfinished_jobs and not unfinished_workflows
+        return {
+            "trajectory_id": rec.trajectory_id,
+            "workspace": rec.workspace,
+            "user_query": rec.user_query,
+            "objective": rec.objective,
+            "state": "completed" if complete else "open",
+            "execution_all_terminal": execution_all_terminal,
+            "created_at": rec.created_at,
+            "updated_at": rec.updated_at,
+            "completed_at": rec.completed_at,
+            "job_count": len(jobs),
+            "workflow_count": len(workflows),
+            "unfinished_job_ids": [j.job_id for j in unfinished_jobs],
+            "unfinished_workflow_ids": [w.workflow_id for w in unfinished_workflows],
+            "final_submit_job_id": final_submit.job_id if final_submit else None,
+            "final_submit_outcome": (
+                final_submit.output.get("outcome")
+                if final_submit and isinstance(final_submit.output, dict)
+                else None
+            ),
+            "report_path": effective_report,
+            "report_count": report_count,
+            "report_final_submit_job_id": report_final_submit_job_id,
+            "report_matches_final_submit": report_matches_final_submit,
+            "stale_report": stale_report,
+            "report_recorded_at": (
+                report_record["created_at"]
+                if report_record is not None
+                else (rec.updated_at if rec.report_path else None)
+            ),
+            "complete": complete,
+            "jobs": [self._job_summary(j) for j in jobs],
+            "workflows": [self._workflow_summary(w) for w in workflows],
+        }
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> TrajectoryRecord:
+        return TrajectoryRecord(
+            trajectory_id=row["trajectory_id"],
+            workspace=row["workspace"],
+            user_query=row["user_query"],
+            objective=row["objective"],
+            state=row["state"],
+            final_submit_job_id=row["final_submit_job_id"],
+            report_path=row["report_path"],
+            created_at=int(row["created_at"]),
+            updated_at=int(row["updated_at"]),
+            completed_at=row["completed_at"],
+        )
+
+    @staticmethod
+    def _workflow_from_row(row: sqlite3.Row) -> WorkflowRecord:
+        keys = set(row.keys())
+        return WorkflowRecord(
+            workflow_id=row["workflow_id"],
+            name=row["name"],
+            version=row["version"],
+            descriptor=row["descriptor"],
+            params=json.loads(row["params_json"]),
+            trajectory_id=row["trajectory_id"] if "trajectory_id" in keys else None,
+            state=row["state"],
+            submitted_at=int(row["submitted_at"]),
+            finished_at=row["finished_at"],
+        )
+
+    @staticmethod
+    def _job_summary(job: JobRecord) -> dict[str, Any]:
+        return {
+            "job_id": job.job_id,
+            "tool": job.tool_name,
+            "state": job.state.value,
+            "workflow_id": job.workflow_id,
+            "workflow_node_id": job.workflow_node_id,
+            "submitted_at": job.submitted_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "error_code": job.error_code,
+        }
+
+    @staticmethod
+    def _workflow_summary(workflow: WorkflowRecord) -> dict[str, Any]:
+        return {
+            "workflow_id": workflow.workflow_id,
+            "name": workflow.name,
+            "version": workflow.version,
+            "state": workflow.state,
+            "submitted_at": workflow.submitted_at,
+            "finished_at": workflow.finished_at,
+        }
 
 
 # ---------------------------------------------------------------- ArtifactStore
@@ -1235,6 +1679,27 @@ class RunStore:
         finally:
             conn.close()
 
+    def finish_open_for_job(self, job_id: str, *, exit_state: str) -> None:
+        ts = now_us()
+        conn = self.workspace.connect()
+        try:
+            conn.execute(
+                """
+                UPDATE runs
+                   SET finished_at = ?,
+                       exit_state = ?,
+                       duration_ms = CASE
+                         WHEN duration_ms IS NULL THEN (? - started_at) / 1000
+                         ELSE duration_ms
+                       END
+                 WHERE job_id = ?
+                   AND finished_at IS NULL
+                """,
+                (ts, exit_state, ts, job_id),
+            )
+        finally:
+            conn.close()
+
     def for_job(self, job_id: str) -> list[RunRecord]:
         conn = self.workspace.connect()
         try:
@@ -1267,6 +1732,7 @@ __all__ = [
     "ArtifactStore",
     "JobStore",
     "RunStore",
+    "TrajectoryStore",
     "Workspace",
     "canonical_json",
     "now_us",

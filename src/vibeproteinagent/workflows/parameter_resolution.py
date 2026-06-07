@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from vibeproteinagent.adapters.descriptor import resolve_input_schema_dict
-from vibeproteinagent.agents.planning.parameter_ownership import (
+from vibeproteinagent.workflows.parameter_policies import (
     RUNTIME_SOURCES,
     STRONG_USER_SOURCES,
     TOOL_PARAMETER_POLICIES,
@@ -225,8 +225,28 @@ def _derive_source_artifacts(
         policy = policy_for(tool, field)
         if not policy.derive_when_upstream:
             continue
-        value = _derive_field_from_candidate(field, candidate)
+        value = _derive_field_from_candidate(tool, field, candidate)
         if value is None:
+            if _field_requires_pdb_structure(tool, field):
+                structure_path = candidate_structure_path(candidate, prefer_pdb=False)
+                if structure_path:
+                    raise _parameter_conflict(
+                        tool=tool,
+                        field=field,
+                        source=sources.get("candidates", "upstream_candidate"),
+                        ownership=policy.ownership,
+                        status="failed_missing_pdb_artifact",
+                        details={
+                            "candidate_id": candidate.get("candidate_id"),
+                            "structure_path": structure_path,
+                            "required_format": "pdb",
+                            "hint": (
+                                f"{tool}.{field} requires a PDB artifact; "
+                                "use an upstream predicted_pdb/pdb_path or a "
+                                "CIF-capable consumer"
+                            ),
+                        },
+                    )
             continue
         _set_runtime_value(
             inputs,
@@ -549,6 +569,7 @@ def _source_artifact_fields(tool: str) -> tuple[str, ...]:
     return {
         "proteinmpnn": ("pdb_path",),
         "ligandmpnn": ("pdb_path", "sequence"),
+        "pyrosetta": ("pdb_path",),
         "rfdiffusion": ("target_pdb", "target_sequence"),
         "rfdiffusion3": ("target_pdb", "target_sequence"),
         "rfpeptides": ("target_pdb", "target_sequence"),
@@ -564,9 +585,13 @@ def _source_artifact_fields(tool: str) -> tuple[str, ...]:
     }.get(tool, ())
 
 
-def _derive_field_from_candidate(field: str, candidate: dict[str, Any]) -> Any:
+def _derive_field_from_candidate(tool: str, field: str, candidate: dict[str, Any]) -> Any:
     if field in {"pdb_path", "target_pdb", "structure_path", "motif_pdb"}:
-        return candidate_structure_path(candidate, prefer_pdb=True)
+        return candidate_structure_path(
+            candidate,
+            prefer_pdb=_field_prefers_pdb_structure(tool, field),
+            require_pdb=_field_requires_pdb_structure(tool, field),
+        )
     if field in {"sequence", "target_sequence", "motif_sequence"}:
         return candidate_sequence(candidate)
     if field == "input_json":
@@ -579,6 +604,16 @@ def _derive_field_from_candidate(field: str, candidate: dict[str, Any]) -> Any:
             return None
         return [{"id": candidate.get("candidate_id") or "candidate", "sequence": sequence}]
     return None
+
+
+def _field_prefers_pdb_structure(tool: str, field: str) -> bool:
+    del field
+    cif_capable = {"ipsae", "structure_analysis", "protein_qc"}
+    return tool not in cif_capable
+
+
+def _field_requires_pdb_structure(tool: str, field: str) -> bool:
+    return field == "pdb_path" and tool in {"ligandmpnn", "pyrosetta"}
 
 
 def _canonical_candidates(value: Any) -> list[dict[str, Any]]:

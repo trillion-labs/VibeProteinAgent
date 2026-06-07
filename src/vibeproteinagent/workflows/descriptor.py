@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ParamType = Literal["str", "int", "float", "bool", "path", "list", "dict"]
 OnFailure = Literal["stop", "continue", "skip"]
-VIRTUAL_OUTPUT_NODES = frozenset({"prior_round"})
+VIRTUAL_OUTPUT_NODES = frozenset({"external_candidates"})
 
 
 class WorkflowParam(BaseModel):
@@ -56,6 +56,8 @@ class Workflow(BaseModel):
     name: str = Field(min_length=1)
     version: str = "0.0.0"
     description: str | None = None
+    user_query: str | None = None
+    objective: str | None = None
     params: dict[str, WorkflowParam] = Field(default_factory=dict)
     nodes: list[WorkflowNode] = Field(default_factory=list)
 

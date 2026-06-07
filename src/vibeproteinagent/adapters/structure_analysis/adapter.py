@@ -20,8 +20,8 @@ from vibeproteinagent.adapters.residue_mapping import (
     residue_refs_from_objects,
     resolve_positions,
 )
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.binary import find_binary
 
 AA3 = {
@@ -60,6 +60,23 @@ class Residue:
 
 def _dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
     return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
+
+
+def _is_heavy_atom(atom_name: str) -> bool:
+    letters = "".join(ch for ch in atom_name.strip() if ch.isalpha()).upper()
+    return bool(letters) and not letters.startswith(("H", "D"))
+
+
+def _heavy_atoms(residue: Residue) -> list[tuple[str, tuple[float, float, float]]]:
+    return [
+        (atom, coord)
+        for atom, coord in residue.atoms.items()
+        if _is_heavy_atom(atom)
+    ]
+
+
+def _residue_atom_key(residue: Residue) -> tuple[str, int, str, str]:
+    return residue.chain_id, residue.resseq, residue.icode, residue.resname
 
 
 def _parse_pdb(path: Path) -> tuple[list[Residue], list[Residue]]:
@@ -452,6 +469,7 @@ class StructureAnalysisOutput(BaseModel):
     burial: dict[str, int]
     interface: dict[str, int]
     ligand_contacts: dict[str, int]
+    ligand_pocket: dict[str, Any] = Field(default_factory=dict)
     liabilities: list[dict[str, Any]]
     annotation_scope: dict[str, Any]
     artifacts: dict[str, str]
@@ -625,24 +643,48 @@ def _analyze_structure(
                 interface_set.add(r.key)
 
     ligand_names = {x.upper() for x in params.ligand_resnames}
-    ligand_contacts = []
-    for r, ca in coords:
-        if ca is None:
+    ligand_contacts: list[dict[str, Any]] = []
+    ligand_atom_contacts: set[tuple[tuple[str, int, str, str], str]] = set()
+    ligand_heavy_atom_keys: set[tuple[tuple[str, int, str, str], str]] = set()
+    contact_atom_pair_count = 0
+    for lig in ligands:
+        if ligand_names and lig.resname not in ligand_names:
+            continue
+        for lig_atom, _lig_coord in _heavy_atoms(lig):
+            ligand_heavy_atom_keys.add((_residue_atom_key(lig), lig_atom))
+    for r, _ca in coords:
+        protein_atoms = _heavy_atoms(r)
+        if not protein_atoms:
             continue
         for lig in ligands:
             if ligand_names and lig.resname not in ligand_names:
                 continue
-            points = list(lig.atoms.values())
-            if (
-                points
-                and min(_dist(ca, p) for p in points) <= params.contact_distance_angstrom
-            ):
+            ligand_atoms = _heavy_atoms(lig)
+            if not ligand_atoms:
+                continue
+            closest: tuple[str, str, float] | None = None
+            pair_count = 0
+            for protein_atom, protein_coord in protein_atoms:
+                for ligand_atom, ligand_coord in ligand_atoms:
+                    d = _dist(protein_coord, ligand_coord)
+                    if d <= params.contact_distance_angstrom:
+                        pair_count += 1
+                        ligand_atom_contacts.add((_residue_atom_key(lig), ligand_atom))
+                        if closest is None or d < closest[2]:
+                            closest = (protein_atom, ligand_atom, d)
+            if pair_count and closest is not None:
+                contact_atom_pair_count += pair_count
                 ligand_contacts.append({
                     "chain_id": r.chain_id,
                     "resseq": r.resseq,
+                    "icode": r.icode,
                     "ligand_resname": lig.resname,
                     "ligand_chain_id": lig.chain_id,
                     "ligand_resseq": lig.resseq,
+                    "protein_atom": closest[0],
+                    "ligand_atom": closest[1],
+                    "distance": round(closest[2], 3),
+                    "atom_pair_count": pair_count,
                 })
 
     patches = _patches(all_rows)
@@ -667,6 +709,10 @@ def _analyze_structure(
     chains = sorted({r.chain_id for r in residues})
     ss_counts = Counter(row["secondary_structure"] for row in all_rows)
     n_rows = max(1, len(all_rows))
+    ligand_contact_residue_keys = {
+        (c["chain_id"], c["resseq"], c["icode"]) for c in ligand_contacts
+    }
+    ligand_contact_residue_count = len(ligand_contact_residue_keys)
     annotation_scope = {
         "summary_scope": "all_residues_after_chain_filter",
         "annotation_scope": (
@@ -695,13 +741,25 @@ def _analyze_structure(
         "interface": {
             "contact_count": len(contacts),
             "interface_residue_count": len(interface_set),
-            "ligand_contact_count": len(ligand_contacts),
+            "ligand_contact_count": ligand_contact_residue_count,
         },
         "ligand_contacts": {
-            "contact_count": len(ligand_contacts),
-            "contact_residue_count": len({
-                (c["chain_id"], c["resseq"]) for c in ligand_contacts
-            }),
+            "contact_count": ligand_contact_residue_count,
+            "contact_residue_count": ligand_contact_residue_count,
+            "contact_atom_pair_count": contact_atom_pair_count,
+            "ligand_heavy_atom_count": len(ligand_heavy_atom_keys),
+            "contact_ligand_atom_count": len(ligand_atom_contacts),
+        },
+        "ligand_pocket": {
+            "pocket_residue_count": ligand_contact_residue_count,
+            "ligand_heavy_atom_count": len(ligand_heavy_atom_keys),
+            "ligand_buried_atom_count": len(ligand_atom_contacts),
+            "ligand_buried_fraction": (
+                len(ligand_atom_contacts) / len(ligand_heavy_atom_keys)
+                if ligand_heavy_atom_keys
+                else 0.0
+            ),
+            "distance_cutoff_angstrom": params.contact_distance_angstrom,
         },
         "liabilities": liabilities[: params.max_annotations],
         "secondary_structure_source": ss_source,
@@ -710,12 +768,14 @@ def _analyze_structure(
     summary_path = out_dir / f"{output_prefix}_summary.json"
     residue_path = out_dir / f"{output_prefix}_residue_structure_annotations.tsv"
     contacts_path = out_dir / f"{output_prefix}_interface_contacts.tsv"
+    ligand_contacts_path = out_dir / f"{output_prefix}_ligand_contacts.tsv"
     patches_path = out_dir / f"{output_prefix}_surface_patches.json"
     dssp_path = out_dir / f"{output_prefix}_dssp.tsv"
     summary["artifacts"] = {
         "summary_json": str(summary_path),
         "residue_annotations_tsv": str(residue_path),
         "interface_contacts_tsv": str(contacts_path),
+        "ligand_contacts_tsv": str(ligand_contacts_path),
         "surface_patches_json": str(patches_path),
         "dssp_tsv": str(dssp_path),
     }
@@ -746,6 +806,18 @@ def _analyze_structure(
             fh.write(
                 f"{c['chain_id']}\t{c['resseq']}\t{c['other_chain_id']}\t"
                 f"{c['other_resseq']}\t{c['distance']}\n"
+            )
+    with ligand_contacts_path.open("w") as fh:
+        fh.write(
+            "chain_id\tresseq\ticode\tligand_resname\tligand_chain_id\tligand_resseq\t"
+            "protein_atom\tligand_atom\tdistance\tatom_pair_count\n"
+        )
+        for c in ligand_contacts:
+            fh.write(
+                f"{c['chain_id']}\t{c['resseq']}\t{c['icode']}\t{c['ligand_resname']}\t"
+                f"{c['ligand_chain_id']}\t{c['ligand_resseq']}\t"
+                f"{c['protein_atom']}\t{c['ligand_atom']}\t{c['distance']}\t"
+                f"{c['atom_pair_count']}\n"
             )
     patches_path.write_text(json.dumps(patches, indent=2, sort_keys=True) + "\n")
     with dssp_path.open("w") as fh:
@@ -788,6 +860,7 @@ class StructureAnalysisAdapter(ToolAdapter):
             },
             interface=summary["interface"],
             ligand_contacts=summary["ligand_contacts"],
+            ligand_pocket=summary["ligand_pocket"],
             liabilities=summary["liabilities"],
             annotation_scope=summary["annotation_scope"],
             artifacts=summary["artifacts"],
@@ -894,6 +967,7 @@ def _structure_scores(summary: dict[str, Any]) -> dict[str, Any]:
         "burial": summary["burial"],
         "interface": summary["interface"],
         "ligand_contacts": summary["ligand_contacts"],
+        "ligand_pocket": summary["ligand_pocket"],
         "liability_count": len(summary["liabilities"]),
         "secondary_structure_source": summary["secondary_structure_source"],
     }

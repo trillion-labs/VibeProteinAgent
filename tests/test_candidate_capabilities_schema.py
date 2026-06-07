@@ -7,7 +7,7 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
 from vibeproteinagent.adapters.merge_candidates.adapter import MergeCandidatesInput
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

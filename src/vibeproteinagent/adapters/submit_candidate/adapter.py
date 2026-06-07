@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.core.errors import InvalidParamsError
+from vibeproteinagent.core.errors import InvalidParamsError, NotFoundError
 from vibeproteinagent.workspace import ArtifactStore, JobStore, Workspace
 
 Outcome = Literal["accepted", "no_acceptable_candidate"]
@@ -64,13 +64,22 @@ class CandidateRef(BaseModel):
     job_id: str
     candidate_id: str | None = None
     index: int | None = Field(default=None, ge=0)
+    rank: int | None = Field(default=None, ge=1)
     justification: str = Field(min_length=1)
     scores_to_highlight: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _has_selector(self) -> CandidateRef:
-        if not self.candidate_id and self.index is None:
-            raise ValueError("candidate ref requires candidate_id or zero-based index")
+        selectors = [
+            self.candidate_id is not None,
+            self.index is not None,
+            self.rank is not None,
+        ]
+        if sum(1 for selected in selectors if selected) != 1:
+            raise ValueError(
+                "candidate ref requires exactly one selector: candidate_id, "
+                "zero-based index, or rank"
+            )
         return self
 
 
@@ -97,6 +106,7 @@ class SubmitCandidateOutput(BaseModel):
     reasoning: str
     supersedes: str | None = None
     auto_selected: bool = False
+    next_report_command: str
     runtime_ms: int
 
 
@@ -112,6 +122,11 @@ class SubmitCandidateAdapter(ToolAdapter):
     ) -> SubmitCandidateOutput:
         t0 = time.time()
         workspace = Workspace(ctx.workspace_root.name, ctx.workspace_root)
+        try:
+            current_job = JobStore(workspace).get(ctx.job_id)
+            report_id = current_job.trajectory_id or ctx.job_id
+        except NotFoundError:
+            report_id = ctx.job_id
         resolved = [
             _resolve_candidate(workspace, ref)
             for ref in params.candidates
@@ -127,6 +142,9 @@ class SubmitCandidateAdapter(ToolAdapter):
             "reasoning": params.reasoning,
             "supersedes": params.supersedes,
             "auto_selected": False,
+            "next_report_command": (
+                f"vpa report {report_id} --workspace {workspace.name} --out report.html"
+            ),
         }
         (out_dir / "submission.json").write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -178,6 +196,7 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
         "selector": {
             "candidate_id": ref.candidate_id,
             "index": ref.index,
+            "rank": ref.rank,
         },
         "candidate_id": candidate_id,
         "index": index,
@@ -186,13 +205,17 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
         "structure_path": _first_str(row, *_STRUCTURE_KEYS),
         "full_structure_path": _first_str(row, "full_structure_path"),
         "backbone_path": _first_str(row, "backbone_path"),
-        "capabilities": row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {},
+        "capabilities": (
+            row.get("capabilities")
+            if isinstance(row.get("capabilities"), dict)
+            else {}
+        ),
         "score": _as_float(row.get("score")),
         "scores": scores,
         "scores_highlighted": {
-            key: scores.get(key)
+            key: _score_highlight_value(row, scores, key)
             for key in ref.scores_to_highlight
-            if key in scores
+            if _score_highlight_value(row, scores, key) is not None
         },
         "justification": ref.justification,
         "artifacts": artifacts,
@@ -253,7 +276,8 @@ def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(producer_scores, dict):
         row.update(producer_scores)
-        row["scores"] = dict(producer_scores)
+    if scores:
+        row["scores"] = dict(scores)
     return {key: value for key, value in row.items() if value is not None}
 
 
@@ -268,14 +292,56 @@ def _select_row(
                 return idx, row
         raise InvalidParamsError(
             "candidate_id not found in referenced job output",
-            details={"job_id": ref.job_id, "candidate_id": wanted},
+            details={
+                "job_id": ref.job_id,
+                "candidate_id": wanted,
+                "available": _available_selectors(rows),
+            },
+        )
+    if ref.rank is not None:
+        matches = [
+            (idx, row)
+            for idx, row in enumerate(rows)
+            if _as_int(row.get("rank")) == ref.rank
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        raise InvalidParamsError(
+            "rank not found in referenced job output"
+            if not matches
+            else "rank selector matched multiple candidates",
+            details={
+                "job_id": ref.job_id,
+                "rank": ref.rank,
+                "available": _available_selectors(rows),
+            },
         )
     if ref.index is None or ref.index >= len(rows):
         raise InvalidParamsError(
             "candidate index is outside referenced job output",
-            details={"job_id": ref.job_id, "index": ref.index, "candidate_count": len(rows)},
+            details={
+                "job_id": ref.job_id,
+                "index": ref.index,
+                "candidate_count": len(rows),
+                "available": _available_selectors(rows),
+            },
         )
     return ref.index, rows[ref.index]
+
+
+def _available_selectors(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    ranks: list[int] = []
+    candidate_ids: list[str] = []
+    for idx, row in enumerate(rows):
+        candidate_ids.append(_candidate_id(row, idx))
+        rank = _as_int(row.get("rank"))
+        if rank is not None:
+            ranks.append(rank)
+    return {
+        "candidate_ids": candidate_ids,
+        "indices": list(range(len(rows))),
+        "ranks": ranks,
+    }
 
 
 def _candidate_id(row: dict[str, Any], index: int) -> str:
@@ -306,6 +372,25 @@ def _scores(row: dict[str, Any]) -> dict[str, float | int | str | None]:
     if "pae" not in scores and "mean_pae" in scores:
         scores["pae"] = scores["mean_pae"]
     return scores
+
+
+def _score_highlight_value(
+    row: dict[str, Any],
+    flattened_scores: dict[str, float | int | str | None],
+    key: str,
+) -> float | int | str | None:
+    if key in flattened_scores:
+        return flattened_scores[key]
+    for root in (row, row.get("scores")):
+        current: Any = root
+        for part in key.split("."):
+            if not isinstance(current, dict) or part not in current:
+                break
+            current = current[part]
+        else:
+            if isinstance(current, (int, float, str)):
+                return current
+    return None
 
 
 def _artifact_refs(

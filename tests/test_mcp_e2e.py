@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.slow
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _supervisor_target(
@@ -55,7 +56,7 @@ async def _drive(
         "VPA_WORKSPACE": "default",
         "PYTHONNOUSERSITE": "1",
     }
-    env.pop("PYTHONPATH", None)
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "vibeproteinagent.cli.main", "mcp", "serve", "--transport", "stdio"],

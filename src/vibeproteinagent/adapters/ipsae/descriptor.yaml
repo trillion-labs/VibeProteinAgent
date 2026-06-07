@@ -1,7 +1,7 @@
 name: ipsae
 version: "1.0.0"
 category: scoring
-description: "Computes the ipSAE interface confidence score from a structure prediction model (requires both the predicted PDB and the model's PAE matrix) for a given chain pair. Use as an in-silico binder-design triage filter; CPU-only and fast."
+description: "Computes the ipSAE interface confidence score from a structure prediction model (requires both the predicted PDB and the model's PAE matrix) for a given chain pair. Use as a representative in-silico binder-design triage filter."
 runtime: python
 backend: numpy
 gpu_required: false

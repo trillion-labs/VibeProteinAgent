@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibeproteinagent.agents.planning.candidate_merge import merge_candidate_records
+from vibeproteinagent.candidates.merge import merge_candidate_records
 
 
 def _candidate(

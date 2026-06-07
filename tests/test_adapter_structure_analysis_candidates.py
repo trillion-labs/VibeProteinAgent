@@ -9,7 +9,7 @@ from vibeproteinagent.adapters.structure_analysis.adapter import (
     StructureAnalysisAdapter,
     StructureAnalysisInput,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _pdb(tmp_path):
@@ -30,6 +30,36 @@ def _pdb_with_residue_count(tmp_path, name: str, count: int):
             "  1.00 20.00           C\n"
             for index in range(1, count + 1)
         )
+    )
+    return path
+
+
+def _pdb_atom(
+    record: str,
+    serial: int,
+    atom: str,
+    resname: str,
+    chain: str,
+    resseq: int,
+    x: float,
+    y: float,
+    z: float,
+    element: str,
+) -> str:
+    return (
+        f"{record:<6}{serial:5d} {atom:^4s} {resname:>3s} {chain}{resseq:4d}"
+        f"    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+    )
+
+
+def _pdb_with_ligand(tmp_path):
+    path = tmp_path / "ligand_contact.pdb"
+    path.write_text(
+        _pdb_atom("ATOM", 1, "CA", "ALA", "A", 1, 0.0, 0.0, 0.0, "C")
+        + _pdb_atom("ATOM", 2, "CB", "ALA", "A", 1, 8.0, 0.0, 0.0, "C")
+        + _pdb_atom("HETATM", 3, "C1", "LIG", "L", 1, 9.0, 0.0, 0.0, "C")
+        + _pdb_atom("HETATM", 4, "O1", "LIG", "L", 1, 20.0, 0.0, 0.0, "O")
+        + _pdb_atom("HETATM", 5, "H1", "LIG", "L", 1, 8.5, 0.0, 0.0, "H")
     )
     return path
 
@@ -114,3 +144,27 @@ def test_structure_analysis_scores_each_candidate_structure(tmp_path) -> None:
         out.candidates[0]["artifacts"]["structure_analysis"]["summary_json"]
         != out.candidates[1]["artifacts"]["structure_analysis"]["summary_json"]
     )
+
+
+def test_structure_analysis_candidate_scores_include_ligand_pocket(tmp_path) -> None:
+    pdb = _pdb_with_ligand(tmp_path)
+    adapter = StructureAnalysisAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        StructureAnalysisInput(
+            candidates=[_candidate(str(pdb))],
+            ligand_resnames=["LIG"],
+            contact_distance_angstrom=2.0,
+            run_dssp=False,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    scores = out.candidates[0]["scores"]["structure_analysis"]
+    assert scores["interface"]["ligand_contact_count"] == 1
+    assert scores["ligand_contacts"]["contact_count"] == 1
+    assert scores["ligand_contacts"]["contact_residue_count"] == 1
+    assert scores["ligand_pocket"]["pocket_residue_count"] == 1
+    assert scores["ligand_pocket"]["ligand_heavy_atom_count"] == 2
+    assert scores["ligand_pocket"]["ligand_buried_atom_count"] == 1
+    assert scores["ligand_pocket"]["ligand_buried_fraction"] == pytest.approx(0.5)

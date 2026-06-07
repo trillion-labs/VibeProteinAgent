@@ -5,139 +5,36 @@ import math
 from pathlib import Path
 
 from .metrics import (
-    RECOVERY_DEFINITIONS,
-    RECOVERY_PLOT_TITLE_SUFFIX,
-    SCORE_DEFINITIONS,
-    TOOL_OUTPUT_KIND,
-    TOOLS_PREFER_RECOVERY,
     pretty_tool_name,
 )
 from .models import PlotSpec, ReportModel
 
 
 def build_plots(model: ReportModel) -> list[PlotSpec]:
-    """Build only meaningful plots — skip tautological single-value bar charts.
+    """Build Appendix plots only for MSA-generation evidence.
 
-    Multi-candidate runs get distributions; single-candidate runs get the
-    per-residue pLDDT trace if their structure carries B-factor confidence.
+    Candidate-level analytics now live in the review and comparison sections.
+    The Appendix Plots panel is reserved for alignment context, so it does not
+    emit pLDDT traces, score bars, or cross-metric scatter charts.
     """
     plots: list[PlotSpec] = []
-
-    # Per-residue pLDDT (B-factor) plot — most informative for structure
-    # prediction outputs. Skip when no candidate has a structure file.
-    for candidate in model.candidates[:5]:
-        if not candidate.structure_path:
+    for block in model.msa_blocks:
+        identities = [value for value in block.identities if _num(value) is not None]
+        if len(identities) < 3:
             continue
-        plddt_values = _extract_plddt_per_residue(Path(candidate.structure_path))
-        if not plddt_values:
-            continue
+        source = pretty_tool_name(block.source_tool or "") if block.source_tool else "MSA"
         plots.append(
             PlotSpec(
-                f"Per-residue pLDDT · {candidate.candidate_id}",
-                "plddt_trace",
-                plddt_trace_svg(plddt_values, idx=len(plots)),
-            )
-        )
-        # Only one per-residue plot is shown unless this is a multi-candidate
-        # run — keep the report from getting noisy.
-        if len(model.candidates) == 1:
-            break
-
-    # Score distribution — bucketed by source tool. Each tool's score has
-    # its own meaning and scale (ProteinMPNN's NLL is not comparable to
-    # Boltz-2's ranking confidence), so plotting them in one chart would
-    # mix incompatible units. One plot per tool keeps the y-axis honest
-    # and lets each plot carry its own "what does score mean here?" caption.
-    #
-    # For inverse-folding tools (proteinmpnn / ligandmpnn) the canonical
-    # ``candidate.score`` is per-residue NLL — wrong-direction and on an
-    # unfamiliar scale. We swap to ``seq_recovery`` (fraction of native
-    # residues recovered, 0-1, higher = better) which is the metric
-    # sequence-design reviewers actually look at. If recovery isn't
-    # available we fall back to the raw score for those tools too.
-    # ``axis_kind`` records what we actually plotted: "recovery" only
-    # when the swap fired for every contributing candidate, otherwise
-    # "score". Per-tool homogeneity is enforced by separating the
-    # buckets — if any candidate of an MPNN tool lacks recovery, we
-    # use the score path for that entire tool's bucket so all bars
-    # share one axis and the caption stays honest.
-    by_tool: dict[str, list[float]] = {}
-    axis_kind: dict[str, str] = {}
-    for c in model.candidates:
-        tool = ""
-        if isinstance(c.source, dict):
-            tool = str(c.source.get("tool") or "").lower()
-        recovery = None
-        if tool in TOOLS_PREFER_RECOVERY:
-            recovery = _num(c.scores.get("seq_recovery"))
-            if recovery is None:
-                recovery = _num(c.scores.get("recovery"))
-        # First candidate of a tool decides the axis: prefer recovery
-        # when available, otherwise raw score. Subsequent candidates of
-        # the same tool must match — drop any that can't supply a value
-        # on the chosen axis (rare in practice, but keeps the bars
-        # comparable).
-        chosen_axis = axis_kind.get(tool)
-        if chosen_axis is None:
-            if tool in TOOLS_PREFER_RECOVERY and recovery is not None:
-                chosen_axis = "recovery"
-            elif c.score is not None:
-                chosen_axis = "score"
-            else:
-                continue
-            axis_kind[tool] = chosen_axis
-        if chosen_axis == "recovery":
-            if recovery is None:
-                continue
-            by_tool.setdefault(tool, []).append(recovery)
-        else:  # "score"
-            if c.score is None:
-                continue
-            by_tool.setdefault(tool, []).append(c.score)
-    for tool_lc, scores in by_tool.items():
-        if len(scores) < 3:
-            continue
-        tool_label = pretty_tool_name(tool_lc) if tool_lc else "Candidate"
-        output_kind = TOOL_OUTPUT_KIND.get(tool_lc, "")
-        if axis_kind[tool_lc] == "recovery":
-            score_def = RECOVERY_DEFINITIONS.get(tool_lc, "")
-            title = (
-                f"{tool_label} {RECOVERY_PLOT_TITLE_SUFFIX}"
-                if tool_lc
-                else "Sequence recovery distribution"
-            )
-        else:
-            score_def = SCORE_DEFINITIONS.get(tool_lc, "")
-            title = (
-                f"{tool_label} score distribution"
-                if tool_lc
-                else "Candidate score distribution"
-            )
-        plots.append(
-            PlotSpec(
-                title,
-                "score_bars",
+                f"{source} identity distribution",
+                "msa_identity",
                 score_distribution_svg(
-                    scores,
-                    tool_label=tool_label,
-                    output_kind=output_kind,
-                    score_definition=score_def,
+                    identities,
+                    tool_label=source,
+                    output_kind="MSA sequence identity",
+                    score_definition="Fractional identity to the query over aligned, non-gap query columns.",
                 ),
             )
         )
-
-    pairs = [
-        (c.scores.get("plddt"), c.scores.get("iptm"), c.candidate_id)
-        for c in model.candidates
-        if _num(c.scores.get("plddt")) is not None and _num(c.scores.get("iptm")) is not None
-    ]
-    if len(pairs) >= 3:
-        plots.append(PlotSpec("pLDDT vs ipTM", "scatter", scatter_svg(pairs)))
-
-    # QC flag counts and workflow node-state breakdowns used to be plotted
-    # here, but both add visual noise without information value once the
-    # per-tool widgets render the underlying data directly (QC widget shows
-    # every metric + flag, and the workflow DAG already shows node states).
     return plots
 
 

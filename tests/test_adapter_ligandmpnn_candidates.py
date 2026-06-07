@@ -3,12 +3,17 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+pytest.importorskip("prody")
+
 from vibeproteinagent.adapters.ligandmpnn.adapter import LigandMPNNDesign, LigandMPNNInput, LigandMPNNOutput, _ligandmpnn_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
-def _candidate() -> dict:
-    return {"schema_version": "candidate_v1", "candidate_id": "cand_struct", "source": {"tool": "upstream", "node_id": None, "job_id": None, "local_id": "struct_0000", "native_id": None, "index": 0}, "structure_path": "/tmp/input.pdb", "sequence": "AAAA", "scores": {}, "artifacts": {}}
+def _candidate(
+    structure_path: str = "/tmp/input.pdb",
+    artifacts: dict | None = None,
+) -> dict:
+    return {"schema_version": "candidate_v1", "candidate_id": "cand_struct", "source": {"tool": "upstream", "node_id": None, "job_id": None, "local_id": "struct_0000", "native_id": None, "index": 0}, "structure_path": structure_path, "sequence": "AAAA", "scores": {}, "artifacts": artifacts or {}}
 
 
 def test_ligandmpnn_emits_canonical_candidates() -> None:
@@ -34,6 +39,16 @@ def test_ligandmpnn_output_preserves_legacy_fields() -> None:
 
 def test_ligandmpnn_consumes_canonical_legacy_and_rejects_mixed() -> None:
     assert LigandMPNNInput(candidates=[_candidate()]).pdb_path == "/tmp/input.pdb"
+    assert LigandMPNNInput(
+        candidates=[
+            _candidate(
+                "/tmp/input.cif",
+                {"protenix_v2": {"predicted_pdb": "/tmp/input.pdb"}},
+            )
+        ]
+    ).pdb_path == "/tmp/input.pdb"
+    with pytest.raises(ValidationError, match="requires a PDB artifact"):
+        LigandMPNNInput(candidates=[_candidate("/tmp/input.cif")])
     assert LigandMPNNInput(pdb_path="/tmp/input.pdb").pdb_path == "/tmp/input.pdb"
     with pytest.raises(ValidationError, match="Mixed canonical and legacy"):
         LigandMPNNInput(candidates=[_candidate(), {"pdb_path": "/tmp/legacy.pdb"}])

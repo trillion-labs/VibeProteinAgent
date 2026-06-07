@@ -6,15 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from vibeproteinagent.adapters.pxdesign.adapter import PXDesignDesign, PXDesignInput, PXDesignOutput, _pxdesign_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate() -> dict:
     return {"schema_version": "candidate_v1", "candidate_id": "cand_target", "source": {"tool": "upstream", "node_id": None, "job_id": None, "local_id": "struct_0000", "native_id": None, "index": 0}, "structure_path": "/tmp/target.pdb", "scores": {}, "artifacts": {}}
-
-
-def _ir(inputs: dict | None = None) -> dict:
-    return {"version": "planner_ir_v1", "goal": "x", "assumptions": [], "missing_inputs": [], "nodes": [{"id": "n", "tool": "pxdesign", "intent": "x", "inputs": inputs or {}, "upstream": []}]}
 
 
 def test_pxdesign_emits_canonical_candidates() -> None:

@@ -15,7 +15,7 @@ from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext, null_context
 from vibeproteinagent.adapters.foldseek.adapter import FoldseekAdapter, FoldseekInput
 from vibeproteinagent.adapters.mmseqs2_gpu.adapter import MMseqs2GpuAdapter, MMseqs2GpuInput
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 
 def _read_first_fasta(path: str) -> FastaRecord:

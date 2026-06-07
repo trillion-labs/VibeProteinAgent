@@ -14,6 +14,7 @@ class ErrorCode:
     DEPENDENCY = "E_DEPENDENCY"
     INTERNAL = "E_INTERNAL"
     DAEMON_UNAVAILABLE = "E_DAEMON_UNAVAILABLE"
+    DAEMON_WORKSPACE_MISMATCH = "E_DAEMON_WORKSPACE_MISMATCH"
     WORKSPACE = "E_WORKSPACE"
     NOT_FOUND = "E_NOT_FOUND"
     CONFLICT = "E_CONFLICT"
@@ -50,6 +51,7 @@ _EXIT_MAP: dict[str, int] = {
     ErrorCode.INTERNAL: EXIT_RUNTIME_ERROR,
     ErrorCode.BUSY: EXIT_RUNTIME_ERROR,
     ErrorCode.DAEMON_UNAVAILABLE: EXIT_DAEMON_ERROR,
+    ErrorCode.DAEMON_WORKSPACE_MISMATCH: EXIT_USER_ERROR,
 }
 
 
@@ -88,6 +90,10 @@ class WorkspaceError(VPAError):
 
 class DaemonUnavailableError(VPAError):
     code = ErrorCode.DAEMON_UNAVAILABLE
+
+
+class DaemonWorkspaceMismatchError(VPAError):
+    code = ErrorCode.DAEMON_WORKSPACE_MISMATCH
 
 
 class DependencyError(VPAError):

@@ -1,7 +1,7 @@
 name: prodigy
 version: "1.0.0"
 category: scoring
-description: "Predicts protein-protein binding affinity (ΔG in kcal/mol and K_d) from a complex PDB using a statistical contact-based model on a chain-A vs chain-B interface. CPU-only; fast triage when an ML predictor is overkill or unavailable."
+description: "Predicts protein-protein binding affinity (ΔG in kcal/mol and K_d) from a complex PDB using a statistical contact-based model on a chain-A vs chain-B interface."
 runtime: python
 backend: biopython
 gpu_required: false

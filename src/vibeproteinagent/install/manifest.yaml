@@ -18,13 +18,6 @@ profiles:
       - structure_analysis
       - protein_qc
       - rank_designs
-  agent:
-    description: "Agent orchestration plus lightweight planning/retrieval tools."
-    extends: base
-    tools:
-      - literature_search
-      - search_sequence
-      - template_select
   full:
     description: "Every supported first-class in-tree tool, sidecar, and required model weight."
     tools:

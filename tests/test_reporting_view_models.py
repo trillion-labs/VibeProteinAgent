@@ -8,8 +8,6 @@ or rendering behavior.
 from __future__ import annotations
 
 from vibeproteinagent.reporting.models import (
-    AgentDecision,
-    AgentTranscript,
     CandidateStatus,
     Provenance,
     ReportCandidate,
@@ -42,7 +40,7 @@ def _node(node_id: str, tool: str, *, upstream=None, state="completed"):
     )
 
 
-def _model(*, nodes=None, candidates=None, finals=None, transcript=None, warnings=None):
+def _model(*, nodes=None, candidates=None, finals=None, warnings=None, raw_summary=None):
     return ReportModel(
         summary=RunSummary(
             kind="workflow",
@@ -55,8 +53,8 @@ def _model(*, nodes=None, candidates=None, finals=None, transcript=None, warning
         graph=WorkflowGraph(workflow_id="wf_view", nodes=list(nodes or [])),
         candidates=list(candidates or []),
         final_candidates=list(finals or []),
-        agent_transcript=transcript,
         warnings=list(warnings or []),
+        raw_summary=dict(raw_summary or {}),
     )
 
 
@@ -188,29 +186,22 @@ def test_overview_prefers_recorded_warning_as_main_caveat():
     assert overview.main_caveat == "Structure prediction did not complete."
 
 
-def test_agent_rationale_uses_recorded_query_plan_and_decisions():
-    transcript = AgentTranscript(
-        run_id="agent_1",
-        user_query="Design a 70 aa binder.",
-        plan_structured={"steps": [{"name": "Generate"}, {"name": "Rank"}]},
-        decisions=[
-            AgentDecision(
-                round_index=1,
-                decision_label="completed_review_metrics",
-                reason="Enough candidates passed review.",
-            )
-        ],
-        tool_calls=[],
+def test_agent_rationale_uses_recorded_workflow_query_and_graph_plan():
+    model = _model(
+        nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")],
+        raw_summary={
+            "user_query": "Design a 70 aa binder.",
+            "objective": "Accept high-confidence designs.",
+        },
     )
-    model = _model(transcript=transcript, nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")])
     review = build_review_model(model)
 
     rationale = build_agent_rationale_view_model(model, review)
 
     assert rationale.user_query == "Design a 70 aa binder."
-    assert rationale.stage_plan == ["Generate", "Rank"]
-    assert rationale.major_decisions[0].provenance == Provenance.EXACT
-    assert "Enough candidates" in rationale.major_decisions[0].value
+    assert rationale.stage_plan == ["Generation", "Ranking"]
+    assert rationale.major_decisions == []
+    assert rationale.has_full_transcript is False
 
 
 def test_candidate_board_rows_map_status_metric_chips_and_download_flags():
@@ -245,6 +236,43 @@ def test_candidate_board_rows_map_status_metric_chips_and_download_flags():
     assert row.has_downloads is True
     assert {chip.label for chip in row.metric_chips} >= {"pLDDT", "pTM", "ipTM", "GRAVY", "Net charge", "QC"}
     assert [chip.label for chip in row.metric_chips[:3]] == ["ipTM", "pLDDT", "pTM"]
+
+
+def test_candidate_board_renumbers_duplicate_raw_ranks_by_review_order():
+    candidates = [
+        ReportCandidate(
+            candidate_id="cand_a",
+            rank=1,
+            sequence="ACDEFG",
+            structure_path="/tmp/cand_a.pdb",
+            scores={"esm3": {"mean_plddt": 0.90, "ptm": 0.78}},
+        ),
+        ReportCandidate(
+            candidate_id="cand_b",
+            rank=1,
+            sequence="ACDEFA",
+            structure_path="/tmp/cand_b.pdb",
+            scores={"esm3": {"mean_plddt": 0.82, "ptm": 0.70}},
+        ),
+        ReportCandidate(
+            candidate_id="cand_c",
+            rank=1,
+            sequence="ACDEFC",
+            structure_path="/tmp/cand_c.pdb",
+            scores={"esm3": {"mean_plddt": 0.74, "ptm": 0.62}},
+        ),
+    ]
+    model = _model(
+        nodes=[_node("design", "esm3")],
+        candidates=candidates,
+        finals=[ReportCandidate(candidate_id="cand_a", sequence="ACDEFG")],
+    )
+    review = build_review_model(model)
+
+    board = build_candidate_board_view_model(review)
+
+    assert [row.candidate_id for row in board.rows[:3]] == ["cand_a", "cand_b", "cand_c"]
+    assert [row.rank for row in board.rows[:3]] == [1, 2, 3]
 
 
 def test_candidate_dossier_surfaces_missing_evidence_and_risks():
@@ -329,8 +357,8 @@ def test_workflow_review_preset_classifies_binder_from_interface_evidence():
 
     assert preset.workflow_type == "binder"
     assert preset.confidence >= 0.9
-    assert preset.metric_priority[:3] == ["ipTM", "pLDDT", "pTM"]
-    assert preset.cross_candidate_metrics[:3] == ["ipTM", "pLDDT", "pTM"]
+    assert preset.metric_priority[:3] == ["ipSAE", "ipTM", "pLDDT"]
+    assert preset.cross_candidate_metrics[:3] == ["ipSAE", "ipTM", "pLDDT"]
     assert preset.evidence_family_order[0] == "Interface & binding"
 
 

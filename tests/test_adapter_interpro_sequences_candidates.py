@@ -5,7 +5,7 @@ from vibeproteinagent.adapters.interpro_sequences.adapter import (
     InterProSequencesOutput,
     _canonical_candidate_from_record,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _record() -> UniProtRecord:

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibeproteinagent.adapters import (
     ToolRegistry,
     serialize_descriptor,
 )
+from vibeproteinagent.adapters.descriptor import (
+    resolve_input_schema_dict,
+    resolve_output_schema_dict,
+)
+from vibeproteinagent.adapters.schema_affordance import conditional_required_summary
 from vibeproteinagent.adapters.availability import attach_availability, descriptor_availability
 from vibeproteinagent.adapters.visibility import is_public_tool
 from vibeproteinagent.core.errors import (
@@ -25,6 +31,7 @@ from vibeproteinagent.workspace import (
     JobState,
     JobStore,
     LogFileManager,
+    TrajectoryStore,
     Workspace,
 )
 from vibeproteinagent.workspace.store import ArtifactStore, now_us
@@ -71,8 +78,20 @@ class SessionCtx:
 # of an opaque protocol error.
 
 
-def _descriptor_with_availability(descriptor: Any) -> dict[str, Any]:
-    return attach_availability(serialize_descriptor(descriptor), descriptor)
+def _descriptor_payload(
+    descriptor: Any,
+    adapter_cls: type[Any] | None = None,
+    *,
+    schema_only: bool = False,
+) -> dict[str, Any]:
+    payload = serialize_descriptor(descriptor)
+    if schema_only:
+        input_schema = resolve_input_schema_dict(descriptor)
+        payload["input_schema_resolved"] = input_schema
+        payload["conditional_required"] = conditional_required_summary(input_schema)
+        payload["output_schema_resolved"] = resolve_output_schema_dict(descriptor)
+        return payload
+    return attach_availability(payload, descriptor, adapter_cls)
 
 
 def _raise_if_unavailable(
@@ -122,6 +141,7 @@ def list_tools(
     category: str | None = None,
     *,
     include_internal: bool = False,
+    schema_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return public tool descriptors, optionally filtered by category.
 
@@ -132,7 +152,7 @@ def list_tools(
     try:
         ctx.registry.discover()
         return [
-            attach_availability(serialize_descriptor(d), d, cls)
+            _descriptor_payload(d, cls, schema_only=schema_only)
             for d, cls in ctx.registry.entries(category=category)
             if include_internal or is_public_tool(d)
         ]
@@ -140,12 +160,18 @@ def list_tools(
         return [vpa_error_to_dict(exc)]
 
 
-def tool_info(ctx: SessionCtx, name: str, version: str = "*") -> dict[str, Any]:
+def tool_info(
+    ctx: SessionCtx,
+    name: str,
+    version: str = "*",
+    *,
+    schema_only: bool = False,
+) -> dict[str, Any]:
     """Return one tool descriptor by name + PEP-440 version specifier."""
     try:
         ctx.registry.discover()
         descriptor, cls = ctx.registry.get(name, version)
-        return attach_availability(serialize_descriptor(descriptor), descriptor, cls)
+        return _descriptor_payload(descriptor, cls, schema_only=schema_only)
     except VPAError as exc:
         return vpa_error_to_dict(exc)
 
@@ -158,6 +184,7 @@ def submit_job(
     call_id: str | None = None,
     priority: str = "normal",
     workflow_id: str | None = None,
+    trajectory_id: str | None = None,
     force_new: bool = False,
     max_retries: int = 0,
 ) -> dict[str, Any]:
@@ -170,6 +197,7 @@ def submit_job(
     random salt so the deterministic ``job_id`` no longer collides.
     """
     try:
+        runtime_info = ctx.supervisor().require_workspace(ctx.workspace.name)
         if not isinstance(force_new, bool):
             raise InvalidParamsError(
                 "force_new must be a boolean",
@@ -184,9 +212,11 @@ def submit_job(
                 },
             )
         ctx.registry.discover()
+        if trajectory_id is not None:
+            TrajectoryStore(ctx.workspace).get(trajectory_id)
         descriptor, cls = ctx.registry.get(tool, version)
         schema = resolve_input_schema(descriptor)
-        validate_against(schema, params)
+        validate_against(schema, params, tool_name=descriptor.name)
         _raise_if_unavailable(descriptor, cls, params)
         store = ctx.store()
         pre_submit_us = now_us()
@@ -197,6 +227,7 @@ def submit_job(
             call_id=call_id,
             priority=priority,
             workspace_name=ctx.workspace.name,
+            trajectory_id=trajectory_id,
             workflow_id=workflow_id,
             max_retries=max_retries,
             salt=resolve_salt(force_new),
@@ -208,9 +239,35 @@ def submit_job(
         )
         if not idempotent_hit and rec.state is JobState.SUBMITTED:
             rec = store.transition(rec.job_id, JobState.QUEUED)
-        return {**job_to_dict(rec), "idempotent_hit": idempotent_hit}
+        return {
+            **job_to_dict(rec),
+            "idempotent_hit": idempotent_hit,
+            **_execution_payload(ctx.workspace.name, runtime_info),
+        }
     except VPAError as exc:
         return vpa_error_to_dict(exc)
+
+
+def _execution_payload(workspace_name: str, runtime_info: dict[str, Any]) -> dict[str, Any]:
+    daemon_running = bool(runtime_info.get("running"))
+    supervisor_workspace = runtime_info.get("workspace")
+    return {
+        "daemon_running": daemon_running,
+        "requested_workspace": workspace_name,
+        "supervisor_workspace": supervisor_workspace,
+        "workspace_match": (
+            daemon_running
+            and isinstance(supervisor_workspace, str)
+            and supervisor_workspace == workspace_name
+        ),
+        "execution_ready": (
+            daemon_running
+            and (
+                supervisor_workspace is None
+                or str(supervisor_workspace) == workspace_name
+            )
+        ),
+    }
 
 
 def _rfdiffusion_mode_readiness(params: dict[str, Any]) -> dict[str, Any]:
@@ -288,9 +345,14 @@ def get_logs(ctx: SessionCtx, job_id: str, tail: int | None = None) -> str | dic
 
 
 def cancel_job(ctx: SessionCtx, job_id: str) -> dict[str, Any]:
-    """Set the durable cancel_requested flag on a job (fire-and-forget)."""
+    """Cancel a job, stopping the owning VPA worker when it is already running."""
     try:
-        rec = ctx.store().request_cancel(job_id)
+        rec = ctx.store().get(job_id)
+        client = ctx.supervisor()
+        if client.is_running():
+            client.require_workspace(ctx.workspace.name)
+            return client.cancel(rec.job_id)
+        rec = ctx.store().request_cancel(rec.job_id)
         return {"job_id": rec.job_id, "state": rec.state.value}
     except VPAError as exc:
         return vpa_error_to_dict(exc)
@@ -443,6 +505,121 @@ def current_workspace(ctx: SessionCtx) -> dict[str, Any]:
     return {"name": ctx.workspace.name, "root": str(ctx.workspace.root)}
 
 
+def start_trajectory(
+    ctx: SessionCtx,
+    user_query: str,
+    objective: str | None = None,
+) -> dict[str, Any]:
+    """Create a trajectory for one user query."""
+    try:
+        rec = TrajectoryStore(ctx.workspace).create(
+            user_query=user_query,
+            objective=objective,
+        )
+        return {"trajectory": rec.model_dump(), "trajectory_id": rec.trajectory_id}
+    except VPAError as exc:
+        return vpa_error_to_dict(exc)
+
+
+def get_trajectory_status(ctx: SessionCtx, trajectory_id: str) -> dict[str, Any]:
+    """Return completion accounting for one trajectory."""
+    try:
+        return {"trajectory": TrajectoryStore(ctx.workspace).status(trajectory_id)}
+    except VPAError as exc:
+        return vpa_error_to_dict(exc)
+
+
+def wait_trajectory(
+    ctx: SessionCtx,
+    trajectory_id: str,
+    timeout_ms: int = 30_000,
+) -> dict[str, Any]:
+    """Poll all direct jobs and workflows in a trajectory until terminal."""
+    store = TrajectoryStore(ctx.workspace)
+    deadline = time.time() + (timeout_ms / 1000.0)
+    try:
+        status = store.status(trajectory_id)
+        timed_out = False
+        while True:
+            execution_all_terminal = bool(status["execution_all_terminal"])
+            if execution_all_terminal:
+                break
+            if timeout_ms == 0 or time.time() >= deadline:
+                timed_out = not execution_all_terminal
+                break
+            time.sleep(0.25)
+            status = store.status(trajectory_id)
+        return {
+            "trajectory_id": trajectory_id,
+            "jobs": status["jobs"],
+            "workflows": status["workflows"],
+            "execution_all_terminal": status["execution_all_terminal"],
+            "trajectory_complete": status["complete"],
+            "unfinished_job_ids": status["unfinished_job_ids"],
+            "unfinished_workflow_ids": status["unfinished_workflow_ids"],
+            "final_submit_job_id": status["final_submit_job_id"],
+            "report_path": status["report_path"],
+            "timed_out": timed_out,
+        }
+    except VPAError as exc:
+        return vpa_error_to_dict(exc)
+
+
+def render_report(
+    ctx: SessionCtx,
+    source_id: str,
+    out: str | None = None,
+    format: str = "html",
+    replace_report: bool = False,
+) -> dict[str, Any]:
+    """Render a read-only report for traj_ / wf_ / job_ sources."""
+    try:
+        from vibeproteinagent.reporting import (
+            collect_report_model,
+            resolve_report_output_path,
+            write_report,
+        )
+
+        model = collect_report_model(ctx.workspace, source_id)
+        default_name = (
+            f"{source_id}_report_bundle"
+            if format == "bundle"
+            else f"{source_id}_report.html"
+        )
+        out_path = Path(out) if out else Path.cwd() / default_name
+        canonical_report_path = resolve_report_output_path(out_path, report_format=format)
+        trajectory_store = TrajectoryStore(ctx.workspace) if source_id.startswith("traj_") else None
+        if trajectory_store is not None:
+            trajectory_store.preflight_report(
+                source_id,
+                str(canonical_report_path),
+                format=format,
+                replace=replace_report,
+            )
+        report_path = write_report(model, out_path, report_format=format)
+        trajectory_status = None
+        if trajectory_store is not None:
+            trajectory_status = trajectory_store.record_report(
+                source_id,
+                str(report_path),
+                source_id=source_id,
+                format=format,
+                replace=replace_report,
+            ).model_dump()
+        data: dict[str, Any] = {
+            "report_html": str(report_path),
+            "format": format,
+            "source": {"kind": model.summary.kind, "id": model.summary.id},
+            "candidate_count": len(model.candidates),
+            "replace_report": replace_report,
+        }
+        if trajectory_status is not None:
+            data["trajectory"] = trajectory_status
+        return data
+    except VPAError as exc:
+        return vpa_error_to_dict(exc)
+
+
 def list_workflows(_ctx: SessionCtx) -> list[dict[str, Any]]:
     """Return discoverable workflow descriptors with planner-usable structure."""
     from vibeproteinagent.cli.commands.workflow import (
@@ -534,6 +711,7 @@ def run_workflow(
     name: str,
     params: dict[str, Any],
     *,
+    trajectory_id: str | None = None,
     max_wait_s: int = 3600,
 ) -> dict[str, Any]:
     """Submit and synchronously run a workflow by name or path."""
@@ -548,9 +726,14 @@ def run_workflow(
     try:
         p = _resolve_descriptor(name)
         wf = load_workflow(p)
+        if trajectory_id is not None:
+            TrajectoryStore(ctx.workspace).get(trajectory_id)
         supervisor = ctx.supervisor()
-        sup = supervisor if supervisor.is_running() else None
-        executor = WorkflowExecutor(ctx.workspace, ctx.registry, sup)
+        runtime_info = supervisor.require_workspace(ctx.workspace.name)
+        sup = supervisor if runtime_info.get("running") else None
+        executor = WorkflowExecutor(
+            ctx.workspace, ctx.registry, sup, trajectory_id=trajectory_id
+        )
         wf_id = executor.submit(wf, params)
         if sup is None:
             rec = executor.store.get(wf_id)
@@ -559,9 +742,13 @@ def run_workflow(
                 "ok": False,
                 "code": "E_DAEMON_UNAVAILABLE",
                 "workflow_id": wf_id,
+                "trajectory_id": rec.trajectory_id,
                 "state": rec.state,
                 "name": rec.name,
                 "message": "supervisor not running; nodes were recorded but not executed",
+                "requested_workspace": ctx.workspace.name,
+                "supervisor_workspace": runtime_info.get("workspace"),
+                "daemon_running": runtime_info.get("running"),
                 "nodes": [_workflow_node_to_dict_with_output(ctx, n) for n in nodes],
             }
         try:
@@ -573,16 +760,22 @@ def run_workflow(
                 "ok": False,
                 "code": exc.code,
                 "workflow_id": wf_id,
+                "trajectory_id": rec.trajectory_id,
                 "state": rec.state,
                 "name": rec.name,
                 "message": exc.message,
-                "details": exc.details,
+                "details": {
+                    **(exc.details or {}),
+                    "requested_workspace": ctx.workspace.name,
+                    "supervisor_workspace": supervisor.runtime_info().get("workspace"),
+                },
                 "nodes": [_workflow_node_to_dict_with_output(ctx, n) for n in nodes],
             }
         nodes = executor.store.list_nodes(wf_id)
         return {
             "ok": final.state == "completed",
             "workflow_id": wf_id,
+            "trajectory_id": final.trajectory_id,
             "state": final.state,
             "name": final.name,
             "nodes": [_workflow_node_to_dict_with_output(ctx, n) for n in nodes],
@@ -601,21 +794,35 @@ def register_orchestration_tools(app: FastMCP, ctx: SessionCtx) -> list[str]:
         name="list_tools",
         description=(
             "List public first-class tools (optionally filter by category). "
-            "Set include_internal=True for developer-only runtime/glue adapters."
+            "Set include_internal=True for developer-only runtime/glue adapters; "
+            "set schema_only=True to skip availability probes and include resolved schemas."
         ),
     )
     def _list_tools(
         category: str | None = None,
         include_internal: bool = False,
+        schema_only: bool = False,
     ) -> list[dict[str, Any]]:
-        return list_tools(ctx, category, include_internal=include_internal)
+        return list_tools(
+            ctx,
+            category,
+            include_internal=include_internal,
+            schema_only=schema_only,
+        )
 
     @app.tool(
         name="tool_info",
-        description="Show one tool's descriptor (name + PEP-440 version spec).",
+        description=(
+            "Show one tool's descriptor (name + PEP-440 version spec). "
+            "Set schema_only=True to skip availability probes and include resolved schemas."
+        ),
     )
-    def _tool_info(name: str, version: str = "*") -> dict[str, Any]:
-        return tool_info(ctx, name, version)
+    def _tool_info(
+        name: str,
+        version: str = "*",
+        schema_only: bool = False,
+    ) -> dict[str, Any]:
+        return tool_info(ctx, name, version, schema_only=schema_only)
 
     @app.tool(
         name="submit_job",
@@ -633,11 +840,13 @@ def register_orchestration_tools(app: FastMCP, ctx: SessionCtx) -> list[str]:
         call_id: str | None = None,
         priority: str = "normal",
         workflow_id: str | None = None,
+        trajectory_id: str | None = None,
         force_new: bool = False,
         max_retries: int = 0,
     ) -> dict[str, Any]:
         return submit_job(
             ctx, tool, params, version, call_id, priority, workflow_id,
+            trajectory_id=trajectory_id,
             force_new=force_new, max_retries=max_retries,
         )
 
@@ -697,6 +906,52 @@ def register_orchestration_tools(app: FastMCP, ctx: SessionCtx) -> list[str]:
         return current_workspace(ctx)
 
     @app.tool(
+        name="start_trajectory",
+        description="Create a trajectory for one user query in this MCP workspace.",
+    )
+    def _start_trajectory(
+        user_query: str,
+        objective: str | None = None,
+    ) -> dict[str, Any]:
+        return start_trajectory(ctx, user_query, objective)
+
+    @app.tool(
+        name="get_trajectory_status",
+        description="Return query-level completion accounting for a trajectory.",
+    )
+    def _get_trajectory_status(trajectory_id: str) -> dict[str, Any]:
+        return get_trajectory_status(ctx, trajectory_id)
+
+    @app.tool(
+        name="wait_trajectory",
+        description=(
+            "Poll all direct jobs and workflows in a trajectory until terminal "
+            "or timeout_ms elapses."
+        ),
+    )
+    def _wait_trajectory(
+        trajectory_id: str,
+        timeout_ms: int = 30_000,
+    ) -> dict[str, Any]:
+        return wait_trajectory(ctx, trajectory_id, timeout_ms)
+
+    @app.tool(
+        name="render_report",
+        description=(
+            "Render a read-only HTML report for a traj_, wf_, or job_ source. "
+            "For traj_ sources, records exactly one final report unless "
+            "replace_report=True."
+        ),
+    )
+    def _render_report(
+        source_id: str,
+        out: str | None = None,
+        format: str = "html",
+        replace_report: bool = False,
+    ) -> dict[str, Any]:
+        return render_report(ctx, source_id, out, format, replace_report)
+
+    @app.tool(
         name="list_workflows",
         description="List workflow descriptors visible to vpa (built-ins + user dir).",
     )
@@ -717,9 +972,12 @@ def register_orchestration_tools(app: FastMCP, ctx: SessionCtx) -> list[str]:
     def _run_workflow(
         name: str,
         params: dict[str, Any],
+        trajectory_id: str | None = None,
         max_wait_s: int = 3600,
     ) -> dict[str, Any]:
-        return run_workflow(ctx, name, params, max_wait_s=max_wait_s)
+        return run_workflow(
+            ctx, name, params, trajectory_id=trajectory_id, max_wait_s=max_wait_s
+        )
 
     return [
         "list_tools",
@@ -735,6 +993,10 @@ def register_orchestration_tools(app: FastMCP, ctx: SessionCtx) -> list[str]:
         "warm_tool",
         "list_workspaces",
         "current_workspace",
+        "start_trajectory",
+        "get_trajectory_status",
+        "wait_trajectory",
+        "render_report",
         "list_workflows",
         "get_workflow_status",
         "run_workflow",
@@ -749,15 +1011,19 @@ __all__ = [
     "get_logs",
     "get_results",
     "get_status",
+    "get_trajectory_status",
     "get_workflow_status",
     "list_artifacts",
     "list_tools",
     "list_workflows",
     "list_workspaces",
     "register_orchestration_tools",
+    "render_report",
     "run_workflow",
+    "start_trajectory",
     "submit_job",
     "tool_info",
+    "wait_trajectory",
     "wait_job",
     "warm_tool",
 ]

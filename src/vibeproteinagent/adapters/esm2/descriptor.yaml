@@ -1,7 +1,7 @@
 name: esm2
 version: "1.1.0"
 category: protein_design
-description: "Sequence-only protein language model. Embedding returns per-residue/pooled embeddings; sequence_generation fills mask chars and 1-indexed mask_positions. No structure output."
+description: "Sequence-only protein language model. Embedding returns per-residue/pooled embeddings; sequence_generation fills mask chars and 1-indexed mask_positions."
 runtime: python
 backend: pytorch
 gpu_required: true

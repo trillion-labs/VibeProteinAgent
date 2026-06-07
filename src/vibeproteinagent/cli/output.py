@@ -174,15 +174,6 @@ def _dispatch_pretty(data: dict[str, Any], style: LogStyle) -> None:
     if "warmed" in data:
         render.render_warm_result(data, style=style)
         return
-    if "run_id" in data and "mode" in data:
-        render.render_agent_result(data, style=style)
-        return
-    if "valid" in data and "plan" in data:
-        render.render_agent_plan_validation(data, style=style)
-        return
-    if "runs" in data and isinstance(data["runs"], list):
-        render.render_agent_runs(data, style=style)
-        return
     if "nodes" in data and "workflow_id" in data:
         render.render_workflow_status(data, style=style)
         return

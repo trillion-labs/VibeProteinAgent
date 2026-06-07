@@ -4,17 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from vibeproteinagent.adapters.sequence_edit.adapter import SequenceEditInput, SequenceEditOutput, _sequence_edit_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
-from vibeproteinagent.agents.planning.compiler import compile_planner_ir
-from vibeproteinagent.agents.planning.fixup import StructuredFixup
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate(sequence: str = "ACDE") -> dict:
     return {"schema_version": "candidate_v1", "candidate_id": f"cand_{sequence}", "source": {"tool": "upstream", "node_id": None, "job_id": None, "local_id": "seq_0000", "native_id": None, "index": 0}, "sequence": sequence, "scores": {}, "artifacts": {}}
-
-
-def _ir(inputs: dict | None = None) -> dict:
-    return {"version": "planner_ir_v1", "goal": "x", "assumptions": [], "missing_inputs": [], "nodes": [{"id": "n", "tool": "sequence_edit", "intent": "x", "inputs": inputs or {}, "upstream": []}]}
 
 
 def test_sequence_edit_emits_canonical_candidates() -> None:
@@ -42,13 +36,3 @@ def test_sequence_edit_consumes_canonical_legacy_and_rejects_mixed() -> None:
     assert SequenceEditInput(operation="check_wt_consistency", candidates=[_candidate("ACDE"), _candidate("CCDE")]).mutant_sequence == "CCDE"
     with pytest.raises(ValidationError, match="Mixed canonical and legacy"):
         SequenceEditInput(operation="mutate_residues", candidates=[_candidate(), {"sequence": "AAAA"}], mutation_notation=["A1C"])
-
-
-def test_sequence_edit_explicit_mode_enforcement() -> None:
-    with pytest.raises(StructuredFixup):
-        compile_planner_ir(_ir())
-    compiled = compile_planner_ir(_ir({"mode": "mutate_residues"}))
-    assert compiled["workflow_plan"]["nodes"][0]["inputs"]["operation"] == "mutate_residues"
-    assert "mode" not in compiled["workflow_plan"]["nodes"][0]["inputs"]
-    with pytest.raises(StructuredFixup):
-        compile_planner_ir(_ir({"mode": "bad"}))

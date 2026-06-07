@@ -26,6 +26,7 @@ def derive_job_id(
     version: str,
     params: dict[str, Any],
     workspace: str,
+    trajectory_id: str | None = None,
     workflow_id: str | None = None,
     workflow_node_id: str | None = None,
     salt: str | None = None,
@@ -34,8 +35,8 @@ def derive_job_id(
 
     Per **Architecture v1 — Errata 2**, the job_id is the first 32 hex
     characters of ``sha256`` over a canonical-JSON encoding of the
-    submission. The same ``(tool, version, params, workspace, workflow)``
-    tuple always resolves to the same id; ``salt`` is the ``--force-new``
+    submission. The same ``(tool, version, params, workspace, trajectory,
+    workflow)`` tuple always resolves to the same id; ``salt`` is the ``--force-new``
     escape hatch for explicit seed-reproducibility re-runs.
 
     ``version`` must be the *resolved* concrete version (e.g. ``"1.0.0"``),
@@ -47,6 +48,7 @@ def derive_job_id(
         "version": version,
         "params": params,
         "workspace": workspace,
+        "trajectory_id": trajectory_id,
         "workflow_id": workflow_id,
         "workflow_node_id": workflow_node_id,
         "salt": salt,

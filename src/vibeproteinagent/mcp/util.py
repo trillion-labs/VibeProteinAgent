@@ -5,6 +5,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from vibeproteinagent.adapters import ToolDescriptor
+from vibeproteinagent.adapters._error_guides import enrich_errors
 from vibeproteinagent.adapters.descriptor import resolve_input_schema_dict
 from vibeproteinagent.core.errors import InvalidParamsError, VPAError
 from vibeproteinagent.workspace import JobRecord
@@ -20,7 +21,12 @@ def resolve_input_schema(descriptor: ToolDescriptor) -> dict[str, Any]:
     return resolve_input_schema_dict(descriptor)
 
 
-def validate_against(schema: dict[str, Any], params: dict[str, Any]) -> None:
+def validate_against(
+    schema: dict[str, Any],
+    params: dict[str, Any],
+    *,
+    tool_name: str = "tool",
+) -> None:
     """Validate `params` against a JSON Schema, raising InvalidParamsError on failure."""
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
@@ -29,17 +35,24 @@ def validate_against(schema: dict[str, Any], params: dict[str, Any]) -> None:
         return
     first = errors[0]
     field = ".".join(str(p) for p in first.absolute_path) or "<root>"
+    raw_errors = [
+        {
+            "field": ".".join(str(p) for p in e.absolute_path) or "<root>",
+            "message": e.message,
+        }
+        for e in errors
+    ]
+    enriched = enrich_errors(
+        tool_name=tool_name,
+        schema=schema,
+        raw_errors=raw_errors,
+        params=params,
+    )
     raise InvalidParamsError(
-        f"params failed validation: {first.message} at '{field}'",
+        f"params failed validation: {enriched[0]['message']} at '{field}'",
         details={
             "field": field,
-            "errors": [
-                {
-                    "field": ".".join(str(p) for p in e.absolute_path) or "<root>",
-                    "message": e.message,
-                }
-                for e in errors
-            ],
+            "errors": enriched,
         },
     )
 
@@ -60,6 +73,7 @@ def job_to_dict(rec: JobRecord) -> dict[str, Any]:
         "error_details": rec.error_details,
         "log_path": rec.log_path,
         "workspace": rec.workspace,
+        "trajectory_id": rec.trajectory_id,
         "workflow_id": rec.workflow_id,
         "workflow_node_id": rec.workflow_node_id,
         "worker_id": rec.worker_id,

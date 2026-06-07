@@ -58,8 +58,10 @@ vendor/protenix-pxd/protenix/model/layer_norm/.ninja_*
 vendor/protenix-pxd/protenix/model/layer_norm/lock
 vendor/proteina-complexa/rf3_outputs/
 
-# Auto-generated showcase artifacts (regenerate with scripts/render_showcase.py)
-docs/render-showcase*
-
-# Private benchmark inference harness and generated OpenRouter/VPA outputs.
-.bench_vpa_inference/
+VPA_Skills_Authoring_Guide.pdf
+Agent_Skills_Authoring_Guide.pdf
+results_claude/
+galpha_report.html
+report.html
+mb_report.html
+workspace_specs/

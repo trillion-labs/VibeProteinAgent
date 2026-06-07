@@ -6,7 +6,7 @@ from vibeproteinagent.adapters import null_context
 from vibeproteinagent.adapters._remote.uniprot import UniProtRecord
 from vibeproteinagent.adapters.go_sequences import adapter as mod
 from vibeproteinagent.adapters.go_sequences.adapter import GOSequencesAdapter, GOSequencesInput
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _patch_remote(monkeypatch) -> None:

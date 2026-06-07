@@ -1,7 +1,7 @@
 name: go_sequences
 version: "1.0.0"
 category: retrieval
-description: "Legacy/internal GO-specific UniProt sequence retrieval used by search_sequence. Directly callable for exact GO debug workflows, but normal agent planning should use search_sequence."
+description: "Legacy/internal GO-specific UniProt sequence retrieval used by search_sequence. Directly callable for exact GO debug workflows."
 runtime: python
 backend: numpy
 gpu_required: false

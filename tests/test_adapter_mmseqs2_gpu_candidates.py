@@ -8,7 +8,7 @@ from vibeproteinagent.adapters.mmseqs2_gpu.adapter import (
     MMseqs2GpuOutput,
     _mmseqs2_gpu_candidates,
 )
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate() -> dict:

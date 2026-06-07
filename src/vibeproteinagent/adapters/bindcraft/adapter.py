@@ -56,8 +56,8 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_positions,
 )
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
-from vibeproteinagent.agents.planning.canonical_tools import candidate_capability_flags
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.errors import VPAError
 from vibeproteinagent.workers.sidecar import PersistentPythonSidecar, SidecarRuntimeSpec
 

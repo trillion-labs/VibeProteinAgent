@@ -12,7 +12,7 @@ from vibeproteinagent.adapters.search_sequence.adapter import (
     SearchSequenceInput,
     SequenceSourceResult,
 )
-from vibeproteinagent.agents.planning.candidate import stable_candidate_id
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 
 def _candidate(

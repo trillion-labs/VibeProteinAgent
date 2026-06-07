@@ -25,7 +25,7 @@ from vibeproteinagent.workers.supervisor import (
     resolve_default_gpu_ids,
 )
 from vibeproteinagent.workers.supervisor_client import SupervisorClient
-from vibeproteinagent.workspace import Workspace
+from vibeproteinagent.workspace import JobStore, Workspace
 
 daemon_app = typer.Typer(no_args_is_help=True, help="Worker daemon lifecycle.")
 
@@ -50,10 +50,16 @@ def daemon_start(
     try:
         client = SupervisorClient()
         if client.is_running():
+            info = client.runtime_info()
             print_envelope_err(
                 ErrorCode.CONFLICT,
                 f"supervisor already running (pid={client.pid()})",
-                {"pid": client.pid(), "socket": str(client.socket_path)},
+                {
+                    "pid": client.pid(),
+                    "socket": str(client.socket_path),
+                    "supervisor_workspace": info.get("workspace"),
+                    "supervisor_workspace_root": info.get("workspace_root"),
+                },
                 json_mode=json_,
             )
             return
@@ -147,7 +153,6 @@ def daemon_stop(
 ) -> None:
     """Stop the supervisor (and all workers) cleanly."""
     try:
-        del workspace
         client = SupervisorClient()
         if not client.is_running():
             print_envelope_err(
@@ -156,31 +161,63 @@ def daemon_stop(
                 {"socket": str(client.socket_path)},
                 json_mode=json_,
             )
+            return
+        info = client.runtime_info()
+        requested = Workspace.resolve(workspace).name if workspace is not None else None
+        supervisor_workspace = info.get("workspace")
+        if requested is not None and supervisor_workspace != requested:
+            print_envelope_err(
+                ErrorCode.DAEMON_WORKSPACE_MISMATCH,
+                "supervisor is running for a different workspace",
+                {
+                    "requested_workspace": requested,
+                    "supervisor_workspace": supervisor_workspace,
+                    "hint": "stop the daemon with its owning workspace or omit --workspace",
+                },
+                json_mode=json_,
+            )
+            return
         pid = client.pid()
         try:
             client.shutdown()
         except DaemonUnavailableError:
             pass
+        if pid:
+            _signal_process_group(pid, signal.SIGTERM)
         # Wait up to 10s for clean stop.
         if not client.wait_until_stopped(timeout_s=10.0):
             if pid:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _signal_process_group(pid, signal.SIGKILL)
                 # Cleanup leftover pidfile / socket.
                 for f in (paths.supervisor_pid_file(), paths.supervisor_socket()):
                     try:
                         f.unlink()
                     except FileNotFoundError:
                         pass
+        cancelled_running: list[str] = []
+        if supervisor_workspace:
+            ws = Workspace.resolve(str(supervisor_workspace))
+            if ws.db_path.exists():
+                cancelled_running = JobStore(ws).cancel_running_for_shutdown()
         print_envelope_ok(
-            {"stopped": True, "pid": pid},
+            {"stopped": True, "pid": pid, "cancelled_running_job_ids": cancelled_running},
             json_mode=json_,
             render=render_daemon_stop,
         )
     except Exception as exc:
         fail_from_exception(exc, json_mode=json_)
+
+
+def _signal_process_group(pid: int, sig: int) -> None:
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
 
 
 @daemon_app.command("status")
@@ -199,18 +236,30 @@ def daemon_status(
         running = client.is_running()
         if not running:
             print_envelope_ok(
-                {"running": False, "workspace": ws.name},
+                {
+                    "running": False,
+                    "workspace": ws.name,
+                    "requested_workspace": ws.name,
+                    "supervisor_workspace": None,
+                    "supervisor_workspace_root": None,
+                    "workspace_match": False,
+                },
                 json_mode=json_,
                 render=render_daemon_status,
             )
             return
-        info = client.worker_info()
+        info = client.runtime_info()
+        supervisor_workspace = info.get("workspace")
         print_envelope_ok(
             {
                 "running": True,
                 "pid": client.pid(),
                 "socket": str(client.socket_path),
-                "workspace": ws.name,
+                "workspace": supervisor_workspace or ws.name,
+                "requested_workspace": ws.name,
+                "supervisor_workspace": supervisor_workspace,
+                "supervisor_workspace_root": info.get("workspace_root"),
+                "workspace_match": supervisor_workspace == ws.name,
                 "workers": info.get("workers", []),
                 "log": str(paths.supervisor_log_file()),
             },

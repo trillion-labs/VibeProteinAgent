@@ -128,6 +128,8 @@ def workflow_inspect(
             "name": wf.name,
             "version": wf.version,
             "description": wf.description,
+            "user_query": wf.user_query,
+            "objective": wf.objective,
             "params": {k: v.model_dump() for k, v in wf.params.items()},
             "nodes": [n.model_dump() for n in wf.nodes],
         }
@@ -144,6 +146,7 @@ def workflow_run(
     ),
     params_file: str | None = typer.Option(None, "--params-file"),
     workspace: str | None = typer.Option(None, "--workspace"),
+    trajectory: str | None = typer.Option(None, "--trajectory", help="Trajectory id (traj_*)."),
     follow: bool = typer.Option(False, "--follow"),
     resume: str | None = typer.Option(None, "--resume", help="Existing workflow_id."),
     max_wait_s: int = typer.Option(3600, "--max-wait-s"),
@@ -152,9 +155,14 @@ def workflow_run(
     """Submit and run a workflow synchronously."""
     try:
         ws = _ensure_workspace(workspace)
+        if trajectory is not None:
+            from vibeproteinagent.workspace import TrajectoryStore
+
+            TrajectoryStore(ws).get(trajectory)
         registry = _registry()
         supervisor = SupervisorClient()
-        if not supervisor.is_running():
+        runtime_info = supervisor.require_workspace(ws.name)
+        if not runtime_info.get("running"):
             supervisor = None  # type: ignore[assignment]
 
         if resume is not None:
@@ -167,7 +175,9 @@ def workflow_run(
                     json_mode=json_,
                 )
                 return
-            executor = WorkflowExecutor(ws, registry, supervisor)
+            executor = WorkflowExecutor(
+                ws, registry, supervisor, trajectory_id=rec.trajectory_id
+            )
             final = executor.run_sync(resume, max_wait_s=max_wait_s)
             _print_workflow(executor, final, json_=json_, follow=follow)
             return
@@ -180,7 +190,7 @@ def workflow_run(
             merged.update(load_params_file(params_file))
         merged.update(parse_kv_pairs(param))
 
-        executor = WorkflowExecutor(ws, registry, supervisor)
+        executor = WorkflowExecutor(ws, registry, supervisor, trajectory_id=trajectory)
         wf_id = executor.submit(wf, merged)
         if supervisor is None:
             # Without a supervisor we can record the workflow but cannot run it.
@@ -217,6 +227,9 @@ def workflow_status(
                 "workflow_id": wf.workflow_id,
                 "name": wf.name,
                 "version": wf.version,
+                "user_query": _workflow_descriptor_value(wf.descriptor, "user_query"),
+                "objective": _workflow_descriptor_value(wf.descriptor, "objective"),
+                "trajectory_id": wf.trajectory_id,
                 "state": wf.state,
                 "submitted_at": wf.submitted_at,
                 "finished_at": wf.finished_at,
@@ -255,6 +268,9 @@ def _print_workflow(
             "workflow_id": wf.workflow_id,
             "name": wf.name,
             "version": wf.version,
+            "user_query": _workflow_descriptor_value(wf.descriptor, "user_query"),
+            "objective": _workflow_descriptor_value(wf.descriptor, "objective"),
+            "trajectory_id": wf.trajectory_id,
             "state": wf.state,
             "submitted_at": wf.submitted_at,
             "finished_at": wf.finished_at,
@@ -277,6 +293,21 @@ def _node_status_dict(n: Any) -> dict[str, Any]:
         "error_message": n.error_message,
         "error_details": n.error_details,
     }
+
+
+def _workflow_descriptor_value(descriptor_yaml: str, key: str) -> str | None:
+    from yaml import safe_load
+
+    try:
+        raw = safe_load(descriptor_yaml) or {}
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get(key)
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 __all__ = ["workflow_app"]

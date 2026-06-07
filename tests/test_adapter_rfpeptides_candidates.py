@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from vibeproteinagent.adapters.rfpeptides.adapter import RFPeptidesDesign, RFPeptidesInput, RFPeptidesOutput, _rfpeptides_candidates
-from vibeproteinagent.agents.planning.candidate import validate_candidate_v1
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 
 def _candidate() -> dict:
