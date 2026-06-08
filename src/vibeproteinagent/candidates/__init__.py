@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from .capabilities import (
+    CANDIDATE_CAPABILITY_FIELDS,
     CANONICAL_CONSUMERS,
+    CANONICAL_PRODUCERS,
     CANONICAL_PROFILE_CONSUMERS,
     CANONICAL_PROFILE_PRODUCERS,
-    CANONICAL_PRODUCERS,
     CANONICAL_SCALAR_CONSUMERS,
     CANONICAL_TERM_CONSUMERS,
     CANONICAL_TERM_PRODUCERS,
-    CANDIDATE_CAPABILITY_FIELDS,
     EXPLICIT_MODE_INPUT_FIELDS,
     EXPLICIT_MODE_TOOLS,
     CandidateCapability,
@@ -24,6 +24,15 @@ from .capabilities import (
     planner_facing_candidate_contract,
     profile_guided_default_inputs,
 )
+from .chain_roles import (
+    add_interface_chain_pair,
+    chain_role_entry,
+    chain_sequence_from_structure,
+    chain_sequences_from_structure,
+    complex_chain_metadata,
+    interface_chain_pair,
+    observed_chain_for_sequence,
+)
 from .merge import (
     CandidateMergeResult,
     merge_candidate_records,
@@ -32,19 +41,20 @@ from .merge import (
 from .schema import candidate_schema, stable_candidate_id, validate_candidate_v1
 
 __all__ = [
+    "CANDIDATE_CAPABILITY_FIELDS",
     "CANONICAL_CONSUMERS",
+    "CANONICAL_PRODUCERS",
     "CANONICAL_PROFILE_CONSUMERS",
     "CANONICAL_PROFILE_PRODUCERS",
-    "CANONICAL_PRODUCERS",
     "CANONICAL_SCALAR_CONSUMERS",
     "CANONICAL_TERM_CONSUMERS",
     "CANONICAL_TERM_PRODUCERS",
-    "CANDIDATE_CAPABILITY_FIELDS",
     "EXPLICIT_MODE_INPUT_FIELDS",
     "EXPLICIT_MODE_TOOLS",
     "CandidateCapability",
     "CandidateCapabilityContract",
     "CandidateMergeResult",
+    "add_interface_chain_pair",
     "annotate_candidate_capabilities",
     "candidate_capabilities_from_record",
     "candidate_capability_flags",
@@ -53,8 +63,14 @@ __all__ = [
     "candidate_contract_for_inputs",
     "candidate_contract_for_node",
     "candidate_schema",
+    "chain_role_entry",
+    "chain_sequence_from_structure",
+    "chain_sequences_from_structure",
+    "complex_chain_metadata",
     "explicit_mode_input_field",
+    "interface_chain_pair",
     "merge_candidate_records",
+    "observed_chain_for_sequence",
     "planner_facing_candidate_contract",
     "profile_guided_default_inputs",
     "stable_candidate_id",

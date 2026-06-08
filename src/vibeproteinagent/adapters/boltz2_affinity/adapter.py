@@ -43,6 +43,7 @@ from vibeproteinagent.adapters.msa_policy import (
     strip_prepared_msa,
     yaml_file_has_prepared_msa,
 )
+from vibeproteinagent.candidates.chain_roles import chain_role_entry
 from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.compat import ensure_rdkit_allchem_descriptors
 from vibeproteinagent.core.config import vpa_home
@@ -535,6 +536,8 @@ def _boltz2_affinity_candidates(
 ) -> list[dict[str, Any]]:
     source = _select_source_candidate(params)
     sequence = source.get("sequence") if isinstance(source, dict) else None
+    if not sequence:
+        sequence = _protein_sequence_for_chain(params, params.binder_chain)
     local_id = (
         _source_local_id(source, "boltz2_affinity_0000")
         if isinstance(source, dict)
@@ -582,9 +585,13 @@ def _boltz2_affinity_candidates(
         if sequence:
             candidate["sequence"] = sequence
     candidate.setdefault("scores", {})["boltz2_affinity"] = scores
-    candidate.setdefault("artifacts", {})["boltz2_affinity"] = {
+    artifact = {
         "predicted_cif": predicted_cif,
     }
+    complex_rows = _boltz2_complex_chain_rows(params, source, predicted_cif)
+    if complex_rows:
+        artifact["complex_chains"] = complex_rows
+    candidate.setdefault("artifacts", {})["boltz2_affinity"] = artifact
     return [candidate]
 
 
@@ -613,7 +620,12 @@ def _candidate_sequence_matches(
     params: Boltz2AffinityInput,
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    protein_sequences = _protein_sequences_from_params(params)
+    binder_sequence = _protein_sequence_for_chain(params, params.binder_chain)
+    protein_sequences = (
+        {binder_sequence}
+        if binder_sequence
+        else _protein_sequences_from_params(params)
+    )
     if not protein_sequences:
         return []
     return [
@@ -653,6 +665,103 @@ def _protein_sequences_from_params(params: Boltz2AffinityInput) -> set[str]:
         if isinstance(sequence, str) and sequence:
             sequences.add(sequence)
     return sequences
+
+
+def _typed_sequences_from_params(params: Boltz2AffinityInput) -> list[dict[str, Any]]:
+    if params.sequences is not None:
+        return [
+            {
+                "type": str(entry.get("type") or ""),
+                "id": str(entry.get("id") or ""),
+                "sequence": entry.get("sequence"),
+                "smiles": entry.get("smiles"),
+                "ccd": entry.get("ccd"),
+            }
+            for entry in params.sequences
+            if isinstance(entry, dict)
+        ]
+    if params.input_yaml is None:
+        return []
+    try:
+        with Path(params.input_yaml).expanduser().open("r") as fh:
+            doc = yaml.safe_load(fh)
+    except OSError:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in doc.get("sequences") or []:
+        if not isinstance(entry, dict):
+            continue
+        for kind, body in entry.items():
+            if not isinstance(body, dict):
+                continue
+            out.append(
+                {
+                    "type": str(kind),
+                    "id": str(body.get("id") or ""),
+                    "sequence": body.get("sequence"),
+                    "smiles": body.get("smiles"),
+                    "ccd": body.get("ccd"),
+                }
+            )
+    return out
+
+
+def _protein_sequence_for_chain(
+    params: Boltz2AffinityInput,
+    chain_id: str | None,
+) -> str | None:
+    if not chain_id:
+        return None
+    for entry in _typed_sequences_from_params(params):
+        if entry.get("type") == "protein" and entry.get("id") == chain_id:
+            sequence = entry.get("sequence")
+            return str(sequence) if isinstance(sequence, str) and sequence else None
+    return None
+
+
+def _boltz2_complex_chain_rows(
+    params: Boltz2AffinityInput,
+    source: dict[str, Any],
+    predicted_cif: str,
+) -> list[dict[str, Any]]:
+    entries = _typed_sequences_from_params(params)
+    if not entries:
+        return []
+    source_sequence = source.get("sequence") if isinstance(source, dict) else None
+    rows: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        kind = entry.get("type")
+        chain_id = str(entry.get("id") or "")
+        sequence = entry.get("sequence")
+        sequence_text = str(sequence) if isinstance(sequence, str) and sequence else None
+        if kind == "protein":
+            role = "target"
+            if chain_id == params.binder_chain and (
+                not source_sequence or source_sequence == sequence_text
+            ):
+                role = "binder"
+            elif source_sequence and source_sequence == sequence_text:
+                role = "design"
+            rows.append(
+                chain_role_entry(
+                    role=role,
+                    sequence=sequence_text,
+                    chain_id=chain_id or None,
+                    input_order=index,
+                    structure_path=predicted_cif,
+                )
+            )
+        elif chain_id == params.binder_chain:
+            rows.append(
+                {
+                    "role": "ligand",
+                    "chain_id": chain_id,
+                    "input_order": index,
+                }
+            )
+    return rows
 
 
 def _source_local_id(candidate: dict[str, Any], fallback: str) -> str:

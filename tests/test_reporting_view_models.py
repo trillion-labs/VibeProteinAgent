@@ -7,6 +7,8 @@ or rendering behavior.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from vibeproteinagent.reporting.models import (
     CandidateStatus,
     Provenance,
@@ -405,6 +407,35 @@ def test_build_report_view_model_composes_sections():
     assert vm.candidate_board.total_count == 1
     assert len(vm.candidate_dossiers) == 1
     assert vm.workflow_trace.workflow_type == review.workflow_type
+
+
+def test_agent_rationale_thresholds_use_short_reasoning_excerpt():
+    reasoning = (
+        "NO ACCEPTABLE CANDIDATE.\n\n"
+        "OBJECTIVE & ACCEPTANCE CRITERIA: binder must contact V452; "
+        "ipSAE>=0.7 and pLDDT>=80.\n\n"
+        "EXPLORATION: this long section should not be copied into the "
+        "threshold summary because it is not a threshold."
+    )
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+        raw_summary={"objective": "Design a V452 binder."},
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "no_acceptable_candidate",
+            "reasoning": reasoning,
+        },
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert "binder must contact V452" in overview.agent_objective
+    assert "ipSAE>=0.7" in overview.agent_objective
+    assert "this long section should not be copied" not in overview.agent_objective
 
 
 def test_workflow_review_preset_classifies_binder_from_interface_evidence():

@@ -55,6 +55,40 @@ def _pxdesign_candidate(sequence: str, target_pdb: str, index: int) -> dict:
     return candidate
 
 
+def _bindcraft_candidate(sequence: str, target_pdb: str, index: int = 0) -> dict:
+    candidate = _candidate(sequence, candidate_id=f"cand_bindcraft_{index}")
+    candidate["source"] = {
+        "tool": "bindcraft",
+        "node_id": None,
+        "job_id": None,
+        "local_id": f"design_{index:04d}",
+        "native_id": None,
+        "index": index,
+    }
+    candidate["scores"] = {"bindcraft": {"iptm": 0.78, "plddt": 0.85}}
+    candidate["artifacts"] = {
+        "bindcraft": {
+            "target_pdb": target_pdb,
+            "target_chain": "A",
+            "complex_chains": [
+                {
+                    "role": "target",
+                    "chain_id": "A",
+                    "input_order": 0,
+                    "sequence_length": 2,
+                },
+                {
+                    "role": "binder",
+                    "chain_id": "B",
+                    "input_order": 1,
+                    "sequence_length": len(sequence),
+                },
+            ],
+        }
+    }
+    return candidate
+
+
 def _target_pdb(tmp_path) -> str:
     path = tmp_path / "target.pdb"
     path.write_text(
@@ -69,6 +103,31 @@ def _target_pdb(tmp_path) -> str:
             ]
         )
         + "\n"
+    )
+    return str(path)
+
+
+def _target_input_json(tmp_path) -> str:
+    path = tmp_path / "target_with_msa.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "agarase_target",
+                    "sequences": [
+                        {
+                            "proteinChain": {
+                                "sequence": "AG",
+                                "count": 1,
+                                "pairedMsaPath": "/tmp/pairing.a3m",
+                                "unpairedMsaPath": "/tmp/non_pairing.a3m",
+                            }
+                        }
+                    ],
+                    "modelSeeds": [7],
+                }
+            ]
+        )
     )
     return str(path)
 
@@ -216,6 +275,56 @@ def test_protenix_v2_writes_pxdesign_target_binder_complex_entries(tmp_path) -> 
     assert payload[1]["sequences"][1]["proteinChain"]["sequence"] == "ACDE"
 
 
+def test_protenix_v2_writes_target_input_json_binder_complex_entries(tmp_path) -> None:
+    target_json = _target_input_json(tmp_path)
+    params = ProtenixV2Input(
+        target_input_json=target_json,
+        candidates=[
+            _candidate("MKKL", candidate_id="cand_a"),
+            _candidate("ACDE", candidate_id="cand_b"),
+        ],
+        seeds=[101],
+    )
+
+    path = _write_protenix_input_json_from_candidates(
+        params.candidates,
+        params.seeds,
+        tmp_path / "canonical_candidates.json",
+        target_input_json=params.target_input_json,
+    )
+
+    payload = json.loads(path.read_text())
+    assert [item["name"] for item in payload] == [
+        "canonical_candidate_0000",
+        "canonical_candidate_0001",
+    ]
+    target_chain = payload[0]["sequences"][0]["proteinChain"]
+    assert target_chain["sequence"] == "AG"
+    assert target_chain["pairedMsaPath"] == "/tmp/pairing.a3m"
+    assert target_chain["unpairedMsaPath"] == "/tmp/non_pairing.a3m"
+    assert payload[0]["sequences"][1]["proteinChain"]["sequence"] == "MKKL"
+    assert payload[1]["sequences"][1]["proteinChain"]["sequence"] == "ACDE"
+    assert payload[0]["modelSeeds"] == [101]
+
+
+def test_protenix_v2_writes_bindcraft_target_binder_complex_entries(tmp_path) -> None:
+    target = _target_pdb(tmp_path)
+    params = ProtenixV2Input(
+        candidates=[_bindcraft_candidate("MKKL", target)],
+        seeds=[101],
+    )
+
+    path = _write_protenix_input_json_from_candidates(
+        params.candidates,
+        params.seeds,
+        tmp_path / "canonical_candidates.json",
+    )
+
+    payload = json.loads(path.read_text())
+    assert payload[0]["sequences"][0]["proteinChain"]["sequence"] == "AG"
+    assert payload[0]["sequences"][1]["proteinChain"]["sequence"] == "MKKL"
+
+
 def test_protenix_v2_rejects_mixed_pxdesign_target_context_candidates(tmp_path) -> None:
     target = _target_pdb(tmp_path)
     params = ProtenixV2Input(
@@ -226,7 +335,7 @@ def test_protenix_v2_rejects_mixed_pxdesign_target_context_candidates(tmp_path) 
         seeds=[101],
     )
 
-    with pytest.raises(ValueError, match="cannot mix PXDesign target-context"):
+    with pytest.raises(ValueError, match="cannot mix target-context"):
         _write_protenix_input_json_from_candidates(
             params.candidates,
             params.seeds,
@@ -258,10 +367,149 @@ def test_protenix_v2_candidates_preserve_pxdesign_sequence_mapping(tmp_path) -> 
         candidates[0]["artifacts"]["protenix_v2"]["complex_input_mode"]
         == "pxdesign_target_sequence_binder_sequence"
     )
+    assert candidates[0]["artifacts"]["protenix_v2"]["complex_chains"][0] == {
+        "role": "target",
+        "input_order": 0,
+        "sequence_length": 2,
+        "observed_chain_id": None,
+    }
+    assert candidates[0]["artifacts"]["protenix_v2"]["complex_chains"][1] == {
+        "role": "binder",
+        "input_order": 1,
+        "sequence_length": 4,
+        "observed_chain_id": None,
+    }
+
+
+def test_protenix_v2_candidates_preserve_bindcraft_identity_with_target_input_json(
+    tmp_path,
+) -> None:
+    target = _target_pdb(tmp_path)
+    target_json = _target_input_json(tmp_path)
+    params = ProtenixV2Input(
+        target_input_json=target_json,
+        candidates=[_bindcraft_candidate("MKKL", target, 0)],
+        seeds=[101],
+    )
+
+    candidate = _protenix_v2_candidates(params, [_pxdesign_record(0)])[0]
+
+    assert candidate["candidate_id"] == "cand_bindcraft_0"
+    assert candidate["sequence"] == "MKKL"
+    assert candidate["scores"]["bindcraft"]["iptm"] == pytest.approx(0.78)
+    assert candidate["scores"]["protenix_v2"]["iptm"] == pytest.approx(0.6)
+    assert candidate["artifacts"]["bindcraft"]["target_pdb"] == target
+    assert (
+        candidate["artifacts"]["protenix_v2"]["complex_input_mode"]
+        == "target_input_json_target_sequence_binder_sequence"
+    )
+    assert candidate["artifacts"]["protenix_v2"]["target_input_json"] == target_json
+    assert candidate["artifacts"]["protenix_v2"]["complex_chains"] == [
+        {
+            "role": "target",
+            "input_order": 0,
+            "sequence_length": 2,
+            "observed_chain_id": None,
+        },
+        {
+            "role": "binder",
+            "input_order": 1,
+            "sequence_length": 4,
+            "observed_chain_id": None,
+        },
+    ]
+
+
+def test_protenix_v2_candidates_preserve_bindcraft_identity_from_target_context(
+    tmp_path,
+) -> None:
+    target = _target_pdb(tmp_path)
+    params = ProtenixV2Input(
+        candidates=[_bindcraft_candidate("MKKL", target, 0)],
+        seeds=[101],
+    )
+
+    candidate = _protenix_v2_candidates(params, [_pxdesign_record(0)])[0]
+
+    assert candidate["candidate_id"] == "cand_bindcraft_0"
+    assert candidate["sequence"] == "MKKL"
+    assert (
+        candidate["artifacts"]["protenix_v2"]["complex_input_mode"]
+        == "bindcraft_target_sequence_binder_sequence"
+    )
+    assert candidate["artifacts"]["protenix_v2"]["complex_chains"][1]["sequence_length"] == 4
 
 
 def test_protenix_v2_consumes_legacy_input_json() -> None:
     assert ProtenixV2Input(input_json="/tmp/input.json").input_json == "/tmp/input.json"
+
+
+def test_protenix_v2_rejects_target_input_json_with_raw_input_json() -> None:
+    with pytest.raises(ValidationError, match="do not combine it with input_json"):
+        ProtenixV2Input(
+            input_json="/tmp/input.json",
+            target_input_json="/tmp/target.json",
+        )
+
+
+def test_protenix_v2_rejects_target_input_json_without_candidates() -> None:
+    with pytest.raises(ValidationError, match="requires canonical Candidate"):
+        ProtenixV2Input(target_input_json="/tmp/target.json")
+
+
+def test_protenix_v2_raw_complex_input_uses_binder_sequence(tmp_path) -> None:
+    input_json = tmp_path / "complex.json"
+    input_json.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "cplx_design",
+                    "sequences": [
+                        {"proteinChain": {"sequence": "A" * 809, "count": 1}},
+                        {"proteinChain": {"sequence": "ACDEF" * 14, "count": 1}},
+                    ],
+                    "modelSeeds": [101],
+                }
+            ]
+        )
+    )
+    params = ProtenixV2Input(input_json=str(input_json))
+    record = ProtenixV2PredictionRecord(
+        candidate_id="protenix_v2:cplx_design:seed_101:rank_0",
+        seed=101,
+        rank=0,
+        cif_path=str(tmp_path / "complex.cif"),
+        pdb_path=None,
+        summary_json=str(tmp_path / "summary.json"),
+        ranking_score=0.9,
+        plddt=80.0,
+        iptm=0.65,
+        ptm=0.7,
+    )
+
+    candidate = _protenix_v2_candidates(params, [record])[0]
+
+    assert len(candidate["sequence"]) == 70
+    assert candidate["sequence"] == "ACDEF" * 14
+    chains = candidate["artifacts"]["protenix_v2"]["complex_chains"]
+    assert chains == [
+        {
+            "role": "target",
+            "input_order": 0,
+            "sequence_length": 809,
+            "observed_chain_id": None,
+        },
+        {
+            "role": "binder",
+            "input_order": 1,
+            "sequence_length": 70,
+            "observed_chain_id": None,
+        },
+    ]
+    assert (
+        candidate["artifacts"]["protenix_v2"]["complex_input_mode"]
+        == "input_json_target_sequence_binder_sequence"
+    )
 
 
 def test_protenix_v2_rejects_mixed_candidates() -> None:

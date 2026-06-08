@@ -27,13 +27,17 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_structure_residue_refs,
     resolve_positions,
 )
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import (
+    chain_sequence_from_structure,
+    complex_chain_metadata,
+)
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 # --------------------------------------------------------------------------- paths
 
@@ -451,6 +455,22 @@ def _rfdiffusion3_candidates(
         }
         if design.sequence:
             candidate["sequence"] = design.sequence
+        if params.target_pdb:
+            rfdiffusion3_artifacts = candidate["artifacts"].setdefault("rfdiffusion3", {})
+            rfdiffusion3_artifacts.setdefault("target_pdb", params.target_pdb)
+            rfdiffusion3_artifacts.setdefault("target_chain", params.target_chain)
+            chain_rows = complex_chain_metadata(
+                target_sequence=chain_sequence_from_structure(
+                    params.target_pdb,
+                    params.target_chain,
+                ),
+                binder_sequence=design.sequence,
+                structure_path=design.pdb_path,
+                target_chain_id=params.target_chain,
+                binder_input_order=1,
+            )
+            if chain_rows:
+                rfdiffusion3_artifacts["complex_chains"] = chain_rows
         if params.candidates and _is_canonical_candidate(params.candidates[0]):
             upstream_scores = params.candidates[0].get("scores")
             if isinstance(upstream_scores, dict):

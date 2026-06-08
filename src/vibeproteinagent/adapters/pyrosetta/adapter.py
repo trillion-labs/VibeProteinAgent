@@ -49,10 +49,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import add_interface_chain_pair
 from vibeproteinagent.candidates.paths import candidate_pdb_path
 from vibeproteinagent.candidates.schema import stable_candidate_id
-from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.core.errors import VPAError
 from vibeproteinagent.workers.sidecar import (
     PersistentPythonSidecar,
@@ -421,42 +422,64 @@ def _pyrosetta_candidates(
     }
     if interface_metrics:
         scores["interface_metrics"] = interface_metrics
-    candidate = {
-        "schema_version": "candidate_v1",
-        "candidate_id": stable_candidate_id(
-            "pyrosetta",
-            local_id,
-            structure_path=structure_path,
-            index=0,
-        ),
-        "source": {
-            "tool": "pyrosetta",
-            "node_id": None,
-            "job_id": None,
-            "local_id": local_id,
-            "native_id": None,
-            "index": 0,
-        },
-        "structure_path": structure_path,
-        "scores": {"pyrosetta": scores},
-        "artifacts": {"pyrosetta": {"relaxed_pdb_path": structure_path}},
-        "capabilities": candidate_capability_flags(
-            has_backbone_structure=bool(structure_path),
-            has_full_structure=bool(structure_path),
-            has_candidate_scores=True,
-        ),
-    }
     if params.candidates and _is_canonical_candidate(params.candidates[0]):
         source = params.candidates[0]
-        upstream_scores = source.get("scores")
-        if isinstance(upstream_scores, dict):
-            candidate["scores"] = {**upstream_scores, **candidate["scores"]}
-        if source.get("sequence"):
-            candidate["sequence"] = source.get("sequence")
-            candidate["capabilities"]["has_sequence"] = True
-        if isinstance(source.get("capabilities"), dict):
-            candidate["capabilities"] = dict(source["capabilities"])
-            candidate["capabilities"]["has_candidate_scores"] = True
+        candidate = {
+            key: value
+            for key, value in source.items()
+            if key
+            in {
+                "schema_version",
+                "candidate_id",
+                "source",
+                "sequence",
+                "structure_path",
+                "capabilities",
+            }
+        }
+        candidate["scores"] = dict(source.get("scores") or {})
+        candidate["artifacts"] = dict(source.get("artifacts") or {})
+        candidate["structure_path"] = structure_path
+        candidate["capabilities"] = dict(source.get("capabilities") or {})
+        candidate["capabilities"]["has_candidate_scores"] = True
+        candidate["capabilities"]["has_backbone_structure"] = True
+        candidate["capabilities"]["has_full_structure"] = True
+    else:
+        candidate = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "pyrosetta",
+                local_id,
+                structure_path=structure_path,
+                index=0,
+            ),
+            "source": {
+                "tool": "pyrosetta",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": None,
+                "index": 0,
+            },
+            "structure_path": structure_path,
+            "scores": {},
+            "artifacts": {},
+            "capabilities": candidate_capability_flags(
+                has_backbone_structure=bool(structure_path),
+                has_full_structure=bool(structure_path),
+                has_candidate_scores=True,
+            ),
+        }
+    pyrosetta_artifacts = {"relaxed_pdb_path": structure_path}
+    if params.mode == "interface":
+        add_interface_chain_pair(
+            pyrosetta_artifacts,
+            params.chains_a,
+            params.chains_b,
+            source="pyrosetta",
+        )
+    candidate.setdefault("scores", {})["pyrosetta"] = scores
+    candidate.setdefault("artifacts", {})["pyrosetta"] = pyrosetta_artifacts
     return [candidate]
 
 

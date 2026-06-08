@@ -13,8 +13,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vibeproteinagent.reporting.models import ReportCandidate, WorkflowNodeSummary
+from vibeproteinagent.reporting.models import (
+    ReportCandidate,
+    ReportModel,
+    RunSummary,
+    WorkflowGraph,
+    WorkflowNodeSummary,
+)
 from vibeproteinagent.reporting.render import (
+    _chain_context_for,
+    _dedup_candidate_view,
     _extract_chains_from_structure,
     _node_candidate_map,
     _node_details,
@@ -379,6 +387,219 @@ def test_extract_chains_keeps_hetatm_marked_standard_aa_chain(tmp_path: Path):
     assert chains.get("A") == "GL"          # target (HETATM standard AA kept)
     # Water and the zinc ion are genuine heteroatoms — excluded.
     assert "W" not in chains
+
+
+def test_report_chain_context_prefers_recorded_binder_metadata(tmp_path: Path):
+    p = tmp_path / "complex.pdb"
+    p.write_text(_PDB_BINDER_COMPLEX)
+    candidate = ReportCandidate(
+        candidate_id="cand_complex",
+        sequence="XXXX",
+        structure_path=str(p),
+        source={
+            "candidate_artifacts": {
+                "protenix_v2": {
+                    "complex_chains": [
+                        {
+                            "role": "target",
+                            "input_order": 0,
+                            "sequence_length": 2,
+                            "observed_chain_id": "A",
+                        },
+                        {
+                            "role": "binder",
+                            "input_order": 1,
+                            "sequence_length": 2,
+                            "observed_chain_id": "B",
+                        },
+                    ]
+                }
+            }
+        },
+    )
+
+    context = _chain_context_for(candidate)
+
+    assert context.binder_chain_id == "B"
+    assert context.target_chains == (("A", 2),)
+    html = _viewer_block(candidate, context)
+    assert 'data-binder-chain="B"' in html
+    assert "MA" in html
+
+
+def test_report_chain_context_uses_explicit_chain_id_metadata(tmp_path: Path):
+    p = tmp_path / "complex.pdb"
+    p.write_text(_PDB_BINDER_COMPLEX)
+    candidate = ReportCandidate(
+        candidate_id="cand_complex",
+        sequence="GL",
+        structure_path=str(p),
+        source={
+            "candidate_artifacts": {
+                "pxdesign": {
+                    "complex_chains": [
+                        {"role": "target", "chain_id": "A", "sequence_length": 2},
+                        {"role": "binder", "chain_id": "B", "sequence_length": 2},
+                    ]
+                }
+            }
+        },
+    )
+
+    context = _chain_context_for(candidate)
+
+    assert context.binder_chain_id == "B"
+    assert context.target_chains == (("A", 2),)
+
+
+def test_report_chain_context_rejects_explicit_chain_length_mismatch(tmp_path: Path):
+    p = tmp_path / "complex.pdb"
+    p.write_text(_PDB_BINDER_COMPLEX)
+    candidate = ReportCandidate(
+        candidate_id="cand_complex",
+        sequence="MA",
+        structure_path=str(p),
+        source={
+            "candidate_artifacts": {
+                "bindcraft": {
+                    "complex_chains": [
+                        {"role": "target", "chain_id": "A", "sequence_length": 2},
+                        {"role": "binder", "chain_id": "A", "sequence_length": 999},
+                    ]
+                }
+            }
+        },
+    )
+
+    context = _chain_context_for(candidate)
+
+    assert context.binder_chain_id == "B"
+    assert context.target_chains == (("A", 2),)
+
+
+def test_report_chain_context_rejects_same_chain_target_binder_metadata(
+    tmp_path: Path,
+):
+    p = tmp_path / "complex.pdb"
+    p.write_text(_PDB_BINDER_COMPLEX)
+    candidate = ReportCandidate(
+        candidate_id="cand_complex",
+        sequence="GL",
+        structure_path=str(p),
+        source={
+            "candidate_artifacts": {
+                "bindcraft": {
+                    "complex_chains": [
+                        {"role": "target", "chain_id": "A", "sequence_length": 2},
+                        {"role": "binder", "chain_id": "A", "sequence_length": 2},
+                    ]
+                }
+            }
+        },
+    )
+
+    context = _chain_context_for(candidate)
+
+    assert not context.is_complex
+
+
+def test_report_dedup_does_not_collapse_complex_candidates_by_target_sequence(
+    tmp_path: Path,
+):
+    first = tmp_path / "complex_1.pdb"
+    second = tmp_path / "complex_2.pdb"
+    first.write_text(_PDB_BINDER_COMPLEX)
+    second.write_text(_PDB_BINDER_COMPLEX.replace("MET B", "VAL B", 1))
+    shared_target_sequence = "GL"
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_complex", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id="wf_complex"),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_high_iptm",
+                sequence=shared_target_sequence,
+                structure_path=str(first),
+                scores={"protenix_v2": {"iptm": 0.65}},
+            ),
+            ReportCandidate(
+                candidate_id="cand_lower_iptm",
+                sequence=shared_target_sequence,
+                structure_path=str(second),
+                scores={"protenix_v2": {"iptm": 0.25}},
+            ),
+        ],
+    )
+
+    deduped = _dedup_candidate_view(model)
+
+    assert [candidate.candidate_id for candidate in deduped.candidates] == [
+        "cand_high_iptm",
+        "cand_lower_iptm",
+    ]
+
+
+def test_report_dedup_merges_same_candidate_id_with_binder_sequence_metadata(
+    tmp_path: Path,
+):
+    p = tmp_path / "complex.pdb"
+    p.write_text(_PDB_BINDER_COMPLEX)
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_complex", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id="wf_complex"),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_ranked",
+                sequence="GL",
+                structure_path=str(p),
+                scores={"rank_designs": {"score": 1.0}},
+            ),
+            ReportCandidate(
+                candidate_id="cand_ranked",
+                sequence="MA",
+                structure_path=str(p),
+                scores={
+                    "protenix_v2": {"iptm": 0.65},
+                    "ipsae": {"ipsae_score": 0.24},
+                },
+                source={
+                    "candidate_artifacts": {
+                        "protenix_v2": {
+                            "complex_chains": [
+                                {
+                                    "role": "target",
+                                    "input_order": 0,
+                                    "sequence_length": 2,
+                                    "observed_chain_id": "A",
+                                },
+                                {
+                                    "role": "binder",
+                                    "input_order": 1,
+                                    "sequence_length": 2,
+                                    "observed_chain_id": "B",
+                                },
+                            ]
+                        }
+                    }
+                },
+            ),
+            ReportCandidate(
+                candidate_id="cand_ranked",
+                sequence="MA",
+                structure_path=str(p),
+                scores={"protenix_v2": {"iptm": 0.21}},
+            ),
+        ],
+    )
+
+    deduped = _dedup_candidate_view(model)
+
+    assert len(deduped.candidates) == 1
+    assert deduped.candidates[0].sequence == "MA"
+    assert deduped.candidates[0].source["candidate_artifacts"]["protenix_v2"][
+        "complex_chains"
+    ][1]["role"] == "binder"
+    assert deduped.candidates[0].scores["protenix_v2"]["iptm"] == 0.65
+    assert deduped.candidates[0].scores["ipsae"]["ipsae_score"] == 0.24
 
 
 # --------------------------------------------------------------------------- #

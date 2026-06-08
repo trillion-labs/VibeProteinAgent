@@ -283,10 +283,18 @@ def _tmalign_candidates(
                 "artifacts": {},
             }
         candidate.setdefault("scores", {})["tmalign"] = scores
+        tmalign_artifacts: dict[str, Any] = {}
         if superposition_pdb:
-            candidate.setdefault("artifacts", {})["tmalign"] = {
-                "superposition_pdb": superposition_pdb
-            }
+            tmalign_artifacts["superposition_pdb"] = superposition_pdb
+        if params.candidates and len(params.candidates) >= 2:
+            tmalign_artifacts["reference_candidate_id"] = params.candidates[0].get(
+                "candidate_id"
+            )
+            tmalign_artifacts["design_candidate_id"] = source_candidate.get(
+                "candidate_id"
+            )
+        if tmalign_artifacts:
+            candidate.setdefault("artifacts", {})["tmalign"] = tmalign_artifacts
         candidate.setdefault(
             "capabilities",
             candidate_capability_flags(

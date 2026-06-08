@@ -117,6 +117,48 @@ def test_submit_candidate_legacy_resolution_still_works(tmp_workspace: Workspace
     assert out.candidates_resolved[0]["sequence"] == "ACDE"
 
 
+def test_submit_candidate_preserves_ranked_candidate_artifact_metadata(
+    tmp_workspace: Workspace,
+) -> None:
+    job_id = _completed_job(
+        tmp_workspace,
+        {
+            "ranked_candidates": [
+                {
+                    "rank": 1,
+                    "candidate_id": "cand_complex",
+                    "sequence": "ACDEF",
+                    "structure_path": "/tmp/complex.cif",
+                    "score": 1.2,
+                    "scores": {"protenix_v2": {"iptm": 0.65}},
+                    "artifacts": {
+                        "protenix_v2": {
+                            "complex_chains": [
+                                {"role": "target", "input_order": 0, "sequence_length": 809},
+                                {"role": "binder", "input_order": 1, "sequence_length": 5},
+                            ]
+                        }
+                    },
+                }
+            ]
+        },
+    )
+
+    out = _adapter(tmp_workspace).run(
+        SubmitCandidateInput(
+            outcome="accepted",
+            candidates=[{"job_id": job_id, "rank": 1, "justification": "best complex"}],
+            reasoning="submit ranked complex",
+        ),
+        null_context(tmp_workspace.job_dir("job_submit")),
+    )
+
+    resolved = out.candidates_resolved[0]
+    assert resolved["candidate_id"] == "cand_complex"
+    assert resolved["sequence"] == "ACDEF"
+    assert resolved["candidate_artifacts"]["protenix_v2"]["complex_chains"][1]["role"] == "binder"
+
+
 def test_submit_candidate_canonical_candidates_win_over_legacy_lists(
     tmp_workspace: Workspace,
 ) -> None:

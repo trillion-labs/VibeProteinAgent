@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import add_interface_chain_pair
 from vibeproteinagent.candidates.schema import stable_candidate_id
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -183,6 +184,16 @@ def _prodigy_candidates(
                 "artifacts": {},
             }
         candidate.setdefault("scores", {})["prodigy"] = scores
+        prodigy_artifacts = candidate.setdefault("artifacts", {}).setdefault(
+            "prodigy",
+            {},
+        )
+        add_interface_chain_pair(
+            prodigy_artifacts,
+            params.chain_a,
+            params.chain_b,
+            source="prodigy",
+        )
         candidate.setdefault(
             "capabilities",
             candidate_capability_flags(
@@ -197,10 +208,18 @@ def _prodigy_candidates(
 
 
 def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    preserved = (
+        "schema_version",
+        "candidate_id",
+        "source",
+        "sequence",
+        "structure_path",
+        "capabilities",
+    )
     out = {
         key: value
         for key, value in candidate.items()
-        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
+        if key in preserved
     }
     out["scores"] = dict(candidate.get("scores") or {})
     out["artifacts"] = dict(candidate.get("artifacts") or {})

@@ -6,12 +6,34 @@
     {"required": ["input_json"]},
     {"required": ["candidates"]}
   ],
+  "allOf": [
+    {
+      "not": {
+        "required": ["input_json", "target_input_json"]
+      }
+    },
+    {
+      "if": {
+        "required": ["target_input_json"]
+      },
+      "then": {
+        "required": ["candidates"]
+      }
+    }
+  ],
   "properties": {
     "input_json": {
       "type": "string",
       "minLength": 1,
       "description": "Absolute path to a Protenix-format input JSON describing the molecular system (chains, ligands, optional MSA/template hints).",
       "examples": ["/abs/path/protenix_input.json"],
+      "vpa:digest": "sha256"
+    },
+    "target_input_json": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional Protenix-format target JSON used with canonical Candidate[] inputs. The first proteinChain, including prepared MSA fields, is copied as the target chain and each candidate sequence is appended as the binder/design chain.",
+      "examples": ["/abs/path/target_with_msa.json"],
       "vpa:digest": "sha256"
     },
     "candidates": {

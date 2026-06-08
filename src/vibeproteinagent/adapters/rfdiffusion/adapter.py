@@ -39,6 +39,10 @@ from vibeproteinagent.adapters.residue_mapping import (
     resolve_positions,
 )
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import (
+    chain_sequence_from_structure,
+    complex_chain_metadata,
+)
 from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.compat import import_dgl_with_graphbolt_guard
 
@@ -655,10 +659,13 @@ def _requested_length_range(params: RFdiffusionInput) -> tuple[int, int]:
 
 def _requested_symmetric_length(params: RFdiffusionInput) -> int:
     low, high = _requested_length_range(params)
-    return int(round((low + high) / 2))
+    return round((low + high) / 2)
 
 
-def _target_span(params: RFdiffusionInput, target_pdb: Path) -> tuple[str, dict[str, object] | None, list[str]]:
+def _target_span(
+    params: RFdiffusionInput,
+    target_pdb: Path,
+) -> tuple[str, dict[str, object] | None, list[str]]:
     chain = params.target_chain.upper()
     if params.target_residues is not None:
         span, resolution = resolve_position_range(
@@ -693,7 +700,8 @@ def _resolve_rf_selector_list(
             resolved.append(text)
             if params.target_sequence or params.target_fasta_path:
                 warnings.append(
-                    f"{label} selector {text!r} is RFdiffusion-native syntax and was not sequence-mapped"
+                    f"{label} selector {text!r} is RFdiffusion-native syntax "
+                    "and was not sequence-mapped"
                 )
             continue
         chain = (match.group("chain") or target_chain).upper()
@@ -702,7 +710,8 @@ def _resolve_rf_selector_list(
         if chain != target_chain:
             resolved.append(text)
             warnings.append(
-                f"{label} selector {text!r} targets chain {chain}; only target_chain {target_chain} "
+                f"{label} selector {text!r} targets chain {chain}; only "
+                f"target_chain {target_chain} "
                 "can be sequence-mapped"
             )
             continue
@@ -729,7 +738,13 @@ def _resolve_rf_selector_list(
                 label=label,
             )
             resolved.append(span)
-        mappings.append({"requested_selector": text, "resolved_selector": resolved[-1], **resolution.to_audit()})
+        mappings.append(
+            {
+                "requested_selector": text,
+                "resolved_selector": resolved[-1],
+                **resolution.to_audit(),
+            }
+        )
         warnings.extend(resolution.warnings)
     if not mappings:
         return resolved, None, warnings
@@ -1042,6 +1057,22 @@ def _canonical_candidate_from_design(
         candidate["structure_path"] = structure_path
     if design.get("trb_path"):
         candidate["artifacts"]["rfdiffusion"] = {"trb_path": design["trb_path"]}
+    if params.target_pdb:
+        rfdiffusion_artifacts = candidate["artifacts"].setdefault("rfdiffusion", {})
+        rfdiffusion_artifacts.setdefault("target_pdb", params.target_pdb)
+        rfdiffusion_artifacts.setdefault("target_chain", params.target_chain)
+        chain_rows = complex_chain_metadata(
+            target_sequence=chain_sequence_from_structure(
+                params.target_pdb,
+                params.target_chain,
+            ),
+            binder_sequence=str(sequence) if sequence else None,
+            structure_path=structure_path,
+            target_chain_id=params.target_chain,
+            binder_input_order=1,
+        )
+        if chain_rows:
+            rfdiffusion_artifacts["complex_chains"] = chain_rows
     if params.profile_guidance is not None:
         candidate["artifacts"]["profile_guidance"] = profile_guidance_metadata(
             params.profile_guidance

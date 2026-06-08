@@ -969,11 +969,7 @@ def _review_console_section(
             final_submission.get("reasoning")
             or "The agent completed the search without selecting a candidate."
         )
-        banner = (
-            '<div class="console-banner">'
-            "<strong>No acceptable final candidate was submitted.</strong>"
-            f"<p>{_h(reason)}</p></div>"
-        )
+        banner = _no_acceptable_candidate_banner(reason)
 
     counts: dict[str, int] = {}
     for bundle in review.bundles:
@@ -1012,6 +1008,82 @@ def _review_console_section(
   {banner}
   {console_body}
 </section>"""
+
+
+def _no_acceptable_candidate_banner(reason: str) -> str:
+    summary = _submission_reason_summary(reason)
+    bullets = _submission_reason_bullets(reason)
+    bullets_html = (
+        '<ul class="console-banner-list">'
+        + "".join(f"<li>{_h(item)}</li>" for item in bullets)
+        + "</ul>"
+        if bullets
+        else ""
+    )
+    details = ""
+    if reason.strip() and reason.strip() != summary:
+        details = (
+            '<details class="console-banner-details">'
+            "<summary>Full recorded submission reasoning</summary>"
+            f"<p>{_h(reason.strip())}</p>"
+            "</details>"
+        )
+    return (
+        '<div class="console-banner">'
+        "<strong>No acceptable final candidate was submitted.</strong>"
+        f"<p>{_h(summary)}</p>"
+        f"{bullets_html}"
+        f"{details}"
+        "</div>"
+    )
+
+
+def _submission_reason_summary(reason: str) -> str:
+    text = _normalize_reason_text(reason)
+    if not text:
+        return "The search completed without a candidate that met the recorded acceptance criteria."
+    for heading in ("CONCLUSION", "RESULT", "KEY FINDING"):
+        section = _reason_section(text, heading)
+        if section:
+            return _clip_reason_sentence(section, 260)
+    return _clip_reason_sentence(text, 260)
+
+
+def _submission_reason_bullets(reason: str) -> list[str]:
+    text = _normalize_reason_text(reason)
+    bullets: list[str] = []
+    for heading, label in (
+        ("OBJECTIVE", "Objective"),
+        ("KEY FINDING", "Key finding"),
+        ("RESULT", "Result"),
+    ):
+        section = _reason_section(text, heading)
+        if section:
+            bullets.append(f"{label}: {_clip_reason_sentence(section, 180)}")
+    return bullets[:3]
+
+
+def _normalize_reason_text(reason: str) -> str:
+    return "\n".join(line.strip() for line in str(reason or "").splitlines()).strip()
+
+
+def _reason_section(text: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"(?is)\b{re.escape(heading)}(?:\s*&\s*[A-Z ]+)?\s*[-:]?\s*(.+?)(?=\n\s*\n\s*[A-Z][A-Z &()0-9/-]{{3,}}\s*[-:]|\Z)"
+    )
+    match = pattern.search(text)
+    return " ".join(match.group(1).split()) if match else ""
+
+
+def _clip_reason_sentence(text: str, limit: int) -> str:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return ""
+    sentence_match = re.match(r"(.+?[.!?])(?:\s|$)", normalized)
+    candidate = sentence_match.group(1) if sentence_match else normalized
+    if len(candidate) <= limit:
+        return candidate
+    return candidate[: max(0, limit - 1)].rstrip(" ,;:") + "..."
 
 
 def _saas_overview_section(vm: OverviewViewModel) -> str:
@@ -4063,6 +4135,107 @@ class _ChainContext:
         return "target chains " + ", ".join(parts)
 
 
+def _candidate_artifact_metadata(candidate: ReportCandidate) -> dict[str, Any]:
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    artifacts = source.get("candidate_artifacts")
+    return artifacts if isinstance(artifacts, dict) else {}
+
+
+def _complex_chain_rows(candidate: ReportCandidate) -> list[dict[str, Any]]:
+    artifacts = _candidate_artifact_metadata(candidate)
+    for payload in artifacts.values():
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("complex_chains")
+        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+            return rows
+    return []
+
+
+def _chain_context_from_metadata(
+    candidate: ReportCandidate,
+    chains: list[tuple[str, str]],
+) -> tuple[_ChainContext, bool]:
+    rows = _complex_chain_rows(candidate)
+    if not rows or len(chains) <= 1:
+        return _ChainContext(), False
+    chain_by_order = {
+        index: (chain_id, sequence)
+        for index, (chain_id, sequence) in enumerate(chains)
+    }
+
+    def chain_for(row: dict[str, Any]) -> tuple[str, int] | None:
+        def valid_chain(chain_id: str) -> tuple[str, int] | None:
+            expected_length = row.get("sequence_length")
+            for observed_chain_id, sequence in chains:
+                if observed_chain_id != chain_id:
+                    continue
+                if (
+                    isinstance(expected_length, int)
+                    and expected_length > 0
+                    and len(sequence) != expected_length
+                ):
+                    return None
+                return observed_chain_id, len(sequence)
+            return None
+
+        observed = row.get("observed_chain_id")
+        if isinstance(observed, str) and observed:
+            chain = valid_chain(observed)
+            if chain is not None:
+                return chain
+        explicit = row.get("chain_id")
+        if isinstance(explicit, str) and explicit:
+            chain = valid_chain(explicit)
+            if chain is not None:
+                return chain
+        order = row.get("input_order")
+        if isinstance(order, int) and order in chain_by_order:
+            chain_id, sequence = chain_by_order[order]
+            expected_length = row.get("sequence_length")
+            if (
+                isinstance(expected_length, int)
+                and expected_length > 0
+                and len(sequence) != expected_length
+            ):
+                return None
+            return chain_id, len(sequence)
+        length = row.get("sequence_length")
+        if isinstance(length, int) and length > 0:
+            candidates = [
+                (chain_id, len(sequence))
+                for chain_id, sequence in chains
+                if len(sequence) == length
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
+
+    binder_roles = {"binder", "design", "query", "peptide"}
+    binder = next(
+        (
+            chain_for(row)
+            for row in rows
+            if str(row.get("role") or "").lower() in binder_roles
+        ),
+        None,
+    )
+    if binder is None:
+        return _ChainContext(), False
+    targets: list[tuple[str, int]] = []
+    for row in rows:
+        if str(row.get("role") or "").lower() in binder_roles:
+            continue
+        chain = chain_for(row)
+        if chain is not None and chain[0] != binder[0]:
+            targets.append(chain)
+        elif chain is not None and chain[0] == binder[0]:
+            return _ChainContext(), True
+    if not targets:
+        targets = [(chain_id, len(sequence)) for chain_id, sequence in chains if chain_id != binder[0]]
+    return _ChainContext(binder_chain_id=binder[0], target_chains=tuple(targets)), False
+
+
 def _chain_context_for(candidate: ReportCandidate) -> _ChainContext:
     """Detect binder-in-complex layout for ``candidate``.
 
@@ -4071,10 +4244,17 @@ def _chain_context_for(candidate: ReportCandidate) -> _ChainContext:
     ``candidate.sequence`` — the unambiguous "this chain is the
     designed binder, the rest are target context" signal.
     """
-    if not candidate.sequence or not candidate.structure_path:
+    if not candidate.structure_path:
         return _ChainContext()
     chains = _extract_chains_from_structure(Path(candidate.structure_path))
     if len(chains) <= 1:
+        return _ChainContext()
+    metadata_context, block_fallback = _chain_context_from_metadata(candidate, chains)
+    if metadata_context.is_complex:
+        return metadata_context
+    if block_fallback:
+        return _ChainContext()
+    if not candidate.sequence:
         return _ChainContext()
     matches = [cid for cid, cseq in chains if cseq == candidate.sequence]
     if len(matches) != 1:
@@ -4247,6 +4427,26 @@ def _candidate_metric_richness(candidate: ReportCandidate) -> int:
     return n
 
 
+@functools.lru_cache(maxsize=2048)
+def _structure_chain_count(path: str) -> int:
+    try:
+        return len(_extract_chains_from_structure(Path(path)))
+    except Exception:
+        return 0
+
+
+def _is_complex_candidate_record(candidate: ReportCandidate) -> bool:
+    if _complex_chain_rows(candidate):
+        return True
+    if candidate.structure_path:
+        return _structure_chain_count(candidate.structure_path) > 1
+    return False
+
+
+def _can_sequence_dedupe(candidate: ReportCandidate) -> bool:
+    return bool(candidate.sequence) and not _is_complex_candidate_record(candidate)
+
+
 def _merge_score_namespaces(
     base: dict[str, Any] | None, extra: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -4269,6 +4469,47 @@ def _merge_score_namespaces(
         else:
             out[key] = val
     return out
+
+
+def _merge_candidate_sources_for_display(
+    base: dict[str, Any],
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    out = dict(base)
+    base_artifacts = out.get("candidate_artifacts")
+    extra_artifacts = extra.get("candidate_artifacts")
+    if not isinstance(base_artifacts, dict) and isinstance(extra_artifacts, dict):
+        out["candidate_artifacts"] = extra_artifacts
+    return out
+
+
+def _merge_duplicate_candidate_for_display(
+    base: ReportCandidate,
+    extra: ReportCandidate,
+) -> ReportCandidate:
+    base_source = base.source if isinstance(base.source, dict) else {}
+    extra_source = extra.source if isinstance(extra.source, dict) else {}
+    source = _merge_candidate_sources_for_display(base_source, extra_source)
+    sequence = base.sequence
+    if _complex_chain_rows(extra) and extra.sequence:
+        sequence = extra.sequence
+    elif (
+        _is_complex_candidate_record(base)
+        and base.sequence
+        and extra.sequence
+        and len(extra.sequence) < len(base.sequence)
+    ):
+        sequence = extra.sequence
+    return replace(
+        base,
+        sequence=sequence,
+        structure_path=base.structure_path or extra.structure_path,
+        scores=_merge_score_namespaces(extra.scores, base.scores),
+        source=source,
+        qc_flags=base.qc_flags or extra.qc_flags,
+        liabilities=base.liabilities or extra.liabilities,
+        artifacts=base.artifacts or extra.artifacts,
+    )
 
 
 def _dedup_candidate_view(model: ReportModel) -> ReportModel:
@@ -4303,7 +4544,7 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
         return model
 
     final_ids = {c.candidate_id for c in final}
-    final_seqs = {c.sequence for c in final if c.sequence}
+    final_seqs = {c.sequence for c in final if _can_sequence_dedupe(c)}
 
     enriched_final: list[ReportCandidate] = []
     for fc in final:
@@ -4315,6 +4556,8 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
 
     rank_index = {id(ec): i for i, ec in enumerate(explored)}
     kept: list[ReportCandidate] = []
+    kept_by_id: dict[str, int] = {}
+    kept_rank_index: dict[str, int] = {}
     seen_ids: set[str] = set()
     seen_seqs: set[str] = set()
     # Richest first so the representative we keep per id/sequence is the one
@@ -4322,17 +4565,31 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
     for ec in sorted(explored, key=_candidate_metric_richness, reverse=True):
         if ec.candidate_id in final_ids:
             continue
-        if ec.sequence and ec.sequence in final_seqs:
+        can_sequence_dedupe = _can_sequence_dedupe(ec)
+        if can_sequence_dedupe and ec.sequence in final_seqs:
             continue
         if ec.candidate_id in seen_ids:
+            kept_index = kept_by_id.get(ec.candidate_id)
+            if kept_index is not None:
+                kept[kept_index] = _merge_duplicate_candidate_for_display(
+                    kept[kept_index],
+                    ec,
+                )
             continue
-        if ec.sequence and ec.sequence in seen_seqs:
+        if can_sequence_dedupe and ec.sequence in seen_seqs:
             continue
         seen_ids.add(ec.candidate_id)
-        if ec.sequence:
+        kept_by_id[ec.candidate_id] = len(kept)
+        if can_sequence_dedupe and ec.sequence:
             seen_seqs.add(ec.sequence)
         kept.append(ec)
-    kept.sort(key=lambda ec: rank_index[id(ec)])
+        kept_rank_index[ec.candidate_id] = rank_index[id(ec)]
+    kept.sort(
+        key=lambda ec: kept_rank_index.get(
+            ec.candidate_id,
+            rank_index.get(id(ec), 999999),
+        )
+    )
 
     return replace(model, final_candidates=enriched_final, candidates=kept)
 
@@ -4434,12 +4691,15 @@ def _viewer_block(
     except OSError:
         _struct_text = ""
     coverage_note = _sidechain_coverage_note(_struct_text, fmt) if _struct_text else ""
-    # Prefer the candidate's declared sequence; fall back to extracting one
-    # from the structure file itself so the sequence track still renders
-    # for adapters (Boltz-2 etc.) that don't echo the input sequence in
-    # ranked-candidates rows.
-    sequence_str = candidate.sequence or _extract_sequence_from_structure(path)
     is_complex = bool(chain_context and chain_context.is_complex)
+    # Prefer the binder chain sequence for explicit binder-target complexes.
+    # This protects the viewer even for older rows whose candidate.sequence
+    # accidentally held the target chain.
+    sequence_str = _display_sequence_for_candidate(candidate, chain_context)
+    # Otherwise prefer the candidate's declared sequence; fall back to
+    # extracting one from the structure file itself so the sequence track still
+    # renders for adapters that don't echo the input sequence.
+    sequence_str = sequence_str or _extract_sequence_from_structure(path)
     # Does the B-factor column carry real per-residue pLDDT? Coordinate-only
     # generators (PXDesign binder CIFs, rfdiffusion scaffolds) leave it flat
     # zero, so pLDDT colouring would paint the whole chain one flat colour.
@@ -4586,11 +4846,29 @@ def _viewer_block(
 </section>"""
 
 
+def _display_sequence_for_candidate(
+    candidate: ReportCandidate,
+    chain_context: _ChainContext | None,
+) -> str:
+    if (
+        chain_context
+        and chain_context.is_complex
+        and chain_context.binder_chain_id
+        and candidate.structure_path
+    ):
+        chain_sequences = dict(_extract_chains_from_structure(Path(candidate.structure_path)))
+        sequence = chain_sequences.get(chain_context.binder_chain_id)
+        if sequence:
+            return sequence
+    return candidate.sequence or ""
+
+
 def _candidate_sequence_block(
     candidate: ReportCandidate,
     chain_context: _ChainContext | None = None,
 ) -> str:
-    if not candidate.sequence:
+    sequence = _display_sequence_for_candidate(candidate, chain_context)
+    if not sequence:
         return ""
     is_complex = bool(chain_context and chain_context.is_complex)
     # When the structure is a binder-design complex, surface the binder
@@ -4607,16 +4885,16 @@ def _candidate_sequence_block(
         else ""
     )
     truncation_note = (
-        f"<p class='note'>… {len(candidate.sequence) - 240} more residues hidden</p>"
-        if len(candidate.sequence) > 240
+        f"<p class='note'>… {len(sequence) - 240} more residues hidden</p>"
+        if len(sequence) > 240
         else ""
     )
     return (
         '<div class="sequence-block">'
-        f'<div class="sequence-head"><strong>Sequence</strong> · {len(candidate.sequence)} aa'
+        f'<div class="sequence-head"><strong>Sequence</strong> · {len(sequence)} aa'
         f'{head_suffix}'
-        f' <button class="copy-btn" data-copy="{_attr(candidate.sequence)}">Copy</button></div>'
-        f"<code class='msa-seq'>{_colored_sequence(candidate.sequence[:240])}</code>"
+        f' <button class="copy-btn" data-copy="{_attr(sequence)}">Copy</button></div>'
+        f"<code class='msa-seq'>{_colored_sequence(sequence[:240])}</code>"
         f"{truncation_note}"
         f"{target_note}"
         "</div>"

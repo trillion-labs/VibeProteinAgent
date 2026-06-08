@@ -42,6 +42,8 @@ read-only deterministic evidence rendering and do not auto-select candidates.
 Do not hand-edit generated HTML to add missing artifacts or rationale. If the
 report is missing evidence, record that evidence through VPA jobs or structured
 artifacts, then render the report again.
+If final candidate dossiers lack validation evidence, fix the upstream VPA
+candidate/rank/submit flow and re-render; do not patch the report narrative.
 
 ## Evidence
 

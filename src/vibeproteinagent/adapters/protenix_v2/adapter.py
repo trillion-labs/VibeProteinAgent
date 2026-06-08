@@ -29,6 +29,10 @@ from vibeproteinagent.adapters.msa_policy import (
 )
 from vibeproteinagent.adapters.residue_mapping import parse_structure_residue_refs
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import (
+    chain_sequences_from_structure,
+    complex_chain_metadata,
+)
 from vibeproteinagent.candidates.schema import stable_candidate_id
 
 # --------------------------------------------------------------------------- paths
@@ -164,6 +168,15 @@ class ProtenixV2Input(BaseModel):
     input_json: str | None = Field(
         None, description="Absolute path to a Protenix-format input JSON."
     )
+    target_input_json: str | None = Field(
+        None,
+        description=(
+            "Optional Protenix-format target JSON used with canonical Candidate[] "
+            "inputs. The first proteinChain, including prepared MSA fields, is "
+            "copied as the target chain and each candidate sequence is appended "
+            "as the binder/design chain."
+        ),
+    )
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     seeds: list[int] = Field(default_factory=lambda: [101], min_length=1)
     use_msa: bool = Field(default=False)
@@ -202,6 +215,15 @@ class ProtenixV2Input(BaseModel):
         has_canonical_candidates = bool(self.candidates) and all(
             _is_canonical_candidate(item) for item in self.candidates
         )
+        if self.target_input_json and self.input_json:
+            raise ValueError(
+                "protenix_v2 target_input_json is only valid with canonical "
+                "Candidate[] input; do not combine it with input_json"
+            )
+        if self.target_input_json and not has_canonical_candidates:
+            raise ValueError(
+                "protenix_v2 target_input_json requires canonical Candidate[] input"
+            )
         if not self.input_json and not has_canonical_candidates:
             raise ValueError("protenix_v2 requires input_json or canonical Candidate[]")
         return self
@@ -476,6 +498,7 @@ class ProtenixV2Adapter(ToolAdapter):
                 params.candidates,
                 params.seeds,
                 job_inputs / "canonical_candidates.json",
+                target_input_json=params.target_input_json,
             )
 
         # Copy the input json into the job dir so the artifact is self-contained.
@@ -674,11 +697,17 @@ def _write_protenix_input_json_from_candidates(
     candidates: list[dict[str, Any]],
     seeds: list[int],
     path: Path,
+    *,
+    target_input_json: str | None = None,
 ) -> Path:
-    pxdesign_payload = _pxdesign_complex_payload(candidates, seeds)
-    if pxdesign_payload is not None:
+    complex_payload = _canonical_complex_payload(
+        candidates,
+        seeds,
+        target_input_json=target_input_json,
+    )
+    if complex_payload is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(pxdesign_payload, indent=2) + "\n")
+        path.write_text(json.dumps(complex_payload, indent=2) + "\n")
         return path
 
     sequences: list[dict[str, Any]] = []
@@ -701,17 +730,38 @@ def _write_protenix_input_json_from_candidates(
     return path
 
 
-def _pxdesign_complex_payload(
+def _canonical_complex_payload(
     candidates: list[dict[str, Any]],
     seeds: list[int],
+    *,
+    target_input_json: str | None = None,
 ) -> list[dict[str, Any]] | None:
-    contexts = [_pxdesign_target_context(candidate) for candidate in candidates]
+    target_chain = _target_protein_chain_from_input_json(target_input_json)
+    if target_chain is not None:
+        payload: list[dict[str, Any]] = []
+        for index, candidate in enumerate(candidates):
+            sequence = candidate.get("sequence")
+            if not sequence:
+                raise ValueError("protenix_v2 canonical Candidate[] input requires sequence")
+            payload.append(
+                {
+                    "name": _candidate_sample_name(index),
+                    "sequences": [
+                        {"proteinChain": dict(target_chain)},
+                        {"proteinChain": {"sequence": str(sequence), "count": 1}},
+                    ],
+                    "modelSeeds": list(seeds),
+                }
+            )
+        return payload
+
+    contexts = [_candidate_target_context(candidate) for candidate in candidates]
     if not contexts or not any(context is not None for context in contexts):
         return None
     if not all(context is not None for context in contexts):
         raise ValueError(
-            "protenix_v2 canonical Candidate[] input cannot mix PXDesign "
-            "target-context candidates with candidates that lack PXDesign target context"
+            "protenix_v2 canonical Candidate[] input cannot mix target-context "
+            "candidates with candidates that lack target context"
         )
 
     payload: list[dict[str, Any]] = []
@@ -737,16 +787,48 @@ def _pxdesign_complex_payload(
     return payload
 
 
-def _pxdesign_target_context(candidate: dict[str, Any]) -> dict[str, str] | None:
+def _target_protein_chain_from_input_json(path: str | None) -> dict[str, Any] | None:
+    if not path:
+        return None
+    entries = _protein_chain_entries_from_input_json(path, strict=True)
+    for chains in entries.values():
+        if chains:
+            return dict(chains[0])
+    raise ValueError("protenix_v2 target_input_json contains no proteinChain sequence")
+
+
+def _target_sequence_from_input_json(path: str | None) -> str | None:
+    chain = _target_protein_chain_from_input_json(path)
+    if not chain:
+        return None
+    sequence = chain.get("sequence")
+    return str(sequence) if sequence else None
+
+
+def _candidate_target_context(candidate: dict[str, Any]) -> dict[str, str] | None:
     artifacts = candidate.get("artifacts")
-    pxdesign = artifacts.get("pxdesign") if isinstance(artifacts, dict) else None
-    if not isinstance(pxdesign, dict):
+    if not isinstance(artifacts, dict):
         return None
-    target_pdb = pxdesign.get("target_pdb")
-    target_chain = pxdesign.get("target_chain")
-    if not target_pdb or not target_chain:
-        return None
-    return {"target_pdb": str(target_pdb), "target_chain": str(target_chain)}
+    for namespace in ("bindcraft", "pxdesign", "rfdiffusion", "rfdiffusion3", "rfpeptides"):
+        payload = artifacts.get(namespace)
+        if not isinstance(payload, dict):
+            continue
+        target_pdb = payload.get("target_pdb")
+        target_chain = payload.get("target_chain")
+        if target_pdb and target_chain:
+            return {
+                "target_pdb": str(target_pdb),
+                "target_chain": str(target_chain),
+                "source_tool": namespace,
+            }
+    return None
+
+
+def _pxdesign_target_context(candidate: dict[str, Any]) -> dict[str, str] | None:
+    context = _candidate_target_context(candidate)
+    if context and context.get("source_tool") == "pxdesign":
+        return context
+    return None
 
 
 def _target_chain_sequence(target_pdb: Path, target_chain: str) -> str:
@@ -764,6 +846,95 @@ def _candidate_sample_name(index: int) -> str:
     return f"canonical_candidate_{index:04d}"
 
 
+def _protein_chain_sequences_from_input_json(path: str | None) -> dict[str, list[str]]:
+    return {
+        name: [str(chain["sequence"]) for chain in chains]
+        for name, chains in _protein_chain_entries_from_input_json(path).items()
+    }
+
+
+def _protein_chain_entries_from_input_json(
+    path: str | None,
+    *,
+    strict: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).expanduser().read_text())
+    except Exception:
+        if strict:
+            raise
+        return {}
+    if not isinstance(payload, list):
+        if strict:
+            raise ValueError("protenix_v2 target_input_json must contain a list payload")
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or f"input_{index:04d}")
+        chains: list[dict[str, Any]] = []
+        for sequence_item in item.get("sequences") or []:
+            if not isinstance(sequence_item, dict):
+                continue
+            chain = sequence_item.get("proteinChain")
+            if isinstance(chain, dict) and chain.get("sequence"):
+                chains.append(dict(chain))
+        if chains:
+            out[name] = chains
+    return out
+
+
+def _input_json_complex_sequences(
+    params: ProtenixV2Input,
+    record: ProtenixV2PredictionRecord,
+) -> tuple[str, str] | None:
+    if params.candidates or not params.input_json:
+        return None
+    sample_name = _record_sample_name(record)
+    return _input_json_complex_sequences_for_sample(params.input_json, sample_name)
+
+
+def _input_json_complex_sequences_for_sample(
+    input_json: str | None,
+    sample_name: str | None,
+) -> tuple[str, str] | None:
+    sequences_by_name = _protein_chain_sequences_from_input_json(input_json)
+    if not sequences_by_name:
+        return None
+    sequences: list[str] | None = None
+    if sample_name:
+        sequences = sequences_by_name.get(sample_name)
+    if sequences is None and len(sequences_by_name) == 1:
+        sequences = next(iter(sequences_by_name.values()))
+    if not sequences or len(sequences) != 2:
+        return None
+    target_sequence, binder_sequence = sequences
+    return target_sequence, binder_sequence
+
+
+def _complex_chain_metadata(
+    *,
+    target_sequence: str,
+    binder_sequence: str,
+    cif_path: str | None,
+) -> list[dict[str, Any]]:
+    rows = complex_chain_metadata(
+        target_sequence=target_sequence,
+        binder_sequence=binder_sequence,
+        structure_path=cif_path,
+    )
+    for row in rows:
+        row.setdefault("observed_chain_id", None)
+    return rows
+
+
+def _chain_sequences_from_structure(path: str | None) -> dict[str, str]:
+    return chain_sequences_from_structure(path)
+
+
 def _protenix_v2_candidates(
     params: ProtenixV2Input,
     records: list[ProtenixV2PredictionRecord],
@@ -771,9 +942,12 @@ def _protenix_v2_candidates(
     candidates: list[dict[str, Any]] = []
     for index, record in enumerate(records):
         source_candidate = _source_candidate_for_record(params, record)
+        input_json_complex = _input_json_complex_sequences(params, record)
         sequence = (
             str(source_candidate.get("sequence"))
             if isinstance(source_candidate, dict) and source_candidate.get("sequence")
+            else input_json_complex[1]
+            if input_json_complex is not None
             else _source_sequence(params)
         )
         local_id = f"protenix_{index:04d}"
@@ -796,10 +970,46 @@ def _protenix_v2_candidates(
         }
         if (
             isinstance(source_candidate, dict)
-            and _pxdesign_target_context(source_candidate) is not None
+            and params.target_input_json
+            and source_candidate.get("sequence")
         ):
+            target_sequence = _target_sequence_from_input_json(params.target_input_json)
+            if target_sequence:
+                artifacts["protenix_v2"]["complex_input_mode"] = (
+                    "target_input_json_target_sequence_binder_sequence"
+                )
+                artifacts["protenix_v2"]["target_input_json"] = params.target_input_json
+                artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
+                    target_sequence=target_sequence,
+                    binder_sequence=str(source_candidate["sequence"]),
+                    cif_path=record.cif_path,
+                )
+        elif isinstance(source_candidate, dict) and (
+            context := _candidate_target_context(source_candidate)
+        ) is not None:
+            source_tool = context.get("source_tool") or "candidate"
             artifacts["protenix_v2"]["complex_input_mode"] = (
-                "pxdesign_target_sequence_binder_sequence"
+                f"{source_tool}_target_sequence_binder_sequence"
+            )
+            if source_candidate.get("sequence"):
+                target_sequence = _target_chain_sequence(
+                    Path(str(context["target_pdb"])),
+                    str(context["target_chain"]),
+                )
+                artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
+                    target_sequence=target_sequence,
+                    binder_sequence=str(source_candidate["sequence"]),
+                    cif_path=record.cif_path,
+                )
+        elif input_json_complex is not None:
+            target_sequence, binder_sequence = input_json_complex
+            artifacts["protenix_v2"]["complex_input_mode"] = (
+                "input_json_target_sequence_binder_sequence"
+            )
+            artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
+                target_sequence=target_sequence,
+                binder_sequence=binder_sequence,
+                cif_path=record.cif_path,
             )
         generated_capabilities = candidate_capability_flags(
             has_sequence=bool(sequence),
@@ -884,7 +1094,10 @@ def _source_candidate_for_record(
 
 
 def _record_sample_name(record: ProtenixV2PredictionRecord) -> str | None:
-    native = record.candidate_id
+    return _record_sample_name_from_native_id(record.candidate_id)
+
+
+def _record_sample_name_from_native_id(native: str | None) -> str | None:
     if not isinstance(native, str):
         return None
     parts = native.split(":")
@@ -897,21 +1110,9 @@ def _source_sequence(params: ProtenixV2Input) -> str | None:
     for candidate in params.candidates:
         if _is_canonical_candidate(candidate) and candidate.get("sequence"):
             return str(candidate["sequence"])
-    if not params.input_json:
-        return None
-    try:
-        payload = json.loads(Path(params.input_json).expanduser().read_text())
-    except Exception:
-        return None
-    if not isinstance(payload, list):
-        return None
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        for sequence_item in item.get("sequences") or []:
-            if not isinstance(sequence_item, dict):
-                continue
-            chain = sequence_item.get("proteinChain")
-            if isinstance(chain, dict) and chain.get("sequence"):
-                return str(chain["sequence"])
+    for sequences in _protein_chain_sequences_from_input_json(params.input_json).values():
+        if len(sequences) == 2:
+            return sequences[1]
+        if sequences:
+            return sequences[0]
     return None

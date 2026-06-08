@@ -11,8 +11,6 @@ from pydantic import BaseModel, Field, model_validator
 from vibeproteinagent.adapters import _proteina_complexa_common as common
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.candidates.capabilities import candidate_capability_flags
-from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.proteina_complexa import availability_skip_reason
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
@@ -20,6 +18,12 @@ from vibeproteinagent.adapters.residue_mapping import (
     parse_structure_residue_refs,
     resolve_positions,
 )
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import (
+    chain_sequence_from_structure,
+    complex_chain_metadata,
+)
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 ProteinaComplexaMode = Literal["protein_binder", "ligand_binder", "motif"]
 ProteinaComplexaSearchAlgorithm = Literal[
@@ -592,7 +596,8 @@ def _position_mapping_audit(params: ProteinaComplexaInput) -> tuple[dict[str, ob
             warnings.extend(resolution.warnings)
         elif params.target_sequence or params.target_fasta_path:
             warnings.append(
-                "target_pocket_residues could not be sequence-mapped because target_pdb has no protein residues"
+                "target_pocket_residues could not be sequence-mapped because "
+                "target_pdb has no protein residues"
             )
     return mappings, warnings
 
@@ -688,6 +693,7 @@ def _proteina_complexa_candidates(
     candidates: list[dict[str, Any]] = []
     for index, design in enumerate(designs):
         local_id = f"design_{index:04d}"
+        proteina_artifacts = _proteina_complexa_candidate_artifacts(params, design)
         candidate: dict[str, Any] = {
             "schema_version": "candidate_v1",
             "candidate_id": stable_candidate_id(
@@ -721,7 +727,9 @@ def _proteina_complexa_candidates(
                     "designability": design.designability,
                 }
             },
-            "artifacts": {},
+            "artifacts": {"proteina_complexa": proteina_artifacts}
+            if proteina_artifacts
+            else {},
             "capabilities": candidate_capability_flags(
                 has_sequence=bool(design.sequence),
                 has_backbone_structure=bool(design.pdb_path),
@@ -737,6 +745,48 @@ def _proteina_complexa_candidates(
                 candidate["scores"] = {**upstream_scores, **candidate["scores"]}
         candidates.append(candidate)
     return candidates
+
+
+def _proteina_complexa_candidate_artifacts(
+    params: ProteinaComplexaInput,
+    design: ProteinaComplexaDesign,
+) -> dict[str, Any]:
+    artifacts: dict[str, Any] = {"mode": params.mode}
+    if params.target_pdb:
+        artifacts["target_pdb"] = params.target_pdb
+        artifacts["target_chain"] = params.target_chain
+    if params.mode == "protein_binder" and params.target_pdb:
+        chain_rows = complex_chain_metadata(
+            target_sequence=chain_sequence_from_structure(
+                params.target_pdb,
+                params.target_chain,
+            ),
+            binder_sequence=design.sequence,
+            structure_path=design.pdb_path,
+            target_chain_id=params.target_chain,
+            binder_input_order=1,
+        )
+        if chain_rows:
+            artifacts["complex_chains"] = chain_rows
+    elif params.mode == "motif":
+        artifacts["motif_pdb"] = params.motif_pdb
+        artifacts["motif_chain"] = params.motif_chain
+        chain_rows = complex_chain_metadata(
+            target_sequence=chain_sequence_from_structure(
+                params.motif_pdb,
+                params.motif_chain,
+            ),
+            binder_sequence=design.sequence,
+            structure_path=design.pdb_path,
+            target_chain_id=params.motif_chain,
+            target_role="motif",
+            binder_role="design",
+        )
+        if chain_rows:
+            artifacts["complex_chains"] = chain_rows
+    elif params.mode == "ligand_binder":
+        artifacts["ligand_smiles"] = params.ligand_smiles
+    return artifacts
 
 
 __all__ = [

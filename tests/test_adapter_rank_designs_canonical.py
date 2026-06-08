@@ -83,6 +83,36 @@ def test_rank_designs_preserves_canonical_score_namespaces(tmp_path) -> None:
     assert row["scores"]["sequence_analysis"]["hydrophobic_fraction"] == 0.2
 
 
+def test_rank_designs_preserves_canonical_artifact_metadata(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    candidate = _canonical_candidate(
+        "cand_complex",
+        local_id="seq_0000",
+        sequence="ACDEF",
+        score=0.5,
+    )
+    candidate["source"]["tool"] = "protenix_v2"
+    candidate["structure_path"] = "/tmp/complex.cif"
+    candidate["artifacts"] = {
+        "protenix_v2": {
+            "complex_chains": [
+                {"role": "target", "input_order": 0, "sequence_length": 809},
+                {"role": "binder", "input_order": 1, "sequence_length": 5},
+            ]
+        }
+    }
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[candidate], top_k=1),
+        null_context(tmp_path / "job"),
+    )
+
+    row = out.ranked_candidates[0]
+    assert row["sequence"] == "ACDEF"
+    assert row["structure_path"] == "/tmp/complex.cif"
+    assert row["artifacts"]["protenix_v2"]["complex_chains"][1]["role"] == "binder"
+
+
 def test_rank_designs_uses_family_profile_score_and_preserves_namespace(tmp_path) -> None:
     adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
     weak = _canonical_candidate(

@@ -43,6 +43,8 @@ Evaluator tools should consume canonical `candidates` whenever available. Raw
 paths are acceptable for one-off diagnostics, but do not use an unrecorded
 manual table or transcript-only calculation as the sole final-selection
 evidence. Put evidence in tool output or a structured recorded artifact.
+Raw manual complex JSON/path evidence is diagnostic until it is reattached to
+the logical candidate through canonical `candidates` output and `rank_designs`.
 
 ## Reporting
 

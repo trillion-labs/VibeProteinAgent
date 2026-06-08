@@ -90,6 +90,9 @@ def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         row.update(producer_scores)
     if scores:
         row["scores"] = dict(scores)
+    artifacts = candidate.get("artifacts")
+    if isinstance(artifacts, dict) and artifacts:
+        row["artifacts"] = dict(artifacts)
     return {key: value for key, value in row.items() if value is not None}
 
 
@@ -553,6 +556,8 @@ def _score(
         details["prodigy_kd_nm"] = _aliased_metric(candidate_prodigy, "kd_nm", "kd")
     if isinstance(candidate.get("scores"), dict):
         details["scores"] = dict(candidate["scores"])
+    if isinstance(candidate.get("artifacts"), dict):
+        details["artifacts"] = dict(candidate["artifacts"])
     return score, details
 
 

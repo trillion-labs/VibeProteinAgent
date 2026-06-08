@@ -127,6 +127,37 @@ def test_boltz2_affinity_selects_unique_candidate_by_sequence() -> None:
     assert candidate["candidate_id"] == "cand_boltz_1"
 
 
+def test_boltz2_affinity_records_protein_binder_chain_metadata() -> None:
+    upstream = _candidate("BBBB", 1)
+    params = Boltz2AffinityInput(
+        candidates=[_candidate("AAAA", 0), upstream],
+        sequences=[
+            {"type": "protein", "id": "A", "sequence": "AAAA"},
+            {"type": "protein", "id": "B", "sequence": "BBBB"},
+        ],
+        binder_chain="B",
+    )
+
+    candidate = _boltz2_affinity_candidates(params, "/tmp/pred.cif", {})[0]
+
+    assert candidate["candidate_id"] == upstream["candidate_id"]
+    assert candidate["sequence"] == "BBBB"
+    assert candidate["artifacts"]["boltz2_affinity"]["complex_chains"] == [
+        {
+            "role": "target",
+            "chain_id": "A",
+            "input_order": 0,
+            "sequence_length": 4,
+        },
+        {
+            "role": "binder",
+            "chain_id": "B",
+            "input_order": 1,
+            "sequence_length": 4,
+        },
+    ]
+
+
 def test_boltz2_affinity_selects_unique_candidate_from_input_yaml(
     tmp_path,
 ) -> None:

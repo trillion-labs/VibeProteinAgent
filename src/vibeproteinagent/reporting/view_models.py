@@ -9,6 +9,7 @@ tools, mutate the report model, or render HTML.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1266,10 +1267,33 @@ def _recorded_thresholds(model: ReportModel) -> str:
         token in reasoning.lower()
         for token in ("threshold", "criteria", "cutoff", ">= ", "<= ")
     ):
-        values.append(reasoning)
+        values.append(_threshold_excerpt_from_reasoning(reasoning))
     return "; ".join(
         _format_threshold_value(value) for value in values if value not in (None, "", {}, [])
     )
+
+
+def _threshold_excerpt_from_reasoning(reasoning: str) -> str:
+    text = " ".join(str(reasoning or "").split())
+    if not text:
+        return ""
+    for marker in (
+        "OBJECTIVE & ACCEPTANCE CRITERIA:",
+        "ACCEPTANCE CRITERIA:",
+        "SUCCESS CRITERIA:",
+        "CRITERIA:",
+    ):
+        index = text.upper().find(marker)
+        if index >= 0:
+            section = text[index + len(marker):]
+            next_heading = re.search(
+                r"\b[A-Z][A-Z &()0-9/-]{3,}\s*[-:]",
+                section,
+            )
+            if next_heading:
+                section = section[: next_heading.start()]
+            return _clip(section, 260)
+    return _clip(text, 180)
 
 
 def _format_threshold_value(value: Any) -> str:

@@ -134,6 +134,9 @@ objective:
 
 If no candidate passes, call `submit_candidate` with
 `outcome=no_acceptable_candidate` and explain the failed thresholds.
+If you stated an acceptance threshold and the measured tool evidence does not
+meet it, do not submit `accepted` unless the user explicitly relaxed the
+criteria or asked for design hypotheses despite the failed threshold.
 
 ## Example (one shape, not the only one)
 
@@ -147,6 +150,6 @@ Goal: a binder for protein target X.
 -> analyze the room for improvement + try other tools, or mask some
    structure/sequence and regenerate
 ...
--> submit_candidate (accepted if a design clears thresholds,
-   else no_acceptable_candidate)
+-> submit_candidate (prefer rank=1 from the rank_designs job; accepted if a
+   design clears thresholds, else no_acceptable_candidate)
 -> run the submit_candidate next_report_command

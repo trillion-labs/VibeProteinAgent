@@ -35,8 +35,8 @@ canonical ~5.3 GiB tarball from
 from __future__ import annotations
 
 import csv
-import json
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -57,6 +57,11 @@ from vibeproteinagent.adapters.residue_mapping import (
 )
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import (
+    chain_sequence_from_structure,
+    complex_chain_metadata,
+    observed_chain_for_sequence,
+)
 from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.errors import VPAError
 from vibeproteinagent.workers.sidecar import PersistentPythonSidecar, SidecarRuntimeSpec
@@ -424,7 +429,7 @@ class BindCraftAdapter(ToolAdapter):
             status=status,
             designs=designs,
             candidates=[
-                _canonical_candidate_from_design(design.model_dump(), index)
+                _canonical_candidate_from_design(design.model_dump(), index, params=params)
                 for index, design in enumerate(designs)
             ],
             runtime_ms=runtime_ms,
@@ -855,10 +860,40 @@ def _is_canonical_candidate(item: Any) -> bool:
     return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
 
 
-def _canonical_candidate_from_design(design: dict[str, Any], index: int) -> dict[str, Any]:
+def _canonical_candidate_from_design(
+    design: dict[str, Any],
+    index: int,
+    *,
+    params: BindCraftInput | None = None,
+) -> dict[str, Any]:
     local_id = f"binder_{index:04d}"
     sequence = str(design.get("sequence") or "")
     structure_path = str(design.get("pdb_path") or "")
+    bindcraft_artifacts: dict[str, Any] = {}
+    if params is not None:
+        target_pdb = (
+            str(Path(params.target_pdb).expanduser().resolve())
+            if params.target_pdb
+            else None
+        )
+        bindcraft_artifacts.update(
+            {
+                "target_pdb": target_pdb,
+                "target_chain": params.target_chain,
+            }
+        )
+        binder_chain_id = observed_chain_for_sequence(structure_path, sequence)
+        if binder_chain_id == params.target_chain:
+            binder_chain_id = None
+        chain_rows = complex_chain_metadata(
+            target_sequence=chain_sequence_from_structure(target_pdb, params.target_chain),
+            binder_sequence=sequence,
+            structure_path=structure_path,
+            target_chain_id=params.target_chain,
+            binder_chain_id=binder_chain_id,
+        )
+        if chain_rows:
+            bindcraft_artifacts["complex_chains"] = chain_rows
     return {
         "schema_version": "candidate_v1",
         "candidate_id": stable_candidate_id(
@@ -888,7 +923,7 @@ def _canonical_candidate_from_design(design: dict[str, Any], index: int) -> dict
                 "binder_length": design.get("binder_length"),
             }
         },
-        "artifacts": {},
+        "artifacts": {"bindcraft": bindcraft_artifacts} if bindcraft_artifacts else {},
         "capabilities": candidate_capability_flags(
             has_sequence=bool(sequence),
             has_backbone_structure=bool(structure_path),

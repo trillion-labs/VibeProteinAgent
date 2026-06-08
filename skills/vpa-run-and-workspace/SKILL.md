@@ -144,8 +144,9 @@ with a different tool. Don't abandon the whole objective on a single failed job.
 
 ## Finalization
 
-After evidence is available, run `rank_designs` when ranking is needed and
-`submit_candidate` to record accepted or no acceptable candidate. If
+After validation/scoring evidence is available for multiple candidates or tools,
+run `rank_designs` before final selection and prefer `submit_candidate` with
+`rank=1` from that rank job. Then record accepted or no acceptable candidate. If
 `submit_candidate` returns `next_report_command`, run that command. Otherwise
 render `vpa report <traj_id>`. One user query should end with one trajectory
 report that covers the jobs/workflows used for that query.

@@ -124,6 +124,29 @@ _REFERENCE_CANDIDATE_TOOLS = frozenset({
     "family_profile",
 })
 _NON_BOARD_CANDIDATE_TOOLS = _REFERENCE_CANDIDATE_TOOLS | frozenset({"submit_candidate"})
+_FINALIZATION_EVALUATOR_TOOLS = frozenset({
+    "boltz2_affinity",
+    "ipsae",
+    "prodigy",
+    "protein_qc",
+    "protenix_v2",
+    "pxmeter",
+    "pyrosetta",
+    "structure_analysis",
+    "tmalign",
+})
+_FINALIZATION_GENERATOR_TOOLS = frozenset({
+    "bindcraft",
+    "boltzgen",
+    "esm2",
+    "esm3",
+    "proteina_complexa",
+    "proteinmpnn",
+    "pxdesign",
+    "rfdiffusion",
+    "rfdiffusion3",
+    "rfpeptides",
+})
 
 
 def collect_report_model(workspace: Workspace, source_id: str, *, top_k: int = 5) -> ReportModel:
@@ -304,6 +327,14 @@ def _collect_submit_candidate_trajectory(
         )
     workflow_tools = {(n.tool or "").lower() for n in report_nodes}
     tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
+    warnings.extend(
+        _finalization_contract_warnings(
+            report_nodes,
+            candidates,
+            final_candidates,
+            final_submission,
+        )
+    )
     return ReportModel(
         summary=RunSummary(
             kind="job",
@@ -456,6 +487,14 @@ def _collect_trajectory(workspace: Workspace, trajectory_id: str) -> ReportModel
     )
     workflow_tools = {(n.tool or "").lower() for n in report_nodes}
     tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
+    warnings.extend(
+        _finalization_contract_warnings(
+            report_nodes,
+            candidates,
+            final_candidates,
+            final_submission,
+        )
+    )
     return ReportModel(
         summary=RunSummary(
             kind="trajectory",
@@ -533,6 +572,14 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
         )
     workflow_tools = {(n.tool or "").lower() for n in report_nodes}
     tool_by_job = {n.job_id: (n.tool or "").lower() for n in report_nodes if n.job_id}
+    warnings.extend(
+        _finalization_contract_warnings(
+            report_nodes,
+            candidates,
+            final_candidates,
+            final_submission,
+        )
+    )
     return ReportModel(
         summary=RunSummary(
             kind="workflow",
@@ -1526,6 +1573,57 @@ def _candidate_score_map(record: dict[str, Any]) -> dict[str, Any]:
     return _score_map(record)
 
 
+def _candidate_artifact_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    artifacts = record.get("candidate_artifacts")
+    if isinstance(artifacts, dict):
+        return deepcopy(artifacts)
+    artifacts = record.get("artifacts")
+    return deepcopy(artifacts) if isinstance(artifacts, dict) else {}
+
+
+def _normalize_complex_candidate_row(
+    tool: str,
+    row: dict[str, Any],
+    node_params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if tool != "protenix_v2" or not isinstance(node_params, dict):
+        return row
+    input_json = node_params.get("input_json")
+    if not isinstance(input_json, str) or not input_json:
+        return row
+    try:
+        from vibeproteinagent.adapters.protenix_v2.adapter import (
+            _input_json_complex_sequences_for_sample,
+            _record_sample_name_from_native_id,
+        )
+        from vibeproteinagent.candidates.chain_roles import complex_chain_metadata
+    except Exception:
+        return row
+    sample_name = _record_sample_name_from_native_id(
+        str(row.get("candidate_id")) if row.get("candidate_id") else None
+    )
+    complex_sequences = _input_json_complex_sequences_for_sample(input_json, sample_name)
+    if complex_sequences is None:
+        return row
+    target_sequence, binder_sequence = complex_sequences
+    normalized = dict(row)
+    normalized["sequence"] = binder_sequence
+    artifacts = dict(normalized.get("artifacts") or {})
+    protenix = dict(artifacts.get("protenix_v2") or {})
+    protenix.setdefault("complex_input_mode", "input_json_target_sequence_binder_sequence")
+    protenix.setdefault(
+        "complex_chains",
+        complex_chain_metadata(
+            target_sequence=target_sequence,
+            binder_sequence=binder_sequence,
+            structure_path=_first_str(normalized, *_STRUCTURE_PATH_KEYS),
+        ),
+    )
+    artifacts["protenix_v2"] = protenix
+    normalized["artifacts"] = artifacts
+    return normalized
+
+
 def _candidate_record_artifacts(
     record: dict[str, Any],
     structure_path: str | None,
@@ -1736,6 +1834,7 @@ def _candidates_from_submission(
                     "tool": row.get("source_tool"),
                     "node_id": row.get("source_workflow_node_id"),
                     "auto_selected": bool(submission.get("auto_selected", False)),
+                    "candidate_artifacts": _candidate_artifact_metadata(row),
                 },
                 artifacts=artifacts,
             )
@@ -1815,6 +1914,7 @@ def _ranked_candidates(
                         "node_id": node.node_id,
                         "tool": node.tool,
                         "kind": "ranked_candidates",
+                        "candidate_artifacts": _candidate_artifact_metadata(row),
                     },
                     artifacts=_matching_artifacts(stable_structure_path, artifacts),
                 )
@@ -1860,6 +1960,7 @@ def _candidates_from_output(
 
     out: list[ReportCandidate] = []
     for idx, row in enumerate(rows):
+        row = _normalize_complex_candidate_row(tool, row, node_params)
         structure_path = _first_str(row, *_STRUCTURE_PATH_KEYS)
         stable_structure_path = _stable_structure_path(structure_path, artifacts)
         candidate_id = str(
@@ -1879,7 +1980,12 @@ def _candidates_from_output(
                 scores=_candidate_score_map(row),
                 qc_flags=_string_list(row.get("qc_flags") or row.get("flags")),
                 liabilities=_list(row.get("liabilities")),
-                source={"node_id": node.node_id, "tool": node.tool, "kind": "output"},
+                source={
+                    "node_id": node.node_id,
+                    "tool": node.tool,
+                    "kind": "output",
+                    "candidate_artifacts": _candidate_artifact_metadata(row),
+                },
                 artifacts=_matching_artifacts(stable_structure_path, artifacts),
             )
         )
@@ -2288,6 +2394,79 @@ def _warnings_from_job(job: JobRecord, *, source: str | None = None) -> list[Rep
             ReportWarning(level="warning", message=message, source=warning_source)
         )
     return warnings
+
+
+def _finalization_contract_warnings(
+    nodes: list[WorkflowNodeSummary],
+    candidates: list[ReportCandidate],
+    final_candidates: list[ReportCandidate],
+    final_submission: dict[str, Any] | None,
+) -> list[ReportWarning]:
+    if not final_submission or final_submission.get("outcome") != "accepted":
+        return []
+    tools = {(node.tool or "").lower() for node in nodes}
+    evaluator_tools = tools & _FINALIZATION_EVALUATOR_TOOLS
+    if not evaluator_tools:
+        return []
+
+    source = final_submission.get("node_id") or final_submission.get("job_id")
+    warnings: list[ReportWarning] = []
+    if "rank_designs" not in tools and (tools & _FINALIZATION_GENERATOR_TOOLS):
+        warnings.append(
+            ReportWarning(
+                level="warning",
+                message=(
+                    "The agent submitted candidates before running rank_designs to "
+                    "merge validation evidence."
+                ),
+                source=source,
+            )
+        )
+
+    final_ids = {str(c.candidate_id) for c in final_candidates if c.candidate_id}
+    final_score_namespaces = {
+        str(namespace)
+        for candidate in final_candidates
+        for namespace in candidate.scores
+    }
+    final_has_evaluator_scores = bool(final_score_namespaces & evaluator_tools)
+    evaluator_candidate_ids = _candidate_ids_from_tools(nodes, evaluator_tools)
+    evaluator_unmatched = bool(
+        final_ids
+        and evaluator_candidate_ids
+        and evaluator_candidate_ids.isdisjoint(final_ids)
+    )
+    if not final_has_evaluator_scores or evaluator_unmatched:
+        warnings.append(
+            ReportWarning(
+                level="warning",
+                message=(
+                    "The agent submitted candidates before merging validation "
+                    "evidence. Some Protenix/ipSAE/QC results may be shown as "
+                    "unmatched evidence."
+                ),
+                source=source,
+            )
+        )
+
+    return warnings
+
+
+def _candidate_ids_from_tools(
+    nodes: list[WorkflowNodeSummary],
+    tools: set[str] | frozenset[str],
+) -> set[str]:
+    out: set[str] = set()
+    for node in nodes:
+        if (node.tool or "").lower() not in tools:
+            continue
+        output = node.output if isinstance(node.output, dict) else {}
+        for row in output.get("candidates") or []:
+            if isinstance(row, dict) and row.get("candidate_id"):
+                out.add(str(row["candidate_id"]))
+    return out
+
+
 
 
 def _raw_job_summary(job: JobRecord, artifacts: list[ReportArtifact]) -> dict[str, Any]:

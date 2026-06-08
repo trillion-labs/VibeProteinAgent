@@ -39,9 +39,13 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.candidates.capabilities import candidate_capability_flags
-from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.runtime import EnvLocator, sanitized_python_env, smoke_import
+from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import (
+    chain_sequence_from_structure,
+    complex_chain_metadata,
+)
+from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.core.errors import DependencyError, VPAError
 
 # --------------------------------------------------------------------------- paths
@@ -1355,6 +1359,21 @@ def _pxdesign_candidates(
     for index, design in enumerate(designs):
         local_id = f"design_{index:04d}"
         structure_path = design.pdb_path or design.cif_path
+        target_sequence = chain_sequence_from_structure(target_pdb, params.target_chain)
+        pxdesign_artifacts: dict[str, Any] = {
+            "cif_path": design.cif_path,
+            "pdb_path": design.pdb_path,
+            "target_pdb": target_pdb,
+            "target_chain": params.target_chain,
+        }
+        chain_rows = complex_chain_metadata(
+            target_sequence=target_sequence,
+            binder_sequence=design.sequence,
+            structure_path=structure_path,
+            target_chain_id=params.target_chain,
+        )
+        if chain_rows:
+            pxdesign_artifacts["complex_chains"] = chain_rows
         candidate = {
             "schema_version": "candidate_v1",
             "candidate_id": stable_candidate_id(
@@ -1384,14 +1403,7 @@ def _pxdesign_candidates(
                     "structure_detail": "binder_backbone_with_target_context",
                 }
             },
-            "artifacts": {
-                "pxdesign": {
-                    "cif_path": design.cif_path,
-                    "pdb_path": design.pdb_path,
-                    "target_pdb": target_pdb,
-                    "target_chain": params.target_chain,
-                }
-            },
+            "artifacts": {"pxdesign": pxdesign_artifacts},
             "capabilities": candidate_capability_flags(
                 has_sequence=bool(design.sequence),
                 has_backbone_structure=bool(structure_path),

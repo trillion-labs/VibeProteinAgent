@@ -274,6 +274,52 @@ def test_report_submit_job_expands_direct_run_trajectory(
     assert "Protenix v2" in html
 
 
+def test_report_collects_protenix_complex_input_json_as_binder_sequence(
+    tmp_workspace: Workspace,
+) -> None:
+    input_json = tmp_workspace.root / "complex.json"
+    input_json.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "cplx_design",
+                    "sequences": [
+                        {"proteinChain": {"sequence": "A" * 809, "count": 1}},
+                        {"proteinChain": {"sequence": "ACDEF" * 14, "count": 1}},
+                    ],
+                    "modelSeeds": [101],
+                }
+            ]
+        )
+    )
+    job_id = _complete_job(
+        tmp_workspace,
+        "protenix_v2",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": "cand_complex",
+                    "sequence": "A" * 809,
+                    "structure_path": "/tmp/complex.cif",
+                    "scores": {"protenix_v2": {"iptm": 0.65}},
+                }
+            ]
+        },
+        params={"input_json": str(input_json)},
+    )
+
+    model = collect_report_model(tmp_workspace, job_id)
+
+    assert model.candidates[0].sequence == "ACDEF" * 14
+    assert (
+        model.candidates[0].source["candidate_artifacts"]["protenix_v2"][
+            "complex_input_mode"
+        ]
+        == "input_json_target_sequence_binder_sequence"
+    )
+
+
 def test_report_functional_trajectory_separates_reference_hits_from_design_board(
     tmp_workspace: Workspace,
 ) -> None:
@@ -474,6 +520,76 @@ def test_report_keeps_generated_only_candidates_when_ranked_subset_exists(
     assert "top preliminary iptm" in html
     assert "design_1" in html
     assert "design_2" in html
+
+
+def test_report_warns_when_final_submit_skips_ranked_validation_merge(
+    tmp_workspace: Workspace,
+) -> None:
+    traj = TrajectoryStore(tmp_workspace).create(user_query="design miniprotein binder")
+    _complete_job(
+        tmp_workspace,
+        "bindcraft",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": "cand_bindcraft",
+                    "sequence": "ACDEFGHIK",
+                    "structure_path": "/tmp/designed_pose.pdb",
+                    "scores": {"bindcraft": {"iptm": 0.78}},
+                }
+            ]
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+    _complete_job(
+        tmp_workspace,
+        "protenix_v2",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": "cand_protenix_standalone",
+                    "sequence": "ACDEFGHIK",
+                    "structure_path": "/tmp/full_target_complex.cif",
+                    "scores": {"protenix_v2": {"iptm": 0.31, "plddt": 83.7}},
+                }
+            ]
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+    submit_job = _complete_job(
+        tmp_workspace,
+        "submit_candidate",
+        {
+            "submission_id": "sub_direct_unmerged",
+            "outcome": "accepted",
+            "terminal": True,
+            "candidates_resolved": [
+                {
+                    "candidate_id": "cand_bindcraft",
+                    "sequence": "ACDEFGHIK",
+                    "structure_path": "/tmp/designed_pose.pdb",
+                    "scores": {"bindcraft": {"iptm": 0.78}},
+                    "justification": "direct generator candidate",
+                }
+            ],
+            "reasoning": "accepted direct generator candidate",
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+
+    model = collect_report_model(tmp_workspace, submit_job)
+    messages = {warning.message for warning in model.warnings}
+
+    assert (
+        "The agent submitted candidates before running rank_designs to merge "
+        "validation evidence."
+    ) in messages
+    assert (
+        "The agent submitted candidates before merging validation evidence. "
+        "Some Protenix/ipSAE/QC results may be shown as unmatched evidence."
+    ) in messages
 
 
 def test_report_trajectory_excludes_unrelated_workspace_jobs(
@@ -1013,12 +1129,27 @@ def test_direct_submit_report_does_not_use_tool_name_as_user_query(
 def test_report_workflow_no_acceptable_candidate_has_no_final_candidates(
     tmp_workspace: Workspace,
 ) -> None:
+    long_reasoning = (
+        "NO ACCEPTABLE CANDIDATE for a Beta-agarase binder centered on V452.\n\n"
+        "OBJECTIVE & ACCEPTANCE CRITERIA: binder must directly contact target "
+        "residue V452 with heavy-atom <=5.0 A; supporting targets ipSAE>=0.7, "
+        "binder pLDDT>=80.\n\n"
+        "KEY FINDING - V452 IS BURIED: V452 has relative solvent accessibility "
+        "5.6% and 17 heavy-atom neighbors.\n\n"
+        "EXPLORATION (18 binders independently validated): pxdesign and "
+        "RFdiffusion explored many hotspot strategies with a very long account "
+        "that should not dominate the candidate review banner.\n\n"
+        "RESULT: 0/18 binders contact V452. Closest approach 17.4 A; most "
+        "re-dock 20-52 A away.\n\n"
+        "CONCLUSION: The literal objective is not achievable as stated - V452 "
+        "is not solvent-accessible enough to serve as an interface center."
+    )
     submission = {
         "submission_id": "sub_none",
         "outcome": "no_acceptable_candidate",
         "terminal": True,
         "candidates_resolved": [],
-        "reasoning": "no design met the stated objective threshold",
+        "reasoning": long_reasoning,
         "auto_selected": False,
     }
     submit_job = _complete_job(tmp_workspace, "submit_candidate", submission)
@@ -1031,9 +1162,18 @@ def test_report_workflow_no_acceptable_candidate_has_no_final_candidates(
     )
 
     model = collect_report_model(tmp_workspace, wf_id)
+    html = render_report_html(model)
 
     assert model.final_submission["outcome"] == "no_acceptable_candidate"
     assert model.final_candidates == []
+    assert "The literal objective is not achievable as stated" in html
+    assert "Full recorded submission reasoning" in html
+    assert "EXPLORATION (18 binders independently validated)" in html
+    banner = html.split('<div class="console-banner">', 1)[1].split(
+        '<details class="console-banner-details">',
+        1,
+    )[0]
+    assert "very long account that should not dominate" not in banner
 
 
 def test_fresh_workspace_schema_has_no_active_agent_tables(

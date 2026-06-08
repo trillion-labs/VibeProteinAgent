@@ -210,6 +210,11 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
             if isinstance(row.get("capabilities"), dict)
             else {}
         ),
+        "candidate_artifacts": (
+            row.get("artifacts")
+            if isinstance(row.get("artifacts"), dict)
+            else {}
+        ),
         "score": _as_float(row.get("score")),
         "scores": scores,
         "scores_highlighted": {
@@ -278,6 +283,9 @@ def _row_from_canonical_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         row.update(producer_scores)
     if scores:
         row["scores"] = dict(scores)
+    artifacts = candidate.get("artifacts")
+    if isinstance(artifacts, dict) and artifacts:
+        row["artifacts"] = dict(artifacts)
     return {key: value for key, value in row.items() if value is not None}
 
 

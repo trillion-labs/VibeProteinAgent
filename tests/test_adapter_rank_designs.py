@@ -388,6 +388,152 @@ def test_rank_designs_merges_enriched_canonical_workflow_by_candidate_id(
     assert row["scores"]["protein_qc"]["plddt"] == 88.0
 
 
+def test_rank_designs_merges_miniprotein_binder_validation_by_candidate_id(
+    tmp_workspace: Workspace,
+) -> None:
+    candidate_id = "cand_b7c39f5fe83a"
+    sequence = "TRKVYINNRGVVLPPREQRLMDMHMGEQDPFLEQNPQIKRVSRYLSNKMMEKHMRVVYVP"
+    bindcraft_job = _completed_job(
+        tmp_workspace,
+        "bindcraft",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": candidate_id,
+                    "source": {"tool": "bindcraft", "local_id": "s585903", "index": 0},
+                    "sequence": sequence,
+                    "structure_path": "/tmp/designed_pose.pdb",
+                    "scores": {"bindcraft": {"iptm": 0.78, "plddt": 0.85}},
+                    "artifacts": {"bindcraft": {"target_pdb": "/tmp/target.pdb"}},
+                }
+            ]
+        },
+    )
+    protenix_job = _completed_job(
+        tmp_workspace,
+        "protenix_v2",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": candidate_id,
+                    "source": {"tool": "bindcraft", "local_id": "s585903", "index": 0},
+                    "sequence": sequence,
+                    "structure_path": "/tmp/full_target_complex.cif",
+                    "scores": {
+                        "bindcraft": {"iptm": 0.78, "plddt": 0.85},
+                        "protenix_v2": {"iptm": 0.31, "plddt": 83.7, "ptm": 0.62},
+                    },
+                    "artifacts": {
+                        "bindcraft": {"target_pdb": "/tmp/target.pdb"},
+                        "protenix_v2": {
+                            "predicted_cif": "/tmp/full_target_complex.cif",
+                            "pae_path": "/tmp/full_target_complex_pae.json",
+                        },
+                    },
+                }
+            ]
+        },
+    )
+    ipsae_job = _completed_job(
+        tmp_workspace,
+        "ipsae",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": candidate_id,
+                    "source": {"tool": "bindcraft", "local_id": "s585903", "index": 0},
+                    "sequence": sequence,
+                    "structure_path": "/tmp/full_target_complex.cif",
+                    "scores": {"ipsae": {"ipsae_score": 0.0, "interface_pae": 0.0}},
+                }
+            ]
+        },
+    )
+    prodigy_job = _completed_job(
+        tmp_workspace,
+        "prodigy",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": candidate_id,
+                    "source": {"tool": "bindcraft", "local_id": "s585903", "index": 0},
+                    "sequence": sequence,
+                    "structure_path": "/tmp/designed_pose.pdb",
+                    "scores": {
+                        "prodigy": {
+                            "delta_g_kcal_mol": -10.2,
+                            "kd_nm": 36.0,
+                            "interface_contacts": 86,
+                        }
+                    },
+                }
+            ]
+        },
+    )
+    qc_job = _completed_job(
+        tmp_workspace,
+        "protein_qc",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": candidate_id,
+                    "source": {"tool": "bindcraft", "local_id": "s585903", "index": 0},
+                    "sequence": sequence,
+                    "structure_path": "/tmp/full_target_complex.cif",
+                    "scores": {
+                        "protein_qc": {
+                            "plddt": 79.9,
+                            "gravy": -0.83,
+                            "passes_filters": True,
+                        }
+                    },
+                }
+            ]
+        },
+    )
+
+    adapter = RankDesignsAdapter(
+        config={}, weights_dir=tmp_workspace.root / "weights", device=torch.device("cpu")
+    )
+    out = adapter.run(
+        RankDesignsInput(
+            job_ids=[bindcraft_job, protenix_job, ipsae_job, prodigy_job, qc_job],
+            top_k=1,
+        ),
+        null_context(tmp_workspace.job_dir("job_rank_miniprotein")),
+    )
+
+    assert out.candidate_count == 1
+    assert out.warnings == []
+    row = out.ranked_candidates[0]
+    assert row["candidate_id"] == candidate_id
+    assert row["sequence"] == sequence
+    assert row["structure_path"] == "/tmp/full_target_complex.cif"
+    assert row["candidate_ref"]["candidate_id"] == candidate_id
+    assert set(row["evidence_job_ids"]) == {
+        bindcraft_job,
+        protenix_job,
+        ipsae_job,
+        prodigy_job,
+        qc_job,
+    }
+    assert set(row["scores"]) >= {
+        "bindcraft",
+        "protenix_v2",
+        "ipsae",
+        "prodigy",
+        "protein_qc",
+    }
+    assert row["scores"]["ipsae"]["ipsae_score"] == 0.0
+    assert row["scores"]["prodigy"]["kd_nm"] == pytest.approx(36.0)
+    assert row["scores"]["protein_qc"]["gravy"] == pytest.approx(-0.83)
+
+
 def _functional_candidate(
     candidate_id: str,
     *,

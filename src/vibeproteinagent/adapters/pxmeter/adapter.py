@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.chain_roles import add_interface_chain_pair
 from vibeproteinagent.candidates.schema import stable_candidate_id
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -69,7 +70,8 @@ class PXMeterInput(BaseModel):
         if all(canonical):
             if len(candidates) < 2:
                 raise ValueError(
-                    "pxmeter canonical Candidate[] input requires reference and predicted candidates"
+                    "pxmeter canonical Candidate[] input requires reference and "
+                    "predicted candidates"
                 )
             reference_cif = candidates[0].get("structure_path")
             predicted_cif = candidates[1].get("structure_path")
@@ -260,7 +262,22 @@ def _pxmeter_candidates(
                 "artifacts": {},
             }
         candidate.setdefault("scores", {})["pxmeter"] = metrics
-        candidate.setdefault("artifacts", {})["pxmeter"] = {"report_json_path": report_json_path}
+        pxmeter_artifacts: dict[str, Any] = {"report_json_path": report_json_path}
+        for pair in params.chain_pairs or []:
+            add_interface_chain_pair(
+                pxmeter_artifacts,
+                pair.a,
+                pair.b,
+                source="pxmeter",
+            )
+        if params.candidates and len(params.candidates) >= 2:
+            pxmeter_artifacts["reference_candidate_id"] = params.candidates[0].get(
+                "candidate_id"
+            )
+            pxmeter_artifacts["design_candidate_id"] = source_candidate.get(
+                "candidate_id"
+            )
+        candidate.setdefault("artifacts", {})["pxmeter"] = pxmeter_artifacts
         candidate.setdefault(
             "capabilities",
             candidate_capability_flags(
@@ -275,10 +292,18 @@ def _pxmeter_candidates(
 
 
 def _copy_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    preserved = (
+        "schema_version",
+        "candidate_id",
+        "source",
+        "sequence",
+        "structure_path",
+        "capabilities",
+    )
     out = {
         key: value
         for key, value in candidate.items()
-        if key in {"schema_version", "candidate_id", "source", "sequence", "structure_path", "capabilities"}
+        if key in preserved
     }
     out["scores"] = dict(candidate.get("scores") or {})
     out["artifacts"] = dict(candidate.get("artifacts") or {})
