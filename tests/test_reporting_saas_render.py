@@ -6,6 +6,7 @@ structure controls without snapshotting the full HTML.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from vibeproteinagent.reporting.models import (
@@ -262,7 +263,12 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "overscroll-behavior:contain" in html
     assert 'data-open-cand="viewer-cand_1"' in html
     assert "viewer-cand_2" in html
-    assert 'class="asset-pill is-on asset-download-link" href="data:chemical/x-pdb;base64,' in html
+    cross = html[html.index('id="cross-candidate-analysis"'):]
+    assert 'class="asset-pill is-on asset-download-link" href="data:chemical/x-pdb;base64,' in cross
+    comparison = html[html.index('id="candidate-comparison"'):html.index('id="cross-candidate-analysis"')]
+    assert 'asset-download-link" href="data:chemical/x-pdb;base64,' not in comparison
+    structure_comparison = html[html.index('id="structure-comparison"'):html.index('id="candidate-comparison"')]
+    assert 'asset-download-link" href="data:chemical/x-pdb;base64,' not in structure_comparison
     assert '<span class="asset-pill is-missing" aria-disabled="true">No structure</span>' in html
     assert '<span class="asset-pill is-missing" aria-disabled="true">No downloads</span>' in html
 
@@ -293,6 +299,150 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "backboneTraceSpec" not in html
     assert "addPolymerTraceOverlay" not in html
     assert "vpa-structures" in html
+
+
+def _viewer_payloads(html: str) -> list[dict]:
+    start = html.index('<script id="vpa-structures" type="application/json">')
+    start = html.index(">", start) + 1
+    end = html.index("</script>", start)
+    return json.loads(html[start:end])
+
+
+def test_report_top_k_limits_candidate_heavy_surfaces_and_viewer_payloads(tmp_path: Path):
+    candidates = []
+    for idx in range(1, 7):
+        structure = _pdb(tmp_path / f"cand_{idx}.pdb")
+        candidates.append(
+            ReportCandidate(
+                candidate_id=f"cand_{idx}",
+                rank=idx,
+                sequence="A" * (50 + idx),
+                structure_path=str(structure),
+                scores={
+                    "esm3": {"mean_plddt": 0.9 - idx * 0.01, "ptm": 0.7},
+                    "ipsae": {"ipsae": 0.8 - idx * 0.02},
+                },
+            )
+        )
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_topk", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id="wf_topk",
+            nodes=[_node("n1", "pxdesign"), _node("n2", "esm3"), _node("n3", "ipsae")],
+        ),
+        candidates=candidates,
+    )
+
+    html = render_report_html(model, top_k=3)
+
+    assert html.count('<button type="button" class="board-card candidate-board-row') == 3
+    assert html.count('<template class="cand-detail-tpl"') == 3
+    assert html.count('class="comparison-row') == 3
+    assert 'data-display-limit-notice' in html
+    assert "Showing top 3 of 6 candidates" in html
+    assert (
+        '<span class="saas-stat-value">6</span><span class="saas-stat-label">Generated</span>'
+        in html
+    )
+    candidates_section = html[html.index('id="candidates"'):html.index('id="structure-comparison"')]
+    for idx in range(1, 4):
+        assert f"cand_{idx}" in candidates_section
+    for idx in range(4, 7):
+        assert f"cand_{idx}" not in candidates_section
+    payload_ids = {payload["candidate_id"] for payload in _viewer_payloads(html)}
+    assert payload_ids == {"cand_1", "cand_2", "cand_3"}
+    assert all(not payload["id"].startswith("viewer-cand_4") for payload in _viewer_payloads(html))
+
+
+def test_report_top_k_always_includes_final_candidate(tmp_path: Path):
+    candidates = []
+    for idx in range(1, 4):
+        structure = _pdb(tmp_path / f"cand_{idx}.pdb")
+        candidates.append(
+            ReportCandidate(
+                candidate_id=f"cand_{idx}",
+                rank=idx,
+                sequence="A" * 60,
+                structure_path=str(structure),
+                scores={"esm3": {"mean_plddt": 0.9, "ptm": 0.7}},
+            )
+        )
+    final_structure = _pdb(tmp_path / "cand_final.pdb")
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_topk_final", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id="wf_topk_final",
+            nodes=[_node("n1", "pxdesign"), _node("n2", "esm3")],
+        ),
+        candidates=candidates,
+        final_candidates=[
+            ReportCandidate(
+                candidate_id="cand_final",
+                rank=99,
+                sequence="A" * 60,
+                structure_path=str(final_structure),
+                scores={"esm3": {"mean_plddt": 0.88, "ptm": 0.7}},
+            )
+        ],
+    )
+
+    html = render_report_html(model, top_k=2)
+
+    candidates_section = html[html.index('id="candidates"'):html.index('id="structure-comparison"')]
+    assert "cand_final" in candidates_section
+    assert html.count('<button type="button" class="board-card candidate-board-row') == 1
+    assert "cand_2" not in candidates_section
+    payload_ids = {payload["candidate_id"] for payload in _viewer_payloads(html)}
+    assert payload_ids == {"cand_final"}
+
+
+def test_cross_candidate_binder_length_filters_long_complex_sequence_and_places_structure_download(
+    tmp_path: Path,
+):
+    structure = _pdb(tmp_path / "binder_short.pdb")
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_length", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id="wf_length",
+            nodes=[_node("n1", "pxdesign"), _node("n2", "esm3"), _node("n3", "ipsae")],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="binder_short",
+                rank=1,
+                sequence="A" * 60,
+                structure_path=str(structure),
+                scores={"esm3": {"mean_plddt": 0.9, "ptm": 0.7}, "ipsae": {"ipsae": 0.8}},
+            ),
+            ReportCandidate(
+                candidate_id="long_complex",
+                rank=2,
+                sequence="A" * 560,
+                scores={"esm3": {"mean_plddt": 0.85, "ptm": 0.65}, "ipsae": {"ipsae": 0.1}},
+            ),
+        ],
+    )
+
+    html = render_report_html(model)
+    cross = html[html.index('id="cross-candidate-analysis"'):html.index('id="workflow-audit"')]
+
+    assert "Binder length (aa)" in cross
+    assert 'data-metric="Binder length (aa)"' in cross
+    assert 'data-default-min="60"' in cross
+    assert 'data-default-max="60"' in cross
+    assert 'data-default-max="560"' not in cross
+    assert 'data-candidate-range-filter' in cross
+    assert 'data-filter-results' in cross
+    assert 'data-filter-result' in cross
+    assert 'data-metrics="' in cross
+    assert "&quot;Binder length (aa)&quot;:60" in cross
+    result_start = cross.index('<article class="candidate-filter-result"')
+    result_end = cross.index("</article>", result_start)
+    result = cross[result_start:result_end]
+    assert result.index("candidate-filter-result-metrics") < result.index("asset-download-link")
+    assert 'href="data:chemical/x-pdb;base64,' in result
+    assert 'download="binder_short.pdb"' in result
+    assert "long_complex" not in result
 
 
 def test_non_binder_filter_highlights_fold_confidence_primary_metric(tmp_path: Path):

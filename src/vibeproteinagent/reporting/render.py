@@ -33,6 +33,7 @@ from .metrics import (
     pretty_metric_name as _pretty_metric_name,
 )
 from .models import (
+    BoardGroup,
     CandidateEvidenceBundle,
     CandidateStatus,
     EvidenceStep,
@@ -88,7 +89,7 @@ def write_report(
     viewer_mode: str = "offline",
     report_format: str = "html",
     share: bool = False,
-    top_k: int = 5,
+    top_k: int = 20,
 ) -> Path:
     if viewer_mode not in {"offline", "online"}:
         raise InvalidParamsError(
@@ -313,6 +314,13 @@ def _download_link(
     )
 
 
+def _is_structure_artifact_path(path_str: str | Path, kind: str | None = None) -> bool:
+    if (kind or "").strip().lower() == "structure":
+        return True
+    suffix = Path(path_str).suffix.lower()
+    return suffix in {".pdb", ".ent", ".cif", ".mmcif"}
+
+
 def _load_3dmol_min_js() -> str | None:
     """Return the inlined 3Dmol-min.js asset for offline embedding.
 
@@ -510,11 +518,12 @@ def _board_group_display_title(status: str, fallback: str) -> str:
 
 def _detail_structure_tab(bundle: CandidateEvidenceBundle, *, active: bool) -> str:
     # Structure is the default landing tab whenever the candidate has a 3D
-    # artifact: the render gets the full panel width as a hero, with the
-    # downloadable artifacts (mostly the structure file) directly beneath it.
+    # artifact: the render gets the full panel width as a hero. Structure
+    # downloads are intentionally centralized in Cross-Candidate Analysis so
+    # single-file reports do not repeat the same base64 payload in every view.
     cand = bundle.candidate
     chain_context = _chain_context_for(cand)
-    body = _viewer_block(cand, chain_context) + _candidate_downloads(cand)
+    body = _viewer_block(cand, chain_context)
     cls = "cand-tabpanel is-active" if active else "cand-tabpanel"
     return f'<div class="{cls}" data-tab="structure">{body}</div>'
 
@@ -921,7 +930,6 @@ def _detail_template(
         primary_media = (
             '<div class="dossier-structure-primary">'
             f'{_viewer_block(cand, chain_context)}'
-            f'{_candidate_downloads(cand)}'
             '</div>'
         )
     else:
@@ -956,6 +964,7 @@ def _review_console_section(
     review: ReportReviewModel,
     board_vm: CandidateBoardViewModel | None = None,
     preset: WorkflowReviewPreset | None = None,
+    display_notice: str = "",
 ) -> str:
     base = review.base
     final_submission = base.final_submission or {}
@@ -1001,10 +1010,11 @@ def _review_console_section(
     <div>
       <p class="card-eyebrow">Designs</p>
       <h2 class="card-title">Candidate review</h2>
-      <p class="saas-section-subtitle">{_h(guidance)} Open a dossier to inspect structure, evidence families, risks, missing evidence, downloads, and provenance.</p>
+      <p class="saas-section-subtitle">{_h(guidance)} Open a dossier to inspect structure, evidence families, risks, missing evidence, and provenance.</p>
     </div>
     <span class="card-meta">{_h(meta)}</span>
   </header>
+  {display_notice}
   {banner}
   {console_body}
 </section>"""
@@ -1201,7 +1211,7 @@ def _saas_candidate_comparison_section(
     )
     rows = "".join(
         _comparison_row(row, metric_cols, bundles_by_id.get(row.candidate_id))
-        for row in board.rows[:12]
+        for row in board.rows
     )
     if not rows:
         rows = '<tr><td colspan="12" class="empty">No candidates available for comparison.</td></tr>'
@@ -1304,6 +1314,8 @@ def _comparison_asset_actions(
     seen: set[str] = set()
     if candidate is not None:
         for artifact in candidate.artifacts:
+            if _is_structure_artifact_path(artifact.path, artifact.kind):
+                continue
             if artifact.path in seen:
                 continue
             seen.add(artifact.path)
@@ -1312,15 +1324,6 @@ def _comparison_asset_actions(
                     artifact.path,
                     artifact.field,
                     kind=artifact.kind,
-                    css="asset-pill is-on asset-download-link",
-                )
-            )
-        if candidate.structure_path and candidate.structure_path not in seen:
-            download_links.append(
-                _download_link(
-                    candidate.structure_path,
-                    "structure",
-                    kind="structure",
                     css="asset-pill is-on asset-download-link",
                 )
             )
@@ -1370,6 +1373,104 @@ def _structure_comparison_bundles(
         if limit is not None and len(bundles) >= limit:
             break
     return bundles
+
+
+@dataclass(frozen=True)
+class _DisplayLimit:
+    requested: int
+    total: int
+    displayed: int
+    final_count: int
+
+    @property
+    def truncated(self) -> bool:
+        return self.displayed < self.total
+
+
+def _display_limited_review(
+    review: ReportReviewModel,
+    top_k: int,
+) -> tuple[ReportReviewModel, _DisplayLimit]:
+    requested = max(1, int(top_k or 1))
+    ordered = _review_ordered_bundles(review)
+    total = len(ordered)
+    selected: list[CandidateEvidenceBundle] = []
+    seen: set[str] = set()
+
+    def add(bundle: CandidateEvidenceBundle) -> None:
+        key = bundle.candidate.candidate_id or str(id(bundle))
+        if key in seen:
+            return
+        seen.add(key)
+        selected.append(bundle)
+
+    for bundle in ordered:
+        if bundle.status == CandidateStatus.FINAL:
+            add(bundle)
+
+    for bundle in ordered:
+        if bundle.status == CandidateStatus.FINAL:
+            continue
+        if len(selected) >= requested:
+            break
+        add(bundle)
+
+    selected_ids = {id(bundle) for bundle in selected}
+    groups: list[BoardGroup] = []
+    for group in review.board_groups:
+        bundles = [bundle for bundle in group.bundles if id(bundle) in selected_ids]
+        if bundles:
+            groups.append(replace(group, bundles=bundles))
+    limited = replace(review, board_groups=groups, bundles=selected)
+    meta = _DisplayLimit(
+        requested=requested,
+        total=total,
+        displayed=len(selected),
+        final_count=sum(1 for bundle in selected if bundle.status == CandidateStatus.FINAL),
+    )
+    return limited, meta
+
+
+def _display_limited_board(
+    board: CandidateBoardViewModel,
+    review: ReportReviewModel,
+) -> CandidateBoardViewModel:
+    order = [bundle.candidate.candidate_id for bundle in _review_ordered_bundles(review)]
+    allowed = set(order)
+    by_id = {row.candidate_id: row for row in board.rows if row.candidate_id in allowed}
+    rows = [by_id[candidate_id] for candidate_id in order if candidate_id in by_id]
+    return replace(
+        board,
+        rows=rows,
+        total_count=len(rows),
+        recommended_count=sum(1 for row in rows if row.status == CandidateStatus.FINAL),
+    )
+
+
+def _display_limited_dossiers(
+    dossiers: list[CandidateDossierViewModel],
+    review: ReportReviewModel,
+) -> list[CandidateDossierViewModel]:
+    order = [bundle.candidate.candidate_id for bundle in _review_ordered_bundles(review)]
+    by_id = {dossier.candidate_id: dossier for dossier in dossiers}
+    return [by_id[candidate_id] for candidate_id in order if candidate_id in by_id]
+
+
+def _display_limit_notice(meta: _DisplayLimit) -> str:
+    if not meta.truncated:
+        return ""
+    effective = (
+        f" Showing {meta.displayed} candidates because {meta.final_count} final "
+        "submitted candidates are always included."
+        if meta.displayed != meta.requested
+        else ""
+    )
+    return (
+        '<div class="display-limit-notice" data-display-limit-notice>'
+        f'Showing top {meta.requested} of {meta.total} candidates; final submitted '
+        f'candidates are always included.{_h(effective)}'
+        '</div>'
+    )
 
 
 def _review_ordered_bundles(review: ReportReviewModel) -> list[CandidateEvidenceBundle]:
@@ -1445,7 +1546,6 @@ def _structure_comparison_card(
         f'{_viewer_block(candidate, _chain_context_for(candidate), dom_id=dom_id, compact=True)}'
         '<footer class="structure-compare-foot">'
         f'<a href="#candidates" data-open-cand="{_attr(open_target)}">Open full dossier</a>'
-        f'{_download_link(candidate.structure_path or "", "structure", kind="structure", css="asset-pill is-on asset-download-link") if candidate.structure_path else ""}'
         '</footer>'
         '</article>'
     )
@@ -1660,7 +1760,11 @@ def _saas_cross_candidate_section(
         qc_counts[qc_label] = qc_counts.get(qc_label, 0) + 1
         for item in d.missing_evidence:
             missing_counts[item.label] = missing_counts.get(item.label, 0) + 1
-    length_card = _saas_hist_card(length_title, lengths)
+    length_card = _saas_filter_metric_card(
+        "length",
+        length_title,
+        [float(length) for length in lengths],
+    )
     status_card = _saas_count_card("Review Status", status_counts)
     missing_card = _saas_count_card("Missing Evidence", missing_counts)
     qc_card = _saas_count_card("QC Summary", qc_counts)
@@ -1685,7 +1789,12 @@ def _saas_cross_candidate_section(
         else ""
     )
     diversity = _diversity_notice(dossiers)
-    filter_panel = _cross_candidate_filter_panel(dossiers, filter_metric_labels, preset)
+    filter_panel = _cross_candidate_filter_panel(
+        dossiers,
+        [*filter_metric_labels, length_title],
+        preset,
+        length_title=length_title,
+    )
     return f"""<section id="cross-candidate-analysis" class="card saas-section">
   <header class="card-header">
     <div>
@@ -1708,7 +1817,7 @@ def _cross_candidate_length_values(
     if preset is None or preset.workflow_type != WorkflowType.BINDER or not lengths:
         return "Length (aa)", lengths
     ordered = sorted(lengths)
-    median = ordered[len(ordered) // 2]
+    median = ordered[(len(ordered) - 1) // 2]
     binder_lengths = [length for length in lengths if length <= median * 1.5]
     return "Binder length (aa)", binder_lengths or lengths
 
@@ -2341,6 +2450,8 @@ def _cross_candidate_filter_panel(
     dossiers: list[CandidateDossierViewModel],
     metric_labels: list[str],
     preset: WorkflowReviewPreset | None = None,
+    *,
+    length_title: str | None = None,
 ) -> str:
     metric_labels = list(dict.fromkeys(metric_labels))
     result_dossiers = [dossier for dossier in dossiers if dossier.structure_path]
@@ -2349,7 +2460,7 @@ def _cross_candidate_filter_panel(
         reverse=True,
     )
     result_cards = "".join(
-        _cross_candidate_filter_result(dossier, metric_labels, preset)
+        _cross_candidate_filter_result(dossier, metric_labels, preset, length_title=length_title)
         for dossier in result_dossiers
     )
     if not metric_labels or not result_cards:
@@ -2371,6 +2482,8 @@ def _cross_candidate_filter_result(
     dossier: CandidateDossierViewModel,
     metric_labels: list[str],
     preset: WorkflowReviewPreset | None = None,
+    *,
+    length_title: str | None = None,
 ) -> str:
     metrics: dict[str, float] = {}
     for chip in dossier.metric_chips:
@@ -2380,6 +2493,10 @@ def _cross_candidate_filter_result(
         title = _cross_candidate_metric_title(chip.label, preset)
         if title in metric_labels:
             metrics[title] = value
+    if length_title and length_title in metric_labels:
+        length_value = _dossier_length_value(dossier)
+        if length_value is not None:
+            metrics[length_title] = float(length_value)
     metric_summary = "".join(
         '<span class="candidate-filter-primary-metric">'
         f'{_h(metric_labels[0])} {_h(_fmt_range_value(metrics[metric_labels[0]]))}</span>'
@@ -2429,11 +2546,20 @@ def _dossier_metric_value_by_title(
     title: str,
     preset: WorkflowReviewPreset | None = None,
 ) -> float | None:
+    if title in {"Length (aa)", "Binder length (aa)"}:
+        length_value = _dossier_length_value(dossier)
+        return float(length_value) if length_value is not None else None
     for chip in dossier.metric_chips:
         if _cross_candidate_metric_title(chip.label, preset) != title:
             continue
         return _chip_numeric_value(chip)
     return None
+
+
+def _dossier_length_value(dossier: CandidateDossierViewModel) -> int | None:
+    if not dossier.sequence:
+        return None
+    return len(dossier.sequence)
 
 
 def _metric_filter_step(lo: float, hi: float) -> str:
@@ -2582,7 +2708,7 @@ def render_report_html(
     viewer_mode: str = "offline",
     report_format: str = "html",
     share: bool = False,
-    top_k: int = 5,
+    top_k: int = 20,
 ) -> str:
     """Build a self-contained product-style HTML report.
 
@@ -2594,12 +2720,6 @@ def render_report_html(
     timestamp).
     """
     del share, report_format  # share/bundle behaviour handled upstream in write_report
-    # ``top_k`` no longer truncates the candidate surface: the review console's
-    # board shows the *full* candidate population grouped by status (Final /
-    # Ranked / Incomplete / Failed), so every design stays auditable rather than
-    # being silently dropped below a cut-off. The parameter is retained for CLI
-    # compatibility but is intentionally a no-op for the console layout.
-    del top_k
     # Deduplicate / enrich candidate records for display so one protein that
     # appears as both a final pick and one or more explored records doesn't
     # render as several near-empty cards. Display-only — the run record is
@@ -2616,6 +2736,13 @@ def render_report_html(
     # from the (already display-prepared) model; never re-executes the engine.
     review = build_review_model(deduped)
     saas_vm = build_report_view_model(deduped, review)
+    display_review, display_limit = _display_limited_review(review, top_k)
+    display_board = _display_limited_board(saas_vm.candidate_board, display_review)
+    display_dossiers = _display_limited_dossiers(
+        saas_vm.candidate_dossiers,
+        display_review,
+    )
+    display_notice = _display_limit_notice(display_limit)
     model = _flatten_candidate_view(deduped)
     title = f"VPA report · {model.summary.id}"
 
@@ -2641,7 +2768,7 @@ def render_report_html(
     if show_candidates:
         nav_items.append(("candidate-dossiers", "Evidence Summary", "dossier"))
         nav_items.append(("candidates", "Candidate Review", "candidate"))
-        if _structure_comparison_bundles(review):
+        if _structure_comparison_bundles(display_review):
             nav_items.append(("structure-comparison", "Structure Comparison", "structure"))
         nav_items.append(("candidate-comparison", "Candidate Comparison", "compare"))
         nav_items.append(("cross-candidate-analysis", "Cross-Candidate Analysis", "analytics"))
@@ -2660,20 +2787,18 @@ def render_report_html(
 
     nav_html = "".join(_nav_item_html(*item) for item in nav_items)
 
-    # Load structures for every candidate the console can open — one payload per
-    # distinct candidate that carries a structure. The console activates each
-    # candidate's viewer lazily from this shared <script> block, so every board
-    # card (not just the top-k) resolves to a real viewer when clicked. Dedup by
-    # candidate_id to avoid embedding the same file twice.
+    # Load structures only for the display-limited candidate surface. The full
+    # evidence model remains counted above, but heavyweight inline structure
+    # payloads follow the report's top-k contract.
     _viewer_entries: list[tuple[ReportCandidate, str]] = []
     _seen_viewer_ids: set[str] = set()
-    for _bundle in review.bundles:
+    for _bundle in display_review.bundles:
         _c = _bundle.candidate
         if _c.candidate_id in _seen_viewer_ids:
             continue
         _seen_viewer_ids.add(_c.candidate_id)
         _viewer_entries.append((_c, _structure_dom_id(_c.candidate_id)))
-    for _index, _bundle in enumerate(_structure_comparison_bundles(review), start=1):
+    for _index, _bundle in enumerate(_structure_comparison_bundles(display_review), start=1):
         _c = _bundle.candidate
         _viewer_entries.append((_c, _comparison_structure_dom_id(_c.candidate_id, _index)))
     viewer_payloads = _collect_viewer_payloads(_viewer_entries)
@@ -2705,27 +2830,32 @@ def render_report_html(
 
     # ----- Candidate review console (primary surface) -----
     candidate_dossiers_section = (
-        _saas_candidate_dossiers_section(saas_vm.candidate_dossiers, saas_vm.review_preset)
+        _saas_candidate_dossiers_section(display_dossiers, saas_vm.review_preset)
         if show_candidates
         else ""
     )
     candidates_section = (
-        _review_console_section(review, saas_vm.candidate_board, saas_vm.review_preset)
+        _review_console_section(
+            display_review,
+            display_board,
+            saas_vm.review_preset,
+            display_notice=display_notice,
+        )
         if show_candidates
         else ""
     )
     candidate_comparison_section = (
-        _saas_candidate_comparison_section(saas_vm.candidate_board, saas_vm.review_preset, review)
+        _saas_candidate_comparison_section(display_board, saas_vm.review_preset, display_review)
         if show_candidates
         else ""
     )
     structure_comparison_section = (
-        _structure_comparison_section(review, saas_vm.review_preset)
+        _structure_comparison_section(display_review, saas_vm.review_preset)
         if show_candidates
         else ""
     )
     cross_candidate_section = (
-        _saas_cross_candidate_section(saas_vm.candidate_dossiers, saas_vm.review_preset)
+        _saas_cross_candidate_section(display_dossiers, saas_vm.review_preset)
         if show_candidates
         else ""
     )
@@ -3531,6 +3661,7 @@ def _collect_viewer_payloads(entries: list[tuple[ReportCandidate, str]]) -> list
     """
     payloads: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    seen_paths: dict[str, str] = {}
     for candidate, dom_id in entries:
         if dom_id in seen_ids:
             continue
@@ -3539,6 +3670,17 @@ def _collect_viewer_payloads(entries: list[tuple[ReportCandidate, str]]) -> list
             continue
         path = Path(candidate.structure_path)
         if not path.is_file():
+            continue
+        path_key = str(path.expanduser().resolve())
+        if path_key in seen_paths:
+            payloads.append(
+                {
+                    "id": dom_id,
+                    "candidate_id": candidate.candidate_id,
+                    "filename": path.name,
+                    "content_ref": seen_paths[path_key],
+                }
+            )
             continue
         try:
             content = path.read_text(errors="replace")
@@ -3550,6 +3692,7 @@ def _collect_viewer_payloads(entries: list[tuple[ReportCandidate, str]]) -> list
         # Mark standard-AA atoms as ATOM so 3Dmol cartoons the protein and the
         # Sidechains toggle works even for PXDesign/Protenix HETATM-only CIFs.
         content = _normalize_structure_for_viewer(content, fmt)
+        seen_paths[path_key] = dom_id
         payloads.append(
             {
                 "id": dom_id,
@@ -13353,6 +13496,11 @@ code {
   background:#fff7ed; border:1px solid #fed7aa; color:#7c2d12;
 }
 .console-banner p { margin:4px 0 0; color:#9a3412; font-size:13px; }
+.display-limit-notice {
+  margin:0 0 16px; padding:12px 14px; border-radius:10px;
+  background:#f8fafc; border:1px solid var(--line); color:var(--muted);
+  font-size:13px; font-weight:600;
+}
 
 .console {
   display:grid; grid-template-columns:minmax(240px, 320px) 1fr; gap:18px; align-items:start;
@@ -14483,6 +14631,10 @@ body.sidebar-collapsed .sidebar-foot {
 }
 .card-console > .card-header + .console,
 .card-console > .card-header + .console-banner,
+.card-console > .card-header + .display-limit-notice,
+.card-console > .card-header + .display-limit-notice + .console,
+.card-console > .card-header + .display-limit-notice + .console-banner,
+.card-console > .card-header + .display-limit-notice + .console-banner + .console,
 .card-console > .card-header + .console-banner + .console {
   margin-top:0;
 }
@@ -16578,7 +16730,17 @@ def _js() -> str:
   // inside an inert <template> until its board card is selected, so eager
   // getElementById can't reach them — the console drives initialisation lazily.
   const payloadMap = {};
-  for (const payload of structurePayloads) payloadMap[payload.id] = payload;
+  for (const payload of structurePayloads) {
+    const ref = payload.content_ref ? payloadMap[payload.content_ref] : null;
+    payloadMap[payload.id] = ref
+      ? Object.assign({}, ref, payload, {
+          content: ref.content,
+          format: ref.format,
+          has_sidechains: ref.has_sidechains,
+          has_plddt: ref.has_plddt
+        })
+      : payload;
+  }
   window.__vpaPayloadMap = payloadMap;
 
   if (typeof $3Dmol === 'undefined') {

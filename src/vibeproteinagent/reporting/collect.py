@@ -149,7 +149,7 @@ _FINALIZATION_GENERATOR_TOOLS = frozenset({
 })
 
 
-def collect_report_model(workspace: Workspace, source_id: str, *, top_k: int = 5) -> ReportModel:
+def collect_report_model(workspace: Workspace, source_id: str, *, top_k: int = 20) -> ReportModel:
     del top_k  # top-k is a rendering concern; collection keeps the complete model.
     if source_id.startswith("traj_"):
         return _collect_trajectory(workspace, source_id)

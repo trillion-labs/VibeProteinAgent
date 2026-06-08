@@ -438,6 +438,132 @@ def test_agent_rationale_thresholds_use_short_reasoning_excerpt():
     assert "this long section should not be copied" not in overview.agent_objective
 
 
+def test_agent_objective_prefers_raw_objective_over_submission_metadata():
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+        raw_summary={"objective": "Design a thermostable V452 binder."},
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "accepted",
+            "objective": "Submission-level objective should not win.",
+            "acceptance_criteria": "ipSAE>=0.7",
+            "reasoning": (
+                "OBJECTIVE & ACCEPTANCE CRITERIA: reasoning objective should "
+                "not win either."
+            ),
+        },
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert "Objective: Design a thermostable V452 binder." in overview.agent_objective
+    assert "Submission-level objective should not win" not in overview.agent_objective
+    assert "reasoning objective should not win" not in overview.agent_objective
+
+
+def test_agent_objective_uses_structured_final_submission_fields_when_raw_missing():
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "accepted",
+            "design_objective": "Design a short binder for residue V452.",
+            "acceptance_criteria": {"ipSAE": ">=0.7", "pLDDT": ">=80"},
+        },
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert "Objective: Design a short binder for residue V452." in overview.agent_objective
+    assert '"ipSAE": ">=0.7"' in overview.agent_objective
+    assert "Objective metadata was not recorded" not in overview.agent_objective
+
+
+def test_agent_objective_uses_structured_final_submission_criteria_when_objective_missing():
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "no_acceptable_candidate",
+            "acceptance_criteria": "binder contact at V452 and ipSAE>=0.7",
+        },
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert (
+        "Objective: Acceptance criteria: binder contact at V452 and ipSAE>=0.7"
+        in overview.agent_objective
+    )
+    assert "No explicit numeric thresholds were captured" not in overview.agent_objective
+
+
+def test_agent_objective_falls_back_to_explicit_reasoning_objective_section():
+    reasoning = (
+        "NO ACCEPTABLE CANDIDATE.\n\n"
+        "OBJECTIVE: design a binder that contacts V452 and passes ipSAE>=0.7.\n\n"
+        "EXPLORATION: this should stay out of the objective summary."
+    )
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "no_acceptable_candidate",
+            "reasoning": reasoning,
+        },
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert (
+        "Objective: design a binder that contacts V452 and passes ipSAE>=0.7."
+        in overview.agent_objective
+    )
+    assert "this should stay out" not in overview.agent_objective
+
+
+def test_agent_objective_uses_metadata_not_recorded_fallback_without_explicit_section():
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "no_acceptable_candidate",
+            "reasoning": (
+                "No candidate passed the informal cutoff, but no explicit "
+                "objective section was recorded."
+            ),
+        },
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert (
+        "Objective metadata was not recorded; report summarizes recorded evidence."
+        in overview.agent_objective
+    )
+    assert "No separate objective field" not in overview.agent_objective
+
+
 def test_workflow_review_preset_classifies_binder_from_interface_evidence():
     model = _model(
         nodes=[

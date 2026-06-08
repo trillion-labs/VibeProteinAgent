@@ -196,6 +196,10 @@ _WORKFLOW_LABELS = {
     WorkflowType.GENERIC: "Generic workflow",
 }
 
+_OBJECTIVE_METADATA_FALLBACK = (
+    "Objective metadata was not recorded; report summarizes recorded evidence."
+)
+
 
 def build_report_view_model(
     model: ReportModel, review: ReportReviewModel
@@ -1109,19 +1113,20 @@ def _agent_objective_summary(
     model: ReportModel,
     preset: WorkflowReviewPreset,
 ) -> str:
+    del preset  # Objective metadata is reported from recorded fields only.
     objective = _recorded_objective(model)
     thresholds = _recorded_thresholds(model)
     parts: list[str] = []
     if objective:
         parts.append(f"Objective: {objective}")
     else:
-        parts.append(
-            "No separate objective field was recorded; this report summarizes the "
-            f"recorded tool evidence as a {preset.label.lower()}."
-        )
+        parts.append(_OBJECTIVE_METADATA_FALLBACK)
     if thresholds:
-        parts.append(f"Thresholds/criteria: {thresholds}")
-    else:
+        if thresholds != objective and not (
+            _objective_text_is_criteria(objective) and thresholds in objective
+        ):
+            parts.append(f"Thresholds/criteria: {thresholds}")
+    elif not _objective_text_is_criteria(objective):
         parts.append("No explicit numeric thresholds were captured in VPA metadata.")
     return " ".join(parts)
 
@@ -1239,10 +1244,14 @@ def _recorded_user_query(model: ReportModel) -> str:
 
 def _recorded_objective(model: ReportModel) -> str:
     raw = model.raw_summary if isinstance(model.raw_summary, dict) else {}
+    final_submission = model.final_submission if isinstance(model.final_submission, dict) else {}
+    reasoning = final_submission.get("reasoning")
     return _first_nonempty(
         str(raw.get("objective")) if raw.get("objective") is not None else None,
         str(raw.get("design_objective")) if raw.get("design_objective") is not None else None,
         _workflow_context_from_raw(raw, "objective"),
+        _final_submission_objective_metadata(final_submission),
+        _objective_excerpt_from_reasoning(reasoning) if isinstance(reasoning, str) else None,
     )
 
 
@@ -1259,26 +1268,70 @@ def _recorded_thresholds(model: ReportModel) -> str:
         if raw.get(key) not in (None, "", {}, []):
             values.append(raw.get(key))
     final_submission = model.final_submission if isinstance(model.final_submission, dict) else {}
-    for key in ("acceptance_criteria", "success_criteria", "thresholds"):
+    for key in (
+        "acceptance_criteria",
+        "success_criteria",
+        "criteria",
+        "thresholds",
+        "acceptance_thresholds",
+    ):
         if final_submission.get(key) not in (None, "", {}, []):
             values.append(final_submission.get(key))
     reasoning = final_submission.get("reasoning")
-    if isinstance(reasoning, str) and any(
-        token in reasoning.lower()
-        for token in ("threshold", "criteria", "cutoff", ">= ", "<= ")
-    ):
+    if not values and isinstance(reasoning, str):
         values.append(_threshold_excerpt_from_reasoning(reasoning))
     return "; ".join(
         _format_threshold_value(value) for value in values if value not in (None, "", {}, [])
     )
 
 
+def _final_submission_objective_metadata(final_submission: dict[str, Any]) -> str:
+    for key in ("objective", "design_objective"):
+        if final_submission.get(key) not in (None, "", {}, []):
+            return _format_threshold_value(final_submission.get(key))
+    labels = {
+        "acceptance_criteria": "Acceptance criteria",
+        "success_criteria": "Success criteria",
+        "criteria": "Criteria",
+        "thresholds": "Thresholds",
+        "acceptance_thresholds": "Acceptance thresholds",
+    }
+    for key, label in labels.items():
+        if final_submission.get(key) not in (None, "", {}, []):
+            return f"{label}: {_format_threshold_value(final_submission.get(key))}"
+    return ""
+
+
+def _objective_text_is_criteria(objective: str) -> bool:
+    return objective.startswith(
+        (
+            "Acceptance criteria:",
+            "Success criteria:",
+            "Criteria:",
+            "Thresholds:",
+            "Acceptance thresholds:",
+        )
+    )
+
+
+def _objective_excerpt_from_reasoning(reasoning: str) -> str:
+    return _explicit_objective_or_criteria_section(reasoning, limit=260)
+
+
 def _threshold_excerpt_from_reasoning(reasoning: str) -> str:
+    return _explicit_objective_or_criteria_section(reasoning, limit=260)
+
+
+def _explicit_objective_or_criteria_section(reasoning: str, *, limit: int) -> str:
     text = " ".join(str(reasoning or "").split())
     if not text:
         return ""
     for marker in (
         "OBJECTIVE & ACCEPTANCE CRITERIA:",
+        "OBJECTIVE AND ACCEPTANCE CRITERIA:",
+        "OBJECTIVE / ACCEPTANCE CRITERIA:",
+        "DESIGN OBJECTIVE:",
+        "OBJECTIVE:",
         "ACCEPTANCE CRITERIA:",
         "SUCCESS CRITERIA:",
         "CRITERIA:",
@@ -1292,8 +1345,8 @@ def _threshold_excerpt_from_reasoning(reasoning: str) -> str:
             )
             if next_heading:
                 section = section[: next_heading.start()]
-            return _clip(section, 260)
-    return _clip(text, 180)
+            return _clip(section, limit)
+    return ""
 
 
 def _format_threshold_value(value: Any) -> str:

@@ -22,14 +22,13 @@ def report(
     ),
     out: str | None = typer.Option(None, "--out", "-o", help="Output HTML path or bundle dir."),
     top_k: int = typer.Option(
-        5,
+        20,
         "--top-k",
         min=1,
         max=100,
         help=(
-            "Deprecated / no-op. The review console shows the full candidate "
-            "population grouped by status, so nothing is truncated. Retained "
-            "for backward compatibility."
+            "Maximum displayed candidates in candidate-heavy report sections. "
+            "Final submitted candidates are always included."
         ),
     ),
     viewer: str = typer.Option(

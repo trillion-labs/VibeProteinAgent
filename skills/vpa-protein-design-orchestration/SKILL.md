@@ -19,6 +19,11 @@ Infer or ask for:
 - stopping condition: accepted candidate or no acceptable candidate.
 
 Keep criteria explicit and conservative when the query is underspecified.
+When starting the trajectory, pass the objective explicitly:
+`vpa trajectory start --workspace <workspace> --user-query "<original request>" --objective "<objective>"`.
+Record measurable acceptance criteria in workflow params, run params, or the
+final `submit_candidate` reasoning before rendering the report; do not rely on
+the report to reconstruct them from generic prose.
 
 ## Tool Families
 
@@ -94,8 +99,11 @@ ranked, and submitted candidates.
 
 Use one `traj_` trajectory for each user query. You may choose direct `vpa run`
 calls or an explicit `vpa workflow run` block at any point; the choice is open.
-Do not treat workflow as required for protein design. Use it only when you decide
-a fixed sub-DAG is useful, then continue the adaptive loop from its results.
+Start that trajectory with `--objective`, and keep the same objective wording in
+downstream params when tools expose `objective`, `design_objective`,
+`acceptance_criteria`, `success_criteria`, or `thresholds`. Do not treat workflow
+as required for protein design. Use it only when you decide a fixed sub-DAG is
+useful, then continue the adaptive loop from its results.
 
 When a job fails (OOM, CUDA, bad params), don't drop the objective: read
 `vpa logs`, fix params and retry or swap to another tool, and fold the failure
@@ -122,13 +130,14 @@ objective:
 
 ```text
 - [ ] objective + measurable acceptance criteria stated
-- [ ] one trajectory tracks this user query
+- [ ] one trajectory tracks this user query and was started with `--objective`
 - [ ] candidate tools/workflows tried, with reason
 - [ ] any top-k/subset validation rule recorded
 - [ ] evidence jobs run -> rank_designs when comparison helps
 - [ ] verified against criteria (qc / structure_analysis / rank) -> if short, fix and re-run
 - [ ] explored alternatives / iterated while it improves the objective
 - [ ] submit_candidate (accepted | no_acceptable_candidate)
+- [ ] acceptance criteria recorded before final report rendering
 - [ ] one HTML trajectory report rendered
 ```
 
