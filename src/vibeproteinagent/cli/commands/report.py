@@ -66,7 +66,7 @@ def report(
         if enrichment_job_ids:
             model = collect_report_model(ws, id)
         default_name = f"{id}_report_bundle" if format_ == "bundle" else f"{id}_report.html"
-        default_out = Path.cwd() / default_name
+        default_out = ws.root / default_name
         target_out = Path(out) if out else default_out
         canonical_report_path = resolve_report_output_path(target_out, report_format=format_)
         trajectory_store = TrajectoryStore(ws) if id.startswith("traj_") else None

@@ -166,6 +166,51 @@ def _pxdesign_record(index: int = 0) -> ProtenixV2PredictionRecord:
     )
 
 
+def _canonical_candidates_record(
+    rank: int,
+    *,
+    ranking_score: float,
+    seed: int = 101,
+) -> ProtenixV2PredictionRecord:
+    return ProtenixV2PredictionRecord(
+        candidate_id=f"protenix_v2:canonical_candidates:seed_{seed}:rank_{rank}",
+        seed=seed,
+        rank=rank,
+        cif_path=f"/tmp/canonical_candidates_rank_{rank}.cif",
+        pdb_path=f"/tmp/canonical_candidates_rank_{rank}.pdb",
+        summary_json=f"/tmp/canonical_candidates_rank_{rank}.json",
+        pae_path=f"/tmp/canonical_candidates_rank_{rank}_pae.json",
+        full_confidence_json=f"/tmp/canonical_candidates_rank_{rank}_full.json",
+        ranking_score=ranking_score,
+        plddt=90.0 - rank,
+        iptm=0.6,
+        ptm=0.7,
+    )
+
+
+def _canonical_candidate_record(
+    index: int,
+    rank: int,
+    *,
+    ranking_score: float,
+    seed: int = 101,
+) -> ProtenixV2PredictionRecord:
+    return ProtenixV2PredictionRecord(
+        candidate_id=f"protenix_v2:canonical_candidate_{index:04d}:seed_{seed}:rank_{rank}",
+        seed=seed,
+        rank=rank,
+        cif_path=f"/tmp/canonical_candidate_{index}_rank_{rank}.cif",
+        pdb_path=f"/tmp/canonical_candidate_{index}_rank_{rank}.pdb",
+        summary_json=f"/tmp/canonical_candidate_{index}_rank_{rank}.json",
+        pae_path=f"/tmp/canonical_candidate_{index}_rank_{rank}_pae.json",
+        full_confidence_json=f"/tmp/canonical_candidate_{index}_rank_{rank}_full.json",
+        ranking_score=ranking_score,
+        plddt=90.0 - rank,
+        iptm=0.6,
+        ptm=0.7,
+    )
+
+
 def test_protenix_v2_emits_canonical_candidates() -> None:
     params = ProtenixV2Input(candidates=[_candidate("MKKL")])
     records = [_record(0), _record(1)]
@@ -208,6 +253,100 @@ def test_protenix_v2_preserves_upstream_identity_for_canonical_sample() -> None:
     assert candidate["scores"]["protenix_v2"]["plddt"] == 80.0
     assert candidate["artifacts"]["esm2"]["fasta"] == "/tmp/esm2.fa"
     assert candidate["artifacts"]["protenix_v2"]["predicted_cif"] == "/tmp/protenix_0.cif"
+
+
+def test_protenix_v2_preserves_upstream_identity_for_single_canonical_candidates_sample() -> None:
+    params = ProtenixV2Input(
+        candidates=[_candidate("MKKL", candidate_id="cand_a691984f1120")]
+    )
+    record = ProtenixV2PredictionRecord(
+        candidate_id="protenix_v2:canonical_candidates:seed_101:rank_0",
+        seed=101,
+        rank=0,
+        cif_path="/tmp/canonical_candidates_sample_0.cif",
+        pdb_path="/tmp/canonical_candidates_sample_0.pdb",
+        summary_json="/tmp/canonical_candidates_summary_confidence_sample_0.json",
+        pae_path="/tmp/canonical_candidates_confidences_sample_0.json",
+        full_confidence_json="/tmp/canonical_candidates_full_data_sample_0.json",
+        ranking_score=0.9,
+        plddt=88.5,
+        iptm=0.0,
+        ptm=0.86,
+    )
+
+    candidate = _protenix_v2_candidates(params, [record])[0]
+
+    assert candidate["candidate_id"] == "cand_a691984f1120"
+    assert candidate["sequence"] == "MKKL"
+    assert candidate["structure_path"] == "/tmp/canonical_candidates_sample_0.cif"
+    assert candidate["scores"]["esm2"]["score"] == 0.42
+    assert candidate["scores"]["protenix_v2"]["plddt"] == 88.5
+    assert (
+        candidate["artifacts"]["protenix_v2"]["native_id"]
+        == "protenix_v2:canonical_candidates:seed_101:rank_0"
+    )
+    assert candidate["artifacts"]["protenix_v2"]["local_id"] == "protenix_0000"
+
+
+def test_protenix_v2_emits_one_best_candidate_per_upstream_logical_candidate() -> None:
+    params = ProtenixV2Input(candidates=[_candidate("MKKL", candidate_id="cand_same")])
+    records = [
+        _canonical_candidates_record(1, ranking_score=0.5),
+        _canonical_candidates_record(0, ranking_score=0.9),
+    ]
+
+    candidates = _protenix_v2_candidates(params, records)
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["candidate_id"] == "cand_same"
+    assert candidate["structure_path"] == "/tmp/canonical_candidates_rank_0.cif"
+    assert candidate["scores"]["protenix_v2"]["ranking_score"] == 0.9
+    assert (
+        candidate["artifacts"]["protenix_v2"]["native_id"]
+        == "protenix_v2:canonical_candidates:seed_101:rank_0"
+    )
+    assert candidate["artifacts"]["protenix_v2"]["local_id"] == "protenix_0001"
+
+
+def test_protenix_v2_keeps_distinct_upstream_candidates_when_each_has_multiple_records() -> None:
+    params = ProtenixV2Input(
+        candidates=[
+            _candidate("MKKL", candidate_id="cand_a"),
+            _candidate("ACDE", candidate_id="cand_b"),
+        ]
+    )
+    records = [
+        _canonical_candidate_record(0, 1, ranking_score=0.2),
+        _canonical_candidate_record(0, 0, ranking_score=0.8),
+        _canonical_candidate_record(1, 1, ranking_score=0.3),
+        _canonical_candidate_record(1, 0, ranking_score=0.7),
+    ]
+
+    candidates = _protenix_v2_candidates(params, records)
+
+    assert len(candidates) == 2
+    by_id = {candidate["candidate_id"]: candidate for candidate in candidates}
+    assert by_id["cand_a"]["sequence"] == "MKKL"
+    assert by_id["cand_a"]["structure_path"] == "/tmp/canonical_candidate_0_rank_0.cif"
+    assert by_id["cand_a"]["scores"]["protenix_v2"]["ranking_score"] == pytest.approx(0.8)
+    assert by_id["cand_b"]["sequence"] == "ACDE"
+    assert by_id["cand_b"]["structure_path"] == "/tmp/canonical_candidate_1_rank_0.cif"
+    assert by_id["cand_b"]["scores"]["protenix_v2"]["ranking_score"] == pytest.approx(0.7)
+
+
+def test_protenix_v2_legacy_unmapped_records_still_emit_record_level_candidates() -> None:
+    params = ProtenixV2Input(candidates=[_candidate("MKKL", candidate_id="cand_same")])
+    records = [_record(0), _record(1)]
+
+    candidates = _protenix_v2_candidates(params, records)
+
+    assert len(candidates) == 2
+    assert {candidate["structure_path"] for candidate in candidates} == {
+        "/tmp/protenix_0.cif",
+        "/tmp/protenix_1.cif",
+    }
+    assert len({candidate["candidate_id"] for candidate in candidates}) == 2
 
 
 def test_protenix_v2_output_preserves_legacy_fields() -> None:

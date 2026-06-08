@@ -826,6 +826,94 @@ def test_trajectory_report_relative_path_is_idempotent(
     assert status["complete"] is True
 
 
+def test_report_default_path_is_workspace_root(
+    runner: CliRunner,
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    traj = TrajectoryStore(tmp_workspace).create(user_query="default report path")
+    _complete_job(
+        tmp_workspace,
+        "submit_candidate",
+        {
+            "submission_id": "sub_final",
+            "outcome": "no_acceptable_candidate",
+            "terminal": True,
+            "candidates_resolved": [],
+            "reasoning": "none passed",
+            "auto_selected": False,
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            traj.trajectory_id,
+            "--workspace",
+            tmp_workspace.name,
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    expected = tmp_workspace.root / f"{traj.trajectory_id}_report.html"
+    assert payload["data"]["report_html"] == str(expected)
+    assert expected.exists()
+    assert not (tmp_path / f"{traj.trajectory_id}_report.html").exists()
+    status = TrajectoryStore(tmp_workspace).status(traj.trajectory_id)
+    assert status["report_path"] == str(expected)
+
+
+def test_bundle_report_default_path_is_workspace_root(
+    runner: CliRunner,
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    traj = TrajectoryStore(tmp_workspace).create(user_query="default bundle path")
+    _complete_job(
+        tmp_workspace,
+        "submit_candidate",
+        {
+            "submission_id": "sub_final",
+            "outcome": "no_acceptable_candidate",
+            "terminal": True,
+            "candidates_resolved": [],
+            "reasoning": "none passed",
+            "auto_selected": False,
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            traj.trajectory_id,
+            "--workspace",
+            tmp_workspace.name,
+            "--format",
+            "bundle",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    expected = tmp_workspace.root / f"{traj.trajectory_id}_report_bundle" / "report.html"
+    assert payload["data"]["report_html"] == str(expected)
+    assert expected.exists()
+    assert not (tmp_path / f"{traj.trajectory_id}_report_bundle").exists()
+    status = TrajectoryStore(tmp_workspace).status(traj.trajectory_id)
+    assert status["report_path"] == str(expected)
+
+
 def test_trajectory_bundle_report_uses_canonical_html_path(
     runner: CliRunner,
     tmp_workspace: Workspace,

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from vibeproteinagent.adapters import null_context
 from vibeproteinagent.adapters.base import torch
 from vibeproteinagent.adapters.rank_designs.adapter import RankDesignsAdapter, RankDesignsInput
+from vibeproteinagent.workspace import JobState, JobStore, Workspace
 
 
 def _canonical_candidate(
@@ -30,6 +31,56 @@ def _canonical_candidate(
         "scores": {"go_sequences": {"score": score, "plddt": 90.0}},
         "artifacts": {},
     }
+
+
+def _complete_job(
+    workspace: Workspace,
+    tool: str,
+    output: dict,
+    *,
+    params: dict | None = None,
+) -> str:
+    store = JobStore(workspace)
+    job = store.submit(tool, "1.0.0", params or {}, trajectory_id=None)
+    store.transition(job.job_id, JobState.QUEUED)
+    store.transition(job.job_id, JobState.RUNNING)
+    store.transition(job.job_id, JobState.COMPLETED, output=output)
+    return job.job_id
+
+
+def _protenix_candidate(
+    candidate_id: str,
+    *,
+    sequence: str,
+    structure_path: str,
+    ranking_score: float,
+    native_id: str,
+) -> dict:
+    candidate = _canonical_candidate(
+        candidate_id,
+        local_id="protenix_0000",
+        sequence=sequence,
+        score=0.0,
+    )
+    candidate["source"]["tool"] = "protenix_v2"
+    candidate["source"]["native_id"] = native_id
+    candidate["structure_path"] = structure_path
+    candidate["scores"] = {
+        "protenix_v2": {
+            "ranking_score": ranking_score,
+            "plddt": 85.0,
+            "iptm": 0.0,
+            "ptm": 0.8,
+        }
+    }
+    candidate["artifacts"] = {
+        "protenix_v2": {
+            "predicted_cif": structure_path,
+            "native_id": native_id,
+            "local_id": "protenix_0000",
+        }
+    }
+    return candidate
 
 
 def test_rank_designs_accepts_all_canonical_candidates(tmp_path) -> None:
@@ -292,3 +343,214 @@ def test_rank_designs_canonical_detection_only_applies_to_candidates_slot(tmp_pa
 
     assert out.ranked_candidates[0]["candidate_id"] == "cand_prediction"
     assert out.ranked_candidates[0]["sequence"] == "AAAA"
+
+
+def test_rank_designs_keeps_distinct_candidate_ids_with_same_sequence_separate(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        RankDesignsInput(
+            candidates=[
+                _canonical_candidate("cand_a", local_id="seq_0000", sequence="AAAA", score=0.2),
+                _canonical_candidate("cand_b", local_id="seq_0001", sequence="AAAA", score=0.9),
+            ],
+            top_k=10,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.candidate_count == 2
+    assert [row["candidate_id"] for row in out.ranked_candidates] == ["cand_b", "cand_a"]
+    assert [row["candidate_score"] for row in out.ranked_candidates] == [0.9, 0.2]
+
+
+def test_rank_designs_does_not_mix_same_candidate_id_alternate_structures(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    weak = _protenix_candidate(
+        "cand_same",
+        sequence="AAAA",
+        structure_path="/tmp/rank1.cif",
+        ranking_score=0.5,
+        native_id="protenix_v2:canonical_candidates:seed_101:rank_1",
+    )
+    strong = _protenix_candidate(
+        "cand_same",
+        sequence="AAAA",
+        structure_path="/tmp/rank0.cif",
+        ranking_score=0.9,
+        native_id="protenix_v2:canonical_candidates:seed_101:rank_0",
+    )
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[weak, strong], top_k=10),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.candidate_count == 1
+    assert len(out.ranked_candidates) == 1
+    row = out.ranked_candidates[0]
+    assert row["candidate_id"] == "cand_same"
+    assert row["structure_path"] == "/tmp/rank0.cif"
+    assert row["scores"]["protenix_v2"]["ranking_score"] == pytest.approx(0.9)
+    assert (
+        row["artifacts"]["protenix_v2"]["native_id"]
+        == "protenix_v2:canonical_candidates:seed_101:rank_0"
+    )
+    assert any("alternate structure variant" in warning for warning in out.warnings)
+
+
+def test_rank_designs_attaches_sequence_level_qc_to_best_alternate_structure(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    weak = _protenix_candidate(
+        "cand_same",
+        sequence="AAAA",
+        structure_path="/tmp/rank1.cif",
+        ranking_score=0.5,
+        native_id="protenix_v2:canonical_candidates:seed_101:rank_1",
+    )
+    strong = _protenix_candidate(
+        "cand_same",
+        sequence="AAAA",
+        structure_path="/tmp/rank0.cif",
+        ranking_score=0.9,
+        native_id="protenix_v2:canonical_candidates:seed_101:rank_0",
+    )
+
+    out = adapter.run(
+        RankDesignsInput(
+            candidates=[weak, strong],
+            qc_results=[
+                {
+                    "candidate_id": "cand_same",
+                    "sequence": "AAAA",
+                    "flags": ["high_instability_index"],
+                }
+            ],
+            top_k=10,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.candidate_count == 1
+    row = out.ranked_candidates[0]
+    assert row["structure_path"] == "/tmp/rank0.cif"
+    assert row["qc_flags"] == ["high_instability_index"]
+    assert row["qc_flag_count"] == 1
+    assert row["score"] == pytest.approx(0.9 + 0.85 + 0.25 * 0.8 - 0.10)
+
+
+def test_rank_designs_sequence_only_evidence_fans_out_without_collapsing_candidates(
+    tmp_path,
+) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+
+    out = adapter.run(
+        RankDesignsInput(
+            candidates=[
+                _canonical_candidate("cand_a", local_id="seq_0000", sequence="AAAA", score=0.2),
+                _canonical_candidate("cand_b", local_id="seq_0001", sequence="AAAA", score=0.9),
+            ],
+            qc_results=[{"sequence": "AAAA", "flags": ["shared_sequence_flag"]}],
+            top_k=10,
+        ),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.candidate_count == 2
+    by_id = {row["candidate_id"]: row for row in out.ranked_candidates}
+    assert set(by_id) == {"cand_a", "cand_b"}
+    assert by_id["cand_a"]["qc_flags"] == ["shared_sequence_flag"]
+    assert by_id["cand_b"]["qc_flags"] == ["shared_sequence_flag"]
+
+
+def test_rank_designs_keeps_same_candidate_id_different_sequences_separate(tmp_path) -> None:
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    first = _protenix_candidate(
+        "cand_same",
+        sequence="AAAA",
+        structure_path="/tmp/aaaa.cif",
+        ranking_score=0.8,
+        native_id="protenix_v2:canonical_candidate_0000:seed_101:rank_0",
+    )
+    second = _protenix_candidate(
+        "cand_same",
+        sequence="CCCC",
+        structure_path="/tmp/cccc.cif",
+        ranking_score=0.7,
+        native_id="protenix_v2:canonical_candidate_0001:seed_101:rank_0",
+    )
+
+    out = adapter.run(
+        RankDesignsInput(candidates=[first, second], top_k=10),
+        null_context(tmp_path / "job"),
+    )
+
+    assert out.candidate_count == 2
+    assert {row["sequence"] for row in out.ranked_candidates} == {"AAAA", "CCCC"}
+    assert any("material conflicts" in warning for warning in out.warnings)
+
+
+def test_rank_designs_does_not_collapse_distinct_protenix_jobs_with_same_output_basename(
+    tmp_workspace: Workspace,
+    tmp_path,
+) -> None:
+    job_ids = []
+    for index, sequence in enumerate(("AAAA", "CCCC", "DDDD", "EEEE")):
+        candidate = _canonical_candidate(
+            f"cand_{index}",
+            local_id="protenix_0000",
+            sequence=sequence,
+            score=0.0,
+        )
+        candidate["source"]["tool"] = "protenix_v2"
+        candidate["source"]["native_id"] = "protenix_v2:canonical_candidates:seed_101:rank_0"
+        candidate["structure_path"] = (
+            f"/tmp/protenix_job_{index}/predictions/canonical_candidates_sample_0.cif"
+        )
+        candidate["scores"] = {
+            "protenix_v2": {
+                "ranking_score": 0.1 + index,
+                "plddt": 80.0 + index,
+                "iptm": 0.0,
+                "ptm": 0.8,
+            }
+        }
+        candidate["artifacts"] = {
+            "protenix_v2": {
+                "predicted_cif": candidate["structure_path"],
+                "native_id": candidate["source"]["native_id"],
+                "local_id": "protenix_0000",
+            }
+        }
+        job_ids.append(
+            _complete_job(
+                tmp_workspace,
+                "protenix_v2",
+                {
+                    "candidates": [candidate],
+                    "predicted_cif": candidate["structure_path"],
+                    "metrics": candidate["scores"]["protenix_v2"],
+                },
+                params={"sequence": sequence},
+            )
+        )
+
+    adapter = RankDesignsAdapter(config={}, weights_dir=tmp_path, device=torch.device("cpu"))
+    out = adapter.run(
+        RankDesignsInput(job_ids=job_ids, top_k=4),
+        null_context(tmp_workspace.root / "jobs" / "job_rank"),
+    )
+
+    assert out.candidate_count == 4
+    assert {row["candidate_id"] for row in out.ranked_candidates} == {
+        "cand_0",
+        "cand_1",
+        "cand_2",
+        "cand_3",
+    }
+    assert {row["sequence"] for row in out.ranked_candidates} == {
+        "AAAA",
+        "CCCC",
+        "DDDD",
+        "EEEE",
+    }

@@ -370,7 +370,7 @@ def test_rank_designs_merges_enriched_canonical_workflow_by_candidate_id(
     )
 
     assert out.candidate_count == 1
-    assert out.warnings == []
+    assert any("alternate structure variant" in warning for warning in out.warnings)
     row = out.ranked_candidates[0]
     assert row["candidate_id"] == candidate_id
     assert row["structure_path"] == "/tmp/boltz2_pred.cif"
@@ -509,7 +509,7 @@ def test_rank_designs_merges_miniprotein_binder_validation_by_candidate_id(
     )
 
     assert out.candidate_count == 1
-    assert out.warnings == []
+    assert any("alternate structure variant" in warning for warning in out.warnings)
     row = out.ranked_candidates[0]
     assert row["candidate_id"] == candidate_id
     assert row["sequence"] == sequence

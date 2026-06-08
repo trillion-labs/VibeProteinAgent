@@ -29,9 +29,11 @@ vpa report <traj_id> --workspace <name>
 ```
 
 Each query gets its own uniquely-named workspace; write its report to a unique
-path. Omitting `--out` defaults to `<id>_report.html`, which is already unique —
-don't override it with a shared `report.html` that overwrites a prior query's
-report.
+path. Omitting `--out` writes `<id>_report.html` in the resolved workspace root
+(`$VPA_HOME/workspaces/<workspace>/`). Do not hardcode user-specific absolute
+paths; use the `report_html` value returned by `vpa report --json` or the
+printed "Report written" path. Don't override it with a shared `report.html`
+that overwrites a prior query's report.
 
 `traj_` reports cover the query trajectory: tagged direct jobs plus tagged
 workflows. `job_` reports cover one job unless the job is a legacy
@@ -44,6 +46,10 @@ report is missing evidence, record that evidence through VPA jobs or structured
 artifacts, then render the report again.
 If final candidate dossiers lack validation evidence, fix the upstream VPA
 candidate/rank/submit flow and re-render; do not patch the report narrative.
+Prefer final submissions that reference enriched/ranked candidates carrying the
+selected evidence. Submitting an earlier sequence-only candidate can make the
+final dossier look incomplete even when downstream structure or scoring jobs
+exist elsewhere in the trajectory.
 
 ## Evidence
 

@@ -79,6 +79,10 @@ Respect what each candidate actually contains:
   schema says so. Check the tool schema instead of converting formats by name;
 - use `merge_candidates` only to combine canonical candidate streams. It does
   not create evidence, improve designs, or choose a winner.
+- when validation tools enrich a logical design with structure or scoring
+  evidence, keep submitting and ranking the enriched canonical candidate stream.
+  Submitting an earlier sequence-only candidate after downstream evidence exists
+  can make the final report dossier appear to lack structure or score evidence.
 
 ## Posture: explore to maximize
 
@@ -136,10 +140,17 @@ objective:
 - [ ] evidence jobs run -> rank_designs when comparison helps
 - [ ] verified against criteria (qc / structure_analysis / rank) -> if short, fix and re-run
 - [ ] explored alternatives / iterated while it improves the objective
-- [ ] submit_candidate (accepted | no_acceptable_candidate)
+- [ ] submit_candidate (accepted | no_acceptable_candidate), preferably
+      referencing the enriched/ranked candidate that carries final evidence
 - [ ] acceptance criteria recorded before final report rendering
 - [ ] one HTML trajectory report rendered
 ```
+
+If `rank_designs` returns fewer ranked rows than the distinct designs you
+validated, treat that as a candidate-identity contract failure rather than a
+normal tie. Inspect the per-tool outputs, proceed only with an explicit caveat
+when the evidence is otherwise decisive, and prefer fixing candidate wiring or
+rerunning with canonical candidate streams before final report rendering.
 
 If no candidate passes, call `submit_candidate` with
 `outcome=no_acceptable_candidate` and explain the failed thresholds.

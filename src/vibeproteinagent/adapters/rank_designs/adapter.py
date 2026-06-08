@@ -136,24 +136,125 @@ def _source_value(row: dict[str, Any], key: str) -> Any:
     return source.get(key)
 
 
-def _meaningful_identity_keys(row: dict[str, Any]) -> list[str]:
-    keys: list[str] = []
-    for name in ("candidate_id", "name", "id", "seed", "header"):
+def _explicit_identity_key(row: dict[str, Any]) -> str | None:
+    for name in ("candidate_id", "name", "id", "header"):
         value = row.get(name)
         if value not in (None, ""):
-            keys.append(f"{name}:{value}")
+            return f"{name}:{value}"
+    return None
+
+
+def _scoped_source_identity_keys(row: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    source_job_id = row.get("source_job_id")
     for name in ("local_id", "native_id"):
         value = _source_value(row, name)
-        if value not in (None, ""):
-            keys.append(f"source.{name}:{value}")
-    for name in ("structure_path", "predicted_cif", "predicted_pdb", "pdb_path", "cif_path"):
-        value = row.get(name)
-        if value not in (None, ""):
-            keys.append(f"structure:{Path(str(value)).name}")
-    sequence = row.get("sequence")
-    if sequence not in (None, ""):
-        keys.append(f"sequence:{sequence}")
+        if value not in (None, "") and source_job_id not in (None, ""):
+            keys.append(f"source_job:{source_job_id}:source.{name}:{value}")
     return keys
+
+
+def _row_sequence(row: dict[str, Any]) -> str | None:
+    for key in ("sequence", "protein_sequence", "designed_sequence"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _row_structure_identity(row: dict[str, Any]) -> str | None:
+    for key in ("structure_path", "predicted_cif", "predicted_pdb", "pdb_path", "cif_path"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _all_lookup_keys(row: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    explicit = _explicit_identity_key(row)
+    if explicit:
+        keys.append(explicit)
+    keys.extend(_scoped_source_identity_keys(row))
+    structure = _row_structure_identity(row)
+    if structure:
+        keys.append(f"structure:{structure}")
+    sequence = _row_sequence(row)
+    if sequence:
+        keys.append(f"sequence:{sequence}")
+    return list(dict.fromkeys(keys))
+
+
+def _design_identity_keys(row: dict[str, Any]) -> list[str]:
+    explicit = _explicit_identity_key(row)
+    if explicit:
+        return [explicit]
+    scoped = _scoped_source_identity_keys(row)
+    if scoped:
+        return scoped
+    structure = _row_structure_identity(row)
+    if structure:
+        return [f"structure:{structure}"]
+    sequence = _row_sequence(row)
+    if sequence:
+        return [f"sequence:{sequence}"]
+    return []
+
+
+def _evidence_identity_keys(row: dict[str, Any]) -> list[str]:
+    explicit = _explicit_identity_key(row)
+    if explicit:
+        return [explicit]
+    keys: list[str] = []
+    structure = _row_structure_identity(row)
+    if structure:
+        keys.append(f"structure:{structure}")
+    sequence = _row_sequence(row)
+    if sequence:
+        keys.append(f"sequence:{sequence}")
+    keys.extend(_scoped_source_identity_keys(row))
+    return list(dict.fromkeys(keys))
+
+
+def _rows_material_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_sequence = _row_sequence(left)
+    right_sequence = _row_sequence(right)
+    if left_sequence and right_sequence and left_sequence != right_sequence:
+        return False
+    left_structure = _row_structure_identity(left)
+    right_structure = _row_structure_identity(right)
+    if left_structure and right_structure and left_structure != right_structure:
+        return False
+    return True
+
+
+def _group_material_compatible(
+    group: dict[str, dict[str, Any]],
+    row: dict[str, Any],
+) -> bool:
+    return all(_rows_material_compatible(existing, row) for existing in group.values())
+
+
+def _group_sequence_conflicts(group: dict[str, dict[str, Any]], row: dict[str, Any]) -> bool:
+    row_sequence = _row_sequence(row)
+    if not row_sequence:
+        return False
+    for existing in group.values():
+        existing_sequence = _row_sequence(existing)
+        if existing_sequence and existing_sequence != row_sequence:
+            return True
+    return False
+
+
+def _register_group_keys(
+    key_to_group: dict[str, list[int]],
+    row: dict[str, Any],
+    group_index: int,
+) -> None:
+    for key in _all_lookup_keys(row):
+        group_indices = key_to_group.setdefault(key, [])
+        if group_index not in group_indices:
+            group_indices.append(group_index)
 
 
 def _merge_mapping(
@@ -191,34 +292,105 @@ def _join_rows_by_identity(
     candidates: list[dict[str, Any]],
 ) -> tuple[list[dict[str, dict[str, Any]]], list[str]]:
     groups: list[dict[str, dict[str, Any]]] = []
-    key_to_group: dict[str, int] = {}
+    key_to_group: dict[str, list[int]] = {}
     warnings: list[str] = []
+    material_conflicts: set[str] = set()
+    position_to_group: dict[int, int] = {}
 
-    for bucket, rows in (
-        ("prediction", predictions),
-        ("analysis", analyses),
-        ("qc", qc_results),
-        ("candidate", candidates),
-    ):
-        for index, row in enumerate(rows):
-            meaningful_keys = _meaningful_identity_keys(row)
-            position_key = f"position:{index}"
-            lookup_keys = meaningful_keys or [position_key]
-            group_index = next(
-                (key_to_group[key] for key in lookup_keys if key in key_to_group),
-                None,
-            )
-            if group_index is None:
-                group_index = len(groups)
-                groups.append({})
-            group = groups[group_index]
-            if bucket in group:
-                group[bucket] = _merge_mapping(group[bucket], row)
-            else:
-                group[bucket] = dict(row)
-            for key in [*meaningful_keys, position_key]:
-                key_to_group.setdefault(key, group_index)
+    def add_or_merge_row(group_index: int, bucket: str, row: dict[str, Any]) -> None:
+        group = groups[group_index]
+        if bucket in group:
+            group[bucket] = _merge_mapping(group[bucket], row)
+        else:
+            group[bucket] = dict(row)
+        _register_group_keys(key_to_group, row, group_index)
 
+    def new_group(bucket: str, row: dict[str, Any], position: int) -> int:
+        group_index = len(groups)
+        groups.append({})
+        add_or_merge_row(group_index, bucket, row)
+        position_to_group.setdefault(position, group_index)
+        return group_index
+
+    def compatible_indices_for_keys(
+        row: dict[str, Any],
+        keys: list[str],
+    ) -> tuple[list[int], bool]:
+        matches: list[int] = []
+        conflict = False
+        for key in keys:
+            for group_index in key_to_group.get(key) or []:
+                if _group_material_compatible(groups[group_index], row):
+                    if group_index not in matches:
+                        matches.append(group_index)
+                elif key.startswith("candidate_id:") and _group_sequence_conflicts(
+                    groups[group_index],
+                    row,
+                ):
+                    conflict = True
+        return matches, conflict
+
+    design_rows: list[tuple[str, int, dict[str, Any]]] = [
+        ("prediction", index, row)
+        for index, row in enumerate(predictions)
+        if _explicit_identity_key(row)
+    ]
+    design_rows.extend(("candidate", index, row) for index, row in enumerate(candidates))
+    for bucket, index, row in design_rows:
+        identity_keys = _design_identity_keys(row)
+        group_indices, conflict = compatible_indices_for_keys(row, identity_keys)
+        if conflict:
+            material_conflicts.update(key for key in identity_keys if key.startswith("candidate_id:"))
+        if group_indices:
+            add_or_merge_row(group_indices[0], bucket, row)
+            position_to_group.setdefault(index, group_indices[0])
+        else:
+            new_group(bucket, row, index)
+
+    evidence_rows: list[tuple[str, int, dict[str, Any]]] = [
+        ("prediction", index, row)
+        for index, row in enumerate(predictions)
+        if not _explicit_identity_key(row)
+    ]
+    evidence_rows.extend(("analysis", index, row) for index, row in enumerate(analyses))
+    evidence_rows.extend(("qc", index, row) for index, row in enumerate(qc_results))
+    for bucket, index, row in evidence_rows:
+        identity_keys = _evidence_identity_keys(row)
+        group_indices, conflict = compatible_indices_for_keys(row, identity_keys)
+        if conflict:
+            material_conflicts.update(key for key in identity_keys if key.startswith("candidate_id:"))
+        if (
+            not group_indices
+            and not identity_keys
+            and row.get("source_job_id") in (None, "")
+        ):
+            position_group_index = position_to_group.get(index)
+            if (
+                position_group_index is not None
+                and _group_material_compatible(groups[position_group_index], row)
+            ):
+                group_indices = [position_group_index]
+        if group_indices:
+            for group_index in group_indices:
+                add_or_merge_row(group_index, bucket, row)
+        else:
+            new_group(bucket, row, index)
+
+    if not groups:
+        for bucket, rows in (
+            ("prediction", predictions),
+            ("analysis", analyses),
+            ("qc", qc_results),
+            ("candidate", candidates),
+        ):
+            for index, row in enumerate(rows):
+                new_group(bucket, row, index)
+
+    for key in sorted(material_conflicts):
+        warnings.append(
+            f"rank_designs kept {key} in separate groups because sequence or "
+            "structure material conflicts."
+        )
     for index, group in enumerate(groups, start=1):
         if not group.get("prediction") and not group.get("candidate"):
             buckets = ", ".join(sorted(group))
@@ -297,19 +469,27 @@ def _rows_from_jobs(
 
 
 def _merge_rank_canonical_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[str, list[dict[str, Any]]] = {}
-    order: list[str] = []
+    groups: list[list[dict[str, Any]]] = []
+    group_keys: list[str] = []
     for candidate in candidates:
         candidate_id = str(candidate.get("candidate_id") or "")
         if not candidate_id:
-            candidate_id = f"position:{len(order)}"
-        if candidate_id not in groups:
-            order.append(candidate_id)
-        groups.setdefault(candidate_id, []).append(candidate)
+            candidate_id = f"position:{len(groups)}"
+        group_index = None
+        for index, group in enumerate(groups):
+            if group_keys[index] == candidate_id and all(
+                _rows_material_compatible(existing, candidate) for existing in group
+            ):
+                group_index = index
+                break
+        if group_index is None:
+            group_index = len(groups)
+            group_keys.append(candidate_id)
+            groups.append([])
+        groups[group_index].append(candidate)
 
     merged: list[dict[str, Any]] = []
-    for candidate_id in order:
-        group = groups[candidate_id]
+    for group in groups:
         current = dict(group[0])
         current["scores"] = dict(group[0].get("scores") or {})
         current["artifacts"] = dict(group[0].get("artifacts") or {})
@@ -328,6 +508,62 @@ def _merge_rank_canonical_candidates(candidates: list[dict[str, Any]]) -> list[d
                 )
         merged.append(current)
     return merged
+
+
+def _ranked_logical_key(row: dict[str, Any], index: int) -> str:
+    candidate_id = row.get("candidate_id")
+    sequence = row.get("sequence")
+    if candidate_id not in (None, "") and sequence not in (None, ""):
+        return f"candidate_id:{candidate_id}:sequence:{sequence}"
+    if candidate_id not in (None, ""):
+        return f"candidate_id:{candidate_id}"
+    return f"position:{index}"
+
+
+def _dedupe_ranked_logical_candidates(
+    ranked: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    selected: list[dict[str, Any]] = []
+    selected_by_key: dict[str, dict[str, Any]] = {}
+    dropped_counts: dict[str, int] = {}
+    for index, row in enumerate(ranked):
+        key = _ranked_logical_key(row, index)
+        current = selected_by_key.get(key)
+        if current is not None:
+            _merge_dropped_ranked_evidence(current, row)
+            dropped_counts[key] = dropped_counts.get(key, 0) + 1
+            continue
+        selected_by_key[key] = row
+        selected.append(row)
+    warnings = [
+        f"rank_designs selected the best representative for {key}; dropped {count} "
+        f"alternate structure variant{'s' if count != 1 else ''}."
+        for key, count in sorted(dropped_counts.items())
+    ]
+    return selected, warnings
+
+
+def _merge_dropped_ranked_evidence(winner: dict[str, Any], dropped: dict[str, Any]) -> None:
+    for key in ("scores", "artifacts"):
+        winner_payload = winner.get(key)
+        dropped_payload = dropped.get(key)
+        if not isinstance(winner_payload, dict) or not isinstance(dropped_payload, dict):
+            continue
+        for namespace, payload in dropped_payload.items():
+            winner_payload.setdefault(namespace, payload)
+
+    for key in ("evidence_job_ids", "evidence_tools"):
+        winner_values = winner.get(key)
+        dropped_values = dropped.get(key)
+        if not isinstance(winner_values, list) or not isinstance(dropped_values, list):
+            continue
+        for value in dropped_values:
+            if value not in winner_values:
+                winner_values.append(value)
+        winner_values.sort()
+    candidate_ref = winner.get("candidate_ref")
+    if isinstance(candidate_ref, dict):
+        candidate_ref["source_job_ids"] = winner.get("evidence_job_ids") or []
 
 
 def _metric(row: dict[str, Any], key: str) -> float | None:
@@ -415,24 +651,33 @@ def _score(
     candidate: dict[str, Any],
 ) -> tuple[float, dict[str, Any]]:
     candidate_score = _metric(candidate, "score")
+    candidate_protenix = _score_namespace(candidate, "protenix_v2")
     ranking_score = _first_metric(
         _metric(prediction, "ranking_score"),
         _metric(candidate, "ranking_score"),
+        _aliased_metric(candidate_protenix, "ranking_score"),
         candidate_score,
     )
     plddt = _first_metric(
         _aliased_metric(prediction, "plddt", "mean_plddt"),
         _aliased_metric(candidate, "plddt", "mean_plddt"),
     )
-    iptm = _first_metric(_metric(prediction, "iptm"), _metric(candidate, "iptm"))
-    ptm = _first_metric(_metric(prediction, "ptm"), _metric(candidate, "ptm"))
+    iptm = _first_metric(
+        _metric(prediction, "iptm"),
+        _metric(candidate, "iptm"),
+        _aliased_metric(candidate_protenix, "iptm"),
+    )
+    ptm = _first_metric(
+        _metric(prediction, "ptm"),
+        _metric(candidate, "ptm"),
+        _aliased_metric(candidate_protenix, "ptm"),
+    )
     ipsae = _first_metric(
         _aliased_metric(analysis, "ipsae_score", "ipsae", "ipsae_max", "interface_pae"),
         _aliased_metric(candidate, "ipsae_score", "ipsae", "ipsae_max", "interface_pae"),
     )
     candidate_qc = _score_namespace(candidate, "protein_qc")
     candidate_boltz2 = _score_namespace(candidate, "boltz2_affinity")
-    candidate_protenix = _score_namespace(candidate, "protenix_v2")
     candidate_structure = _score_namespace(candidate, "structure_analysis")
     candidate_ipsae = _score_namespace(candidate, "ipsae")
     candidate_prodigy = _score_namespace(candidate, "prodigy")
@@ -607,6 +852,8 @@ class RankDesignsAdapter(ToolAdapter):
             )
 
         ranked.sort(key=lambda row: (-row["score"], str(row["candidate_id"])))
+        ranked, dedupe_warnings = _dedupe_ranked_logical_candidates(ranked)
+        warnings.extend(dedupe_warnings)
         for rank, row in enumerate(ranked, start=1):
             row["rank"] = rank
         selected = ranked[: params.top_k]
@@ -632,7 +879,7 @@ class RankDesignsAdapter(ToolAdapter):
                 )
         ctx.emit_progress(1.0)
         return RankDesignsOutput(
-            candidate_count=len(groups),
+            candidate_count=len(ranked),
             ranked_candidates=selected,
             ranked_json=str(json_path),
             ranked_tsv=str(tsv_path),

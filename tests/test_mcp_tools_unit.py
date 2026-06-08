@@ -322,6 +322,88 @@ def test_mcp_render_report_relative_path_is_idempotent(
     assert status["complete"] is True
 
 
+def test_mcp_render_report_default_path_is_workspace_root(
+    ctx: SessionCtx,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = start_trajectory(ctx, "default report path")
+    trajectory_id = started["trajectory_id"]
+    store = JobStore(ctx.workspace)
+    job = store.submit(
+        "submit_candidate",
+        "1.0.0",
+        {},
+        trajectory_id=trajectory_id,
+    )
+    store.transition(job.job_id, JobState.QUEUED)
+    store.transition(job.job_id, JobState.RUNNING)
+    store.transition(
+        job.job_id,
+        JobState.COMPLETED,
+        output={
+            "submission_id": "sub_final",
+            "outcome": "no_acceptable_candidate",
+            "terminal": True,
+            "candidates_resolved": [],
+            "reasoning": "none passed",
+            "auto_selected": False,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    out = render_report(ctx, trajectory_id)
+
+    expected = ctx.workspace.root / f"{trajectory_id}_report.html"
+    assert out["report_html"] == str(expected)
+    assert expected.exists()
+    assert not (tmp_path / f"{trajectory_id}_report.html").exists()
+    status = get_trajectory_status(ctx, trajectory_id)["trajectory"]
+    assert status["report_path"] == str(expected)
+    assert status["complete"] is True
+
+
+def test_mcp_render_bundle_report_default_path_is_workspace_root(
+    ctx: SessionCtx,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = start_trajectory(ctx, "default bundle path")
+    trajectory_id = started["trajectory_id"]
+    store = JobStore(ctx.workspace)
+    job = store.submit(
+        "submit_candidate",
+        "1.0.0",
+        {},
+        trajectory_id=trajectory_id,
+    )
+    store.transition(job.job_id, JobState.QUEUED)
+    store.transition(job.job_id, JobState.RUNNING)
+    store.transition(
+        job.job_id,
+        JobState.COMPLETED,
+        output={
+            "submission_id": "sub_final",
+            "outcome": "no_acceptable_candidate",
+            "terminal": True,
+            "candidates_resolved": [],
+            "reasoning": "none passed",
+            "auto_selected": False,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    out = render_report(ctx, trajectory_id, format="bundle")
+
+    expected = ctx.workspace.root / f"{trajectory_id}_report_bundle" / "report.html"
+    assert out["report_html"] == str(expected)
+    assert expected.exists()
+    assert not (tmp_path / f"{trajectory_id}_report_bundle").exists()
+    status = get_trajectory_status(ctx, trajectory_id)["trajectory"]
+    assert status["report_path"] == str(expected)
+    assert status["complete"] is True
+
+
 def test_list_workspaces_includes_session(ctx: SessionCtx) -> None:
     out = list_workspaces(ctx)
     assert isinstance(out, list)

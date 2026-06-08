@@ -651,13 +651,7 @@ class ProtenixV2Adapter(ToolAdapter):
             return records, None, warnings
         # Pick the highest ranking_score (Protenix default rank metric); fall
         # back to (rank=0, lowest seed) ordering when scores are absent.
-        records.sort(
-            key=lambda r: (
-                -(r.ranking_score if r.ranking_score is not None else -1e9),
-                r.seed,
-                r.rank,
-            )
-        )
+        records.sort(key=_protenix_record_sort_key)
         return records, records[0], warnings
 
     def estimate_vram(self, params: ProtenixV2Input) -> int:
@@ -939,136 +933,187 @@ def _protenix_v2_candidates(
     params: ProtenixV2Input,
     records: list[ProtenixV2PredictionRecord],
 ) -> list[dict[str, Any]]:
+    selected_records = _representative_candidate_records(params, records)
     candidates: list[dict[str, Any]] = []
+    for index, record in selected_records:
+        candidates.append(_protenix_v2_candidate_for_record(params, record, index))
+    return candidates
+
+
+def _representative_candidate_records(
+    params: ProtenixV2Input,
+    records: list[ProtenixV2PredictionRecord],
+) -> list[tuple[int, ProtenixV2PredictionRecord]]:
+    selected: dict[str, tuple[int, ProtenixV2PredictionRecord]] = {}
+    canonical_positions: set[int] = set()
+    order: list[str] = []
     for index, record in enumerate(records):
         source_candidate = _source_candidate_for_record(params, record)
-        input_json_complex = _input_json_complex_sequences(params, record)
-        sequence = (
-            str(source_candidate.get("sequence"))
-            if isinstance(source_candidate, dict) and source_candidate.get("sequence")
-            else input_json_complex[1]
-            if input_json_complex is not None
-            else _source_sequence(params)
-        )
-        local_id = f"protenix_{index:04d}"
-        scores = {
-            "seed": record.seed,
-            "rank": record.rank,
-            "ranking_score": record.ranking_score,
-            "plddt": record.plddt,
-            "iptm": record.iptm,
-            "ptm": record.ptm,
+        if not _is_canonical_candidate(source_candidate):
+            continue
+        assert source_candidate is not None
+        candidate_id = source_candidate.get("candidate_id")
+        if not candidate_id:
+            continue
+        key = str(candidate_id)
+        canonical_positions.add(index)
+        current = selected.get(key)
+        if current is None:
+            order.append(key)
+            selected[key] = (index, record)
+        elif _protenix_record_sort_key(record) < _protenix_record_sort_key(current[1]):
+            selected[key] = (index, record)
+
+    representatives = [selected[key] for key in order]
+    for index, record in enumerate(records):
+        if index not in canonical_positions:
+            representatives.append((index, record))
+    representatives.sort(key=lambda item: item[0])
+    return representatives
+
+
+def _protenix_v2_candidate_for_record(
+    params: ProtenixV2Input,
+    record: ProtenixV2PredictionRecord,
+    index: int,
+) -> dict[str, Any]:
+    source_candidate = _source_candidate_for_record(params, record)
+    input_json_complex = _input_json_complex_sequences(params, record)
+    sequence = (
+        str(source_candidate.get("sequence"))
+        if isinstance(source_candidate, dict) and source_candidate.get("sequence")
+        else input_json_complex[1]
+        if input_json_complex is not None
+        else _source_sequence(params)
+    )
+    local_id = f"protenix_{index:04d}"
+    scores = {
+        "seed": record.seed,
+        "rank": record.rank,
+        "ranking_score": record.ranking_score,
+        "plddt": record.plddt,
+        "iptm": record.iptm,
+        "ptm": record.ptm,
+    }
+    artifacts = {
+        "protenix_v2": {
+            "native_id": record.candidate_id,
+            "local_id": local_id,
+            "summary_json": record.summary_json,
+            "pae_path": record.pae_path,
+            "full_confidence_json": record.full_confidence_json,
+            "predicted_cif": record.cif_path,
+            "predicted_pdb": record.pdb_path,
         }
-        artifacts = {
-            "protenix_v2": {
-                "summary_json": record.summary_json,
-                "pae_path": record.pae_path,
-                "full_confidence_json": record.full_confidence_json,
-                "predicted_cif": record.cif_path,
-                "predicted_pdb": record.pdb_path,
-            }
-        }
-        if (
-            isinstance(source_candidate, dict)
-            and params.target_input_json
-            and source_candidate.get("sequence")
-        ):
-            target_sequence = _target_sequence_from_input_json(params.target_input_json)
-            if target_sequence:
-                artifacts["protenix_v2"]["complex_input_mode"] = (
-                    "target_input_json_target_sequence_binder_sequence"
-                )
-                artifacts["protenix_v2"]["target_input_json"] = params.target_input_json
-                artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
-                    target_sequence=target_sequence,
-                    binder_sequence=str(source_candidate["sequence"]),
-                    cif_path=record.cif_path,
-                )
-        elif isinstance(source_candidate, dict) and (
-            context := _candidate_target_context(source_candidate)
-        ) is not None:
-            source_tool = context.get("source_tool") or "candidate"
+    }
+    if (
+        isinstance(source_candidate, dict)
+        and params.target_input_json
+        and source_candidate.get("sequence")
+    ):
+        target_sequence = _target_sequence_from_input_json(params.target_input_json)
+        if target_sequence:
             artifacts["protenix_v2"]["complex_input_mode"] = (
-                f"{source_tool}_target_sequence_binder_sequence"
+                "target_input_json_target_sequence_binder_sequence"
             )
-            if source_candidate.get("sequence"):
-                target_sequence = _target_chain_sequence(
-                    Path(str(context["target_pdb"])),
-                    str(context["target_chain"]),
-                )
-                artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
-                    target_sequence=target_sequence,
-                    binder_sequence=str(source_candidate["sequence"]),
-                    cif_path=record.cif_path,
-                )
-        elif input_json_complex is not None:
-            target_sequence, binder_sequence = input_json_complex
-            artifacts["protenix_v2"]["complex_input_mode"] = (
-                "input_json_target_sequence_binder_sequence"
+            artifacts["protenix_v2"]["target_input_json"] = params.target_input_json
+            artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
+                target_sequence=target_sequence,
+                binder_sequence=str(source_candidate["sequence"]),
+                cif_path=record.cif_path,
+            )
+    elif isinstance(source_candidate, dict) and (
+        context := _candidate_target_context(source_candidate)
+    ) is not None:
+        source_tool = context.get("source_tool") or "candidate"
+        artifacts["protenix_v2"]["complex_input_mode"] = (
+            f"{source_tool}_target_sequence_binder_sequence"
+        )
+        if source_candidate.get("sequence"):
+            target_sequence = _target_chain_sequence(
+                Path(str(context["target_pdb"])),
+                str(context["target_chain"]),
             )
             artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
                 target_sequence=target_sequence,
-                binder_sequence=binder_sequence,
+                binder_sequence=str(source_candidate["sequence"]),
                 cif_path=record.cif_path,
             )
-        generated_capabilities = candidate_capability_flags(
-            has_sequence=bool(sequence),
-            has_backbone_structure=bool(record.cif_path),
-            has_full_structure=bool(record.cif_path),
-            has_candidate_scores=True,
+    elif input_json_complex is not None:
+        target_sequence, binder_sequence = input_json_complex
+        artifacts["protenix_v2"]["complex_input_mode"] = (
+            "input_json_target_sequence_binder_sequence"
         )
-        if _is_canonical_candidate(source_candidate):
-            assert source_candidate is not None
-            candidate = {
-                key: value
-                for key, value in source_candidate.items()
-                if key
-                in {
-                    "schema_version",
-                    "candidate_id",
-                    "source",
-                    "sequence",
-                    "structure_path",
-                    "capabilities",
-                }
+        artifacts["protenix_v2"]["complex_chains"] = _complex_chain_metadata(
+            target_sequence=target_sequence,
+            binder_sequence=binder_sequence,
+            cif_path=record.cif_path,
+        )
+    generated_capabilities = candidate_capability_flags(
+        has_sequence=bool(sequence),
+        has_backbone_structure=bool(record.cif_path),
+        has_full_structure=bool(record.cif_path),
+        has_candidate_scores=True,
+    )
+    if _is_canonical_candidate(source_candidate):
+        assert source_candidate is not None
+        candidate = {
+            key: value
+            for key, value in source_candidate.items()
+            if key
+            in {
+                "schema_version",
+                "candidate_id",
+                "source",
+                "sequence",
+                "structure_path",
+                "capabilities",
             }
-            candidate["scores"] = dict(source_candidate.get("scores") or {})
-            candidate["artifacts"] = dict(source_candidate.get("artifacts") or {})
-            candidate["capabilities"] = dict(source_candidate.get("capabilities") or {})
-            for key, value in generated_capabilities.items():
-                candidate["capabilities"][key] = bool(candidate["capabilities"].get(key)) or bool(
-                    value
-                )
-        else:
-            candidate = {
-                "schema_version": "candidate_v1",
-                "candidate_id": stable_candidate_id(
-                    "protenix_v2",
-                    local_id,
-                    native_id=record.candidate_id,
-                    sequence=sequence,
-                    structure_path=record.cif_path,
-                    index=index,
-                ),
-                "source": {
-                    "tool": "protenix_v2",
-                    "node_id": None,
-                    "job_id": None,
-                    "local_id": local_id,
-                    "native_id": record.candidate_id,
-                    "index": index,
-                },
-                "scores": {},
-                "artifacts": {},
-                "capabilities": generated_capabilities,
-            }
-        candidate["structure_path"] = record.cif_path
-        candidate.setdefault("scores", {})["protenix_v2"] = scores
-        candidate.setdefault("artifacts", {}).update(artifacts)
-        if sequence:
-            candidate["sequence"] = sequence
-        candidates.append(candidate)
-    return candidates
+        }
+        candidate["scores"] = dict(source_candidate.get("scores") or {})
+        candidate["artifacts"] = dict(source_candidate.get("artifacts") or {})
+        candidate["capabilities"] = dict(source_candidate.get("capabilities") or {})
+        for key, value in generated_capabilities.items():
+            candidate["capabilities"][key] = bool(candidate["capabilities"].get(key)) or bool(
+                value
+            )
+    else:
+        candidate = {
+            "schema_version": "candidate_v1",
+            "candidate_id": stable_candidate_id(
+                "protenix_v2",
+                local_id,
+                native_id=record.candidate_id,
+                sequence=sequence,
+                structure_path=record.cif_path,
+                index=index,
+            ),
+            "source": {
+                "tool": "protenix_v2",
+                "node_id": None,
+                "job_id": None,
+                "local_id": local_id,
+                "native_id": record.candidate_id,
+                "index": index,
+            },
+            "scores": {},
+            "artifacts": {},
+            "capabilities": generated_capabilities,
+        }
+    candidate["structure_path"] = record.cif_path
+    candidate.setdefault("scores", {})["protenix_v2"] = scores
+    candidate.setdefault("artifacts", {}).update(artifacts)
+    if sequence:
+        candidate["sequence"] = sequence
+    return candidate
+
+
+def _protenix_record_sort_key(record: ProtenixV2PredictionRecord) -> tuple[float, int, int]:
+    return (
+        -(record.ranking_score if record.ranking_score is not None else -1e9),
+        record.seed,
+        record.rank,
+    )
 
 
 def _source_candidate_for_record(
@@ -1080,6 +1125,9 @@ def _source_candidate_for_record(
     sample_name = _record_sample_name(record)
     if sample_name is None:
         return None
+    if sample_name == "canonical_candidates" and len(params.candidates) == 1:
+        candidate = params.candidates[0]
+        return candidate if _is_canonical_candidate(candidate) else None
     prefix = "canonical_candidate_"
     if not sample_name.startswith(prefix):
         return None

@@ -586,7 +586,7 @@ def render_report(
             if format == "bundle"
             else f"{source_id}_report.html"
         )
-        out_path = Path(out) if out else Path.cwd() / default_name
+        out_path = Path(out) if out else ctx.workspace.root / default_name
         canonical_report_path = resolve_report_output_path(out_path, report_format=format)
         trajectory_store = TrajectoryStore(ctx.workspace) if source_id.startswith("traj_") else None
         if trajectory_store is not None:

@@ -146,8 +146,12 @@ with a different tool. Don't abandon the whole objective on a single failed job.
 
 After validation/scoring evidence is available for multiple candidates or tools,
 run `rank_designs` before final selection and prefer `submit_candidate` with
-`rank=1` from that rank job. Then record accepted or no acceptable candidate. If
-`submit_candidate` returns `next_report_command`, run that command. Otherwise
+`rank=1` from that rank job. When the selected design has been enriched by
+structure prediction or scoring, submit the enriched/ranked candidate rather
+than an earlier sequence-only upstream candidate so the final dossier retains
+the evidence. Then record accepted or no acceptable candidate. If
+`submit_candidate` returns `next_report_command`, run that command from any
+directory; by default the report is written to the workspace root. Otherwise
 render `vpa report <traj_id>`. One user query should end with one trajectory
 report that covers the jobs/workflows used for that query.
 
@@ -156,3 +160,9 @@ stays attached to the logical design. Use raw `pdb_path`/`structure_path`
 diagnostics only when candidate identity is unavailable or intentionally
 ambiguous, and note that such evidence may render as unmatched or missing from
 final candidate dossiers.
+If `rank_designs` collapses distinct logical designs into fewer rows than the
+evaluated population, treat it as a candidate-identity contract failure. Do not
+silently rely on the collapsed rank as final truth; inspect the per-candidate
+tool outputs, record the caveat in `submit_candidate` reasoning if proceeding,
+and prefer fixing the upstream candidate wiring before rendering the final
+report.
