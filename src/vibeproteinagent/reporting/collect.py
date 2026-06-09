@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from copy import deepcopy
 from dataclasses import replace
@@ -107,6 +108,12 @@ _SCORE_KEYS = (
     "ca_bfactor_plddt",
     "atom_bfactor_plddt",
     "aromatic_fraction",
+    # Rosetta / stability scoring
+    "total_score",
+    "ddg",
+    "ddg_reu",
+    "mean_ddg",
+    "delta_delta_g",
     # Context (kept for filtering, never bar-rendered)
     "num_residues",
     "length",
@@ -202,6 +209,14 @@ def _collect_single_job(workspace: Workspace, job: JobRecord) -> ReportModel:
     final_candidates = _enrich_final_candidates_from_current_candidates(
         _candidates_from_submission(final_submission),
         candidates,
+    )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
+        final_candidates,
+        report_nodes,
+    )
+    final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
+        final_candidates,
+        workspace.root,
     )
     if not candidates:
         candidates = _structure_candidates(
@@ -319,6 +334,14 @@ def _collect_submit_candidate_trajectory(
     final_candidates = _enrich_final_candidates_from_current_candidates(
         _candidates_from_submission(final_submission),
         candidates,
+    )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
+        final_candidates,
+        report_nodes,
+    )
+    final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
+        final_candidates,
+        workspace.root,
     )
     if not candidates:
         candidates = _structure_candidates(
@@ -462,6 +485,14 @@ def _collect_trajectory(workspace: Workspace, trajectory_id: str) -> ReportModel
         _candidates_from_submission(final_submission),
         candidates,
     )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
+        final_candidates,
+        report_nodes,
+    )
+    final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
+        final_candidates,
+        workspace.root,
+    )
     if not candidates:
         candidates = _structure_candidates(
             all_artifacts,
@@ -565,6 +596,14 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
     final_candidates = _enrich_final_candidates_from_current_candidates(
         _candidates_from_submission(final_submission),
         candidates,
+    )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
+        final_candidates,
+        report_nodes,
+    )
+    final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
+        final_candidates,
+        workspace.root,
     )
     if not candidates:
         candidates = _structure_candidates(
@@ -1798,6 +1837,7 @@ def _candidates_from_submission(
     for idx, row in enumerate(resolved):
         if not isinstance(row, dict):
             continue
+        scores = _candidate_score_map(row)
         artifacts = [
             ReportArtifact(
                 field=str(artifact.get("field") or ""),
@@ -1823,7 +1863,7 @@ def _candidates_from_submission(
                     if isinstance(row.get("structure_path"), str)
                     else None
                 ),
-                scores=_candidate_score_map(row),
+                scores=scores,
                 source={
                     "kind": "final_submission",
                     "submission_id": submission.get("submission_id"),
@@ -1868,6 +1908,327 @@ def _enrich_final_candidates_from_current_candidates(
             )
         )
     return enriched
+
+
+def _enrich_final_candidates_from_pyrosetta_score_pairs(
+    final_candidates: list[ReportCandidate],
+    nodes: list[WorkflowNodeSummary],
+) -> list[ReportCandidate]:
+    """Attach mutant-minus-WT PyRosetta ddG from structured score outputs.
+
+    Stability reports should not mine prose rationale for ddG. The reportable
+    evidence is the pair of PyRosetta ``mode=score`` outputs: one WT/reference
+    structure and one candidate/threaded-mutant structure. We infer the pair
+    from structure filenames and final candidate identifiers, then store the
+    computed relative energy on the final candidate.
+    """
+
+    if not final_candidates:
+        return final_candidates
+    records = _pyrosetta_score_records(nodes)
+    reference = _reference_pyrosetta_score_record(records)
+    if reference is None:
+        return final_candidates
+    enriched: list[ReportCandidate] = []
+    for candidate in final_candidates:
+        mutant = _candidate_pyrosetta_score_record(candidate, records, reference)
+        if mutant is None:
+            enriched.append(candidate)
+            continue
+        ddg = mutant["total_score"] - reference["total_score"]
+        scores = dict(candidate.scores or {})
+        pyrosetta = dict(scores.get("pyrosetta") or {})
+        pyrosetta.setdefault("ddg_reu", ddg)
+        pyrosetta.setdefault("mutant_total_score", mutant["total_score"])
+        pyrosetta.setdefault("wild_type_total_score", reference["total_score"])
+        pyrosetta.setdefault("comparison", "mutant_minus_wild_type")
+        scores["pyrosetta"] = pyrosetta
+        source = dict(candidate.source or {})
+        source.setdefault(
+            "stability_evidence",
+            {
+                "source": "pyrosetta_score_pair",
+                "wild_type_job_id": reference.get("job_id"),
+                "mutant_job_id": mutant.get("job_id"),
+                "wild_type_structure_path": reference.get("structure_path"),
+                "mutant_structure_path": mutant.get("structure_path"),
+            },
+        )
+        enriched.append(replace(candidate, scores=scores, source=source))
+    return enriched
+
+
+def _pyrosetta_score_records(nodes: list[WorkflowNodeSummary]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for node in nodes:
+        if (node.tool or "").lower() != "pyrosetta":
+            continue
+        output = node.output if isinstance(node.output, dict) else {}
+        mode = str(output.get("mode") or "").lower()
+        if mode and mode != "score":
+            continue
+        rows = output.get("candidates")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    record = _pyrosetta_score_record_from_payload(node, row, output)
+                    if record is not None:
+                        records.append(record)
+        else:
+            record = _pyrosetta_score_record_from_payload(node, output, output)
+            if record is not None:
+                records.append(record)
+    return records
+
+
+def _pyrosetta_score_record_from_payload(
+    node: WorkflowNodeSummary,
+    payload: dict[str, Any],
+    output: dict[str, Any],
+) -> dict[str, Any] | None:
+    scores = payload.get("scores") if isinstance(payload.get("scores"), dict) else {}
+    pyrosetta = scores.get("pyrosetta") if isinstance(scores.get("pyrosetta"), dict) else {}
+    total_score = _as_float(
+        payload.get("total_score")
+        or pyrosetta.get("total_score")
+        or output.get("total_score")
+    )
+    if total_score is None:
+        return None
+    mode = str(payload.get("mode") or pyrosetta.get("mode") or output.get("mode") or "").lower()
+    if mode and mode != "score":
+        return None
+    structure_path = _first_str(payload, *_STRUCTURE_PATH_KEYS) or _first_str(
+        output,
+        *_STRUCTURE_PATH_KEYS,
+        "relaxed_pdb_path",
+    )
+    return {
+        "node_id": node.node_id,
+        "job_id": node.job_id,
+        "candidate_id": str(payload.get("candidate_id") or ""),
+        "structure_path": structure_path,
+        "total_score": total_score,
+        "tokens": _stability_record_tokens(payload.get("candidate_id"), structure_path, node.node_id),
+    }
+
+
+def _reference_pyrosetta_score_record(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    references = [
+        record
+        for record in records
+        if _stability_tokens_mark_reference(record.get("tokens"))
+    ]
+    if len(references) == 1:
+        return references[0]
+    if references:
+        return references[0]
+    return None
+
+
+def _candidate_pyrosetta_score_record(
+    candidate: ReportCandidate,
+    records: list[dict[str, Any]],
+    reference: dict[str, Any],
+) -> dict[str, Any] | None:
+    candidate_tokens = _candidate_stability_tokens(candidate)
+    if candidate_tokens:
+        matches = [
+            record
+            for record in records
+            if record is not reference
+            and _stability_tokens_overlap(candidate_tokens, record.get("tokens"))
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    non_reference = [
+        record
+        for record in records
+        if record is not reference and not _stability_tokens_mark_reference(record.get("tokens"))
+    ]
+    if candidate.candidate_id and len(non_reference) == 1:
+        return non_reference[0]
+    return None
+
+
+def _enrich_final_candidates_from_workspace_stability_sidecars(
+    final_candidates: list[ReportCandidate],
+    workspace_root: Path,
+) -> list[ReportCandidate]:
+    if not final_candidates:
+        return final_candidates
+    records = _workspace_stability_sidecar_records(workspace_root)
+    if not records:
+        return final_candidates
+    enriched: list[ReportCandidate] = []
+    for candidate in final_candidates:
+        tokens = _candidate_stability_tokens(candidate)
+        match = next(
+            (
+                record
+                for record in records
+                if _stability_tokens_overlap(tokens, record.get("tokens"))
+            ),
+            None,
+        )
+        if match is None:
+            enriched.append(candidate)
+            continue
+        scores = dict(candidate.scores or {})
+        pyrosetta = dict(scores.get("pyrosetta") or {})
+        if "mean_ddg" not in pyrosetta:
+            pyrosetta["mean_ddg"] = match["ddg"]
+        if "mean_ddg_sd" not in pyrosetta and match.get("sd") is not None:
+            pyrosetta["mean_ddg_sd"] = match["sd"]
+        scores["pyrosetta"] = pyrosetta
+        source = dict(candidate.source or {})
+        evidence = dict(source.get("stability_evidence") or {})
+        evidence.setdefault("sidecar_source", "workspace_ddg_log")
+        evidence.setdefault("sidecar_path", match.get("path"))
+        evidence.setdefault("sidecar_label", match.get("label"))
+        source["stability_evidence"] = evidence
+        enriched.append(replace(candidate, scores=scores, source=source))
+    return enriched
+
+
+def _workspace_stability_sidecar_records(workspace_root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if not workspace_root.exists():
+        return records
+    for path in sorted(workspace_root.glob("writeup*/logs/*.log"))[:50]:
+        records.extend(_stability_records_from_ddg_log(path))
+    for path in sorted(workspace_root.glob("writeup*/params/*ddg*results.json"))[:50]:
+        records.extend(_stability_records_from_ddg_json(path))
+    return records
+
+
+def _stability_records_from_ddg_log(path: Path) -> list[dict[str, Any]]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        match = re.match(
+            r"^\s*(?P<label>[A-Za-z0-9_+.-]+)\s+ddG\s*=\s*"
+            r"(?P<ddg>-?\d+(?:\.\d+)?)"
+            r"(?:\s+sd\s*=\s*(?P<sd>-?\d+(?:\.\d+)?))?",
+            line,
+        )
+        if not match:
+            continue
+        label = match.group("label")
+        ddg = _as_float(match.group("ddg"))
+        if ddg is None:
+            continue
+        out.append(
+            {
+                "label": label,
+                "ddg": ddg,
+                "sd": _as_float(match.group("sd")),
+                "path": str(path),
+                "tokens": _filter_stability_tokens(_split_stability_tokens(label)),
+            }
+        )
+    return out
+
+
+def _stability_records_from_ddg_json(path: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for key, value in payload.items():
+        ddg = _as_float(value)
+        if ddg is None:
+            continue
+        out.append(
+            {
+                "label": str(key),
+                "ddg": ddg,
+                "sd": None,
+                "path": str(path),
+                "tokens": _filter_stability_tokens(_split_stability_tokens(str(key))),
+            }
+        )
+    return out
+
+
+def _candidate_stability_tokens(candidate: ReportCandidate) -> set[str]:
+    tokens = set(_split_stability_tokens(candidate.candidate_id))
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    artifacts = source.get("candidate_artifacts")
+    if isinstance(artifacts, dict):
+        for value in _iter_string_values(artifacts):
+            tokens.update(_split_stability_tokens(Path(value).stem))
+    if candidate.structure_path:
+        tokens.update(_split_stability_tokens(Path(candidate.structure_path).stem))
+    return _filter_stability_tokens(tokens)
+
+
+def _stability_record_tokens(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        tokens.update(_split_stability_tokens(Path(value).stem))
+        tokens.update(_split_stability_tokens(Path(value).name))
+    return _filter_stability_tokens(tokens)
+
+
+def _split_stability_tokens(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    normalized = str(value).replace("-", "_")
+    return {
+        token.lower()
+        for token in re.split(r"[^A-Za-z0-9]+", normalized)
+        if token
+    }
+
+
+def _filter_stability_tokens(tokens: set[str]) -> set[str]:
+    generic = {
+        "candidate",
+        "canonical",
+        "cand",
+        "design",
+        "mutant",
+        "sample",
+        "score",
+        "structure",
+        "threaded",
+    }
+    return {token for token in tokens if token not in generic and len(token) >= 2}
+
+
+def _stability_tokens_mark_reference(tokens: Any) -> bool:
+    token_set = set(tokens) if isinstance(tokens, set) else set()
+    return bool(token_set & {"wt", "wildtype", "wild", "reference", "ref"})
+
+
+def _stability_tokens_overlap(left: set[str], right: Any) -> bool:
+    token_set = set(right) if isinstance(right, set) else set()
+    return bool(left & token_set)
+
+
+def _iter_string_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        out: list[str] = []
+        for item in value.values():
+            out.extend(_iter_string_values(item))
+        return out
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(_iter_string_values(item))
+        return out
+    return []
 
 
 # Field names adapters use to surface a structure artifact path on a

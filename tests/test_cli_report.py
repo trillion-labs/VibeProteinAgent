@@ -142,7 +142,11 @@ def test_report_workflow_uses_recorded_user_query_in_html(
         == "Accept designs that satisfy explicit confidence thresholds."
     )
     assert "Design fixed-backbone sequences for chain A." in html
-    assert "User Intent</p>\n      <p>Design fixed-backbone sequences for chain A.</p>" in html
+    assert "User Query</p>" in html
+    assert (
+        '<div class="overview-summary-body"><p>Design fixed-backbone sequences for chain A.</p></div>'
+        in html
+    )
     assert "claude_opus48_design" not in html
 
 
@@ -180,6 +184,100 @@ def test_report_workflow_uses_explicit_submit_candidate(
     assert model.final_submission["submission_id"] == "sub_accepted"
     assert model.final_submission["reasoning"] == "accepted against the objective threshold"
     assert [candidate.candidate_id for candidate in model.final_candidates] == ["design_1"]
+
+
+def test_pyrosetta_score_pair_becomes_reportable_ddg(
+    tmp_workspace: Workspace,
+) -> None:
+    traj = TrajectoryStore(tmp_workspace).create(
+        user_query="Improve stability with S138L Q189N",
+        objective="PyRosetta ddG < 0 against WT",
+    )
+    sidecar_logs = tmp_workspace.root / "writeup_S138L_Q189N" / "logs"
+    sidecar_logs.mkdir(parents=True)
+    (sidecar_logs / "combo.log").write_text(
+        "=== combo confirm (flex-local ddG, n=3; neg=stabilizing) ===\n"
+        "LN     ddG= -15.00 sd= 0.57 raw=[-15.8, -14.6, -14.6]\n"
+    )
+    _complete_job(
+        tmp_workspace,
+        "pyrosetta",
+        {
+            "mode": "score",
+            "total_score": 126.3968805839819,
+            "candidates": [
+                {
+                    "candidate_id": "wt_score",
+                    "structure_path": "/tmp/sb_WT.pdb",
+                    "scores": {
+                        "pyrosetta": {
+                            "mode": "score",
+                            "total_score": 126.3968805839819,
+                        }
+                    },
+                }
+            ],
+        },
+        params={"pdb_path": "/tmp/sb_WT.pdb", "mode": "score"},
+        trajectory_id=traj.trajectory_id,
+    )
+    _complete_job(
+        tmp_workspace,
+        "pyrosetta",
+        {
+            "mode": "score",
+            "total_score": 110.89846864172092,
+            "candidates": [
+                {
+                    "candidate_id": "ln_score",
+                    "structure_path": "/tmp/sb_LN.pdb",
+                    "scores": {
+                        "pyrosetta": {
+                            "mode": "score",
+                            "total_score": 110.89846864172092,
+                        }
+                    },
+                }
+            ],
+        },
+        params={"pdb_path": "/tmp/sb_LN.pdb", "mode": "score"},
+        trajectory_id=traj.trajectory_id,
+    )
+    submission = {
+        "terminal": True,
+        "outcome": "accepted",
+        "submission_id": "sub_stable",
+        "candidates_resolved": [
+            {
+                "candidate_id": "design_LN",
+                "sequence": "ACDE",
+                "justification": "Accepted from structured PyRosetta score outputs.",
+            }
+        ],
+        "reasoning": "Result: design meets the stated stability criterion.",
+        "auto_selected": False,
+    }
+    _complete_job(
+        tmp_workspace,
+        "submit_candidate",
+        submission,
+        trajectory_id=traj.trajectory_id,
+    )
+
+    model = collect_report_model(tmp_workspace, traj.trajectory_id)
+    html = render_report_html(model)
+
+    scores = model.final_candidates[0].scores["pyrosetta"]
+    assert scores["wild_type_total_score"] == pytest.approx(126.3968805839819)
+    assert scores["mutant_total_score"] == pytest.approx(110.89846864172092)
+    assert scores["ddg_reu"] == pytest.approx(-15.498411942260972)
+    assert scores["mean_ddg"] == pytest.approx(-15.0)
+    assert scores["mean_ddg_sd"] == pytest.approx(0.57)
+    assert "Stability scoring" in html
+    assert "ddG" in html
+    assert "-15.5" in html
+    assert "Mean ddG" in html
+    assert "-15" in html
 
 
 def test_report_submit_job_expands_direct_run_trajectory(
@@ -1064,7 +1162,7 @@ def test_report_enriches_missing_sequence_analysis_for_candidates(
     assert "Instability" in html
 
 
-def test_report_cli_default_does_not_run_sequence_analysis_enrichment(
+def test_report_cli_default_runs_sequence_analysis_enrichment(
     runner: CliRunner,
     tmp_workspace: Workspace,
     tmp_path: Path,
@@ -1094,6 +1192,51 @@ def test_report_cli_default_does_not_run_sequence_analysis_enrichment(
             tmp_workspace.name,
             "--out",
             str(out),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)["data"]
+    assert payload["enrichment_enabled"] is True
+    assert len(payload["enrichment_job_ids"]) == 1
+    html = out.read_text()
+    assert "GRAVY" in html
+    model = collect_report_model(tmp_workspace, job_id)
+    assert "sequence_analysis" in {node.tool for node in model.graph.nodes}
+
+
+def test_report_cli_can_disable_sequence_analysis_enrichment(
+    runner: CliRunner,
+    tmp_workspace: Workspace,
+    tmp_path: Path,
+) -> None:
+    job_id = _complete_job(
+        tmp_workspace,
+        "boltzgen",
+        {
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": "design_1",
+                    "sequence": "ACDEFGHIKLMNPQRSTVWY",
+                    "scores": {"boltzgen": {"confidence": 0.73}},
+                }
+            ]
+        },
+    )
+    out = tmp_path / "report.html"
+
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            job_id,
+            "--workspace",
+            tmp_workspace.name,
+            "--out",
+            str(out),
+            "--no-enrich-sequence-analysis",
             "--json",
         ],
     )

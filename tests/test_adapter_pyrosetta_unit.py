@@ -324,6 +324,7 @@ def test_adapter_run_uses_persistent_sidecar(monkeypatch, tmp_path):
     assert out2.total_score == -12.5
     assert len(created) == 1
     assert len(created[0].calls) == 2
+    assert Path(created[0].kwargs["cwd"]) == adapter._env_path
     assert (job_dir / "outputs" / "_result.json").is_file()
     adapter.unload()
     assert created[0].closed is True

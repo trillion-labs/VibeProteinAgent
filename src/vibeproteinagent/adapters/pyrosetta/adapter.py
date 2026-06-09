@@ -119,6 +119,7 @@ def _pyrosetta_import_works(python: Path, timeout_s: int = 20) -> bool:
     """Confirm the dedicated env can import PyRosetta and the sidecar runtime."""
     if not python.is_file():
         return False
+    env_root = python.parent.parent
     return (
         smoke_import(
             label="PyRosetta sidecar",
@@ -131,6 +132,7 @@ def _pyrosetta_import_works(python: Path, timeout_s: int = 20) -> bool:
             ),
             env=_subprocess_env(seed=None),
             timeout_s=timeout_s,
+            cwd=env_root,
         )
         is None
     )
@@ -375,6 +377,7 @@ class PyRosettaAdapter(ToolAdapter):
                 warm_target=_RUNNER_SIDECAR_WARM,
                 run_target=_RUNNER_SIDECAR_CALL,
                 timeout_s=60.0,
+                cwd=pyrosetta_env(),
             )
             sidecar = spec.spawn(PersistentPythonSidecar)
             self._sidecars[key] = sidecar

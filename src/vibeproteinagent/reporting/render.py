@@ -635,12 +635,13 @@ def _score_family_metric_bar(
     numeric = _metric_float(metric)
     percent = _score_family_bar_percent(label, numeric)
     missing_cls = " is-missing" if percent is None else ""
+    categorical_cls = " is-categorical" if percent is None else ""
     width = 0.0 if percent is None else max(4.0, min(100.0, percent))
     display_value = f"{value}{(' ' + unit) if unit else ''}"
     value_markup = (
         f'<span class="metric-value">{_h(display_value)}</span>'
         if percent is not None
-        else f'<span class="metric-value metric-value-pill">{_h(display_value)}</span>'
+        else _categorical_metric_value_markup(display_value)
     )
     meter = (
         f'<div class="metric-bar-track" aria-hidden="true"><i style="width:{width:.0f}%"></i></div>'
@@ -648,7 +649,7 @@ def _score_family_metric_bar(
         else ""
     )
     return (
-        f'<div class="metric-bar-row {_score_family_class(family)}{missing_cls}">'
+        f'<div class="metric-bar-row {_score_family_class(family)}{missing_cls}{categorical_cls}">'
         '<div class="metric-bar-top">'
         f'<span class="metric-label">{_h(label)}'
         f'{f"<span class=\"metric-src\">{_h(source)}</span>" if source else ""}</span>'
@@ -657,6 +658,23 @@ def _score_family_metric_bar(
         f'{meter}'
         '</div>'
     )
+
+
+def _categorical_metric_value_markup(value: str) -> str:
+    items = [
+        item.strip()
+        for item in re.split(r"\s*,\s*", str(value or ""))
+        if item.strip()
+    ]
+    if not items:
+        items = [str(value or "")]
+    tokens = "".join(
+        f'<span class="metric-token">{_h(item)}</span>'
+        for item in items[:8]
+    )
+    if len(items) > 8:
+        tokens += f'<span class="metric-token metric-token-more">+{len(items) - 8}</span>'
+    return f'<span class="metric-token-list">{tokens}</span>'
 
 
 def _score_family_bar_percent(label: str, numeric: float | None) -> float | None:
@@ -1143,9 +1161,41 @@ def _overview_summary_card(title: str, body: str, icon_name: str) -> str:
         f'<span class="overview-card-icon">{_icon_svg(icon_name)}</span>'
         f'<p class="saas-card-kicker">{_h(title)}</p>'
         '</div>'
-        f'<p class="overview-summary-body">{_h(body)}</p>'
+        f'{_overview_summary_body_html(body)}'
         '</div>'
     )
+
+
+def _overview_summary_body_html(body: str) -> str:
+    text = re.sub(r"\s+", " ", str(body or "").strip())
+    if not text:
+        return '<div class="overview-summary-body"><p>No text recorded.</p></div>'
+    segments = _overview_summary_segments(text)
+    if len(segments) <= 1:
+        return f'<div class="overview-summary-body"><p>{_h(text)}</p></div>'
+    items = "".join(f"<li>{_h(segment)}</li>" for segment in segments)
+    return f'<div class="overview-summary-body"><ul class="overview-summary-list">{items}</ul></div>'
+
+
+def _overview_summary_segments(text: str) -> list[str]:
+    sentence_parts = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+", text)
+        if part.strip()
+    ]
+    if len(sentence_parts) > 1:
+        return sentence_parts
+    clause_parts = [
+        part.strip(" ;,")
+        for part in re.split(r"\s*;\s+|\s+-\s+|\s+(?=(?:while|keeping|preserving|relieving|with|without)\b)", text)
+        if part.strip(" ;,")
+    ]
+    if len(clause_parts) > 1:
+        return clause_parts
+    comma_parts = [part.strip(" ,") for part in re.split(r",\s+", text) if part.strip(" ,")]
+    if len(comma_parts) > 2 and len(text) > 180:
+        return comma_parts
+    return [text]
 
 
 def _report_brand_mark() -> str:
@@ -1168,31 +1218,31 @@ def _saas_agent_rationale_section(vm: AgentRationaleViewModel) -> str:
     ) or '<li><span>Decision rationale</span><p>No structured agent decisions were recorded.</p></li>'
     stages = "".join(f"<span>{_h(stage)}</span>" for stage in vm.stage_plan) or "<span>No stage plan recorded</span>"
     query = vm.user_query or "No agent user query was recorded for this run."
-    return f"""<section id="agent-rationale" class="card saas-section">
+    return f"""<section id="agent-rationale" class="card saas-section agent-rationale-section">
   <header class="card-header">
     <div>
       <p class="card-eyebrow">Agent Rationale</p>
       <h2 class="card-title">Agent interpretation and decisions</h2>
-      <p class="saas-section-subtitle">Recorded intent, workflow selection, plan, and decision rationale.</p>
+      <p class="saas-section-subtitle">Recorded intent, review framing, plan, and decision rationale.</p>
     </div>
     <span class="card-meta">{_h(vm.tool_call_count)} tool calls</span>
   </header>
   <div class="saas-rationale-grid">
-    <div class="saas-card">
+    <div class="saas-card agent-rationale-card">
       <p class="saas-card-kicker">User Intent</p>
-      <p>{_h(query)}</p>
+      <div class="agent-rationale-card-body"><p>{_h(query)}</p></div>
     </div>
-    <div class="saas-card">
-      <p class="saas-card-kicker">Workflow Selection</p>
-      <p>{_h(vm.workflow_selection or "Workflow selection was derived from recorded workflow tools.")}</p>
+    <div class="saas-card agent-rationale-card">
+      <p class="saas-card-kicker">Review Framing</p>
+      <div class="agent-rationale-card-body"><p>{_h(vm.workflow_selection or "Review framing was derived from recorded workflow evidence.")}</p></div>
     </div>
-    <div class="saas-card saas-stage-card">
+    <div class="saas-card saas-stage-card agent-rationale-card">
       <p class="saas-card-kicker">Workflow Stages</p>
-      <div class="saas-stage-chips">{stages}</div>
+      <div class="agent-rationale-card-body"><div class="saas-stage-chips">{stages}</div></div>
     </div>
-    <div class="saas-card saas-decisions">
+    <div class="saas-card saas-decisions agent-rationale-card">
       <p class="saas-card-kicker">Major Decisions</p>
-      <ul>{decisions}</ul>
+      <div class="agent-rationale-card-body"><ul>{decisions}</ul></div>
     </div>
   </div>
 </section>"""
@@ -1278,7 +1328,10 @@ def _comparison_row(
     bundle: CandidateEvidenceBundle | None = None,
 ) -> str:
     metric_map = {_metric_label_for_display(chip.label): chip for chip in row.metric_chips}
-    cells = "".join(_comparison_metric_cell(metric_map.get(label)) for label in metric_cols)
+    cells = "".join(
+        _comparison_metric_cell(metric_map.get(label), label=label)
+        for label in metric_cols
+    )
     rank = row.rank if row.rank is not None else "-"
     asset_html = _comparison_asset_actions(row, bundle)
     candidate_cell = (
@@ -1341,15 +1394,34 @@ def _comparison_asset_actions(
     return "".join(actions)
 
 
-def _comparison_metric_cell(chip: Any | None) -> str:
+def _comparison_metric_cell(chip: Any | None, *, label: str = "") -> str:
     if chip is None:
-        return '<td class="metric-cell-missing"><span class="metric-missing" title="Metric not recorded">—</span></td>'
+        missing_title = _comparison_missing_metric_title(label)
+        return (
+            '<td class="metric-cell-missing">'
+            f'<span class="metric-missing" title="{_attr(missing_title)}">—</span>'
+            '</td>'
+        )
     unit = f" {chip.unit}" if chip.unit else ""
-    title = chip.source or chip.family or chip.provenance
+    title = _comparison_recorded_metric_title(label, chip)
     return (
         f'<td><span class="matrix-chip" title="{_attr(title)}">'
         f'{_h(chip.value)}{_h(unit)}</span></td>'
     )
+
+
+def _comparison_missing_metric_title(label: str) -> str:
+    if _metric_label_for_display(label) in {"ddG", "Mean ddG"}:
+        return "No paired ddG"
+    return "Metric not recorded"
+
+
+def _comparison_recorded_metric_title(label: str, chip: Any) -> str:
+    title = chip.source or chip.family or chip.provenance
+    if _metric_label_for_display(label) == "Rosetta total score":
+        suffix = "absolute Rosetta total score; compare only within the same protocol"
+        return f"{title} · {suffix}" if title else suffix
+    return title
 
 
 def _structure_comparison_bundles(
@@ -1554,10 +1626,15 @@ def _structure_comparison_card(
 def _structure_comparison_metric_labels(
     preset: WorkflowReviewPreset | None,
 ) -> list[str]:
-    if preset is not None and preset.workflow_type == WorkflowType.BINDER:
-        return ["ipSAE", "ipTM", "pLDDT", "pTM"]
-    if preset is not None and preset.workflow_type == WorkflowType.DENOVO:
-        return ["pLDDT", "pTM", "GRAVY", "Instability"]
+    if preset is not None:
+        labels = [
+            _metric_label_for_display(label)
+            for label in preset.metric_priority
+            if _metric_label_for_display(label) != "QC"
+        ]
+        labels = list(dict.fromkeys(labels))
+        if labels:
+            return labels[:4]
     return ["pLDDT", "pTM", "ipTM", "GRAVY"]
 
 
@@ -1605,7 +1682,7 @@ def _evidence_snapshot_card(
     dossier: CandidateDossierViewModel,
     preset: WorkflowReviewPreset | None = None,
 ) -> str:
-    primary_label = _snapshot_primary_metric_label(preset)
+    primary_label = _snapshot_primary_metric_label(dossier, preset)
     primary = _dossier_metric_chip(dossier, primary_label) or (
         dossier.metric_chips[0] if dossier.metric_chips else None
     )
@@ -1613,6 +1690,7 @@ def _evidence_snapshot_card(
     score = _snapshot_score_percent(primary.label if primary else "", primary_value)
     score_text = str(primary.value) if primary is not None and primary_value is not None else "--"
     score_style = f"--score:{score:.0f}" if score is not None else "--score:0"
+    score_class = "snapshot-score is-compact" if len(score_text) >= 6 else "snapshot-score"
     bars = "".join(
         bar
         for label in _snapshot_metric_labels(dossier, preset)
@@ -1631,7 +1709,7 @@ def _evidence_snapshot_card(
         f'<span class="status-badge">{_h(dossier.status_label)}</span>'
         "</div>"
         '<div class="evidence-snapshot-body">'
-        f'<div class="snapshot-score" style="{_attr(score_style)}">'
+        f'<div class="{score_class}" style="{_attr(score_style)}">'
         f'<strong>{_h(score_text)}</strong><span>{_h(primary.label if primary else "Score")}</span></div>'
         f'<div class="snapshot-bars">{bars}</div>'
         "</div>"
@@ -1663,9 +1741,17 @@ def _top_candidate_msa_block(dossiers: list[CandidateDossierViewModel]) -> str:
     )
 
 
-def _snapshot_primary_metric_label(preset: WorkflowReviewPreset | None = None) -> str:
-    if preset is not None and preset.workflow_type == WorkflowType.BINDER:
-        return "ipSAE"
+def _snapshot_primary_metric_label(
+    dossier: CandidateDossierViewModel,
+    preset: WorkflowReviewPreset | None = None,
+) -> str:
+    if preset is not None:
+        for label in preset.metric_priority:
+            if _metric_label_for_display(label) == "QC":
+                continue
+            chip = _dossier_metric_chip(dossier, label)
+            if chip is not None and _chip_numeric_value(chip) is not None:
+                return _metric_label_for_display(label)
     if preset is not None and preset.workflow_type == WorkflowType.RETRIEVAL:
         return "QC"
     return "pLDDT"
@@ -1675,10 +1761,14 @@ def _snapshot_metric_labels(
     dossier: CandidateDossierViewModel,
     preset: WorkflowReviewPreset | None = None,
 ) -> list[str]:
-    if preset is not None and preset.workflow_type == WorkflowType.BINDER:
-        preferred = ["ipSAE", "ipTM", "pLDDT", "pTM", "GRAVY", "Net charge", "Instability", "pI"]
-    elif preset is not None and preset.workflow_type == WorkflowType.RETRIEVAL:
-        preferred = ["MSA mean identity", "Seq recovery", "GRAVY", "Net charge"]
+    if preset is not None:
+        preferred = [
+            _metric_label_for_display(label)
+            for label in preset.metric_priority
+            if _metric_label_for_display(label) != "QC"
+        ]
+        if preset.workflow_type == WorkflowType.RETRIEVAL:
+            preferred = ["MSA mean identity", "Seq recovery", *preferred]
     else:
         preferred = ["pLDDT", "pTM", "ipTM", "ipSAE", "GRAVY", "Net charge", "Instability", "pI"]
     observed = [
@@ -1725,6 +1815,10 @@ def _snapshot_score_percent(label: str, value: float | None) -> float | None:
         return max(0.0, min(100.0, value / 14.0 * 100.0))
     if normalized in {"Delta G", "Interface contacts"}:
         return max(0.0, min(100.0, abs(value)))
+    if normalized in {"ddG", "Mean ddG"}:
+        return max(4.0, min(100.0, abs(value) / 100.0 * 100.0))
+    if normalized == "Rosetta total score":
+        return max(4.0, min(100.0, abs(value) / 1000.0 * 100.0))
     return None
 
 
@@ -1838,7 +1932,10 @@ def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> s
     status_label = "Completed" if completed in {"", "completed", "success"} else completed.replace("_", " ").title()
     status_cls = "is-complete" if completed in {"", "completed", "success"} else "is-recorded"
     node_count = len(model.graph.nodes)
-    tool_calls = _workflow_audit_tool_call_list(model.graph.nodes)
+    tool_calls = _workflow_audit_tool_call_list(
+        model.graph.nodes,
+        final_submission=final_submission,
+    )
     selection_events = _workflow_audit_selection_events(model)
     return f"""<section id="workflow-audit" class="card saas-section workflow-audit-section">
   <header class="workflow-audit-header">
@@ -1879,24 +1976,175 @@ def _workflow_audit_selection_events(model: ReportModel) -> str:
     )
 
 
-def _workflow_audit_tool_call_list(nodes: list[WorkflowNodeSummary]) -> str:
+def _workflow_audit_tool_call_list(
+    nodes: list[WorkflowNodeSummary],
+    *,
+    final_submission: dict[str, Any] | None = None,
+) -> str:
     if not nodes:
         return ""
+    groups = _workflow_audit_tool_call_groups(nodes)
     rows = "".join(
-        '<li>'
-        f'<span>{idx}</span>'
-        f'<strong>{_h(_compact_tool_name(node.tool))}</strong>'
-        f'<code>{_h(node.node_id)}</code>'
-        f'<em class="state-{_state_class(node.state)}">{_h(str(node.state or "recorded"))}</em>'
-        '</li>'
-        for idx, node in enumerate(nodes, start=1)
+        _workflow_audit_tool_call_group_row(
+            idx,
+            group,
+            final_submission=final_submission,
+        )
+        for idx, group in enumerate(groups, start=1)
     )
     return (
         '<details class="workflow-tool-call-list" open>'
-        '<summary><strong>Recorded tool calls</strong><em>Exact node order from the run</em></summary>'
+        '<summary><strong>Recorded tool calls</strong>'
+        '<em>Grouped by tool and outcome</em></summary>'
         f'<ol>{rows}</ol>'
         '</details>'
     )
+
+
+def _workflow_audit_tool_call_groups(
+    nodes: list[WorkflowNodeSummary],
+) -> list[dict[str, object]]:
+    groups: list[dict[str, object]] = []
+    by_key: dict[tuple[str, str, str], dict[str, object]] = {}
+    for idx, node in enumerate(nodes, start=1):
+        state_cls = _state_class(node.state)
+        failed = state_cls == "failed"
+        error_text = _workflow_audit_error_text(node) if failed else ""
+        tool_name = _compact_tool_name(node.tool)
+        key = (tool_name, state_cls, error_text)
+        group = by_key.get(key)
+        if group is None:
+            group = {
+                "tool_name": tool_name,
+                "state_cls": state_cls,
+                "state_label": str(node.state or "recorded"),
+                "error_text": error_text,
+                "calls": [],
+            }
+            by_key[key] = group
+            groups.append(group)
+        calls = group["calls"]
+        if isinstance(calls, list):
+            calls.append((idx, node))
+    return groups
+
+
+def _workflow_audit_tool_call_group_row(
+    idx: int,
+    group: dict[str, object],
+    *,
+    final_submission: dict[str, Any] | None = None,
+) -> str:
+    calls = group.get("calls")
+    call_items = calls if isinstance(calls, list) else []
+    count = len(call_items)
+    state_cls = str(group.get("state_cls") or "recorded")
+    failed = state_cls == "failed"
+    error_text = str(group.get("error_text") or "")
+    class_attr = ' class="tool-call-group has-failure"' if failed else ' class="tool-call-group"'
+    title_attr = f' title="{_attr(error_text)}"' if error_text else ""
+    state_label = str(group.get("state_label") or "recorded")
+    tool_name = str(group.get("tool_name") or "Tool")
+    raw_tool = _workflow_audit_group_raw_tool(call_items)
+    outcome = _workflow_audit_group_outcome_caption(
+        raw_tool,
+        count,
+        final_submission=final_submission,
+    )
+    error_html = (
+        f'<small class="tool-call-error">{_h(error_text)}</small>'
+        if error_text
+        else ""
+    )
+    return (
+        f'<li{class_attr}{title_attr}>'
+        f'<span class="tool-call-group-index">{idx}</span>'
+        '<div class="tool-call-group-main">'
+        f'<strong>{_h(tool_name)}</strong>'
+        f'<em class="state-{state_cls}">{_h(state_label)}</em>'
+        '</div>'
+        f'<span class="tool-call-count">{_h(str(count))} call{"s" if count != 1 else ""}</span>'
+        f'<p class="tool-call-outcome">{_h(outcome)}</p>'
+        f'{error_html}'
+        '</li>'
+    )
+
+
+def _workflow_audit_group_raw_tool(call_items: list[Any]) -> str:
+    for _, node in call_items:
+        if isinstance(node, WorkflowNodeSummary) and node.tool:
+            return str(node.tool)
+    return ""
+
+
+def _workflow_audit_group_outcome_caption(
+    tool: str,
+    count: int,
+    *,
+    final_submission: dict[str, Any] | None = None,
+) -> str:
+    normalized = str(tool or "").strip().lower()
+    if normalized == "esm2" and _final_rationale_marks_tool_unused("esm2", final_submission):
+        return "Exploratory sequence model output; final rationale says it was not used."
+    captions = {
+        "protenix_v2": "Predicted candidate structures and confidence metrics.",
+        "esm2": "Generated or evaluated sequence-level mutation suggestions.",
+        "sequence_edit": "Created edited sequence candidates.",
+        "pyrosetta": "Computed Rosetta energy and stability evidence.",
+        "tmalign": "Compared candidate structures against the reference fold.",
+        "structure_analysis": "Annotated structural features and liabilities.",
+        "protein_qc": "Checked sequence biophysics and liability flags.",
+        "rank_designs": "Ranked candidates from available evidence.",
+        "submit_candidate": "Recorded the final submitted candidate decision.",
+    }
+    caption = captions.get(normalized)
+    if caption:
+        return caption
+    return f"Recorded {count} supporting workflow call{'s' if count != 1 else ''}."
+
+
+def _final_rationale_marks_tool_unused(
+    tool: str,
+    final_submission: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(final_submission, dict):
+        return False
+    text = " ".join(
+        str(value)
+        for value in (
+            final_submission.get("reasoning"),
+            *(
+                row.get("justification")
+                for row in final_submission.get("candidates_resolved") or []
+                if isinstance(row, dict)
+            ),
+        )
+        if isinstance(value, str)
+    ).lower()
+    normalized = str(tool or "").lower().replace("_", "").replace("-", "")
+    compact_text = text.replace("_", "").replace("-", "")
+    return normalized in compact_text and (
+        "not used" in text
+        or "not selected" in text
+        or "did not use" in text
+        or "blind to" in text
+    )
+
+
+def _workflow_audit_error_text(node: WorkflowNodeSummary) -> str:
+    bits: list[str] = []
+    if node.error_code:
+        bits.append(str(node.error_code))
+    message = str(node.error_message or "").strip()
+    if message:
+        first_line = message.splitlines()[0].strip()
+        if first_line:
+            bits.append(first_line)
+    if not bits and isinstance(node.error_details, dict):
+        detail = node.error_details.get("message") or node.error_details.get("error")
+        if detail:
+            bits.append(str(detail))
+    return _short(": ".join(bits) if bits else "Failed without a recorded reason.", 150)
 
 
 def _workflow_audit_stage_flow_html(
@@ -1951,7 +2199,7 @@ def _workflow_audit_stage_band_html(
             *stage_specs[:-1],
             {
                 "key": "other",
-                "title": "Evidence Retrieval" if workflow_type == WorkflowType.RETRIEVAL else "Model Call",
+                "title": "Supporting Evidence",
                 "icon": "search",
                 "purpose": "Run recorded supporting tools.",
                 "evidence": "Recorded tool output",
@@ -2029,6 +2277,18 @@ def _workflow_audit_node_stage_key(node: WorkflowNodeSummary) -> str:
     tool = (node.tool or "").strip().lower()
     if tool in {"agent_intent", "user_request"}:
         return "intent"
+    explicit = {
+        "sequence_edit": "engineering",
+        "esm2": "generation",
+        "protein_qc": "qc",
+        "sequence_analysis": "qc",
+        "protenix_v2": "structure",
+        "structure_analysis": "structure",
+        "tmalign": "structure_comparison",
+        "pyrosetta": "energy",
+    }
+    if tool in explicit:
+        return explicit[tool]
     role = classify_tool_role(tool)
     if role == ToolRole.GENERATOR:
         return "structure" if tool in {"esm3", "boltzgen"} else "generation"
@@ -2039,19 +2299,26 @@ def _workflow_audit_node_stage_key(node: WorkflowNodeSummary) -> str:
     if role == ToolRole.EVALUATOR:
         if tool in {"protein_qc", "sequence_analysis"}:
             return "qc"
-        if tool in {"esm3", "esm2", "protenix_v2", "structure_analysis"}:
+        if tool in {"esm3", "protenix_v2", "structure_analysis"}:
             return "structure"
+        if tool in {"tmalign"}:
+            return "structure_comparison"
+        if tool in {"pyrosetta"}:
+            return "energy"
         if tool in {"boltz2_affinity", "pxmeter", "ipsae", "prodigy", "vina"}:
             return "interface"
-        return "qc"
+        return "other"
     return "other"
 
 
 def _workflow_audit_evidence_label(key: str) -> str:
     return {
-        "generation": "Candidate designs",
+        "engineering": "Edited sequence variants",
+        "generation": "Sequence model suggestions",
         "qc": "QC state and flags",
         "structure": "Structure confidence and structure artifacts",
+        "structure_comparison": "Fold preservation and structural similarity",
+        "energy": "Rosetta energy and stability evidence",
         "interface": "Interface and binding evidence",
         "ranking": "Ranked candidate scores",
         "recommendation": "Final submitted candidates",
@@ -2180,9 +2447,12 @@ def _workflow_audit_empty_stage_html(index: int, *, workflow_type: str) -> str:
 def _workflow_stage_icon_name(key: str) -> str:
     return {
         "intent": "intent",
+        "engineering": "tools",
         "generation": "spark",
         "qc": "shield",
         "structure": "cube",
+        "structure_comparison": "compare",
+        "energy": "analytics",
         "interface": "bind",
         "ranking": "rank",
         "recommendation": "check",
@@ -2259,9 +2529,12 @@ def _workflow_trace_stage_specs(
         ]
     specs = [
         {"key": "intent", "title": "User Intent", "icon": "?", "purpose": "Understand design goal and constraints.", "evidence": "Recorded objective"},
-        {"key": "generation", "title": "Generation", "icon": "G", "purpose": "Generate candidate sequences or structures.", "evidence": "Candidate designs"},
+        {"key": "engineering", "title": "Engineering", "icon": "E", "purpose": "Create constrained sequence edits and variants.", "evidence": "Edited candidate sequences"},
+        {"key": "generation", "title": "Sequence Generation", "icon": "G", "purpose": "Explore sequence-model suggestions.", "evidence": "Sequence model output"},
         {"key": "qc", "title": "Sequence QC", "icon": "Q", "purpose": "Filter liabilities and basic biophysical issues.", "evidence": "QC state and flags"},
         {"key": "structure", "title": "Structure Prediction", "icon": "3D", "purpose": "Predict 3D structures and confidence.", "evidence": "pLDDT, pTM, PAE, structures"},
+        {"key": "structure_comparison", "title": "Structure Comparison", "icon": "C", "purpose": "Compare candidate folds against the reference.", "evidence": "TM-score, RMSD, alignment"},
+        {"key": "energy", "title": "Energy Analysis", "icon": "ΔG", "purpose": "Score stability with molecular energy functions.", "evidence": "Rosetta total score, ddG"},
         {"key": "interface", "title": "Interface Scoring", "icon": "I", "purpose": "Assess target binding and interface quality.", "evidence": "ipTM, affinity, contacts"},
         {"key": "ranking", "title": "Ranking", "icon": "R", "purpose": "Integrate evidence and rank candidates.", "evidence": "Composite review order"},
         {"key": "recommendation", "title": "Final Recommendation", "icon": "F", "purpose": "Select final candidates for experimental follow-up.", "evidence": "Final submitted candidates"},
@@ -2347,6 +2620,7 @@ def _compact_tool_name(tool: str) -> str:
         "ipsae": "ipSAE",
         "prodigy": "PRODIGY",
         "vina": "Vina",
+        "sequence_edit": "Sequence edit",
         "sequence_analysis": "Sequence analysis",
         "protein_qc": "Protein QC",
         "structure_analysis": "Structure analysis",
@@ -10607,6 +10881,11 @@ _SCORE_BAR_PRIORITY: tuple[str, ...] = (
     "instability_index",
     "gravy",
     "pi",
+    "total_score",
+    "ddg",
+    "ddg_reu",
+    "mean_ddg",
+    "delta_delta_g",
     "polybasic_hits",
     "aromatic_fraction",
 )
@@ -10896,6 +11175,12 @@ def _quality_class(key: str, value: Any) -> str:
         if num <= -8:
             return "good"
         if num <= -4:
+            return "ok"
+        return "poor"
+    if k in {"ddg", "ddg_reu", "mean_ddg", "delta_delta_g"}:
+        if num <= -1:
+            return "good"
+        if num <= 1:
             return "ok"
         return "poor"
     if k == "instability_index":
@@ -13734,7 +14019,29 @@ body { background:var(--saas-bg); }
   padding:14px 15px; box-shadow:0 1px 2px rgba(15,23,42,.035);
 }
 .overview-summary-card .overview-summary-body {
-  max-height:150px; overflow-y:auto; overscroll-behavior:contain; padding-right:4px;
+  max-height:220px;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding-right:6px;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  word-break:normal;
+}
+.overview-summary-card .overview-summary-body p {
+  margin:0;
+}
+.overview-summary-list {
+  margin:0;
+  padding:0 0 0 17px;
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+}
+.overview-summary-list li {
+  margin:0;
+  font-size:13.5px;
+  line-height:1.55;
+  color:var(--ink);
 }
 .saas-card p { margin:0; font-size:13.5px; line-height:1.55; color:var(--ink); }
 .saas-icon-card-head {
@@ -13789,6 +14096,29 @@ body { background:var(--saas-bg); }
 .saas-caveat-ok { border-color:var(--line-strong); background:#fff; }
 .saas-rationale-grid {
   display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px;
+}
+.agent-rationale-card {
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+}
+.agent-rationale-card-body {
+  max-height:220px;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding-right:6px;
+  min-width:0;
+}
+.agent-rationale-section .agent-rationale-card-body p,
+.agent-rationale-section .agent-rationale-card-body li,
+.agent-rationale-section .agent-rationale-card-body span {
+  white-space:normal;
+  overflow-wrap:anywhere;
+  word-break:normal;
+  overflow:visible;
+  text-overflow:clip;
+  -webkit-line-clamp:unset;
+  -webkit-box-orient:initial;
 }
 .saas-stage-chips { display:flex; flex-wrap:wrap; gap:6px; }
 .saas-stage-chips span, .saas-chip {
@@ -14935,6 +15265,7 @@ body {
   align-items:baseline;
   justify-content:space-between;
   gap:12px;
+  min-width:0;
 }
 .metric-bar-track {
   display:block;
@@ -14964,6 +15295,45 @@ body {
   border:1px solid color-mix(in srgb, var(--family-accent) 22%, #ffffff);
   font-size:12px;
   text-transform:capitalize;
+}
+.metric-bar-row.is-categorical .metric-bar-top {
+  align-items:flex-start;
+  flex-wrap:wrap;
+}
+.metric-bar-row.is-categorical .metric-label {
+  flex:0 1 150px;
+  min-width:96px;
+}
+.metric-token-list {
+  display:flex;
+  flex:1 1 220px;
+  min-width:min(100%, 160px);
+  max-width:100%;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap:6px;
+}
+.metric-token {
+  display:inline-flex;
+  align-items:center;
+  max-width:100%;
+  min-height:24px;
+  padding:3px 8px;
+  border-radius:6px;
+  border:1px solid color-mix(in srgb, var(--family-accent) 18%, #d7dbea);
+  background:color-mix(in srgb, var(--family-soft) 68%, #ffffff);
+  color:#182230;
+  font-size:12px;
+  font-weight:650;
+  line-height:1.35;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  word-break:normal;
+}
+.metric-token-more {
+  color:var(--text-muted);
+  background:#f8fafc;
+  border-color:var(--border);
 }
 .score-family {
   --family-accent:#4f46e5;
@@ -15009,6 +15379,12 @@ body {
 .metric-value {
   color:#101828;
   font-weight:780;
+}
+@media (max-width: 760px) {
+  .metric-token-list {
+    justify-content:flex-start;
+    flex-basis:100%;
+  }
 }
 .dossier-alert-grid {
   gap:12px;
@@ -15412,10 +15788,11 @@ body {
 .snapshot-score {
   width:74px;
   height:74px;
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  justify-content:center;
+  display:grid;
+  grid-template-rows:auto auto;
+  place-content:center;
+  justify-items:center;
+  text-align:center;
   border-radius:50%;
   background:
     radial-gradient(circle at center,#ffffff 0 54%,transparent 55%),
@@ -15427,12 +15804,28 @@ body {
   font-size:19px;
   line-height:1;
   font-weight:880;
+  display:block;
+  width:66px;
+  max-width:calc(100% - 8px);
+  text-align:center;
+  white-space:nowrap;
+  letter-spacing:0;
+  font-variant-numeric:tabular-nums;
+}
+.snapshot-score.is-compact strong {
+  font-size:16px;
 }
 .snapshot-score span {
   margin-top:4px;
   color:#706898;
   font-size:10px;
   font-weight:760;
+  display:block;
+  max-width:64px;
+  text-align:center;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
 }
 .snapshot-bars {
   display:flex;
@@ -15608,6 +16001,7 @@ body {
 .audit-stage-strip {
   display:flex;
   align-items:stretch;
+  justify-content:flex-start;
   gap:18px;
   list-style:none;
   margin:0;
@@ -15615,6 +16009,12 @@ body {
   overflow-x:auto;
   scrollbar-width:thin;
   scrollbar-color:#cfd5e8 transparent;
+}
+.audit-stage-strip::before,
+.audit-stage-strip::after {
+  content:"";
+  flex:1 0 0;
+  min-width:0;
 }
 .audit-stage-strip > .audit-stage {
   flex:0 0 145px;
@@ -15777,9 +16177,25 @@ body {
   color:#1570ef;
   background:#eaf3ff;
 }
+.audit-stage[data-stage="engineering"] .audit-stage-icon {
+  color:#0e7490;
+  background:#e6f7fb;
+}
+.audit-stage[data-stage="generation"] .audit-stage-icon {
+  color:#7f56d9;
+  background:#f4ebff;
+}
 .audit-stage[data-stage="model_call"] .audit-stage-icon {
   color:#7f56d9;
   background:#f4ebff;
+}
+.audit-stage[data-stage="structure_comparison"] .audit-stage-icon {
+  color:#1570ef;
+  background:#eaf3ff;
+}
+.audit-stage[data-stage="energy"] .audit-stage-icon {
+  color:#b54708;
+  background:#fff4df;
 }
 .audit-stage[data-stage="validation"] .audit-stage-icon,
 .audit-stage[data-stage="completed"] .audit-stage-icon {
@@ -15891,8 +16307,8 @@ body {
 }
 .workflow-tool-call-list ol {
   display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-  gap:8px;
+  grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:10px;
   margin:0;
   padding:0 12px 12px;
   list-style:none;
@@ -15910,6 +16326,25 @@ body {
   background:#fff;
   padding:8px;
 }
+.workflow-tool-call-list li.has-failure {
+  border-color:#fecaca;
+  background:#fff7f7;
+  box-shadow:0 0 0 1px rgba(220,38,38,.06) inset;
+}
+.workflow-tool-call-list li.tool-call-group {
+  grid-template-columns:24px minmax(0,1fr) auto;
+  align-items:start;
+  gap:8px 10px;
+  min-height:112px;
+  align-content:start;
+}
+.tool-call-group-main {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  align-items:start;
+  gap:5px 8px;
+  min-width:0;
+}
 .workflow-tool-call-list li > span {
   display:inline-flex;
   justify-content:center;
@@ -15920,8 +16355,12 @@ body {
 .workflow-tool-call-list li strong {
   font-size:12px;
   color:#2f1c72;
-  overflow:hidden;
-  text-overflow:ellipsis;
+  min-width:0;
+  overflow:visible;
+  text-overflow:clip;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  line-height:1.25;
 }
 .workflow-tool-call-list li code {
   color:#667085;
@@ -15934,6 +16373,40 @@ body {
   color:#667085;
   font-size:10.5px;
   font-style:normal;
+}
+.workflow-tool-call-list li em.state-failed {
+  color:#b42318;
+  font-weight:820;
+}
+.tool-call-count {
+  align-self:start;
+  border:1px solid #d0d5dd;
+  border-radius:999px;
+  background:#f8fafc;
+  color:#344054 !important;
+  padding:3px 8px;
+  white-space:nowrap;
+}
+.tool-call-outcome {
+  grid-column:2 / -1;
+  margin:0;
+  color:#475467;
+  font-size:12px;
+  line-height:1.45;
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+.tool-call-error {
+  grid-column:1 / -1;
+  display:block;
+  margin-top:2px;
+  padding:6px 8px;
+  border-radius:7px;
+  background:#fee4e2;
+  color:#912018;
+  font-size:10.8px;
+  line-height:1.35;
+  overflow-wrap:anywhere;
 }
 .workflow-graph-legend span {
   display:inline-flex;

@@ -228,6 +228,7 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "height:24px" in html
     assert "white-space:nowrap" in html
     assert "ipSAE 0.68" in html
+
     assert html.index("cand_1") < html.index("cand_2")
     assert "Binder length (aa)" in html
     assert "Diversity clustering is not recorded" in html
@@ -255,8 +256,9 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "overview-summary-card-user-query" in html
     assert "overview-summary-card-agent-objective" in html
     assert "overview-summary-body" in html
-    assert "max-height:150px" in html
+    assert "max-height:220px" in html
     assert "max-height:clamp(760px, 84vh, 1120px)" in html
+
     assert "height:clamp(580px, 64vh, 840px)" in html
     assert "max-height:clamp(360px, 55vh, 680px)" in html
     assert "max-height:clamp(240px, 34vh, 520px)" in html
@@ -299,6 +301,259 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "backboneTraceSpec" not in html
     assert "addPolymerTraceOverlay" not in html
     assert "vpa-structures" in html
+
+
+def test_liability_metrics_render_as_wrapping_tokens():
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_liability", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id="wf_liability"),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_liability",
+                sequence="ACDEFG",
+                liabilities=[
+                    "Exposed_hydrophobic_patch",
+                    "Buried_polar_candidate",
+                ],
+            )
+        ],
+    )
+
+    html = render_report_html(model)
+
+    assert "metric-token-list" in html
+    assert '<span class="metric-token">Exposed_hydrophobic_patch</span>' in html
+    assert '<span class="metric-token">Buried_polar_candidate</span>' in html
+    assert ".metric-bar-row.is-categorical .metric-bar-top" in html
+    assert "overflow-wrap:anywhere" in html
+
+
+def test_overview_keeps_full_long_query_and_formats_segments() -> None:
+    long_query = (
+        "Enhance fold stability of a 426-aa protein by mutating only buried polar residues. "
+        "Keep protected metal residues unchanged; preserve same length; report all metrics fully."
+    )
+    long_objective = (
+        "Improve predicted fold stability while preserving length=426 and protected residues. "
+        "Thresholds: ddG < 0, pLDDT within 3 points, no extra mutations."
+    )
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_long", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[]),
+        raw_summary={"user_query": long_query, "objective": long_objective},
+    )
+
+    html = render_report_html(model)
+
+    assert long_query in html
+    assert "Improve predicted fold stability while preserving length=426 and protected residues." in html
+    assert "pLDDT within 3 points" in html
+    assert "overview-summary-list" in html
+    assert "Enhance fold stability of a 426-aa protein by mutating only buried polar residues..." not in html
+
+
+def test_workflow_audit_failed_tool_calls_show_reason() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_fail", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[
+                WorkflowNodeSummary(
+                    node_id="qc_bad",
+                    tool="protein_qc",
+                    version="1",
+                    state="failed",
+                    job_id="job_qc_bad",
+                    error_code="E_INVALID_PARAMS",
+                    error_message="protein_qc requires at least one of sequence / pdb_path",
+                )
+            ],
+        ),
+    )
+
+    html = render_report_html(model)
+
+    assert "Needs review" in html
+    assert "has-failure" in html
+    assert "tool-call-error" in html
+    assert "E_INVALID_PARAMS: protein_qc requires at least one of sequence / pdb_path" in html
+
+
+def test_agent_rationale_cards_use_scrollable_bodies() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_rationale", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[_node("submit", "submit_candidate")],
+        ),
+        final_submission={
+            "terminal": True,
+            "outcome": "accepted",
+            "reasoning": " ".join(["selection rationale detail"] * 30) + " terminal-marker",
+            "candidates_resolved": [
+                {
+                    "candidate_id": "cand",
+                    "justification": " ".join(["candidate justification detail"] * 30) + " final-marker",
+                }
+            ],
+        },
+    )
+
+    html = render_report_html(model)
+
+    assert "agent-rationale-section" in html
+    assert html.count('<div class="agent-rationale-card-body">') == 4
+    assert "terminal-marker" in html
+    assert "final-marker" in html
+
+
+def test_workflow_audit_groups_repeated_tool_calls() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_grouped", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[
+                WorkflowNodeSummary(
+                    node_id=f"fold_candidate_{idx}",
+                    tool="protenix_v2",
+                    version="1",
+                    state="completed",
+                    job_id=f"job_fold_{idx}",
+                )
+                for idx in range(6)
+            ],
+        ),
+    )
+
+    html = render_report_html(model)
+
+    assert "Grouped by tool and outcome" in html
+    assert "tool-call-group" in html
+    assert "6 calls" in html
+    assert "Predicted candidate structures and confidence metrics." in html
+    assert "Show exact calls" not in html
+    assert "fold_candidate_0" not in html
+    assert "fold_candidate_5" not in html
+
+
+def test_workflow_audit_tool_call_titles_wrap_without_ellipsis() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_tool_titles", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[_node("edit", "sequence_edit")],
+        ),
+    )
+
+    html = render_report_html(model)
+    strong_rule_start = html.index(".workflow-tool-call-list li strong")
+    strong_rule = html[strong_rule_start : html.index("}", strong_rule_start)]
+
+    assert "<strong>Sequence edit</strong>" in html
+    assert "white-space:normal" in strong_rule
+    assert "overflow-wrap:anywhere" in strong_rule
+    assert "text-overflow:ellipsis" not in strong_rule
+
+
+def test_workflow_audit_uses_domain_specific_stage_labels() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_stages", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[
+                _node("edit", "sequence_edit"),
+                _node("esm", "esm2"),
+                _node("fold", "protenix_v2"),
+                _node("align", "tmalign"),
+                _node("energy", "pyrosetta"),
+                _node("qc", "protein_qc"),
+            ],
+        ),
+    )
+
+    html = render_report_html(model)
+
+    assert "Engineering" in html
+    assert "Sequence Generation" in html
+    assert "Structure Prediction" in html
+    assert "Structure Comparison" in html
+    assert "Energy Analysis" in html
+    assert "Sequence QC" in html
+    assert "Model Call" not in html
+
+
+def test_rosetta_stability_metrics_render_on_candidate_cards() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="job", id="job_pyro", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[_node("pyro", "pyrosetta")],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_stable",
+                rank=1,
+                score=1.0,
+                sequence="ACDEFGHIK",
+                scores={"pyrosetta": {"total_score": -705.4, "ddg_reu": -52.99}},
+                source={"tool": "pyrosetta", "node_id": "pyro"},
+            )
+        ],
+    )
+
+    html = render_report_html(model)
+
+    assert "Rosetta total score" in html
+    assert "ddG" in html
+    assert "REU" in html
+    assert "-52.99" in html
+    assert 'class="snapshot-score is-compact"' in html
+    assert "font-variant-numeric:tabular-nums" in html
+
+
+def test_candidate_comparison_marks_missing_paired_ddg_compactly() -> None:
+    model = ReportModel(
+        summary=RunSummary(
+            kind="trajectory",
+            id="traj_stability_missing_ddg",
+            workspace="ws",
+            state="completed",
+        ),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[_node("pyro", "pyrosetta")],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="total_only",
+                rank=2,
+                sequence="ACDEFGHIK",
+                scores={"pyrosetta": {"total_score": -112.0}},
+                source={"tool": "pyrosetta", "node_id": "pyro"},
+            ),
+            ReportCandidate(
+                candidate_id="paired_ddg",
+                rank=1,
+                sequence="ACDEFGHIL",
+                scores={
+                    "pyrosetta": {
+                        "total_score": -128.0,
+                        "ddg_reu": -15.5,
+                        "mean_ddg": -15.0,
+                    }
+                },
+                source={"tool": "pyrosetta", "node_id": "pyro"},
+            ),
+        ],
+    )
+
+    html = render_report_html(model)
+
+    assert html.count('title="No paired ddG"') == 2
+    assert 'title="Metric not recorded"' in html
+    assert "absolute Rosetta total score" in html
+    assert "-15.50 REU" in html
+    assert "-15 REU" in html
 
 
 def _viewer_payloads(html: str) -> list[dict]:

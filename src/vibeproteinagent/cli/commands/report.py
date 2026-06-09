@@ -44,9 +44,12 @@ def report(
     share: bool = typer.Option(False, "--share", help="Prefer self-contained inline assets."),
     open_: bool = typer.Option(False, "--open", help="Open the generated report in a browser."),
     enrich_sequence_analysis: bool = typer.Option(
-        False,
-        "--enrich-sequence-analysis",
-        help="Opt in to running sequence_analysis enrichment before rendering.",
+        True,
+        "--enrich-sequence-analysis/--no-enrich-sequence-analysis",
+        help=(
+            "Run sequence_analysis enrichment before rendering when sequence-bearing "
+            "candidates do not already have sequence_analysis scores."
+        ),
     ),
     replace_report: bool = typer.Option(
         False,

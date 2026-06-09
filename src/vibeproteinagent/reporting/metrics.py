@@ -173,6 +173,36 @@ METRIC_REGISTRY: dict[str, tuple[str, str, float, float]] = {
         "Fraction of F/Y/W residues. Relevant for UV absorbance / aggregation propensity.",
         0.0, 0.25,
     ),
+    "total_score": (
+        "Rosetta total score",
+        "Rosetta score-function total energy in REU. Lower / more negative is better "
+        "within a comparable scoring protocol.",
+        -1000.0, 100.0,
+    ),
+    "ddg": (
+        "ddG (REU)",
+        "Rosetta energy difference versus the reference design. Negative values are "
+        "stabilizing under the recorded protocol.",
+        -100.0, 20.0,
+    ),
+    "ddg_reu": (
+        "ddG (REU)",
+        "Rosetta energy difference versus the reference design. Negative values are "
+        "stabilizing under the recorded protocol.",
+        -100.0, 20.0,
+    ),
+    "mean_ddg": (
+        "Mean ddG (REU)",
+        "Mean Rosetta ddG across repeated seeds. Negative values are stabilizing under "
+        "the recorded protocol.",
+        -100.0, 20.0,
+    ),
+    "delta_delta_g": (
+        "ddG (REU)",
+        "Rosetta energy difference versus the reference design. Negative values are "
+        "stabilizing under the recorded protocol.",
+        -100.0, 20.0,
+    ),
     "rmsd": (
         "RMSD (A)",
         "Root-mean-square deviation over aligned atoms. Lower = closer "

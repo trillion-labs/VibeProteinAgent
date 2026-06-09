@@ -266,7 +266,7 @@ def test_agent_rationale_uses_recorded_workflow_query_and_graph_plan():
     rationale = build_agent_rationale_view_model(model, review)
 
     assert rationale.user_query == "Design a 70 aa binder."
-    assert rationale.stage_plan == ["Generation", "Ranking"]
+    assert rationale.stage_plan == ["Sequence Generation", "Ranking"]
     assert rationale.major_decisions == []
     assert rationale.has_full_transcript is False
 
@@ -487,6 +487,65 @@ def test_agent_objective_uses_structured_final_submission_fields_when_raw_missin
     assert "Objective metadata was not recorded" not in overview.agent_objective
 
 
+def test_agent_rationale_uses_final_submission_as_major_decisions():
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "accepted",
+            "reasoning": "Selected because PyRosetta ddG improved and fold confidence held.",
+            "candidates_resolved": [
+                {
+                    "candidate_id": "cand",
+                    "justification": "ddG -15.5 REU with TM-score 0.94.",
+                }
+            ],
+        },
+    )
+    review = build_review_model(model)
+
+    rationale = build_agent_rationale_view_model(model, review)
+
+    labels = [item.label for item in rationale.major_decisions]
+    assert labels == ["Final submission", "Selection rationale", "Candidate justification"]
+    assert rationale.major_decisions[0].value == "Accepted"
+    assert "PyRosetta ddG improved" in rationale.major_decisions[1].value
+    assert "ddG -15.5 REU" in rationale.major_decisions[2].value
+
+
+def test_agent_rationale_major_decisions_are_not_truncated():
+    long_reasoning = " ".join(["selection rationale detail"] * 30) + " terminal-marker"
+    long_justification = " ".join(["candidate justification detail"] * 30) + " final-marker"
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "accepted",
+            "reasoning": long_reasoning,
+            "candidates_resolved": [
+                {
+                    "candidate_id": "cand",
+                    "justification": long_justification,
+                }
+            ],
+        },
+    )
+    review = build_review_model(model)
+
+    rationale = build_agent_rationale_view_model(model, review)
+
+    assert rationale.major_decisions[1].value.endswith("terminal-marker")
+    assert rationale.major_decisions[2].value.endswith("final-marker")
+    assert "..." not in rationale.major_decisions[1].value
+    assert "..." not in rationale.major_decisions[2].value
+
+
 def test_agent_objective_uses_structured_final_submission_criteria_when_objective_missing():
     model = _model(
         nodes=[_node("submit", "submit_candidate")],
@@ -589,6 +648,69 @@ def test_workflow_review_preset_classifies_binder_from_interface_evidence():
     assert preset.metric_priority[:3] == ["ipSAE", "ipTM", "pLDDT"]
     assert preset.cross_candidate_metrics[:3] == ["ipSAE", "ipTM", "pLDDT"]
     assert preset.evidence_family_order[0] == "Interface & binding"
+
+
+def test_workflow_review_preset_prioritizes_stability_objective_over_incidental_iptm():
+    model = _model(
+        raw_summary={
+            "user_query": (
+                "Protein stability engineering: improve stability while preserving "
+                "the existing fold."
+            )
+        },
+        nodes=[
+            _node("n1", "sequence_edit"),
+            _node("n2", "esm3"),
+            _node("n3", "protenix_v2"),
+            _node("n4", "pyrosetta"),
+            _node("n5", "sequence_analysis"),
+        ],
+        candidates=[
+            ReportCandidate(
+                candidate_id="stab_1",
+                sequence="ACDEFG",
+                structure_path="/tmp/stab.pdb",
+                scores={
+                    "esm3": {"mean_plddt": 0.88, "ptm": 0.76},
+                    "protenix_v2": {"iptm": 0.42},
+                    "pyrosetta": {"ddg": -2.4, "total_score": -128.0},
+                    "sequence_analysis": {
+                        "gravy": -0.32,
+                        "net_charge": -1.0,
+                        "instability_index": 27.4,
+                    },
+                },
+            )
+        ],
+    )
+    review = build_review_model(model)
+
+    preset = build_workflow_review_preset(model, review)
+    board = build_candidate_board_view_model(review, preset)
+
+    assert preset.workflow_type == "denovo"
+    assert preset.label == "Stability engineering review"
+    assert preset.metric_priority[:4] == [
+        "ddG",
+        "Mean ddG",
+        "Rosetta total score",
+        "pLDDT",
+    ]
+    assert preset.cross_candidate_metrics[:3] == [
+        "ddG",
+        "Mean ddG",
+        "Rosetta total score",
+    ]
+    assert preset.evidence_family_order[0] == "Stability scoring"
+    assert [chip.label for chip in board.rows[0].metric_chips[:5]] == [
+        "ddG",
+        "Rosetta total score",
+        "pLDDT",
+        "pTM",
+        "Instability",
+    ]
+    assert "GRAVY" in [chip.label for chip in board.rows[0].metric_chips]
+    assert "ipTM" not in [chip.label for chip in board.rows[0].metric_chips[:5]]
 
 
 def test_workflow_review_preset_orders_denovo_for_foldability():

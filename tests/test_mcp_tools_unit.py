@@ -363,6 +363,41 @@ def test_mcp_render_report_default_path_is_workspace_root(
     assert status["complete"] is True
 
 
+def test_mcp_render_report_enriches_sequence_analysis_by_default(
+    ctx: SessionCtx,
+    tmp_path: Path,
+) -> None:
+    store = JobStore(ctx.workspace)
+    job = store.submit(
+        "boltzgen",
+        "1.0.0",
+        {},
+    )
+    store.transition(job.job_id, JobState.QUEUED)
+    store.transition(job.job_id, JobState.RUNNING)
+    store.transition(
+        job.job_id,
+        JobState.COMPLETED,
+        output={
+            "candidates": [
+                {
+                    "schema_version": "candidate_v1",
+                    "candidate_id": "design_1",
+                    "sequence": "ACDEFGHIKLMNPQRSTVWY",
+                    "scores": {"boltzgen": {"confidence": 0.73}},
+                }
+            ]
+        },
+    )
+
+    out = render_report(ctx, job.job_id, out=str(tmp_path / "report.html"))
+
+    assert out["enrichment_enabled"] is True
+    assert len(out["enrichment_job_ids"]) == 1
+    html = Path(out["report_html"]).read_text()
+    assert "GRAVY" in html
+
+
 def test_mcp_render_bundle_report_default_path_is_workspace_root(
     ctx: SessionCtx,
     tmp_path: Path,

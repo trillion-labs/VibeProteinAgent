@@ -54,11 +54,13 @@ class PersistentPythonSidecar:
         env: dict[str, str],
         name: str,
         startup_timeout_s: float = 30.0,
+        cwd: Path | str | None = None,
     ) -> None:
         self.python = Path(python)
         self.env = with_vpa_src_pythonpath(env)
         self.name = name
         self.startup_timeout_s = float(startup_timeout_s)
+        self.cwd = Path(cwd) if cwd is not None else None
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
 
@@ -142,7 +144,7 @@ class PersistentPythonSidecar:
             stdout=subprocess.PIPE,
             stderr=sys.stderr,
             env=self.env,
-            cwd=os.getcwd(),
+            cwd=str(self.cwd) if self.cwd is not None else os.getcwd(),
         )
 
     def _read_response(self, timeout_s: float) -> dict[str, Any] | None:
@@ -221,6 +223,7 @@ class SidecarRuntimeSpec:
     run_target: str | None = None
     timeout_s: float = 30.0
     seed_policy: str = "per_seed"
+    cwd: Path | str | None = None
 
     def spawn(
         self,
@@ -231,6 +234,7 @@ class SidecarRuntimeSpec:
             env=self.env,
             name=self.name,
             startup_timeout_s=self.timeout_s,
+            cwd=self.cwd,
         )
 
 

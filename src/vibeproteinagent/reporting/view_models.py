@@ -248,6 +248,10 @@ def build_workflow_review_preset(
     has_interface = "Interface & binding" in families or bool(
         tools & {"boltz2_affinity", "ipsae", "prodigy", "pxmeter", "vina"}
     )
+    has_stability = "Stability scoring" in families or "pyrosetta" in tools
+    has_sequence_biophysics = "Sequence biophysics" in families or bool(
+        tools & {"sequence_analysis", "protein_qc"}
+    )
     has_retrieval = bool(
         tools
         & {
@@ -259,7 +263,132 @@ def build_workflow_review_preset(
             "literature_search",
         }
     )
-    if review.workflow_type == WorkflowType.BINDER or has_interface:
+    objective_focus = _objective_focus(model)
+    if objective_focus == "stability" or (
+        has_stability and objective_focus != "binding"
+    ):
+        confidence = 0.92 if has_stability else 0.76
+        return WorkflowReviewPreset(
+            workflow_type=WorkflowType.DENOVO,
+            label="Stability engineering review",
+            confidence=confidence,
+            confidence_basis=(
+                "stability objective text and/or PyRosetta stability-scoring evidence"
+            ),
+            scientific_question=(
+                "Which candidates best improve protein stability while retaining a plausible fold?"
+            ),
+            overview_focus=(
+                "Stability engineering: prioritize recorded ddG/Rosetta stability "
+                "scores, fold confidence, QC, and sequence biophysics. Interface "
+                "metrics are shown only when recorded, not treated as primary."
+            ),
+            candidate_review_guidance=(
+                "Review candidates as stability-engineering designs. ddG/Rosetta "
+                "stability evidence is primary when present; pLDDT/pTM support fold "
+                "plausibility, and GRAVY/net charge/instability summarize sequence risk."
+            ),
+            comparison_note=(
+                "For stability engineering, compare ddG/Rosetta stability scores, "
+                "fold confidence, QC, sequence biophysics, and recorded liabilities."
+            ),
+            cross_candidate_focus=(
+                "Stability patterns emphasize ddG/Rosetta score ranges, pLDDT/pTM, "
+                "sequence biophysics, and liability prevalence."
+            ),
+            evidence_family_order=[
+                "Stability scoring",
+                "Structure confidence",
+                "Sequence biophysics",
+                "Flags & liabilities",
+                "Novelty & similarity",
+                "Interface & binding",
+            ],
+            metric_priority=[
+                "ddG",
+                "Mean ddG",
+                "Rosetta total score",
+                "pLDDT",
+                "pTM",
+                "Instability",
+                "GRAVY",
+                "Net charge",
+                "pI",
+                "QC",
+                "ipTM",
+                "ipSAE",
+            ],
+            cross_candidate_metrics=[
+                "ddG",
+                "Mean ddG",
+                "Rosetta total score",
+                "pLDDT",
+                "pTM",
+                "Instability",
+                "GRAVY",
+                "Net charge",
+                "pI",
+            ],
+        )
+    if objective_focus == "solubility" or (
+        has_sequence_biophysics and objective_focus == "developability"
+    ):
+        confidence = 0.88 if has_sequence_biophysics else 0.72
+        return WorkflowReviewPreset(
+            workflow_type=WorkflowType.DENOVO,
+            label="Solubility engineering review",
+            confidence=confidence,
+            confidence_basis="solubility/developability objective text and sequence-biophysics evidence",
+            scientific_question=(
+                "Which candidates best improve solubility and sequence developability?"
+            ),
+            overview_focus=(
+                "Solubility engineering: prioritize GRAVY, net charge, instability, "
+                "pI, QC liabilities, and fold confidence when available."
+            ),
+            candidate_review_guidance=(
+                "Review candidates as solubility/developability designs. GRAVY and "
+                "charge-related sequence metrics are primary; structure confidence "
+                "is supporting evidence."
+            ),
+            comparison_note=(
+                "For solubility engineering, compare GRAVY, net charge, instability, "
+                "pI, QC status, liabilities, and fold confidence where recorded."
+            ),
+            cross_candidate_focus=(
+                "Solubility patterns emphasize hydropathy, charge, instability, pI, "
+                "QC state, and liability prevalence."
+            ),
+            evidence_family_order=[
+                "Sequence biophysics",
+                "Flags & liabilities",
+                "Structure confidence",
+                "Stability scoring",
+                "Novelty & similarity",
+                "Interface & binding",
+            ],
+            metric_priority=[
+                "GRAVY",
+                "Net charge",
+                "Instability",
+                "pI",
+                "QC",
+                "pLDDT",
+                "pTM",
+                "ddG",
+                "Mean ddG",
+                "ipTM",
+            ],
+            cross_candidate_metrics=[
+                "GRAVY",
+                "Net charge",
+                "Instability",
+                "pI",
+                "pLDDT",
+                "pTM",
+            ],
+        )
+    if review.workflow_type == WorkflowType.BINDER or has_interface or objective_focus == "binding":
         confidence = 0.92 if has_interface and has_structure else 0.78
         basis = "interface/binding tools or evidence plus structure review signals"
         return WorkflowReviewPreset(
@@ -551,7 +680,7 @@ def build_overview_view_model(
         display_status=_display_status(model.summary.state),
         workflow_id=model.graph.workflow_id or model.summary.id,
         timestamp_ms=model.summary.finished_at or model.summary.submitted_at,
-        design_objective=_clip(objective, 220),
+        design_objective=objective,
         agent_interpretation=_clip(f"{interpretation} {preset.overview_focus}", 260),
         agent_objective=_agent_objective_summary(model, preset),
         workflow_summary=preset.overview_focus,
@@ -568,8 +697,7 @@ def build_agent_rationale_view_model(
 ) -> AgentRationaleViewModel:
     preset = preset or build_workflow_review_preset(model, review)
     workflow_selection = (
-        f"{preset.label} ({preset.confidence:.0%} confidence): "
-        f"{preset.scientific_question} Basis: {preset.confidence_basis}."
+        f"{preset.label}: {preset.scientific_question}"
     )
     recorded_query = _recorded_user_query(model)
     recorded_objective = _recorded_objective(model)
@@ -579,6 +707,7 @@ def build_agent_rationale_view_model(
         intent_summary=_clip(intent, 220) or None,
         workflow_selection=workflow_selection,
         stage_plan=_stage_plan_from_graph(model.graph.nodes),
+        major_decisions=_major_decisions_from_submission(model),
         has_full_transcript=False,
     )
 
@@ -660,9 +789,12 @@ def build_workflow_trace_view_model(
 ) -> WorkflowTraceViewModel:
     preset = preset or build_workflow_review_preset(model, review)
     stage_nodes: dict[str, list[WorkflowNodeSummary]] = {
+        "engineering": [],
         "generation": [],
         "qc": [],
         "structure": [],
+        "structure_comparison": [],
+        "energy": [],
         "interface": [],
         "ranking": [],
         "recommendation": [],
@@ -672,10 +804,16 @@ def build_workflow_trace_view_model(
         stage_nodes[_stage_key(node)].append(node)
     stages = [
         _stage_view(
+            "engineering",
+            "Engineering",
+            stage_nodes["engineering"],
+            "Edited candidate sequences",
+        ),
+        _stage_view(
             "generation",
-            "Generation",
+            "Sequence Generation",
             stage_nodes["generation"],
-            "Candidate sequences or structures",
+            "Sequence model output",
         ),
         _stage_view("qc", "Sequence QC", stage_nodes["qc"], "QC flags and biophysical filters"),
         _stage_view(
@@ -683,6 +821,18 @@ def build_workflow_trace_view_model(
             "Structure Prediction",
             stage_nodes["structure"],
             "Structure confidence",
+        ),
+        _stage_view(
+            "structure_comparison",
+            "Structure Comparison",
+            stage_nodes["structure_comparison"],
+            "Fold preservation evidence",
+        ),
+        _stage_view(
+            "energy",
+            "Energy Analysis",
+            stage_nodes["energy"],
+            "Rosetta energy and stability evidence",
         ),
         _stage_view(
             "interface",
@@ -901,6 +1051,12 @@ def _candidate_strength_phrases(
     delta_g = by_label.get("Delta G")
     if preset.workflow_type == WorkflowType.BINDER and delta_g is not None:
         phrases.append("recorded binding energy estimate")
+    ddg = _chip_float(by_label.get("ddG")) or _chip_float(by_label.get("Mean ddG"))
+    if ddg is not None and "stability" in preset.label.lower():
+        if ddg < 0:
+            phrases.append("stabilizing recorded ddG/Rosetta evidence")
+        else:
+            phrases.append("recorded ddG/Rosetta stability evidence")
     plddt = _chip_float(by_label.get("pLDDT"))
     if plddt is not None:
         if plddt >= 90:
@@ -1002,6 +1158,12 @@ def _missing_evidence(
         missing.append("structure")
     if workflow_type == WorkflowType.BINDER and "Interface & binding" not in families:
         missing.append("interface and binding metrics")
+    if (
+        preset is not None
+        and "stability" in preset.label.lower()
+        and "Stability scoring" not in families
+    ):
+        missing.append("stability scoring metrics")
     if (
         workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO}
         and "Structure confidence" not in families
@@ -1168,8 +1330,61 @@ def _stage_plan_from_graph(nodes: list[WorkflowNodeSummary]) -> list[str]:
     return stages
 
 
+def _major_decisions_from_submission(model: ReportModel) -> list[AgentRationaleItem]:
+    final_submission = model.final_submission if isinstance(model.final_submission, dict) else {}
+    if not final_submission:
+        return []
+    decisions: list[AgentRationaleItem] = []
+    outcome = str(final_submission.get("outcome") or "").replace("_", " ").strip()
+    if outcome:
+        decisions.append(
+            AgentRationaleItem(
+                label="Final submission",
+                value=outcome.title(),
+                provenance=Provenance.EXACT,
+            )
+        )
+    reasoning = final_submission.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        decisions.append(
+            AgentRationaleItem(
+                label="Selection rationale",
+                value=" ".join(reasoning.split()),
+                provenance=Provenance.EXACT,
+            )
+        )
+    resolved = final_submission.get("candidates_resolved")
+    if isinstance(resolved, list):
+        justifications = [
+            str(row.get("justification")).strip()
+            for row in resolved
+            if isinstance(row, dict) and row.get("justification")
+        ]
+        if justifications:
+            decisions.append(
+                AgentRationaleItem(
+                    label="Candidate justification",
+                    value=" ".join(justifications[0].split()),
+                    provenance=Provenance.EXACT,
+                )
+            )
+    return decisions[:3]
+
+
 def _stage_key(node: WorkflowNodeSummary) -> str:
     tool = (node.tool or "").strip().lower()
+    explicit = {
+        "sequence_edit": "engineering",
+        "esm2": "generation",
+        "protein_qc": "qc",
+        "sequence_analysis": "qc",
+        "protenix_v2": "structure",
+        "structure_analysis": "structure",
+        "tmalign": "structure_comparison",
+        "pyrosetta": "energy",
+    }
+    if tool in explicit:
+        return explicit[tool]
     role = classify_tool_role(tool)
     if role == ToolRole.GENERATOR:
         return "structure" if tool in {"esm3", "boltzgen"} else "generation"
@@ -1180,11 +1395,15 @@ def _stage_key(node: WorkflowNodeSummary) -> str:
     if role == ToolRole.EVALUATOR:
         if tool in {"protein_qc", "sequence_analysis"}:
             return "qc"
-        if tool in {"esm3", "esm2", "protenix_v2", "structure_analysis"}:
+        if tool in {"esm3", "protenix_v2", "structure_analysis"}:
             return "structure"
+        if tool in {"tmalign"}:
+            return "structure_comparison"
+        if tool in {"pyrosetta"}:
+            return "energy"
         if tool in {"boltz2_affinity", "pxmeter", "ipsae", "prodigy", "vina"}:
             return "interface"
-        return "qc"
+        return "other"
     return "other"
 
 
@@ -1208,9 +1427,12 @@ def _stage_view(
 
 def _stage_label(key: str) -> str:
     return {
-        "generation": "Generation",
+        "engineering": "Engineering",
+        "generation": "Sequence Generation",
         "qc": "Sequence QC",
         "structure": "Structure Prediction",
+        "structure_comparison": "Structure Comparison",
+        "energy": "Energy Analysis",
         "interface": "Interface Scoring",
         "ranking": "Ranking",
         "recommendation": "Recommendation",
@@ -1283,6 +1505,62 @@ def _recorded_thresholds(model: ReportModel) -> str:
     return "; ".join(
         _format_threshold_value(value) for value in values if value not in (None, "", {}, [])
     )
+
+
+def _objective_focus(model: ReportModel) -> str | None:
+    text = " ".join(
+        part
+        for part in (
+            _recorded_user_query(model),
+            _recorded_objective(model),
+            _recorded_thresholds(model),
+        )
+        if part
+    ).lower()
+    if not text:
+        return None
+    stability_terms = (
+        "stability",
+        "stabil",
+        "thermostability",
+        "thermal stability",
+        "melting temperature",
+        "ddg",
+        "delta delta g",
+        "delta_delta_g",
+        "rosetta",
+        "pyrosetta",
+    )
+    solubility_terms = (
+        "solubility",
+        "soluble",
+        "aggregation",
+        "aggregate",
+        "gravy",
+        "hydrophobic patch",
+        "hydropathy",
+        "developability",
+    )
+    binding_terms = (
+        "binder",
+        "binding",
+        "bind ",
+        "interface",
+        "affinity",
+        "substrate",
+        "ligand",
+        "enzyme-substrate",
+        "complex",
+    )
+    if any(term in text for term in stability_terms):
+        return "stability"
+    if any(term in text for term in solubility_terms):
+        return "solubility"
+    if any(term in text for term in binding_terms):
+        return "binding"
+    if "developability" in text:
+        return "developability"
+    return None
 
 
 def _final_submission_objective_metadata(final_submission: dict[str, Any]) -> str:

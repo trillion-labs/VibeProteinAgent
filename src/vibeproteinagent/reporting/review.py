@@ -271,6 +271,20 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
         ],
     ),
     (
+        "Stability scoring",
+        [
+            ("pyrosetta", "total_score", "Rosetta total score", "REU", _fmt),
+            ("pyrosetta", "ddg", "ddG", "REU", _fmt),
+            ("pyrosetta", "ddg_reu", "ddG", "REU", _fmt),
+            ("pyrosetta", "mean_ddg", "Mean ddG", "REU", _fmt),
+            ("pyrosetta", "delta_delta_g", "ddG", "REU", _fmt),
+            ("pyrosetta", "delta_g", "Delta G", "REU", _fmt),
+            ("pyrosetta", "dg", "Delta G", "REU", _fmt),
+            ("submit_candidate", "ddg_reu", "ddG", "REU", _fmt),
+            ("submit_candidate", "mean_ddg", "Mean ddG", "REU", _fmt),
+        ],
+    ),
+    (
         "Novelty & similarity",
         [
             ("proteinmpnn", "seq_recovery", "Seq recovery", "%", lambda v: _fmt(_pct(v))),
@@ -308,6 +322,8 @@ _METRIC_SOURCE_NAME: dict[str, str] = {
     "proteinmpnn": "ProteinMPNN",
     "ipsae": "ipSAE",
     "prodigy": "PRODIGY",
+    "pyrosetta": "PyRosetta",
+    "submit_candidate": "Submit candidate",
 }
 
 

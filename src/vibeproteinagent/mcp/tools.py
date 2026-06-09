@@ -571,6 +571,7 @@ def render_report(
     out: str | None = None,
     format: str = "html",
     replace_report: bool = False,
+    enrich_sequence_analysis: bool = True,
 ) -> dict[str, Any]:
     """Render a read-only report for traj_ / wf_ / job_ sources."""
     try:
@@ -579,8 +580,18 @@ def render_report(
             resolve_report_output_path,
             write_report,
         )
+        from vibeproteinagent.reporting.enrich import ensure_sequence_analysis_enrichment
 
         model = collect_report_model(ctx.workspace, source_id)
+        enrichment_job_ids: list[str] = []
+        if enrich_sequence_analysis:
+            enrichment_job_ids = ensure_sequence_analysis_enrichment(
+                ctx.workspace,
+                model.summary.id,
+                model,
+            )
+        if enrichment_job_ids:
+            model = collect_report_model(ctx.workspace, source_id)
         default_name = (
             f"{source_id}_report_bundle"
             if format == "bundle"
@@ -611,6 +622,8 @@ def render_report(
             "format": format,
             "source": {"kind": model.summary.kind, "id": model.summary.id},
             "candidate_count": len(model.candidates),
+            "enrichment_job_ids": enrichment_job_ids,
+            "enrichment_enabled": enrich_sequence_analysis,
             "replace_report": replace_report,
         }
         if trajectory_status is not None:
@@ -948,8 +961,16 @@ def register_orchestration_tools(app: FastMCP, ctx: SessionCtx) -> list[str]:
         out: str | None = None,
         format: str = "html",
         replace_report: bool = False,
+        enrich_sequence_analysis: bool = True,
     ) -> dict[str, Any]:
-        return render_report(ctx, source_id, out, format, replace_report)
+        return render_report(
+            ctx,
+            source_id,
+            out,
+            format,
+            replace_report,
+            enrich_sequence_analysis,
+        )
 
     @app.tool(
         name="list_workflows",

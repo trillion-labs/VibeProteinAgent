@@ -244,6 +244,7 @@ class SmokeProbe:
     code: str
     env: Mapping[str, str] | None = None
     timeout_s: int = 30
+    cwd: Path | str | None = None
 
     def run(self) -> str | None:
         try:
@@ -254,6 +255,7 @@ class SmokeProbe:
                 text=True,
                 timeout=self.timeout_s,
                 env=dict(self.env or os.environ),
+                cwd=str(self.cwd) if self.cwd is not None else None,
             )
         except FileNotFoundError:
             return f"{self.label} python not found: {self.python}"
@@ -273,6 +275,7 @@ def smoke_import(
     code: str,
     env: Mapping[str, str] | None = None,
     timeout_s: int = 30,
+    cwd: Path | str | None = None,
 ) -> str | None:
     return SmokeProbe(
         label=label,
@@ -280,6 +283,7 @@ def smoke_import(
         code=code,
         env=env,
         timeout_s=timeout_s,
+        cwd=cwd,
     ).run()
 
 
