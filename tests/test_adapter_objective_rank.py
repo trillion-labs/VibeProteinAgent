@@ -7,7 +7,7 @@ import pytest
 import torch
 from jsonschema import Draft202012Validator, ValidationError as JSONSchemaValidationError
 
-from vibeproteinagent.adapters import null_context
+from vibeproteinagent.adapters import ToolRegistry, null_context
 from vibeproteinagent.adapters.objective_rank.adapter import (
     ObjectiveRankAdapter,
     ObjectiveRankInput,
@@ -27,6 +27,17 @@ def _completed_job(workspace: Workspace, tool: str, output: dict) -> str:
     store.transition(rec.job_id, JobState.RUNNING)
     store.transition(rec.job_id, JobState.COMPLETED, output=output)
     return rec.job_id
+
+
+def test_objective_rank_is_registered_as_public_tool() -> None:
+    registry = ToolRegistry()
+    registry.discover(refresh=True)
+
+    descriptor, adapter_cls = registry.get("objective_rank")
+
+    assert descriptor.name == "objective_rank"
+    assert adapter_cls is ObjectiveRankAdapter
+    assert any(descriptor.name == item.name for item in registry.list())
 
 
 def test_objective_rank_output_schema_requires_ranked_row_identity() -> None:

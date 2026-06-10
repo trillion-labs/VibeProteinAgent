@@ -1350,7 +1350,7 @@ def _agent_decision_value_html(label: str, value: str) -> str:
         blocks = "".join(
             '<div class="decision-section">'
             f"<b>{_h(label)}</b>"
-            f"<p>{_h(body)}</p>"
+            f"<p>{_h(_capitalize_first_alpha(body))}</p>"
             "</div>"
             for label, body in sections
             if body
@@ -1365,8 +1365,24 @@ def _agent_decision_value_html(label: str, value: str) -> str:
     return f'<p class="decision-text">{_h(text)}</p>'
 
 
+def _capitalize_first_alpha(value: str) -> str:
+    text = str(value or "")
+    for idx, char in enumerate(text):
+        if char.isalpha():
+            return f"{text[:idx]}{char.upper()}{text[idx + 1:]}"
+    return text
+
+
 def _structured_decision_sections(text: str) -> list[tuple[str, str]]:
-    heading = re.compile(
+    heading = _decision_heading_pattern()
+    matches = list(heading.finditer(text))
+    if len(matches) >= 2:
+        return _sections_from_decision_heading_matches(text, matches)
+    return _sections_from_decision_sentence_cues(text, matches)
+
+
+def _decision_heading_pattern() -> re.Pattern[str]:
+    return re.compile(
         r"(?i)(?:^|(?<=[.;!?]\s))("
         r"OBJECTIVE|APPROACH|RESULT|KEY FINDING|ACCEPTANCE(?: CRITERIA)?|"
         r"ACCEPTANCE GATES|PIPELINE|THRESHOLDS/CRITERIA|THRESHOLDS|"
@@ -1375,9 +1391,12 @@ def _structured_decision_sections(text: str) -> list[tuple[str, str]]:
         r"ALTERNATIVES|CAVEATS|CAVEAT|LIMITATION|WHY SELECTED"
         r")(?:\s*\([^:]{1,120}\))?\s*:"
     )
-    matches = list(heading.finditer(text))
-    if len(matches) < 2:
-        return []
+
+
+def _sections_from_decision_heading_matches(
+    text: str,
+    matches: list[re.Match[str]],
+) -> list[tuple[str, str]]:
     sections: list[tuple[str, str]] = []
     for idx, match in enumerate(matches):
         start = match.end()
@@ -1387,6 +1406,91 @@ def _structured_decision_sections(text: str) -> list[tuple[str, str]]:
         if body:
             sections.append((label, body))
     return sections
+
+
+def _sections_from_decision_sentence_cues(
+    text: str,
+    matches: list[re.Match[str]],
+) -> list[tuple[str, str]]:
+    sentences = _decision_sentences(text)
+    if len(sentences) < 2:
+        return []
+    sections: list[tuple[str, str]] = []
+    active_label = ""
+    active_parts: list[str] = []
+
+    def flush() -> None:
+        nonlocal active_label, active_parts
+        body = " ".join(part.strip() for part in active_parts if part.strip()).strip()
+        if active_label and body:
+            sections.append((active_label, body))
+        active_label = ""
+        active_parts = []
+
+    for idx, sentence in enumerate(sentences):
+        label, body = _decision_sentence_label_and_body(sentence, first_sentence=idx == 0)
+        if not label:
+            if active_parts:
+                active_parts.append(sentence)
+            continue
+        if label != active_label:
+            flush()
+            active_label = label
+        active_parts.append(body)
+    flush()
+
+    labels = {label for label, _body in sections}
+    if len(sections) < 2 or not (labels & {"Objective", "Selection", "Result", "Ranking"}):
+        return []
+    if matches and sections[0][0] != _decision_heading_label(matches[0].group(1)):
+        return []
+    return sections
+
+
+def _decision_sentences(text: str) -> list[str]:
+    compact = " ".join(str(text or "").split())
+    if not compact:
+        return []
+    return [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+(?=[A-Za-z_])", compact)
+        if part.strip()
+    ]
+
+
+def _decision_sentence_label_and_body(
+    sentence: str,
+    *,
+    first_sentence: bool,
+) -> tuple[str, str]:
+    stripped = sentence.strip()
+    heading_match = _decision_heading_pattern().match(stripped)
+    if heading_match:
+        return (
+            _decision_heading_label(heading_match.group(1)),
+            stripped[heading_match.end():].strip(" .;:-"),
+        )
+    lowered = stripped.lower()
+    if first_sentence and len(stripped) > 80:
+        return "Objective", stripped.strip(" .;:-")
+    if lowered.startswith(("explored ", "tested ", "generated ", "screened ", "evaluated ")):
+        return "Exploration", stripped
+    if lowered.startswith(("ranked ", "ranking ", "objective_rank ", "score ", "scored ")):
+        return "Ranking", stripped
+    if lowered.startswith(("folded ", "validated ", "tmalign ", "tm-align ", "compared ")):
+        return "Validation", stripped
+    if re.match(r"(?i)^[A-Za-z0-9_.-]+ selected\b", stripped) or lowered.startswith(
+        ("selected ", "final selection ", "submitted ")
+    ):
+        return "Selection", stripped
+    if lowered.startswith(("runner-up", "alternative", "validated alternative")) or re.match(
+        r"(?i)^[A-Za-z0-9_.-]+ is the .*runner-up\b",
+        stripped,
+    ):
+        return "Alternative", stripped
+    if lowered.startswith(("caveat", "limitation", "however ", "note ")):
+        return "Caveat", stripped
+    return "", stripped
 
 
 def _decision_heading_label(value: str) -> str:

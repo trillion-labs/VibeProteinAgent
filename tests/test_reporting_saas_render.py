@@ -673,6 +673,41 @@ def test_agent_rationale_structures_title_case_selection_rationale() -> None:
     assert "Objective: de novo amino-acid sequence" not in rationale
 
 
+def test_agent_rationale_structures_single_heading_with_sentence_cues() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_solubility_reasoning", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[_node("submit", "submit_candidate")]),
+        final_submission={
+            "outcome": "accepted",
+            "reasoning": (
+                "Objective: enhance aqueous solubility by mutating only designated residues, "
+                "preserving length and fold/function. "
+                "Explored 4 rational variants via sequence_edit. "
+                "Ranked by sequence_analysis solubility proxy: D lowered hydrophobicity "
+                "and raised net charge. "
+                "objective_rank is not registered in this build, so ranking was done manually. "
+                "Folded WT, B, D with protenix_v2: all pLDDT ~89, no collapse. "
+                "tmalign vs WT: B 0.923, D 0.907. "
+                "D selected as it maximizes the solubility objective while preserving the fold. "
+                "B is the conservative runner-up."
+            ),
+        },
+    )
+
+    html = render_report_html(model)
+    rationale = html[html.index('id="agent-rationale"'):]
+
+    assert "decision-text-structured" in rationale
+    assert "<b>Objective</b>" in rationale
+    assert "<b>Exploration</b>" in rationale
+    assert "<b>Ranking</b>" in rationale
+    assert "<b>Validation</b>" in rationale
+    assert "<b>Selection</b>" in rationale
+    assert "<b>Alternative</b>" in rationale
+    assert "Objective: enhance aqueous solubility" not in rationale
+    assert "<b>Objective</b><p>Enhance aqueous solubility" in rationale
+
+
 def test_workflow_audit_failed_tool_calls_show_reason() -> None:
     model = ReportModel(
         summary=RunSummary(kind="trajectory", id="traj_fail", workspace="ws", state="completed"),
