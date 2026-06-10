@@ -8,6 +8,7 @@
     "terminal",
     "candidates_resolved",
     "reasoning",
+    "selection_summary",
     "auto_selected",
     "next_report_command",
     "runtime_ms"
@@ -21,9 +22,16 @@
     "terminal": {"type": "boolean", "const": true},
     "candidates_resolved": {
       "type": "array",
-      "items": {"type": "object", "additionalProperties": true}
+      "items": {"$ref": "#/$defs/resolved_candidate"}
     },
     "reasoning": {"type": "string", "minLength": 1},
+    "selection_summary": {
+      "oneOf": [
+        {"$ref": "#/$defs/selection_summary"},
+        {"type": "null"}
+      ],
+      "description": "Report-ready explanation of why the accepted final candidate was selected; null for no_acceptable_candidate submissions."
+    },
     "supersedes": {"type": ["string", "null"]},
     "auto_selected": {"type": "boolean", "const": false},
     "next_report_command": {
@@ -33,5 +41,66 @@
     },
     "runtime_ms": {"type": "integer", "minimum": 0}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "selection_evidence": {
+      "type": "object",
+      "required": ["status", "source_tool"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["objective_ranked", "unranked_submission"]
+        },
+        "source_tool": {"type": "string"},
+        "ranked_candidate_id": {"type": ["string", "null"], "minLength": 1},
+        "objective_rank": {"type": ["integer", "null"], "minimum": 1},
+        "objective_score": {"type": ["number", "null"]},
+        "objective_name": {"type": ["string", "null"]},
+        "score_formula": {"type": ["string", "null"]},
+        "formula_text": {"type": ["string", "null"]},
+        "score_direction": {"type": ["string", "null"], "enum": ["higher", "lower", null]},
+        "gate_summary": {"type": "array", "items": {"type": "string"}},
+        "passed_gates": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "failed_gates": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "score_components": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "tie_breaker_values": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": true
+    },
+    "selection_summary": {
+      "type": "object",
+      "required": ["headline", "why_selected", "key_points"],
+      "properties": {
+        "headline": {"type": "string", "minLength": 1, "maxLength": 120},
+        "why_selected": {"type": "string", "minLength": 1, "maxLength": 320},
+        "key_points": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": {"type": "string", "minLength": 1, "maxLength": 120}
+        }
+      },
+      "additionalProperties": false
+    },
+    "resolved_candidate": {
+      "type": "object",
+      "required": ["candidate_id", "selection_evidence"],
+      "properties": {
+        "candidate_id": {"type": "string", "minLength": 1},
+        "ranked_candidate_id": {"type": ["string", "null"], "minLength": 1},
+        "objective_rank": {"type": ["integer", "null"], "minimum": 1},
+        "objective_score": {"type": ["number", "null"]},
+        "objective_name": {"type": ["string", "null"]},
+        "score_formula": {"type": ["string", "null"]},
+        "formula_text": {"type": ["string", "null"]},
+        "gate_summary": {"type": "array", "items": {"type": "string"}},
+        "passed_gates": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "failed_gates": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "score_components": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "tie_breaker_values": {"type": "object", "additionalProperties": true},
+        "selection_evidence": {"$ref": "#/$defs/selection_evidence"}
+      },
+      "additionalProperties": true
+    }
+  }
 }

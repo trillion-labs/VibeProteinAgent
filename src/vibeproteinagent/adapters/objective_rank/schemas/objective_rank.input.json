@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/objective_rank.input.json",
+  "type": "object",
+  "required": ["objective_name", "score_formula"],
+  "properties": {
+    "job_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(job_[A-Za-z0-9]+|[A-Za-z][A-Za-z0-9_.-]*)$"
+      },
+      "default": [],
+      "description": "Completed job ids or workflow call ids whose candidate/evaluator outputs should be collected before objective ranking.",
+      "examples": [["job_mutants", "job_rosetta", "job_refold"]]
+    },
+    "candidates": {
+      "$ref": "#/$defs/rows",
+      "default": [],
+      "description": "Inline candidate records or canonical Candidate[] rows to rank together with rows collected from job_ids.",
+      "examples": [[{"candidate_id": "Y139F_C215V", "scores": {"pyrosetta": {"mean_ddg": -22.4}, "protenix_v2": {"plddt": 89.8}}}]]
+    },
+    "objective_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short name for the scientific or engineering objective being ranked.",
+      "examples": ["fold_stability_repair"]
+    },
+    "gates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/gate"},
+      "default": [],
+      "description": "Hard or warning gates candidates must satisfy before score ordering is interpreted."
+    },
+    "score_formula": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Restricted formula DSL using metric placeholders such as ${pyrosetta.mean_ddg}. Supports +, -, *, /, parentheses, min, max, abs, and clamp.",
+      "examples": ["-1 * ${pyrosetta.mean_ddg}"]
+    },
+    "score_direction": {
+      "type": "string",
+      "enum": ["higher", "lower"],
+      "default": "higher",
+      "description": "Whether a larger or smaller objective_score is better after evaluating score_formula.",
+      "examples": ["higher"]
+    },
+    "constants": {
+      "type": "object",
+      "additionalProperties": {"type": "number"},
+      "default": {},
+      "description": "Numeric constants available as ${constants.name} in gates or formulas.",
+      "examples": [{"wt_plddt": 89.73}]
+    },
+    "missing": {
+      "type": "string",
+      "enum": ["fail", "warn", "zero", "ignore"],
+      "default": "fail",
+      "description": "Default behavior when score_formula references a missing metric: fail the score, warn and use zero, use zero, or silently use zero.",
+      "examples": ["fail", "warn"]
+    },
+    "formula_missing": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "enum": ["fail", "warn", "zero", "ignore"]
+      },
+      "default": {},
+      "description": "Per-metric missing policy overrides for score_formula placeholders. Keys are metric paths without ${}, for example pyrosetta.mean_ddg.",
+      "examples": [{"pyrosetta.mean_ddg": "fail", "protenix_v2.iptm": "zero"}]
+    },
+    "tie_breakers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/tie_breaker"},
+      "default": [],
+      "description": "Deterministic metric tie-breakers applied after gate status and objective_score."
+    },
+    "top_k": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 10,
+      "description": "Number of ranked candidates to keep in output artifacts.",
+      "examples": [10]
+    },
+    "output_prefix": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "default": "objective_rank",
+      "description": "Filename prefix for generated objective ranking TSV/JSON artifacts.",
+      "examples": ["objective_rank", "fold_stability_rank"]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "row": {"type": "object", "additionalProperties": true},
+    "row_or_rows": {
+      "anyOf": [
+        {"$ref": "#/$defs/row"},
+        {"type": "array", "items": {"$ref": "#/$defs/row"}}
+      ]
+    },
+    "rows": {
+      "anyOf": [
+        {"$ref": "#/$defs/row"},
+        {"type": "array", "items": {"$ref": "#/$defs/row_or_rows"}}
+      ]
+    },
+    "gate": {
+      "type": "object",
+      "required": ["id", "metric", "op"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "metric": {"type": "string", "minLength": 1, "description": "Metric path such as pyrosetta.mean_ddg."},
+        "op": {"type": "string", "enum": ["<", "<=", ">", ">=", "==", "!="]},
+        "value": {"type": "number"},
+        "value_metric": {"type": "string", "minLength": 1},
+        "value_constant": {"type": "string", "minLength": 1},
+        "missing": {"type": "string", "enum": ["fail", "warn", "zero", "ignore"], "default": "fail"},
+        "description": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "tie_breaker": {
+      "type": "object",
+      "required": ["metric"],
+      "properties": {
+        "metric": {"type": "string", "minLength": 1},
+        "direction": {"type": "string", "enum": ["higher", "lower"], "default": "higher"},
+        "missing": {"type": "string", "enum": ["last", "first"], "default": "last"},
+        "description": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -428,7 +428,7 @@ def _board_card(bundle: CandidateEvidenceBundle, row: CandidateBoardRow | None =
     dom = _structure_dom_id(cand.candidate_id)
     status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
     is_final = bundle.status == CandidateStatus.FINAL
-    display_rank = row.rank if row and row.rank is not None else (
+    display_rank = row.rank if row is not None else (
         bundle.display_rank if bundle.display_rank is not None else cand.rank
     )
     if display_rank is not None:
@@ -484,7 +484,7 @@ def _board_html(review: ReportReviewModel, board: CandidateBoardViewModel | None
                 f'<details class="board-group board-group-collapsible" '
                 f'data-status="{_attr(group.status)}">'
                 f'<summary class="board-group-head">'
-                f'<span class="board-group-title">{_h(_board_group_display_title(group.status, group.title))}</span>'
+                f'<span class="board-group-title">{_h(_board_group_display_title(group.status, group.title, board))}</span>'
                 f'<span class="board-group-count">{len(group.bundles)}</span></summary>'
                 f'<div class="board-group-cards">{cards}</div>'
                 f"</details>"
@@ -492,7 +492,7 @@ def _board_html(review: ReportReviewModel, board: CandidateBoardViewModel | None
         else:
             groups.append(
                 f'<div class="board-group" data-status="{_attr(group.status)}">'
-                f'<div class="board-group-head"><span class="board-group-title">{_h(_board_group_display_title(group.status, group.title))}</span>'
+                f'<div class="board-group-head"><span class="board-group-title">{_h(_board_group_display_title(group.status, group.title, board))}</span>'
                 f'<span class="board-group-count">{len(group.bundles)}</span></div>'
                 f'<div class="board-group-cards">{cards}</div>'
                 f"</div>"
@@ -500,12 +500,18 @@ def _board_html(review: ReportReviewModel, board: CandidateBoardViewModel | None
     return f'<div class="cand-list candidate-board">{"".join(groups)}</div>'
 
 
-def _board_group_display_title(status: str, fallback: str) -> str:
+def _board_group_display_title(
+    status: str,
+    fallback: str,
+    board: CandidateBoardViewModel | None = None,
+) -> str:
     if status == CandidateStatus.FINAL:
         return "Recommended"
     if status == CandidateStatus.RANKED_ALTERNATIVE:
         return "Alternatives"
     if status == CandidateStatus.EVALUATED_NOT_SELECTED:
+        if board is not None and not getattr(board, "has_objective_rank", False):
+            return "Alternatives"
         return "Evaluated, Not Selected"
     if status == CandidateStatus.GENERATED_NOT_EVALUATED:
         return "Generated, Not Evaluated"
@@ -926,16 +932,7 @@ def _detail_template(
     has_structure = bool((cand.structure_path or "").strip())
 
     status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
-    # When the agent submitted a design the ranker did not score #1, say so once
-    # so the final pick's rank badge doesn't read as a contradiction of the
-    # Design-ranking table.
-    rank_note = (
-        f'<p class="cand-detail-ranknote">Submitted despite Design-ranking '
-        f'#{bundle.submitted_despite_rank} — see the agent\'s rationale in '
-        f'<strong>Pipeline &amp; evidence</strong>.</p>'
-        if bundle.submitted_despite_rank is not None
-        else ""
-    )
+    rank_note = ""
     head = (
         f'<div class="cand-detail-head status-{status_cls}">'
         f'<div class="cand-detail-id"><span class="cand-detail-eyebrow">{_h(status_label)}</span>'
@@ -1008,10 +1005,21 @@ def _review_console_section(
     meta = " · ".join(meta_bits) or f"{len(review.bundles)} candidates"
     board = _board_html(review, board_vm)
     templates = "".join(_detail_template(b, preset) for b in review.bundles)
-    guidance = (
-        preset.candidate_review_guidance
-        if preset
-        else "Review recommended candidates and alternatives as decision-ready design records."
+    ranking_caption = (
+        getattr(board_vm, "ranking_basis_caption", "") if board_vm is not None else ""
+    )
+    ranking_caption_html = (
+        f'<p class="saas-section-subtitle candidate-ranking-caption">{_h(ranking_caption)}</p>'
+        if ranking_caption
+        else ""
+    )
+    override_note = (
+        getattr(board_vm, "objective_override_note", "") if board_vm is not None else ""
+    )
+    override_note_html = (
+        f'<p class="saas-section-subtitle candidate-ranking-caption">{_h(override_note)}</p>'
+        if override_note
+        else ""
     )
 
     console_body = (
@@ -1028,7 +1036,8 @@ def _review_console_section(
     <div>
       <p class="card-eyebrow">Designs</p>
       <h2 class="card-title">Candidate review</h2>
-      <p class="saas-section-subtitle">{_h(guidance)} Open a dossier to inspect structure, evidence families, risks, missing evidence, and provenance.</p>
+      {ranking_caption_html}
+      {override_note_html}
     </div>
     <span class="card-meta">{_h(meta)}</span>
   </header>
@@ -1161,15 +1170,27 @@ def _overview_summary_card(title: str, body: str, icon_name: str) -> str:
         f'<span class="overview-card-icon">{_icon_svg(icon_name)}</span>'
         f'<p class="saas-card-kicker">{_h(title)}</p>'
         '</div>'
-        f'{_overview_summary_body_html(body)}'
+        f'{_overview_summary_body_html(title, body)}'
         '</div>'
     )
 
 
-def _overview_summary_body_html(body: str) -> str:
+def _overview_summary_body_html(title: str, body: str) -> str:
     text = re.sub(r"\s+", " ", str(body or "").strip())
     if not text:
         return '<div class="overview-summary-body"><p>No text recorded.</p></div>'
+    if title.strip().lower() == "agent objective":
+        objective_sections = _overview_objective_sections(text)
+        if objective_sections:
+            blocks = "".join(
+                '<div class="overview-objective-block">'
+                f"<b>{_h(label)}</b>"
+                f"<p>{_h(value)}</p>"
+                "</div>"
+                for label, value in objective_sections
+                if value
+            )
+            return f'<div class="overview-summary-body overview-objective-body">{blocks}</div>'
     segments = _overview_summary_segments(text)
     if len(segments) <= 1:
         return f'<div class="overview-summary-body"><p>{_h(text)}</p></div>'
@@ -1177,7 +1198,48 @@ def _overview_summary_body_html(body: str) -> str:
     return f'<div class="overview-summary-body"><ul class="overview-summary-list">{items}</ul></div>'
 
 
+def _overview_objective_sections(text: str) -> list[tuple[str, str]]:
+    objective, criteria = _split_overview_labeled_pair(text)
+    if not objective and not criteria:
+        return []
+    sections: list[tuple[str, str]] = []
+    if objective:
+        sections.append(("Objective", objective))
+    if criteria:
+        sections.append(("Acceptance criteria", criteria))
+    return sections
+
+
+def _split_overview_labeled_pair(text: str) -> tuple[str, str]:
+    labels = [
+        ("Objective", re.compile(r"(?i)(?<!\w)objective\s*:?\s*")),
+        (
+            "Acceptance criteria",
+            re.compile(
+                r"(?i)(?<!\w)(acceptance criteria|acceptance|accept if|"
+                r"thresholds/criteria|thresholds|criteria)\s*:?\s*"
+            ),
+        ),
+    ]
+    matches: list[tuple[str, re.Match[str]]] = []
+    for label, pattern in labels:
+        match = pattern.search(text)
+        if match:
+            matches.append((label, match))
+    if not matches:
+        return "", ""
+    matches.sort(key=lambda item: item[1].start())
+    values: dict[str, str] = {}
+    for idx, (label, match) in enumerate(matches):
+        end = matches[idx + 1][1].start() if idx + 1 < len(matches) else len(text)
+        values[label] = text[match.end():end].strip(" ;,")
+    return values.get("Objective", ""), values.get("Acceptance criteria", "")
+
+
 def _overview_summary_segments(text: str) -> list[str]:
+    labeled_parts = _split_labeled_summary_segments(text)
+    if len(labeled_parts) > 1:
+        return labeled_parts
     sentence_parts = [
         part.strip()
         for part in re.split(r"(?<=[.!?])\s+", text)
@@ -1187,7 +1249,7 @@ def _overview_summary_segments(text: str) -> list[str]:
         return sentence_parts
     clause_parts = [
         part.strip(" ;,")
-        for part in re.split(r"\s*;\s+|\s+-\s+|\s+(?=(?:while|keeping|preserving|relieving|with|without)\b)", text)
+        for part in re.split(r"\s*;\s+|\s+-\s+", text)
         if part.strip(" ;,")
     ]
     if len(clause_parts) > 1:
@@ -1196,6 +1258,30 @@ def _overview_summary_segments(text: str) -> list[str]:
     if len(comma_parts) > 2 and len(text) > 180:
         return comma_parts
     return [text]
+
+
+def _split_labeled_summary_segments(text: str) -> list[str]:
+    marker = re.compile(
+        r"(?i)(?<!\w)("
+        r"objective|acceptance|accept if|thresholds/criteria|thresholds|criteria|"
+        r"approach|result|key finding|constraints|evidence|caveat|"
+        r"wt folds confidently only with msa|per-position single-mutant rosetta"
+        r")\s*:?"
+    )
+    matches = list(marker.finditer(text))
+    if not matches:
+        return [text]
+    parts: list[str] = []
+    prefix = text[: matches[0].start()].strip(" ;,")
+    if prefix:
+        parts.append(prefix)
+    for idx, match in enumerate(matches):
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        segment = text[start:end].strip(" ;,")
+        if segment:
+            parts.append(segment)
+    return parts or [text]
 
 
 def _report_brand_mark() -> str:
@@ -1213,9 +1299,9 @@ def _report_brand_mark() -> str:
 
 def _saas_agent_rationale_section(vm: AgentRationaleViewModel) -> str:
     decisions = "".join(
-        f'<li><span>{_h(item.label)}</span><p>{_h(item.value)}</p>{_prov_chip(item.provenance)}</li>'
+        _agent_decision_item_html(item)
         for item in vm.major_decisions
-    ) or '<li><span>Decision rationale</span><p>No structured agent decisions were recorded.</p></li>'
+    ) or '<li><span class="decision-label">Decision rationale</span><p>No structured agent decisions were recorded.</p></li>'
     stages = "".join(f"<span>{_h(stage)}</span>" for stage in vm.stage_plan) or "<span>No stage plan recorded</span>"
     query = vm.user_query or "No agent user query was recorded for this run."
     return f"""<section id="agent-rationale" class="card saas-section agent-rationale-section">
@@ -1246,6 +1332,92 @@ def _saas_agent_rationale_section(vm: AgentRationaleViewModel) -> str:
     </div>
   </div>
 </section>"""
+
+
+def _agent_decision_item_html(item: AgentRationaleItem) -> str:
+    return (
+        "<li>"
+        f'<span class="decision-label">{_h(item.label)}</span>'
+        f"{_agent_decision_value_html(item.label, item.value)}"
+        "</li>"
+    )
+
+
+def _agent_decision_value_html(label: str, value: str) -> str:
+    text = " ".join(str(value or "").split())
+    sections = _structured_decision_sections(text)
+    if len(sections) > 1:
+        blocks = "".join(
+            '<div class="decision-section">'
+            f"<b>{_h(label)}</b>"
+            f"<p>{_h(body)}</p>"
+            "</div>"
+            for label, body in sections
+            if body
+        )
+        return f'<div class="decision-text decision-text-structured">{blocks}</div>'
+    if label.strip().lower() == "candidate justification":
+        return (
+            '<div class="decision-text decision-justification-card">'
+            f'<p>{_h(text)}</p>'
+            "</div>"
+        )
+    return f'<p class="decision-text">{_h(text)}</p>'
+
+
+def _structured_decision_sections(text: str) -> list[tuple[str, str]]:
+    heading = re.compile(
+        r"(?i)(?:^|(?<=[.;!?]\s))("
+        r"OBJECTIVE|APPROACH|RESULT|KEY FINDING|ACCEPTANCE(?: CRITERIA)?|"
+        r"ACCEPTANCE GATES|PIPELINE|THRESHOLDS/CRITERIA|THRESHOLDS|"
+        r"CRITERIA|EVIDENCE|FINAL DECISION|BACKBONE VALIDATION|"
+        r"VALIDATION|DESIGN|RANKING|SELECTED|VALIDATED ALTERNATIVES|"
+        r"ALTERNATIVES|CAVEATS|CAVEAT|LIMITATION|WHY SELECTED"
+        r")(?:\s*\([^:]{1,120}\))?\s*:"
+    )
+    matches = list(heading.finditer(text))
+    if len(matches) < 2:
+        return []
+    sections: list[tuple[str, str]] = []
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        label = _decision_heading_label(match.group(1))
+        body = text[start:end].strip(" .;:-")
+        if body:
+            sections.append((label, body))
+    return sections
+
+
+def _decision_heading_label(value: str) -> str:
+    normalized = " ".join(str(value or "").replace("/", " / ").split()).lower()
+    labels = {
+        "objective": "Objective",
+        "approach": "Approach",
+        "result": "Result",
+        "key finding": "Key Finding",
+        "acceptance": "Acceptance",
+        "acceptance criteria": "Acceptance Criteria",
+        "acceptance gates": "Acceptance Gates",
+        "pipeline": "Pipeline",
+        "thresholds / criteria": "Thresholds / Criteria",
+        "thresholds": "Thresholds",
+        "criteria": "Criteria",
+        "evidence": "Evidence",
+        "final decision": "Final Decision",
+        "backbone validation": "Backbone Validation",
+        "validation": "Validation",
+        "design": "Design",
+        "ranking": "Ranking",
+        "selected": "Selected",
+        "validated alternatives": "Validated Alternatives",
+        "alternatives": "Alternatives",
+        "caveats": "Caveats",
+        "caveat": "Caveat",
+        "limitation": "Limitation",
+        "why selected": "Why Selected",
+    }
+    return labels.get(normalized, normalized.title())
 
 
 def _saas_candidate_comparison_section(
@@ -1586,7 +1758,7 @@ def _structure_comparison_section(
     </div>
   </header>
   <div class="structure-comparison-intro">
-    <p>Use this panel like a bench comparison surface: keep candidate 1 beside candidate 9, or drag any other structure into the order that makes the biological question easiest to inspect.</p>
+    <p>Drag candidate panels into the order that makes the most useful structural comparison.</p>
     <span>{_h(preset.scientific_question if preset else "Compare candidates by structure, confidence, and recorded metrics.")}</span>
   </div>
   <div class="structure-comparison-grid" data-structure-compare-grid>{cards}</div>
@@ -1659,10 +1831,16 @@ def _structure_comparison_metric(
 def _saas_candidate_dossiers_section(
     dossiers: list[CandidateDossierViewModel],
     preset: WorkflowReviewPreset | None = None,
+    final_submission: dict[str, Any] | None = None,
 ) -> str:
+    selection_summary = _selection_summary_from_submission(final_submission)
     cards = "".join(
-        _evidence_snapshot_card(d, preset)
-        for d in dossiers[:1]
+        _evidence_snapshot_card(
+            d,
+            preset,
+            selection_summary=selection_summary if idx == 0 else None,
+        )
+        for idx, d in enumerate(dossiers[:1])
     ) or '<p class="empty">No candidate dossiers are available.</p>'
     top_msa = _top_candidate_msa_block(dossiers)
     return f"""<section id="candidate-dossiers" class="card saas-section">
@@ -1670,7 +1848,7 @@ def _saas_candidate_dossiers_section(
     <div>
       <p class="card-eyebrow">Evidence Summary</p>
       <h2 class="card-title">Top candidate evidence at a glance</h2>
-      <p class="saas-section-subtitle">Overview of the leading candidate evidence package before opening the full candidate review board. Structure inspection, risks, downloads, and provenance remain in Candidate Review dossiers.</p>
+      <p class="saas-section-subtitle">Overview of the leading candidate evidence package before opening the full candidate review board.</p>
     </div>
   </header>
   {top_msa}
@@ -1678,9 +1856,59 @@ def _saas_candidate_dossiers_section(
 </section>"""
 
 
+def _selection_summary_from_submission(
+    final_submission: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(final_submission, dict):
+        return None
+    summary = final_submission.get("selection_summary")
+    if not isinstance(summary, dict):
+        return None
+    headline = str(summary.get("headline") or "").strip()
+    why_selected = str(summary.get("why_selected") or "").strip()
+    key_points = [
+        str(item).strip()
+        for item in (summary.get("key_points") or [])
+        if str(item).strip()
+    ]
+    if not headline and not why_selected and not key_points:
+        return None
+    return {
+        "headline": headline,
+        "why_selected": why_selected,
+        "key_points": key_points[:4],
+    }
+
+
+def _selection_summary_card(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return ""
+    headline = str(summary.get("headline") or "").strip()
+    why_selected = str(summary.get("why_selected") or "").strip()
+    key_points = [
+        str(item).strip()
+        for item in (summary.get("key_points") or [])
+        if str(item).strip()
+    ][:4]
+    bullets = "".join(
+        f"<li>{_h(point)}</li>"
+        for point in key_points
+    )
+    bullets_html = f"<ul>{bullets}</ul>" if bullets else ""
+    return (
+        '<div class="selection-summary-card">'
+        '<p class="selection-summary-kicker">Why this candidate</p>'
+        f"<h4>{_h(headline or 'Final selection rationale')}</h4>"
+        f"{f'<p>{_h(why_selected)}</p>' if why_selected else ''}"
+        f"{bullets_html}"
+        "</div>"
+    )
+
+
 def _evidence_snapshot_card(
     dossier: CandidateDossierViewModel,
     preset: WorkflowReviewPreset | None = None,
+    selection_summary: dict[str, Any] | None = None,
 ) -> str:
     primary_label = _snapshot_primary_metric_label(dossier, preset)
     primary = _dossier_metric_chip(dossier, primary_label) or (
@@ -1713,6 +1941,7 @@ def _evidence_snapshot_card(
         f'<strong>{_h(score_text)}</strong><span>{_h(primary.label if primary else "Score")}</span></div>'
         f'<div class="snapshot-bars">{bars}</div>'
         "</div>"
+        f"{_selection_summary_card(selection_summary)}"
         '<div class="evidence-snapshot-foot">'
         f'<span class="asset-pill{" is-missing" if dossier.missing_evidence else " is-on"}">{_h(missing_label)}</span>'
         f'<span>{_h("Structure" if dossier.structure_path else "No structure")}</span>'
@@ -1894,7 +2123,7 @@ def _saas_cross_candidate_section(
     <div>
       <p class="card-eyebrow">Cross-Candidate Analysis</p>
       <h2 class="card-title">Patterns across candidates</h2>
-      <p class="saas-section-subtitle">{_h(preset.cross_candidate_focus if preset else "Lightweight derived summaries across the current candidate set. Missing or unavailable evidence is shown explicitly.")}</p>
+      <p class="saas-section-subtitle">{_h(preset.cross_candidate_focus if preset else "Adjust the filters to narrow candidates by recorded criteria; matching candidates and downloads update with the current view.")}</p>
     </div>
   </header>
   <div class="saas-pattern-grid">{length_card}{status_card}{qc_card}{missing_card}{''.join(metric_cards)}{missing_metrics_card}</div>
@@ -2094,7 +2323,7 @@ def _workflow_audit_group_outcome_caption(
         "tmalign": "Compared candidate structures against the reference fold.",
         "structure_analysis": "Annotated structural features and liabilities.",
         "protein_qc": "Checked sequence biophysics and liability flags.",
-        "rank_designs": "Ranked candidates from available evidence.",
+        "objective_rank": "Ranked candidates with explicit objective gates and formula.",
         "submit_candidate": "Recorded the final submitted candidate decision.",
     }
     caption = captions.get(normalized)
@@ -2624,7 +2853,7 @@ def _compact_tool_name(tool: str) -> str:
         "sequence_analysis": "Sequence analysis",
         "protein_qc": "Protein QC",
         "structure_analysis": "Structure analysis",
-        "rank_designs": "Rank designs",
+        "objective_rank": "Objective rank",
         "submit_candidate": "Submit candidate",
     }
     return aliases.get(name.lower(), name)
@@ -2701,7 +2930,8 @@ def _saas_filter_metric_card(label: str, title: str, values: list[float]) -> str
         f'<span style="height:{max(8, int(count / max_count * 64))}px" title="{_attr(count)} candidate(s)"></span>'
         for count in bins
     )
-    step = _metric_filter_step(lo, hi)
+    integer_only = title.endswith("(aa)") or "length" in title.lower()
+    step = _metric_filter_step(lo, hi, values, integer_only=integer_only)
     disabled = " disabled" if hi <= lo else ""
     return (
         f'<div class="saas-pattern-card metric-range-card metric-filter-card" '
@@ -2836,15 +3066,42 @@ def _dossier_length_value(dossier: CandidateDossierViewModel) -> int | None:
     return len(dossier.sequence)
 
 
-def _metric_filter_step(lo: float, hi: float) -> str:
+def _metric_filter_step(
+    lo: float,
+    hi: float,
+    values: list[float] | None = None,
+    *,
+    integer_only: bool = False,
+) -> str:
     span = abs(hi - lo)
     if span <= 0:
         return "1"
+    if integer_only:
+        return "1"
+    endpoint_places = max(
+        [_filter_value_decimal_places(value) for value in (values or [lo, hi])],
+        default=0,
+    )
+    endpoint_step = 10 ** (-endpoint_places) if endpoint_places else 1
     if span <= 1:
-        return "0.01"
-    if span <= 10:
-        return "0.1"
-    return "1"
+        step = 0.001
+    elif span <= 10:
+        step = 0.01
+    elif span <= 100:
+        step = 0.01
+    elif span <= 1000:
+        step = 0.1
+    else:
+        step = 1
+    step = min(step, endpoint_step)
+    return _fmt_filter_value(step)
+
+
+def _filter_value_decimal_places(value: float) -> int:
+    rendered = _fmt_filter_value(value)
+    if "e" in rendered.lower() or "." not in rendered:
+        return 0
+    return len(rendered.rsplit(".", 1)[1])
 
 
 def _fmt_filter_value(value: float) -> str:
@@ -3104,7 +3361,11 @@ def render_report_html(
 
     # ----- Candidate review console (primary surface) -----
     candidate_dossiers_section = (
-        _saas_candidate_dossiers_section(display_dossiers, saas_vm.review_preset)
+        _saas_candidate_dossiers_section(
+            display_dossiers,
+            saas_vm.review_preset,
+            deduped.final_submission,
+        )
         if show_candidates
         else ""
     )
@@ -4860,8 +5121,91 @@ def _is_complex_candidate_record(candidate: ReportCandidate) -> bool:
     return False
 
 
+def _has_structure_evidence(candidate: ReportCandidate) -> bool:
+    return bool(candidate.structure_path)
+
+
+def _has_interface_evidence(candidate: ReportCandidate) -> bool:
+    scores = candidate.scores or {}
+    for key in ("iptm", "ipsae", "ipsae_score"):
+        if key in scores:
+            return True
+    for namespace in ("protenix_v2", "boltz2", "boltz2_affinity", "ipsae"):
+        block = scores.get(namespace)
+        if not isinstance(block, dict):
+            continue
+        if any(key in block for key in ("iptm", "ipTM", "ipsae", "ipsae_score")):
+            return True
+    return False
+
+
+def _is_sequence_level_support(candidate: ReportCandidate) -> bool:
+    return (
+        bool(candidate.sequence)
+        and not _has_structure_evidence(candidate)
+        and not _is_complex_candidate_record(candidate)
+        and not _has_interface_evidence(candidate)
+    )
+
+
 def _can_sequence_dedupe(candidate: ReportCandidate) -> bool:
-    return bool(candidate.sequence) and not _is_complex_candidate_record(candidate)
+    return _is_sequence_level_support(candidate)
+
+
+def _degapped_sequence(value: str | None) -> str:
+    # Sequence equality is a material-identity check, not a sanitizer. Only
+    # remove common alignment gap/whitespace characters; stripping every
+    # non-letter can collapse distinct upstream IDs or synthetic fixture
+    # sequences such as ACDE0/ACDE1 into the same candidate.
+    return re.sub(r"[-.\s]", "", str(value or "")).upper()
+
+
+def _same_material_sequence(left: ReportCandidate, right: ReportCandidate) -> bool:
+    left_seq = _degapped_sequence(left.sequence)
+    right_seq = _degapped_sequence(right.sequence)
+    return bool(left_seq and right_seq and left_seq == right_seq)
+
+
+def _final_sequence_is_safe_material_key(candidate: ReportCandidate) -> bool:
+    sequence = _degapped_sequence(candidate.sequence)
+    if not sequence:
+        return False
+    rows = _complex_chain_rows(candidate)
+    if not rows:
+        # Sequence-only or monomer rows are already material sequence records.
+        # Multi-chain structures without role metadata are ambiguous: the stored
+        # sequence could be the target, binder, or concatenated context.
+        return not (
+            candidate.structure_path
+            and _structure_chain_count(candidate.structure_path) > 1
+        )
+    binder_lengths = [
+        int(row.get("sequence_length"))
+        for row in rows
+        if str(row.get("role") or "").lower() == "binder"
+        and isinstance(row.get("sequence_length"), int)
+    ]
+    return len(binder_lengths) == 1 and binder_lengths[0] == len(sequence)
+
+
+def _same_sequence_final_support(
+    final_candidate: ReportCandidate,
+    candidate: ReportCandidate,
+) -> bool:
+    return (
+        _final_sequence_is_safe_material_key(final_candidate)
+        and _same_material_sequence(final_candidate, candidate)
+    )
+
+
+def _sequence_support_for_final(
+    final_candidate: ReportCandidate,
+    candidate: ReportCandidate,
+) -> bool:
+    return _same_sequence_final_support(
+        final_candidate,
+        candidate,
+    ) and _is_sequence_level_support(candidate)
 
 
 def _merge_score_namespaces(
@@ -4936,17 +5280,17 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
 
     1. **Enrich final picks.** A ranked/submitted record often carries only
        a couple of headline scores while the matching explored record holds
-       the full evaluation suite (esm3, protein_qc, ...). We merge the
-       same-``candidate_id`` explored scores into each final pick so the
-       final card shows the complete, richest metric set.
-    2. **Drop duplicate proteins from the explored list.** An explored entry
-       whose ``candidate_id`` *or* ``sequence`` already appears among the
-       final picks is the same physical protein at a different pipeline
-       stage — showing it again as a separate card is what made one protein
-       look like three. Those are removed.
-    3. **Collapse remaining duplicates.** Among the remaining candidates, keep a single
-       richest-scored representative per ``candidate_id`` and per sequence,
-       then restore rank order for display.
+       the full evaluation suite (sequence_analysis, protein_qc, ...). We
+       merge same-``candidate_id`` scores, plus sequence-only support rows
+       whose sequence is a safe material key for that final pick.
+    2. **Drop submitted material duplicates from the explored list.** Explored
+       rows with the same ``candidate_id`` as the final, or rows whose sequence
+       safely matches the submitted material, are removed so a complex final is
+       not replaced by a monomer/QC variant in the review board.
+    3. **Collapse remaining sequence-only duplicates.** Among non-final
+       alternatives, keep distinct structured/interface rows separate, but
+       merge duplicate sequence-only support rows into the richest
+       representative. Then restore rank order for display.
 
     Scores are left in their original nested ``{tool: {metric: value}}`` form
     so the review console (which classifies status from ``passes_filters`` /
@@ -4961,19 +5305,22 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
         return model
 
     final_ids = {c.candidate_id for c in final}
-    final_seqs = {c.sequence for c in final if _can_sequence_dedupe(c)}
 
     enriched_final: list[ReportCandidate] = []
     for fc in final:
         merged: dict[str, Any] = dict(fc.scores or {})
         for ec in explored:
-            if ec.candidate_id == fc.candidate_id and ec.scores:
+            if (
+                ec.candidate_id == fc.candidate_id
+                or _sequence_support_for_final(fc, ec)
+            ) and ec.scores:
                 merged = _merge_score_namespaces(merged, ec.scores)
         enriched_final.append(replace(fc, scores=merged))
 
     rank_index = {id(ec): i for i, ec in enumerate(explored)}
     kept: list[ReportCandidate] = []
     kept_by_id: dict[str, int] = {}
+    kept_by_seq: dict[str, int] = {}
     kept_rank_index: dict[str, int] = {}
     seen_ids: set[str] = set()
     seen_seqs: set[str] = set()
@@ -4982,9 +5329,9 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
     for ec in sorted(explored, key=_candidate_metric_richness, reverse=True):
         if ec.candidate_id in final_ids:
             continue
-        can_sequence_dedupe = _can_sequence_dedupe(ec)
-        if can_sequence_dedupe and ec.sequence in final_seqs:
+        if any(_same_sequence_final_support(fc, ec) for fc in final):
             continue
+        can_sequence_dedupe = _can_sequence_dedupe(ec)
         if ec.candidate_id in seen_ids:
             kept_index = kept_by_id.get(ec.candidate_id)
             if kept_index is not None:
@@ -4993,12 +5340,20 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
                     ec,
                 )
             continue
-        if can_sequence_dedupe and ec.sequence in seen_seqs:
+        sequence_key = _degapped_sequence(ec.sequence)
+        if can_sequence_dedupe and sequence_key in seen_seqs:
+            kept_index = kept_by_seq.get(sequence_key)
+            if kept_index is not None:
+                kept[kept_index] = _merge_duplicate_candidate_for_display(
+                    kept[kept_index],
+                    ec,
+                )
             continue
         seen_ids.add(ec.candidate_id)
         kept_by_id[ec.candidate_id] = len(kept)
-        if can_sequence_dedupe and ec.sequence:
-            seen_seqs.add(ec.sequence)
+        if can_sequence_dedupe and sequence_key:
+            seen_seqs.add(sequence_key)
+            kept_by_seq[sequence_key] = len(kept)
         kept.append(ec)
         kept_rank_index[ec.candidate_id] = rank_index[id(ec)]
     kept.sort(
@@ -5779,9 +6134,10 @@ def _wf_node_inputs_from_output(node: WorkflowNodeSummary) -> list[tuple[str, st
             add("structure A", f"{out['length_a']} aa")
         if out.get("length_b") is not None:
             add("structure B", f"{out['length_b']} aa")
-    elif tool == "rank_designs":
+    elif tool == "objective_rank":
         if out.get("candidate_count") is not None:
             add("candidates", out.get("candidate_count"))
+        add("objective", out.get("objective_name"))
     elif tool == "submit_candidate":
         # Surface the terminal-submission shape so the workflow composition
         # row reads as "step N: submit_candidate (outcome=accepted, 2
@@ -6332,7 +6688,7 @@ _TOOL_DISPLAY_NAMES: dict[str, str] = {
     "structure_analysis": "Structure analysis",
     "sequence_analysis": "Sequence analysis",
     "sequence_edit": "Sequence edit",
-    "rank_designs": "Design ranking",
+    "objective_rank": "Objective ranking",
     "template_select": "Template selection",
     "boltz2_affinity": "Boltz-2 affinity",
     "protenix_v2": "Protenix structure prediction",
@@ -6752,7 +7108,7 @@ def _render_tool_widget(tool: str, output: dict[str, Any]) -> str:
         "structure_analysis": _structure_analysis_widget,
         "sequence_analysis": _sequence_analysis_widget,
         "sequence_edit": _sequence_edit_widget,
-        "rank_designs": _rank_designs_widget,
+        "objective_rank": _objective_rank_widget,
         "boltz2_affinity": _boltz2_widget,
         "protenix_v2": _protenix_widget,
         "proteinmpnn": functools.partial(_mpnn_widget, tool="proteinmpnn"),
@@ -8622,12 +8978,12 @@ def _sequence_edit_widget(output: dict[str, Any]) -> str:
     )
 
 
-def _rank_designs_widget(output: dict[str, Any]) -> str:
+def _objective_rank_widget(output: dict[str, Any]) -> str:
     candidates = output.get("ranked_candidates")
     if not isinstance(candidates, list) or not candidates:
         return (
             '<div class="widget widget-rank">'
-            '<h4 class="widget-title">Ranking</h4>'
+            '<h4 class="widget-title">Objective ranking</h4>'
             '<p class="empty">No ranked candidates emitted.</p></div>'
         )
     # Auto-detect interesting columns from the first non-empty row.
@@ -8637,10 +8993,18 @@ def _rank_designs_widget(output: dict[str, Any]) -> str:
             for k in c.keys():
                 if k not in candidate_keys and k not in {"structure_path", "sequence"}:
                     candidate_keys.append(k)
-    display_keys = [k for k in (
-        "rank", "candidate_id", "score", "ranking_score", "plddt", "iptm", "ptm",
-        "qc_flag_count", "liability_count",
-    ) if k in candidate_keys][:8]
+    display_keys = [
+        k
+        for k in (
+            "rank",
+            "candidate_id",
+            "objective_score",
+            "score",
+            "passed_gates",
+            "failed_gates",
+        )
+        if k in candidate_keys
+    ][:8]
     header = "".join(f"<th>{_h(_pretty_metric_name(k))}</th>" for k in display_keys)
     # Sort by the tool's own rank ascending so #1 (best) leads the table and the
     # ordering agrees with the board badges (rows are often emitted in archive
@@ -8671,14 +9035,14 @@ def _rank_designs_widget(output: dict[str, Any]) -> str:
     )
     explainer = (
         '<p class="widget-explainer">'
-        "<strong>Ranking</strong> aggregates per-candidate metrics (confidence, interface scores, QC flags, "
-        "liability counts) into a single ranking score, sorts the designs, and exposes the top candidates "
-        "for the report. Sortable columns; click the header to re-order."
+        f"<strong>objective_rank</strong> for {_h(output.get('objective_name') or 'objective')}. "
+        f"Score: {_h(output.get('formula_text') or 'recorded formula')}; "
+        f"{_h(output.get('score_direction') or 'higher')} is better."
         "</p>"
     )
     return (
         '<div class="widget widget-rank">'
-        '<h4 class="widget-title">Design ranking</h4>'
+        '<h4 class="widget-title">Objective ranking</h4>'
         f"{explainer}{table}</div>"
     )
 
@@ -14017,6 +14381,7 @@ body { background:var(--saas-bg); }
 .saas-card {
   background:#fff; border:1px solid var(--line-strong); border-radius:8px;
   padding:14px 15px; box-shadow:0 1px 2px rgba(15,23,42,.035);
+  min-width:0;
 }
 .overview-summary-card .overview-summary-body {
   max-height:220px;
@@ -14029,6 +14394,32 @@ body { background:var(--saas-bg); }
 }
 .overview-summary-card .overview-summary-body p {
   margin:0;
+}
+.overview-objective-body {
+  display:flex;
+  flex-direction:column;
+  gap:9px;
+}
+.overview-objective-block {
+  padding:9px 10px;
+  border:1px solid #ece8ff;
+  border-radius:8px;
+  background:#fbfaff;
+}
+.overview-objective-block b {
+  display:block;
+  margin:0 0 4px;
+  color:#5b35e6;
+  font-size:10.5px;
+  font-weight:850;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+.overview-objective-block p {
+  margin:0;
+  color:var(--ink);
+  font-size:13px;
+  line-height:1.55;
 }
 .overview-summary-list {
   margin:0;
@@ -14092,6 +14483,11 @@ body { background:var(--saas-bg); }
 .saas-stat-detail { display:block; margin-top:3px; font-size:11.5px; color:var(--muted); }
 .saas-stat .prov { margin-top:7px; display:inline-block; }
 .saas-caveat { border-color:#f1d7a7; background:#fffaf0; }
+.saas-caveat p {
+  max-width:100%;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
 .saas-caveat .saas-card-kicker { color:var(--saas-amber) !important; }
 .saas-caveat-ok { border-color:var(--line-strong); background:#fff; }
 .saas-rationale-grid {
@@ -14129,10 +14525,61 @@ body { background:var(--saas-bg); }
 }
 .saas-chip b { font-weight:750; }
 .saas-chip-muted { color:var(--muted); background:#f8f8fb; border-color:var(--line); }
-.saas-decisions ul { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:8px; }
-.saas-decisions li { border-top:1px solid var(--line); padding-top:8px; }
+.saas-decisions ul { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:10px; }
+.saas-decisions li { border-top:1px solid var(--line); padding-top:10px; }
 .saas-decisions li:first-child { border-top:none; padding-top:0; }
-.saas-decisions span { font-size:12px; font-weight:700; color:var(--ink); }
+.saas-decisions .decision-label {
+  display:block;
+  margin-bottom:6px;
+  font-size:12px;
+  font-weight:800;
+  color:var(--ink);
+}
+.saas-decisions .decision-text {
+  margin:0;
+  color:#344054;
+  font-size:13px;
+  line-height:1.6;
+}
+.decision-text-structured {
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.decision-section {
+  padding:8px 10px;
+  border:1px solid #ece8ff;
+  border-radius:8px;
+  background:#fbfaff;
+}
+.decision-section b {
+  display:block;
+  margin:0 0 3px;
+  color:#5b35e6;
+  font-size:10.5px;
+  font-weight:850;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+.decision-section p {
+  margin:0;
+  color:#344054;
+  font-size:12.5px;
+  line-height:1.55;
+}
+.decision-justification-card {
+  padding:9px 11px;
+  border:1px solid #c9e8ef;
+  border-radius:8px;
+  background:linear-gradient(180deg,#f7fdff 0%,#eef9fb 100%);
+  box-shadow:0 5px 14px rgba(15,118,128,.06);
+}
+.decision-justification-card p {
+  margin:0;
+  color:#29485a;
+  font-size:12.7px;
+  line-height:1.58;
+}
 .saas-table-wrap { overflow:auto; }
 .saas-table { width:100%; border-collapse:separate; border-spacing:0; font-size:13px; }
 .saas-table th {
@@ -15780,14 +16227,14 @@ body {
 }
 .evidence-snapshot-body {
   display:grid;
-  grid-template-columns:76px minmax(0,1fr);
-  gap:14px;
+  grid-template-columns:96px minmax(0,1fr);
+  gap:16px;
   align-items:center;
   margin:14px 0;
 }
 .snapshot-score {
-  width:74px;
-  height:74px;
+  width:92px;
+  height:92px;
   display:grid;
   grid-template-rows:auto auto;
   place-content:center;
@@ -15805,8 +16252,8 @@ body {
   line-height:1;
   font-weight:880;
   display:block;
-  width:66px;
-  max-width:calc(100% - 8px);
+  width:82px;
+  max-width:calc(100% - 10px);
   text-align:center;
   white-space:nowrap;
   letter-spacing:0;
@@ -15821,7 +16268,7 @@ body {
   font-size:10px;
   font-weight:760;
   display:block;
-  max-width:64px;
+  max-width:78px;
   text-align:center;
   white-space:nowrap;
   overflow:hidden;
@@ -15866,6 +16313,73 @@ body {
 }
 .snapshot-bar.is-missing em {
   background:#f4f6fb;
+}
+.selection-summary-card {
+  position:relative;
+  margin:12px 0 14px;
+  padding:16px 16px 15px;
+  border:1px solid #d9def8;
+  border-radius:14px;
+  background:
+    linear-gradient(180deg,rgba(255,255,255,.96) 0%,rgba(247,249,255,.98) 100%);
+  box-shadow:0 12px 28px rgba(76,93,174,.10);
+  overflow:hidden;
+}
+.selection-summary-card::before {
+  content:"";
+  position:absolute;
+  inset:0 auto 0 0;
+  width:4px;
+  background:linear-gradient(180deg,#7c5cff,#2fb7ad);
+}
+.selection-summary-kicker {
+  margin:0 0 10px;
+  color:#6b54d6;
+  font-size:10px;
+  font-weight:850;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+.selection-summary-card h4 {
+  margin:0;
+  color:#172033;
+  font-size:14.5px;
+  line-height:1.38;
+  font-weight:850;
+}
+.selection-summary-card p {
+  margin:9px 0 0;
+  color:#384152;
+  font-size:12.8px;
+  line-height:1.55;
+}
+.selection-summary-card ul {
+  margin:11px 0 0;
+  padding:0;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  list-style:none;
+  color:#475467;
+  font-size:12.2px;
+  line-height:1.45;
+}
+.selection-summary-card li {
+  position:relative;
+  padding-left:16px;
+}
+.selection-summary-card li::before {
+  content:"";
+  position:absolute;
+  left:0;
+  top:.58em;
+  width:6px;
+  height:6px;
+  border-radius:999px;
+  background:#2fb7ad;
+}
+.selection-summary-card li + li {
+  margin-top:0;
 }
 .evidence-snapshot-foot {
   padding-top:10px;

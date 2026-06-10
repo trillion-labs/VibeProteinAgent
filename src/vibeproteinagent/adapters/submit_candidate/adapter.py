@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -49,6 +49,7 @@ _SCORE_KEYS = (
     "affinity",
     "affinity_pred_value",
     "confidence_score",
+    "objective_score",
     "seq_recovery",
     "recovery",
     "gravy",
@@ -62,7 +63,8 @@ _NESTED_SCORE_KEYS = ("metrics", "scores", "confidence_scores")
 
 class CandidateRef(BaseModel):
     job_id: str
-    candidate_id: str | None = None
+    candidate_id: str | None = Field(default=None, min_length=1)
+    ranked_candidate_id: str | None = Field(default=None, min_length=1)
     index: int | None = Field(default=None, ge=0)
     rank: int | None = Field(default=None, ge=1)
     justification: str = Field(min_length=1)
@@ -72,29 +74,44 @@ class CandidateRef(BaseModel):
     def _has_selector(self) -> CandidateRef:
         selectors = [
             self.candidate_id is not None,
+            self.ranked_candidate_id is not None,
             self.index is not None,
             self.rank is not None,
         ]
         if sum(1 for selected in selectors if selected) != 1:
             raise ValueError(
                 "candidate ref requires exactly one selector: candidate_id, "
-                "zero-based index, or rank"
+                "ranked_candidate_id, zero-based index, or rank"
             )
         return self
+
+
+SelectionSummaryPoint = Annotated[str, Field(min_length=1, max_length=120)]
+
+
+class SelectionSummary(BaseModel):
+    headline: str = Field(min_length=1, max_length=120)
+    why_selected: str = Field(min_length=1, max_length=320)
+    key_points: list[SelectionSummaryPoint] = Field(min_length=2, max_length=4)
 
 
 class SubmitCandidateInput(BaseModel):
     outcome: Outcome
     candidates: list[CandidateRef] = Field(default_factory=list)
     reasoning: str = Field(min_length=1)
+    selection_summary: SelectionSummary | None
     supersedes: str | None = None
 
     @model_validator(mode="after")
     def _check_outcome(self) -> SubmitCandidateInput:
         if self.outcome == "accepted" and not self.candidates:
             raise ValueError("accepted submission requires at least one candidate")
+        if self.outcome == "accepted" and self.selection_summary is None:
+            raise ValueError("accepted submission requires selection_summary")
         if self.outcome == "no_acceptable_candidate" and self.candidates:
             raise ValueError("no_acceptable_candidate submission must not include candidates")
+        if self.outcome == "no_acceptable_candidate" and self.selection_summary is not None:
+            raise ValueError("no_acceptable_candidate submission must not include selection_summary")
         return self
 
 
@@ -104,6 +121,7 @@ class SubmitCandidateOutput(BaseModel):
     terminal: bool
     candidates_resolved: list[dict[str, Any]]
     reasoning: str
+    selection_summary: dict[str, Any] | None = None
     supersedes: str | None = None
     auto_selected: bool = False
     next_report_command: str
@@ -140,6 +158,11 @@ class SubmitCandidateAdapter(ToolAdapter):
             "terminal": True,
             "candidates_resolved": resolved,
             "reasoning": params.reasoning,
+            "selection_summary": (
+                params.selection_summary.model_dump()
+                if params.selection_summary is not None
+                else None
+            ),
             "supersedes": params.supersedes,
             "auto_selected": False,
             "next_report_command": (
@@ -167,6 +190,11 @@ def _submission_id(
             "outcome": params.outcome,
             "candidates": resolved,
             "reasoning": params.reasoning,
+            "selection_summary": (
+                params.selection_summary.model_dump()
+                if params.selection_summary is not None
+                else None
+            ),
             "supersedes": params.supersedes,
         },
         sort_keys=True,
@@ -188,6 +216,7 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
     candidate_id = _candidate_id(row, index)
     scores = _scores(row)
     artifacts = _artifact_refs(workspace, ref.job_id, row)
+    selection_evidence = _selection_evidence(job.tool_name, output, row)
     return {
         "source_job_id": ref.job_id,
         "source_tool": job.tool_name,
@@ -195,10 +224,13 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
         "source_workflow_node_id": job.workflow_node_id,
         "selector": {
             "candidate_id": ref.candidate_id,
+            "ranked_candidate_id": ref.ranked_candidate_id,
             "index": ref.index,
             "rank": ref.rank,
         },
         "candidate_id": candidate_id,
+        "ranked_candidate_id": selection_evidence.get("ranked_candidate_id")
+        or _ranked_candidate_id(row),
         "index": index,
         "rank": _as_int(row.get("rank")),
         "sequence": _first_str(row, "sequence", "protein_sequence", "designed_sequence"),
@@ -216,6 +248,17 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
             else {}
         ),
         "score": _as_float(row.get("score")),
+        "objective_rank": selection_evidence.get("objective_rank"),
+        "objective_score": selection_evidence.get("objective_score"),
+        "passed_gates": selection_evidence.get("passed_gates", []),
+        "failed_gates": selection_evidence.get("failed_gates", []),
+        "score_components": selection_evidence.get("score_components", []),
+        "score_formula": selection_evidence.get("score_formula"),
+        "formula_text": selection_evidence.get("formula_text"),
+        "gate_summary": selection_evidence.get("gate_summary", []),
+        "tie_breaker_values": selection_evidence.get("tie_breaker_values", {}),
+        "objective_name": selection_evidence.get("objective_name"),
+        "selection_evidence": selection_evidence,
         "scores": scores,
         "scores_highlighted": {
             key: _score_highlight_value(row, scores, key)
@@ -225,6 +268,95 @@ def _resolve_candidate(workspace: Workspace, ref: CandidateRef) -> dict[str, Any
         "justification": ref.justification,
         "artifacts": artifacts,
     }
+
+
+def _selection_evidence(
+    tool_name: str | None,
+    output: dict[str, Any],
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    source_tool = (tool_name or "").strip().lower()
+    objective_block = row.get("scores", {}).get("objective_rank") if isinstance(row.get("scores"), dict) else None
+    row_is_objective = (
+        source_tool == "objective_rank"
+        or row.get("ranking_intent") == "objective"
+        or isinstance(objective_block, dict)
+    )
+    if row_is_objective:
+        block = objective_block if isinstance(objective_block, dict) else row
+        ranked_candidate_id = (
+            block.get("ranked_candidate_id")
+            or row.get("ranked_candidate_id")
+            or (
+                row.get("candidate_ref", {}).get("ranked_candidate_id")
+                if isinstance(row.get("candidate_ref"), dict)
+                else None
+            )
+        )
+        return {
+            "status": "objective_ranked",
+            "source_tool": source_tool or "objective_rank",
+            "ranked_candidate_id": ranked_candidate_id,
+            "objective_name": (
+                block.get("objective_name")
+                or row.get("objective_name")
+                or output.get("objective_name")
+            ),
+            "objective_rank": _as_int(block.get("rank") or row.get("rank")),
+            "objective_score": _as_float(
+                block.get("objective_score")
+                if block.get("objective_score") is not None
+                else row.get("objective_score")
+            ),
+            "passed_gates": _list_of_dicts(block.get("passed_gates") or row.get("passed_gates")),
+            "failed_gates": _list_of_dicts(block.get("failed_gates") or row.get("failed_gates")),
+            "score_components": _list_of_dicts(
+                block.get("score_components") or row.get("score_components")
+            ),
+            "score_formula": (
+                block.get("score_formula")
+                or row.get("score_formula")
+                or output.get("formula_text")
+            ),
+            "formula_text": (
+                block.get("formula_text")
+                or row.get("formula_text")
+                or block.get("score_formula")
+                or row.get("score_formula")
+                or output.get("formula_text")
+            ),
+            "score_direction": (
+                block.get("score_direction")
+                or row.get("score_direction")
+                or output.get("score_direction")
+            ),
+            "gate_summary": _list_of_strings(
+                block.get("gate_summary") or row.get("gate_summary") or output.get("gate_summary")
+            ),
+            "tie_breaker_values": (
+                block.get("tie_breaker_values")
+                if isinstance(block.get("tie_breaker_values"), dict)
+                else row.get("tie_breaker_values")
+                if isinstance(row.get("tie_breaker_values"), dict)
+                else {}
+            ),
+        }
+    return {
+        "status": "unranked_submission",
+        "source_tool": source_tool,
+    }
+
+
+def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _list_of_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item not in (None, "")]
 
 
 def _candidate_rows(output: dict[str, Any]) -> list[dict[str, Any]]:
@@ -293,11 +425,53 @@ def _select_row(
     rows: list[dict[str, Any]],
     ref: CandidateRef,
 ) -> tuple[int, dict[str, Any]]:
+    if ref.ranked_candidate_id:
+        wanted = str(ref.ranked_candidate_id)
+        matches = [
+            (idx, row)
+            for idx, row in enumerate(rows)
+            if _ranked_candidate_id(row) == wanted
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        raise InvalidParamsError(
+            "ranked_candidate_id not found in referenced job output"
+            if not matches
+            else "ranked_candidate_id selector matched multiple candidates",
+            details={
+                "job_id": ref.job_id,
+                "ranked_candidate_id": wanted,
+                "available": _available_selectors(rows),
+            },
+        )
     if ref.candidate_id:
         wanted = str(ref.candidate_id)
-        for idx, row in enumerate(rows):
-            if _candidate_id(row, idx) == wanted:
-                return idx, row
+        matches = [
+            (idx, row)
+            for idx, row in enumerate(rows)
+            if _candidate_id(row, idx) == wanted
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise InvalidParamsError(
+                "candidate_id selector is ambiguous in referenced job output; "
+                "use ranked_candidate_id, rank, or index",
+                details={
+                    "job_id": ref.job_id,
+                    "candidate_id": wanted,
+                    "matches": [
+                        {
+                            "index": idx,
+                            "rank": _as_int(row.get("rank")),
+                            "candidate_id": _candidate_id(row, idx),
+                            "ranked_candidate_id": _ranked_candidate_id(row),
+                        }
+                        for idx, row in matches
+                    ],
+                    "available": _available_selectors(rows),
+                },
+            )
         raise InvalidParamsError(
             "candidate_id not found in referenced job output",
             details={
@@ -340,16 +514,40 @@ def _select_row(
 def _available_selectors(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ranks: list[int] = []
     candidate_ids: list[str] = []
+    ranked_candidate_ids: list[str] = []
     for idx, row in enumerate(rows):
         candidate_ids.append(_candidate_id(row, idx))
+        ranked_candidate_id = _ranked_candidate_id(row)
+        if ranked_candidate_id:
+            ranked_candidate_ids.append(ranked_candidate_id)
         rank = _as_int(row.get("rank"))
         if rank is not None:
             ranks.append(rank)
     return {
         "candidate_ids": candidate_ids,
+        "ranked_candidate_ids": ranked_candidate_ids,
         "indices": list(range(len(rows))),
         "ranks": ranks,
     }
+
+
+def _ranked_candidate_id(row: dict[str, Any]) -> str | None:
+    value = row.get("ranked_candidate_id")
+    if value not in (None, ""):
+        return str(value)
+    candidate_ref = row.get("candidate_ref")
+    if isinstance(candidate_ref, dict):
+        value = candidate_ref.get("ranked_candidate_id")
+        if value not in (None, ""):
+            return str(value)
+    scores = row.get("scores")
+    if isinstance(scores, dict):
+        objective = scores.get("objective_rank")
+        if isinstance(objective, dict):
+            value = objective.get("ranked_candidate_id")
+            if value not in (None, ""):
+                return str(value)
+    return None
 
 
 def _candidate_id(row: dict[str, Any], index: int) -> str:

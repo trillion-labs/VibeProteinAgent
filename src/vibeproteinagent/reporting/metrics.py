@@ -276,12 +276,15 @@ TOOL_METRIC_EXPLAINERS: dict[tuple[str, str], str] = {
         "when reward isn't populated). Higher = better."
     ),
 
-    # --- Multi-tool reranker ---
-    ("rank_designs", "score"): (
-        "rank_designs composite: ranking_score + plddt/100 + 0.5*iptm + "
-        "0.25*ptm - 0.05*liabilities - 0.10*qc_flags. Higher = better. "
-        "Designed to merge confidence + interface quality + design risk "
-        "into a single sortable scalar."
+    # --- Objective-aware reranker ---
+    ("objective_rank", "objective_score"): (
+        "objective_rank objective_score evaluates the agent-supplied "
+        "score_formula after applying explicit objective gates. Direction "
+        "is recorded in the ranking output."
+    ),
+    ("objective_rank", "score"): (
+        "objective_rank score mirrors objective_score for generic candidate "
+        "resolution. Direction is recorded in the ranking output."
     ),
 }
 
@@ -465,10 +468,9 @@ SCORE_DEFINITIONS: dict[str, str] = {
     ),
     "proteina_complexa": "search-cascade reward; higher = better",
 
-    # Multi-tool reranker.
-    "rank_designs": (
-        "composite: ranking_score + plddt/100 + 0.5*iptm + 0.25*ptm "
-        "- 0.05*liabilities - 0.10*qc_flags; higher = better"
+    # Objective-aware reranker.
+    "objective_rank": (
+        "agent-supplied gates and score_formula; direction recorded in output"
     ),
 }
 

@@ -25,7 +25,7 @@ CANONICAL_PRODUCERS: set[str] = {
 }
 
 CANONICAL_CONSUMERS: dict[str, str] = {
-    "rank_designs": "candidates",
+    "objective_rank": "candidates",
     "rfdiffusion": "candidates",
     "proteinmpnn": "candidates",
     "bindcraft": "candidates",
@@ -229,7 +229,7 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "pyrosetta": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "vina": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "protein_qc": _contract(produces=_SCORES),
-    "rank_designs": _contract(produces=_SCORES),
+    "objective_rank": _contract(consumes=_SCORES, produces=_SCORES),
     "merge_candidates": _contract(),
 }
 

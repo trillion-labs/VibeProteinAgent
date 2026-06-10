@@ -9,8 +9,23 @@ from typer.testing import CliRunner
 from vibeproteinagent.cli.main import app
 from vibeproteinagent.core.errors import InvalidParamsError
 from vibeproteinagent.reporting import collect_report_model, render_report_html
-from vibeproteinagent.reporting.enrich import ensure_sequence_analysis_enrichment
+from vibeproteinagent.reporting.collect import (
+    _dedupe_candidates,
+    _merge_objective_ranked_aliases_into_candidates,
+)
+from vibeproteinagent.reporting.enrich import (
+    _candidate_to_canonical,
+    _sequence_analysis_candidates,
+    ensure_sequence_analysis_enrichment,
+)
+from vibeproteinagent.reporting.models import (
+    ReportCandidate,
+    ReportModel,
+    RunSummary,
+    WorkflowGraph,
+)
 from vibeproteinagent.reporting.review import build_review_model
+from vibeproteinagent.reporting.view_models import build_candidate_board_view_model
 from vibeproteinagent.workflows import WorkflowStore
 from vibeproteinagent.workspace import JobState, JobStore, TrajectoryStore, Workspace
 
@@ -94,11 +109,11 @@ def test_report_workflow_requires_explicit_submit_candidate(
             {"rank": 1, "candidate_id": "design_1", "sequence": "ACDE", "score": 1.0}
         ]
     }
-    rank_job = _complete_job(tmp_workspace, "rank_designs", ranked_output)
+    rank_job = _complete_job(tmp_workspace, "objective_rank", ranked_output)
     wf_id = _workflow_with_node(
         tmp_workspace,
         node_id="rank",
-        tool="rank_designs",
+        tool="objective_rank",
         job_id=rank_job,
         output=ranked_output,
     )
@@ -117,11 +132,11 @@ def test_report_workflow_uses_recorded_user_query_in_html(
             {"rank": 1, "candidate_id": "design_1", "sequence": "ACDE", "score": 1.0}
         ]
     }
-    rank_job = _complete_job(tmp_workspace, "rank_designs", ranked_output)
+    rank_job = _complete_job(tmp_workspace, "objective_rank", ranked_output)
     wf_id = _workflow_with_node(
         tmp_workspace,
         node_id="rank",
-        tool="rank_designs",
+        tool="objective_rank",
         job_id=rank_job,
         output=ranked_output,
         descriptor_yaml=(
@@ -278,6 +293,199 @@ def test_pyrosetta_score_pair_becomes_reportable_ddg(
     assert "-15.5" in html
     assert "Mean ddG" in html
     assert "-15" in html
+
+
+def test_report_aliases_final_submission_to_objective_rank_row(
+    tmp_workspace: Workspace,
+) -> None:
+    traj = TrajectoryStore(tmp_workspace).create(
+        user_query="Improve fold stability with Y139F C215V",
+        objective="Select the best stable mutant after objective_rank.",
+    )
+    _complete_job(
+        tmp_workspace,
+        "protenix_v2",
+        {
+            "candidates": [
+                {
+                    "candidate_id": "cand_final",
+                    "sequence": "ACDE",
+                    "scores": {"protenix_v2": {"plddt": 89.84, "ptm": 0.943}},
+                    "candidate_artifacts": {
+                        "protenix_v2": {
+                            "predicted_pdb": "/tmp/c139_215_sample_0.pdb"
+                        }
+                    },
+                },
+                {
+                    "candidate_id": "cand_mpnn",
+                    "sequence": "ACDF",
+                    "structure_path": "/tmp/mpnnMin_sample_0.pdb",
+                    "scores": {"protenix_v2": {"plddt": 90.07, "ptm": 0.947}},
+                },
+            ]
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+    _complete_job(
+        tmp_workspace,
+        "objective_rank",
+        {
+            "ranking_intent": "objective",
+            "objective_name": "fold_stability",
+            "formula_text": "-1 * ${pyrosetta.mean_ddg}",
+            "score_direction": "higher",
+            "gate_summary": ["pyrosetta.mean_ddg < 0"],
+            "ranked_candidates": [
+                {
+                    "candidate_id": "mpnnMin",
+                    "rank": 1,
+                    "score": 1.13745,
+                    "objective_score": 1.13745,
+                    "objective_name": "fold_stability",
+                    "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                    "score_direction": "higher",
+                    "passed_gates": [],
+                    "failed_gates": [],
+                    "scores": {
+                        "objective_rank": {
+                            "rank": 1,
+                            "objective_score": 1.13745,
+                            "objective_name": "fold_stability",
+                            "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                            "score_direction": "higher",
+                            "passed_gates": [],
+                            "failed_gates": [],
+                        }
+                    },
+                },
+                {
+                    "candidate_id": "c139_215",
+                    "rank": 7,
+                    "score": 1.13415,
+                    "objective_score": 1.13415,
+                    "objective_name": "fold_stability",
+                    "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                    "score_direction": "higher",
+                    "passed_gates": [],
+                    "failed_gates": [],
+                    "plddt": 89.84,
+                    "ptm": 0.943,
+                    "scores": {
+                        "objective_rank": {
+                            "rank": 7,
+                            "objective_score": 1.13415,
+                            "objective_name": "fold_stability",
+                            "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                            "score_direction": "higher",
+                            "passed_gates": [],
+                            "failed_gates": [],
+                        }
+                    },
+                },
+            ]
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+    _complete_job(
+        tmp_workspace,
+        "pyrosetta",
+        {
+            "mode": "relax",
+            "candidates": [
+                {
+                    "candidate_id": "wt_relax",
+                    "structure_path": "/tmp/wt_sample_0.relax.pdb",
+                    "scores": {
+                        "pyrosetta": {"mode": "relax", "total_score": -100.0}
+                    },
+                }
+            ],
+        },
+        params={"label": "wt_relax"},
+        trajectory_id=traj.trajectory_id,
+    )
+    _complete_job(
+        tmp_workspace,
+        "pyrosetta",
+        {
+            "mode": "relax",
+            "candidates": [
+                {
+                    "candidate_id": "mut_relax",
+                    "structure_path": "/tmp/c139_215_sample_0.relax.pdb",
+                    "scores": {
+                        "pyrosetta": {"mode": "relax", "total_score": -112.0}
+                    },
+                },
+                {
+                    "candidate_id": "mut_relax_seed2",
+                    "structure_path": "/tmp/c139_215_sample_0.relax.pdb",
+                    "scores": {
+                        "pyrosetta": {"mode": "relax", "total_score": -114.0}
+                    },
+                }
+            ],
+        },
+        params={"label": "mut_relax"},
+        trajectory_id=traj.trajectory_id,
+    )
+    _complete_job(
+        tmp_workspace,
+        "submit_candidate",
+        {
+            "terminal": True,
+            "outcome": "accepted",
+            "submission_id": "sub_alias",
+            "candidates_resolved": [
+                {
+                    "candidate_id": "cand_final",
+                    "sequence": "ACDE",
+                    "candidate_artifacts": {
+                        "protenix_v2": {
+                            "predicted_pdb": "/tmp/c139_215_sample_0.pdb"
+                        }
+                    },
+                    "justification": "accepted alias-matched final candidate",
+                }
+            ],
+            "reasoning": "accepted alias-matched final candidate",
+            "auto_selected": False,
+        },
+        trajectory_id=traj.trajectory_id,
+    )
+
+    model = collect_report_model(tmp_workspace, traj.trajectory_id)
+    review = build_review_model(model)
+    board = build_candidate_board_view_model(review)
+
+    final = model.final_candidates[0]
+    assert final.rank == 7
+    assert final.score == pytest.approx(1.13415)
+    assert final.scores["objective_rank"]["objective_score"] == pytest.approx(1.13415)
+    assert final.scores["pyrosetta"]["mean_ddg"] == pytest.approx(-13.0)
+    current = next(c for c in model.candidates if c.candidate_id == "cand_final")
+    assert current.rank == 7
+    assert current.score == pytest.approx(1.13415)
+    assert current.scores["objective_rank"]["rank"] == 7
+    assert current.scores["pyrosetta"]["mean_total_score"] == pytest.approx(-113.0)
+    alternative = next(c for c in model.candidates if c.candidate_id == "cand_mpnn")
+    assert alternative.sequence == "ACDF"
+    assert alternative.structure_path == "/tmp/mpnnMin_sample_0.pdb"
+    assert alternative.rank == 1
+    assert alternative.score == pytest.approx(1.13745)
+    assert alternative.scores["objective_rank"]["objective_score"] == pytest.approx(1.13745)
+    assert not any(
+        (c.source or {}).get("tool") == "objective_rank"
+        for c in model.candidates
+    )
+    final_row = next(row for row in board.rows if row.status == "final")
+    assert final_row.rank == 7
+    assert "objective_score 1.134" in final_row.short_verdict
+    assert "missing stability scoring metrics" not in final_row.short_verdict
+    alternative_row = next(row for row in board.rows if row.candidate_id == "cand_mpnn")
+    assert alternative_row.status == "ranked_alternative"
+    assert "objective_score 1.137" in alternative_row.short_verdict
 
 
 def test_report_submit_job_expands_direct_run_trajectory(
@@ -474,7 +682,7 @@ def test_report_functional_trajectory_separates_reference_hits_from_design_board
     }
     _complete_job(
         tmp_workspace,
-        "rank_designs",
+        "objective_rank",
         ranked_output,
         trajectory_id=traj.trajectory_id,
     )
@@ -572,7 +780,7 @@ def test_report_keeps_generated_only_candidates_when_ranked_subset_exists(
     }
     _complete_job(
         tmp_workspace,
-        "rank_designs",
+        "objective_rank",
         ranked_output,
         trajectory_id=traj.trajectory_id,
     )
@@ -681,8 +889,8 @@ def test_report_warns_when_final_submit_skips_ranked_validation_merge(
     messages = {warning.message for warning in model.warnings}
 
     assert (
-        "The agent submitted candidates before running rank_designs to merge "
-        "validation evidence."
+        "The agent submitted candidates without objective_rank evidence. "
+        "Selection rationale may not reflect explicit gates and formula scoring."
     ) in messages
     assert (
         "The agent submitted candidates before merging validation evidence. "
@@ -1206,10 +1414,15 @@ def test_report_cli_default_runs_sequence_analysis_enrichment(
     assert "sequence_analysis" in {node.tool for node in model.graph.nodes}
 
 
-def test_report_cli_can_disable_sequence_analysis_enrichment(
+@pytest.mark.parametrize(
+    "removed_flag",
+    ["--no-enrich-sequence-analysis", "--enrich-sequence-analysis"],
+)
+def test_report_cli_rejects_sequence_analysis_enrichment_flags(
     runner: CliRunner,
     tmp_workspace: Workspace,
     tmp_path: Path,
+    removed_flag: str,
 ) -> None:
     job_id = _complete_job(
         tmp_workspace,
@@ -1236,25 +1449,26 @@ def test_report_cli_can_disable_sequence_analysis_enrichment(
             tmp_workspace.name,
             "--out",
             str(out),
-            "--no-enrich-sequence-analysis",
+            removed_flag,
             "--json",
         ],
     )
 
-    assert result.exit_code == 0, result.stdout
-    payload = json.loads(result.stdout)["data"]
-    assert payload["enrichment_enabled"] is False
-    assert payload["enrichment_job_ids"] == []
+    assert result.exit_code != 0
+    assert not out.exists()
     model = collect_report_model(tmp_workspace, job_id)
     assert "sequence_analysis" not in {node.tool for node in model.graph.nodes}
 
 
-def test_report_cli_runs_sequence_analysis_enrichment_when_requested(
+def test_report_cli_enriches_sequence_analysis_for_trajectory_candidates(
     runner: CliRunner,
     tmp_workspace: Workspace,
     tmp_path: Path,
 ) -> None:
-    job_id = _complete_job(
+    trajectory_id = TrajectoryStore(tmp_workspace).create(
+        user_query="render trajectory report"
+    ).trajectory_id
+    _complete_job(
         tmp_workspace,
         "boltzgen",
         {
@@ -1267,6 +1481,7 @@ def test_report_cli_runs_sequence_analysis_enrichment_when_requested(
                 }
             ]
         },
+        trajectory_id=trajectory_id,
     )
     out = tmp_path / "report.html"
 
@@ -1274,12 +1489,11 @@ def test_report_cli_runs_sequence_analysis_enrichment_when_requested(
         app,
         [
             "report",
-            job_id,
+            trajectory_id,
             "--workspace",
             tmp_workspace.name,
             "--out",
             str(out),
-            "--enrich-sequence-analysis",
             "--json",
         ],
     )
@@ -1291,8 +1505,10 @@ def test_report_cli_runs_sequence_analysis_enrichment_when_requested(
     html = out.read_text()
     assert "Sequence" in html
     assert "GRAVY" in html
-    model = collect_report_model(tmp_workspace, job_id)
+    model = collect_report_model(tmp_workspace, trajectory_id)
     assert "sequence_analysis" in {node.tool for node in model.graph.nodes}
+    by_id = {candidate.candidate_id: candidate for candidate in model.candidates}
+    assert "sequence_analysis" in by_id["design_1"].scores
 
 
 def test_sequence_analysis_enrichment_is_idempotent_with_separate_enriched_record(
@@ -1328,6 +1544,157 @@ def test_sequence_analysis_enrichment_is_idempotent_with_separate_enriched_recor
     )
 
     assert enrichment_ids == []
+
+
+def test_report_sequence_analysis_enrichment_strips_flat_scores_from_input() -> None:
+    payload = _candidate_to_canonical(
+        ReportCandidate(
+            candidate_id="design_1",
+            sequence="ACDEFGHIKLMNPQRSTVWY",
+            source={"tool": "objective_rank", "kind": "ranked_candidates"},
+            scores={
+                "ligandmpnn:runtime_ms": 9263.0,
+                "objective_rank": {"objective_score": 1.2},
+            },
+        )
+    )
+
+    assert payload["scores"] == {"objective_rank": {"objective_score": 1.2}}
+    assert payload["source"] == {"tool": "objective_rank", "local_id": "design_1"}
+
+
+def test_report_sequence_analysis_enrichment_keeps_same_sequence_candidate_ids() -> None:
+    report_model = ReportModel(
+        summary=RunSummary(kind="job", id="job_same_seq", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None),
+        candidates=[
+            ReportCandidate(candidate_id="design_a", sequence="ACDEFGHIK"),
+            ReportCandidate(candidate_id="design_b", sequence="ACDEFGHIK"),
+        ],
+    )
+
+    payloads = _sequence_analysis_candidates(report_model)
+
+    assert [payload["candidate_id"] for payload in payloads] == ["design_a", "design_b"]
+
+
+def test_objective_rank_merge_preserves_duplicate_logical_candidates_by_sequence() -> None:
+    ranked = [
+        ReportCandidate(
+            candidate_id="dup",
+            sequence="AAAA",
+            rank=1,
+            score=2.0,
+            scores={
+                "objective_rank": {
+                    "rank": 1,
+                    "objective_score": 2.0,
+                    "ranked_candidate_id": "dup__v1_a1b2c3d4",
+                }
+            },
+            source={
+                "tool": "objective_rank",
+                "ranked_candidate_id": "dup__v1_a1b2c3d4",
+                "material_key": "mat_a",
+            },
+        ),
+        ReportCandidate(
+            candidate_id="dup",
+            sequence="CCCC",
+            rank=2,
+            score=1.0,
+            scores={
+                "objective_rank": {
+                    "rank": 2,
+                    "objective_score": 1.0,
+                    "ranked_candidate_id": "dup__v2_e5f6a7b8",
+                }
+            },
+            source={
+                "tool": "objective_rank",
+                "ranked_candidate_id": "dup__v2_e5f6a7b8",
+                "material_key": "mat_c",
+            },
+        ),
+    ]
+    candidates = [
+        ReportCandidate(candidate_id="dup", sequence="AAAA"),
+        ReportCandidate(candidate_id="dup", sequence="CCCC"),
+    ]
+
+    merged = _merge_objective_ranked_aliases_into_candidates(ranked, candidates)
+
+    assert len(merged) == 2
+    by_sequence = {candidate.sequence: candidate for candidate in merged}
+    assert by_sequence["AAAA"].rank == 1
+    assert by_sequence["AAAA"].scores["objective_rank"]["ranked_candidate_id"] == "dup__v1_a1b2c3d4"
+    assert by_sequence["AAAA"].source["objective_rank_evidence"]["ranked_candidate_id"] == "dup__v1_a1b2c3d4"
+    assert by_sequence["CCCC"].rank == 2
+    assert by_sequence["CCCC"].scores["objective_rank"]["ranked_candidate_id"] == "dup__v2_e5f6a7b8"
+    assert by_sequence["CCCC"].source["objective_rank_evidence"]["ranked_candidate_id"] == "dup__v2_e5f6a7b8"
+
+
+def test_objective_rank_merge_keeps_ambiguous_alias_rows_separate() -> None:
+    ranked = [
+        ReportCandidate(
+            candidate_id="dup",
+            rank=1,
+            score=2.0,
+            scores={"objective_rank": {"rank": 1, "ranked_candidate_id": "dup__v1"}},
+            source={"tool": "objective_rank", "ranked_candidate_id": "dup__v1"},
+        ),
+        ReportCandidate(
+            candidate_id="dup",
+            rank=2,
+            score=1.0,
+            scores={"objective_rank": {"rank": 2, "ranked_candidate_id": "dup__v2"}},
+            source={"tool": "objective_rank", "ranked_candidate_id": "dup__v2"},
+        ),
+    ]
+    candidates = [
+        ReportCandidate(candidate_id="dup"),
+        ReportCandidate(candidate_id="dup"),
+    ]
+
+    merged = _merge_objective_ranked_aliases_into_candidates(ranked, candidates)
+
+    assert len(merged) == 4
+    assert [candidate.scores for candidate in merged[:2]] == [{}, {}]
+    assert {
+        candidate.source.get("ranked_candidate_id")
+        for candidate in merged[2:]
+        if isinstance(candidate.source, dict)
+    } == {"dup__v1", "dup__v2"}
+
+
+def test_report_dedupe_keeps_distinct_objective_ranked_identities() -> None:
+    candidates = [
+        ReportCandidate(
+            candidate_id="dup",
+            sequence="AAAA",
+            scores={"objective_rank": {"ranked_candidate_id": "dup__v1"}},
+            source={
+                "tool": "objective_rank",
+                "ranked_candidate_id": "dup__v1",
+                "local_id": "dup__v1",
+            },
+        ),
+        ReportCandidate(
+            candidate_id="dup",
+            sequence="CCCC",
+            scores={"objective_rank": {"ranked_candidate_id": "dup__v2"}},
+            source={
+                "tool": "objective_rank",
+                "ranked_candidate_id": "dup__v2",
+                "local_id": "dup__v2",
+            },
+        ),
+    ]
+
+    deduped = _dedupe_candidates(candidates)
+
+    assert len(deduped) == 2
+    assert {candidate.sequence for candidate in deduped} == {"AAAA", "CCCC"}
 
 
 def test_direct_submit_report_does_not_use_tool_name_as_user_query(

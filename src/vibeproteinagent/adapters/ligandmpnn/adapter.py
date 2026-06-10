@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -28,9 +28,6 @@ _VENDOR_WEIGHTS_DIR = _VENDOR_ROOT / "weights"
 # Single bundled checkpoint — see vendor/ligandmpnn/UPSTREAM.md.
 _DEFAULT_CKPTS: dict[str, str] = {
     "ligand_mpnn": "ligandmpnn_v_32_020_25.pt",
-    "protein_mpnn": "proteinmpnn_v_48_020.pt",
-    "soluble_mpnn": "solublempnn_v_48_020.pt",
-    "ca_mpnn": "proteinmpnn_v_48_020_ca.pt",
 }
 
 if str(_VENDOR_ROOT) not in sys.path:
@@ -60,9 +57,12 @@ class LigandMPNNInput(BaseModel):
     temperature: float = Field(0.1, ge=0.0, le=2.0)
     omit_aas: str = Field("X", description="Amino acids disallowed at every position.")
     seed: int | None = Field(None, description="Optional RNG seed for reproducibility.")
-    model_type: str = Field(
+    model_type: Literal["ligand_mpnn"] = Field(
         "ligand_mpnn",
-        description="One of protein_mpnn / ligand_mpnn / soluble_mpnn / ca_mpnn.",
+        description=(
+            "Only `ligand_mpnn` is supported by this tool; it is the only bundled "
+            "LigandMPNN checkpoint."
+        ),
     )
     redesigned_residues: str | None = Field(
         None,

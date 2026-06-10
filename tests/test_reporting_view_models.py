@@ -8,6 +8,7 @@ or rendering behavior.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from vibeproteinagent.reporting.models import (
     CandidateStatus,
@@ -42,11 +43,28 @@ def _node(node_id: str, tool: str, *, upstream=None, state="completed"):
     )
 
 
+def _single_chain_pdb(path: Path) -> str:
+    path.write_text(
+        "\n".join(
+            [
+                "ATOM      1  N   ALA A   1      11.104  13.207   2.100  1.00 90.00           N",
+                "ATOM      2  CA  ALA A   1      12.560  13.207   2.100  1.00 91.00           C",
+                "ATOM      3  C   ALA A   1      13.000  11.900   2.800  1.00 90.00           C",
+                "ATOM      4  O   ALA A   1      14.100  11.600   2.500  1.00 90.00           O",
+                "TER",
+                "END",
+            ]
+        )
+    )
+    return str(path)
+
+
 def _model(
     *,
     nodes=None,
     candidates=None,
     finals=None,
+    final_submission=None,
     warnings=None,
     raw_summary=None,
     candidate_capability_filter_events=None,
@@ -63,6 +81,7 @@ def _model(
         graph=WorkflowGraph(workflow_id="wf_view", nodes=list(nodes or [])),
         candidates=list(candidates or []),
         final_candidates=list(finals or []),
+        final_submission=final_submission,
         warnings=list(warnings or []),
         candidate_capability_filter_events=list(candidate_capability_filter_events or []),
         raw_summary=dict(raw_summary or {}),
@@ -112,7 +131,7 @@ def test_overview_counts_and_provenance_from_review_model():
 
 def test_overview_counts_use_unified_review_population_when_final_is_separate():
     model = _model(
-        nodes=[_node("n1", "pxdesign"), _node("n2", "esm3"), _node("n3", "rank_designs")],
+        nodes=[_node("n1", "pxdesign"), _node("n2", "esm3"), _node("n3", "objective_rank")],
         candidates=[
             ReportCandidate(
                 candidate_id="cand_alt",
@@ -197,9 +216,57 @@ def test_overview_prefers_recorded_warning_as_main_caveat():
     assert overview.main_caveat == "Structure prediction did not complete."
 
 
+def test_overview_warning_caveat_is_not_truncated():
+    warning = (
+        "LigandMPNN checkpoint 'solublempnn_v_48_020.pt' not found in "
+        "/mnt/vast/trillion/hyunjin/.vibeproteinagent/models or vendored fallback "
+        "/mnt/vast/trillion/hyunjin/VibeProteinAgent/vendor/ligandmpnn/weights/"
+        "solublempnn_v_48_020.pt."
+    )
+    model = _model(
+        candidates=[ReportCandidate(candidate_id="c1", sequence="ACDE")],
+        warnings=[ReportWarning(level="error", message=warning)],
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert overview.main_caveat == warning
+    assert "..." not in overview.main_caveat
+
+
+def test_overview_does_not_promote_pydssp_assignment_to_main_caveat():
+    model = _model(
+        candidates=[
+            ReportCandidate(
+                candidate_id="c1",
+                sequence="ACDE",
+                structure_path="/tmp/c1.pdb",
+                scores={
+                    "protein_qc": {"passes_filters": True},
+                    "esm3": {"mean_plddt": 0.9, "ptm": 0.8},
+                },
+            )
+        ],
+        finals=[ReportCandidate(candidate_id="c1", sequence="ACDE")],
+        warnings=[
+            ReportWarning(
+                level="warning",
+                message="secondary_structure assigned from pydssp",
+                source="structure_analysis",
+            )
+        ],
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert overview.main_caveat is None
+
+
 def test_overview_explains_subset_evaluation_without_selection_reason():
     model = _model(
-        nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")],
+        nodes=[_node("n1", "pxdesign"), _node("n2", "objective_rank")],
         candidates=[
             ReportCandidate(
                 candidate_id="selected",
@@ -223,7 +290,7 @@ def test_overview_explains_subset_evaluation_without_selection_reason():
 
 def test_overview_explains_recorded_subset_evaluation():
     model = _model(
-        nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")],
+        nodes=[_node("n1", "pxdesign"), _node("n2", "objective_rank")],
         candidates=[
             ReportCandidate(
                 candidate_id="selected",
@@ -255,7 +322,7 @@ def test_overview_explains_recorded_subset_evaluation():
 
 def test_agent_rationale_uses_recorded_workflow_query_and_graph_plan():
     model = _model(
-        nodes=[_node("n1", "pxdesign"), _node("n2", "rank_designs")],
+        nodes=[_node("n1", "pxdesign"), _node("n2", "objective_rank")],
         raw_summary={
             "user_query": "Design a 70 aa binder.",
             "objective": "Accept high-confidence designs.",
@@ -269,6 +336,125 @@ def test_agent_rationale_uses_recorded_workflow_query_and_graph_plan():
     assert rationale.stage_plan == ["Sequence Generation", "Ranking"]
     assert rationale.major_decisions == []
     assert rationale.has_full_transcript is False
+
+
+def test_agent_objective_metadata_is_not_truncated():
+    objective_text = (
+        "Improve fold stability of the 552-aa enzyme by point mutations restricted "
+        "to the 5 buried-polar target positions (Y139,Y194,C215,T300,T356); <=5 "
+        "mutations; never change protected residues (E266,D270,G379,D440,G530,G532) "
+        "or any non-target position; same length 552. Accept if mutant has lower "
+        "Rosetta relaxed total_score than WT (stabilizing dE<0), refold pLDDT "
+        "maintained (>=WT-2 and >=80), TM to WT >=0.95, and only target positions "
+        "changed. PER-POSITION single-mutant Rosetta scans completed for all five "
+        "target residues and the full sentence must survive report rendering."
+    )
+    model = _model(raw_summary={"objective": objective_text})
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert "..." not in overview.agent_objective
+    assert "PER-POSITION single-mutant Rosetta scans completed for all five" in (
+        overview.agent_objective
+    )
+
+
+def test_candidate_board_explains_objective_rank_basis():
+    rank_node = replace(
+        _node("n_rank", "objective_rank"),
+        output={
+            "ranking_intent": "objective",
+            "objective_name": "fold_stability",
+            "formula_text": "-1 * ${pyrosetta.mean_ddg}",
+            "score_direction": "higher",
+            "gate_summary": ["pyrosetta.mean_ddg < 0"],
+            "ranked_candidates": [{"candidate_id": "cand_alt", "rank": 1}],
+        },
+    )
+    model = _model(
+        nodes=[rank_node],
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_alt",
+                rank=1,
+                score=1.13745,
+                sequence="ACDE",
+                source={"tool": "objective_rank"},
+                scores={
+                    "objective_rank": {
+                        "rank": 1,
+                        "objective_score": 1.13745,
+                        "objective_name": "fold_stability",
+                        "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                        "score_direction": "higher",
+                        "passed_gates": [
+                            {"id": "stabilizing", "metric": "pyrosetta.mean_ddg", "op": "<", "threshold": 0}
+                        ],
+                        "failed_gates": [],
+                    }
+                },
+            )
+        ],
+    )
+    review = build_review_model(model)
+
+    board = build_candidate_board_view_model(review)
+
+    assert board.ranking_basis_caption == (
+        "Ranking: objective_rank for fold_stability. Gates: pyrosetta.mean_ddg < 0. "
+        "Score: -1 * ${pyrosetta.mean_ddg}; higher is better."
+    )
+    assert "Alternative: objective_score 1.137; gates passed" in board.rows[0].short_verdict
+
+
+def test_final_candidate_verdict_prefers_objective_rank_score_over_plddt():
+    rank_node = replace(
+        _node("n_rank", "objective_rank"),
+        output={
+            "ranked_candidates": [
+                {"candidate_id": "cand_best", "rank": 1},
+                {"candidate_id": "cand_final", "rank": 7},
+            ]
+        },
+    )
+    model = _model(
+        raw_summary={"user_query": "Improve fold stability."},
+        nodes=[rank_node, _node("n_protenix", "protenix_v2")],
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_final",
+                rank=7,
+                score=1.13415,
+                sequence="ACDE",
+                source={"tool": "protenix_v2"},
+                scores={
+                    "objective_rank": {
+                        "objective_score": 1.13415,
+                        "rank": 7,
+                        "objective_name": "fold_stability",
+                        "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                        "formula_text": "-1 * ${pyrosetta.mean_ddg}",
+                        "score_direction": "higher",
+                        "gate_summary": ["pyrosetta.mean_ddg < 0"],
+                        "passed_gates": [],
+                        "failed_gates": [],
+                    },
+                    "protenix_v2": {"plddt": 89.84, "ptm": 0.943},
+                },
+            )
+        ],
+        finals=[ReportCandidate(candidate_id="cand_final", sequence="ACDE")],
+    )
+    review = build_review_model(model)
+
+    board = build_candidate_board_view_model(review)
+
+    final_row = next(row for row in board.rows if row.status == "final")
+    assert final_row.short_verdict.startswith("Final: objective_score 1.134")
+    assert board.objective_override_note == (
+        "Submitted objective rank #7: objective_score 1.134."
+    )
 
 
 def test_candidate_board_rows_map_status_metric_chips_and_download_flags():
@@ -312,7 +498,7 @@ def test_candidate_board_rows_map_status_metric_chips_and_download_flags():
     assert [chip.label for chip in row.metric_chips[:3]] == ["ipTM", "pLDDT", "pTM"]
 
 
-def test_candidate_board_renumbers_duplicate_raw_ranks_by_review_order():
+def test_candidate_board_hides_nonfinal_raw_ranks_without_objective_rank():
     candidates = [
         ReportCandidate(
             candidate_id="cand_a",
@@ -346,7 +532,13 @@ def test_candidate_board_renumbers_duplicate_raw_ranks_by_review_order():
     board = build_candidate_board_view_model(review)
 
     assert [row.candidate_id for row in board.rows[:3]] == ["cand_a", "cand_b", "cand_c"]
-    assert [row.rank for row in board.rows[:3]] == [1, 2, 3]
+    assert [row.rank for row in board.rows[:3]] == [1, None, None]
+    assert [row.recommendation_label for row in board.rows[:3]] == [
+        "Recommended",
+        "Alternative",
+        "Alternative",
+    ]
+    assert board.has_objective_rank is False
 
 
 def test_candidate_dossier_surfaces_missing_evidence_and_risks():
@@ -377,7 +569,7 @@ def test_workflow_trace_groups_nodes_into_product_stages():
             _node("n2", "protein_qc", upstream=["n1"]),
             _node("n3", "esm3", upstream=["n2"]),
             _node("n4", "boltz2_affinity", upstream=["n3"]),
-            _node("n5", "rank_designs", upstream=["n4"]),
+            _node("n5", "objective_rank", upstream=["n4"]),
             _node("n6", "submit_candidate", upstream=["n5"]),
         ]
     )
@@ -390,7 +582,7 @@ def test_workflow_trace_groups_nodes_into_product_stages():
     assert by_key["qc"].tools == ["protein_qc"]
     assert by_key["structure"].tools == ["esm3"]
     assert by_key["interface"].tools == ["boltz2_affinity"]
-    assert by_key["ranking"].tools == ["rank_designs"]
+    assert by_key["ranking"].tools == ["objective_rank"]
     assert by_key["recommendation"].tools == ["submit_candidate"]
 
 
@@ -409,7 +601,7 @@ def test_build_report_view_model_composes_sections():
     assert vm.workflow_trace.workflow_type == review.workflow_type
 
 
-def test_agent_rationale_thresholds_use_short_reasoning_excerpt():
+def test_agent_objective_thresholds_use_structured_metadata_not_reasoning():
     reasoning = (
         "NO ACCEPTABLE CANDIDATE.\n\n"
         "OBJECTIVE & ACCEPTANCE CRITERIA: binder must contact V452; "
@@ -420,7 +612,10 @@ def test_agent_rationale_thresholds_use_short_reasoning_excerpt():
     model = _model(
         nodes=[_node("submit", "submit_candidate")],
         candidates=[ReportCandidate(candidate_id="cand", sequence="ACDE")],
-        raw_summary={"objective": "Design a V452 binder."},
+        raw_summary={
+            "objective": "Design a V452 binder.",
+            "acceptance_criteria": "binder must contact V452; ipSAE>=0.7 and pLDDT>=80.",
+        },
     )
     model = replace(
         model,
@@ -563,13 +758,14 @@ def test_agent_objective_uses_structured_final_submission_criteria_when_objectiv
     overview = build_overview_view_model(model, review)
 
     assert (
-        "Objective: Acceptance criteria: binder contact at V452 and ipSAE>=0.7"
+        "Acceptance criteria: binder contact at V452 and ipSAE>=0.7"
         in overview.agent_objective
     )
+    assert "Objective: Acceptance criteria:" not in overview.agent_objective
     assert "No explicit numeric thresholds were captured" not in overview.agent_objective
 
 
-def test_agent_objective_falls_back_to_explicit_reasoning_objective_section():
+def test_agent_objective_does_not_use_final_reasoning_as_objective_metadata():
     reasoning = (
         "NO ACCEPTABLE CANDIDATE.\n\n"
         "OBJECTIVE: design a binder that contacts V452 and passes ipSAE>=0.7.\n\n"
@@ -591,10 +787,55 @@ def test_agent_objective_falls_back_to_explicit_reasoning_objective_section():
     overview = build_overview_view_model(model, review)
 
     assert (
-        "Objective: design a binder that contacts V452 and passes ipSAE>=0.7."
+        "Objective metadata was not recorded; report summarizes recorded evidence."
         in overview.agent_objective
     )
+    assert "design a binder that contacts V452" not in overview.agent_objective
     assert "this should stay out" not in overview.agent_objective
+
+
+def test_agent_objective_keeps_final_reasoning_results_out_of_thresholds():
+    objective = (
+        "Design a de novo amino-acid sequence that binds Gp23 specifically "
+        "(multi-seed-robust complex interface: ipSAE>0.6 and robust iptm) and "
+        "plausibly folds as a standalone protein (single-sequence monomer "
+        "pLDDT>=80, sequence QC pass)."
+    )
+    reasoning = (
+        "Objective: de novo amino-acid sequence that binds Gp23 specifically "
+        "and plausibly folds standalone. Pipeline: folded the target with MSA; "
+        "generated 22 binder candidates. Acceptance gates: protein_qc passes, "
+        "ipSAE>=0.6. Four designs passed every gate. bg_04 ranked #1. "
+        "Validated alternatives: bg_18, bg_11, bg_19."
+    )
+    model = _model(
+        nodes=[_node("submit", "submit_candidate")],
+        candidates=[ReportCandidate(candidate_id="bg_04", sequence="ACDE")],
+        raw_summary={"objective": objective},
+    )
+    model = replace(
+        model,
+        final_submission={
+            "outcome": "accepted",
+            "reasoning": reasoning,
+        },
+    )
+    review = build_review_model(model)
+
+    overview = build_overview_view_model(model, review)
+
+    assert (
+        "Objective: Design a de novo amino-acid sequence that binds Gp23 "
+        "specifically and plausibly folds as a standalone protein."
+    ) in overview.agent_objective
+    assert (
+        "Acceptance criteria: multi-seed-robust complex interface: ipSAE>0.6 "
+        "and robust iptm; single-sequence monomer pLDDT>=80, sequence QC pass"
+    ) in overview.agent_objective
+    assert "Pipeline:" not in overview.agent_objective
+    assert "Four designs passed" not in overview.agent_objective
+    assert "Validated alternatives" not in overview.agent_objective
+    assert "No explicit numeric thresholds were captured" not in overview.agent_objective
 
 
 def test_agent_objective_uses_metadata_not_recorded_fallback_without_explicit_section():
@@ -735,13 +976,46 @@ def test_workflow_review_preset_orders_denovo_for_foldability():
 
     assert preset.workflow_type == "denovo"
     assert preset.metric_priority[:3] == ["pLDDT", "pTM", "QC"]
-    assert [chip.label for chip in board.rows[0].metric_chips[:3]] == ["pLDDT", "pTM", "GRAVY"]
+
+
+def test_protenix_monomer_iptm_does_not_infer_binder_review(tmp_path: Path):
+    structure = _single_chain_pdb(tmp_path / "serine_peptidase.pdb")
+    model = _model(
+        nodes=[_node("fold", "protenix_v2"), _node("submit", "submit_candidate")],
+        candidates=[
+            ReportCandidate(
+                candidate_id="d6",
+                rank=1,
+                sequence="ACDEFGHIK",
+                structure_path=structure,
+                scores={"protenix_v2": {"plddt": 90.45, "ptm": 0.912, "iptm": 0.0}},
+            )
+        ],
+        raw_summary={
+            "user_query": (
+                "Design a protein sequence with serine-type peptidase activity "
+                "(Ser-His-Asp catalytic triad; fold compatible with function)."
+            )
+        },
+    )
+    review = build_review_model(model)
+    preset = build_workflow_review_preset(model, review)
+    board = build_candidate_board_view_model(review, preset)
+
+    assert preset.workflow_type == "denovo"
+    assert preset.metric_priority[:3] == ["pLDDT", "pTM", "QC"]
+    assert "ipTM" not in [chip.label for chip in board.rows[0].metric_chips]
+    assert board.ranking_basis_caption == (
+        "No objective ranking formula was run. Final is the submitted candidate; "
+        "alternatives are shown for evidence only."
+    )
+    assert [chip.label for chip in board.rows[0].metric_chips[:3]] == ["pLDDT", "pTM", "QC"]
     assert "structure confidence" in board.rows[0].short_verdict
 
 
 def test_retrieval_preset_avoids_design_specific_missing_evidence():
     model = _model(
-        nodes=[_node("n1", "search_sequence"), _node("n2", "rank_designs")],
+        nodes=[_node("n1", "search_sequence"), _node("n2", "objective_rank")],
         candidates=[ReportCandidate(candidate_id="hit_1", sequence="ACDEFG")],
     )
     review = build_review_model(model)

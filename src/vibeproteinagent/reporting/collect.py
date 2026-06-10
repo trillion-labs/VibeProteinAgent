@@ -6,7 +6,7 @@ import sqlite3
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import yaml
@@ -130,7 +130,10 @@ _REFERENCE_CANDIDATE_TOOLS = frozenset({
     "go_sequences",
     "family_profile",
 })
-_NON_BOARD_CANDIDATE_TOOLS = _REFERENCE_CANDIDATE_TOOLS | frozenset({"submit_candidate"})
+_HISTORICAL_NON_BOARD_TOOLS = frozenset({"rank" "_designs"})
+_NON_BOARD_CANDIDATE_TOOLS = (
+    _REFERENCE_CANDIDATE_TOOLS | _HISTORICAL_NON_BOARD_TOOLS | frozenset({"submit_candidate"})
+)
 _FINALIZATION_EVALUATOR_TOOLS = frozenset({
     "boltz2_affinity",
     "ipsae",
@@ -210,13 +213,25 @@ def _collect_single_job(workspace: Workspace, job: JobRecord) -> ReportModel:
         _candidates_from_submission(final_submission),
         candidates,
     )
+    final_candidates = _enrich_final_candidates_from_objective_rank(
+        final_candidates,
+        report_nodes,
+    )
     final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
         final_candidates,
         report_nodes,
     )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_relax_aliases(
+        final_candidates,
+        candidates,
+    )
     final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
         final_candidates,
         workspace.root,
+    )
+    candidates = _merge_final_candidate_evidence_into_current_candidates(
+        candidates,
+        final_candidates,
     )
     if not candidates:
         candidates = _structure_candidates(
@@ -335,13 +350,25 @@ def _collect_submit_candidate_trajectory(
         _candidates_from_submission(final_submission),
         candidates,
     )
+    final_candidates = _enrich_final_candidates_from_objective_rank(
+        final_candidates,
+        report_nodes,
+    )
     final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
         final_candidates,
         report_nodes,
     )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_relax_aliases(
+        final_candidates,
+        candidates,
+    )
     final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
         final_candidates,
         workspace.root,
+    )
+    candidates = _merge_final_candidate_evidence_into_current_candidates(
+        candidates,
+        final_candidates,
     )
     if not candidates:
         candidates = _structure_candidates(
@@ -474,6 +501,15 @@ def _collect_trajectory(workspace: Workspace, trajectory_id: str) -> ReportModel
                 }
             )
 
+    upstream = report_nodes[-1].node_id if report_nodes else None
+    enrichment_nodes, enrichment_artifacts, enrichment_warnings, enrichment_params = (
+        _report_enrichment_nodes(workspace, trajectory_id, upstream=upstream)
+    )
+    report_nodes.extend(enrichment_nodes)
+    all_artifacts.extend(enrichment_artifacts)
+    warnings.extend(enrichment_warnings)
+    params_by_node.update(enrichment_params)
+
     candidates = _normalize_candidates(
         report_nodes,
         all_artifacts,
@@ -485,13 +521,25 @@ def _collect_trajectory(workspace: Workspace, trajectory_id: str) -> ReportModel
         _candidates_from_submission(final_submission),
         candidates,
     )
+    final_candidates = _enrich_final_candidates_from_objective_rank(
+        final_candidates,
+        report_nodes,
+    )
     final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
         final_candidates,
         report_nodes,
     )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_relax_aliases(
+        final_candidates,
+        candidates,
+    )
     final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
         final_candidates,
         workspace.root,
+    )
+    candidates = _merge_final_candidate_evidence_into_current_candidates(
+        candidates,
+        final_candidates,
     )
     if not candidates:
         candidates = _structure_candidates(
@@ -597,13 +645,25 @@ def _collect_workflow(workspace: Workspace, workflow_id: str) -> ReportModel:
         _candidates_from_submission(final_submission),
         candidates,
     )
+    final_candidates = _enrich_final_candidates_from_objective_rank(
+        final_candidates,
+        report_nodes,
+    )
     final_candidates = _enrich_final_candidates_from_pyrosetta_score_pairs(
         final_candidates,
         report_nodes,
     )
+    final_candidates = _enrich_final_candidates_from_pyrosetta_relax_aliases(
+        final_candidates,
+        candidates,
+    )
     final_candidates = _enrich_final_candidates_from_workspace_stability_sidecars(
         final_candidates,
         workspace.root,
+    )
+    candidates = _merge_final_candidate_evidence_into_current_candidates(
+        candidates,
+        final_candidates,
     )
     if not candidates:
         candidates = _structure_candidates(
@@ -1348,10 +1408,10 @@ def _report_enrichment_nodes(
     params: dict[str, dict[str, Any]] = {}
     previous = upstream
     seen_node_ids: set[str] = set()
-    for index, job in enumerate(
-        _read_report_enrichment_jobs_readonly(workspace, source_id),
-        start=1,
-    ):
+    enrichment_jobs = _selected_report_enrichment_jobs(
+        _read_report_enrichment_jobs_readonly(workspace, source_id)
+    )
+    for index, job in enumerate(enrichment_jobs, start=1):
         job_artifacts = _artifact_list(
             _read_artifacts_for_job_readonly(workspace, job.job_id),
             job_id=job.job_id,
@@ -1372,6 +1432,15 @@ def _report_enrichment_nodes(
         if isinstance(job.params, dict):
             params[node_id] = job.params
     return nodes, artifacts, warnings, params
+
+
+def _selected_report_enrichment_jobs(jobs: list[JobRecord]) -> list[JobRecord]:
+    if not jobs:
+        return []
+    completed = [job for job in jobs if job.state is JobState.COMPLETED]
+    if completed:
+        return completed
+    return [jobs[-1]]
 
 
 def _safe_enrichment_source(source_id: str) -> str:
@@ -1782,9 +1851,428 @@ def _normalize_candidates(
             )
         )
     _attach_qc_and_analysis(candidates, nodes, merge_global_metrics=False)
+    candidates = _merge_sequence_analysis_candidates(candidates)
     if ranked:
-        return _dedupe_candidates([*ranked, *candidates])
+        candidates = _merge_objective_ranked_aliases_into_candidates(ranked, candidates)
+    candidates = _merge_pyrosetta_relax_aliases_into_candidates(candidates)
     return _dedupe_candidates(candidates)
+
+
+def _merge_pyrosetta_relax_aliases_into_candidates(
+    candidates: list[ReportCandidate],
+) -> list[ReportCandidate]:
+    records = _pyrosetta_relax_candidate_records(candidates)
+    references = [
+        record
+        for record in records
+        if _stability_tokens_mark_reference(record.get("tokens"))
+    ]
+    if not references:
+        return candidates
+    reference_scores = [record["total_score"] for record in references]
+    reference_mean = sum(reference_scores) / len(reference_scores)
+    out: list[ReportCandidate] = []
+    for candidate in candidates:
+        alias = _candidate_path_alias_tokens(candidate)
+        if not alias:
+            out.append(candidate)
+            continue
+        matches = [
+            record
+            for record in records
+            if not _stability_tokens_mark_reference(record.get("tokens"))
+            and record.get("tokens")
+            and set(record["tokens"]) == alias
+        ]
+        if not matches:
+            out.append(candidate)
+            continue
+        mutant_scores = [record["total_score"] for record in matches]
+        mutant_mean = sum(mutant_scores) / len(mutant_scores)
+        scores = dict(candidate.scores or {})
+        pyrosetta = dict(scores.get("pyrosetta") or {})
+        pyrosetta.setdefault("mode", "relax")
+        pyrosetta.setdefault("wild_type_mean_total_score", reference_mean)
+        pyrosetta.setdefault("replicate_count", len(mutant_scores))
+        if len(mutant_scores) == 1:
+            pyrosetta.setdefault("total_score", mutant_scores[0])
+            pyrosetta.setdefault("ddg_reu", mutant_scores[0] - reference_mean)
+        else:
+            pyrosetta.setdefault("mean_total_score", mutant_mean)
+            pyrosetta.setdefault("mean_ddg", mutant_mean - reference_mean)
+        scores["pyrosetta"] = pyrosetta
+        out.append(replace(candidate, scores=scores))
+    return out
+
+
+def _merge_objective_ranked_aliases_into_candidates(
+    ranked: list[ReportCandidate],
+    candidates: list[ReportCandidate],
+) -> list[ReportCandidate]:
+    if not ranked:
+        return candidates
+    if not candidates:
+        return ranked
+
+    ranked_pair_counts: dict[tuple[str, str], int] = {}
+    for candidate in ranked:
+        pair = _candidate_id_sequence_pair(candidate)
+        if pair is not None:
+            ranked_pair_counts[pair] = ranked_pair_counts.get(pair, 0) + 1
+    used_ranked: set[int] = set()
+    used_targets: set[int] = set()
+    out = list(candidates)
+    for ranked_index, ranked_candidate in enumerate(ranked):
+        target_index = _objective_rank_merge_target(
+            ranked_candidate,
+            ranked,
+            out,
+            ranked_pair_counts,
+            used_targets,
+        )
+        if target_index is None:
+            continue
+        target = out[target_index]
+        scores = dict(target.scores or {})
+        scores["objective_rank"] = _objective_rank_score_block(ranked_candidate)
+        source = dict(target.source or {})
+        ranked_source = (
+            ranked_candidate.source if isinstance(ranked_candidate.source, dict) else {}
+        )
+        source.setdefault(
+            "objective_rank_evidence",
+            {
+                "source": "objective_rank",
+                "candidate_id": ranked_candidate.candidate_id,
+                "ranked_candidate_id": _candidate_ranked_candidate_id(ranked_candidate),
+                "identity_key": ranked_source.get("identity_key"),
+                "material_key": _candidate_material_key(ranked_candidate),
+            },
+        )
+        ranked_candidate_id = _candidate_ranked_candidate_id(ranked_candidate)
+        if ranked_candidate_id:
+            source.setdefault("ranked_candidate_id", ranked_candidate_id)
+            source.setdefault("local_id", ranked_candidate_id)
+        material_key = _candidate_material_key(ranked_candidate)
+        if material_key:
+            source.setdefault("material_key", material_key)
+        out[target_index] = replace(
+            target,
+            rank=ranked_candidate.rank or target.rank,
+            score=ranked_candidate.score if ranked_candidate.score is not None else target.score,
+            scores=scores,
+            source=source,
+            qc_flags=target.qc_flags or ranked_candidate.qc_flags,
+            liabilities=target.liabilities or ranked_candidate.liabilities,
+        )
+        used_ranked.add(ranked_index)
+        used_targets.add(target_index)
+
+    out.extend(
+        ranked_candidate
+        for index, ranked_candidate in enumerate(ranked)
+        if index not in used_ranked
+    )
+    return out
+
+
+def _objective_rank_merge_target(
+    ranked_candidate: ReportCandidate,
+    ranked: list[ReportCandidate],
+    candidates: list[ReportCandidate],
+    ranked_pair_counts: dict[tuple[str, str], int],
+    used_targets: set[int],
+) -> int | None:
+    ranked_id = _candidate_ranked_candidate_id(ranked_candidate)
+    if ranked_id:
+        exact = _unique_objective_rank_target(
+            candidates,
+            used_targets,
+            lambda candidate: _candidate_ranked_candidate_id(candidate) == ranked_id,
+            ranked_candidate,
+        )
+        if exact is not None:
+            return exact
+
+    material_key = _candidate_material_key(ranked_candidate)
+    if material_key:
+        exact = _unique_objective_rank_target(
+            candidates,
+            used_targets,
+            lambda candidate: _candidate_material_key(candidate) == material_key,
+            ranked_candidate,
+        )
+        if exact is not None:
+            return exact
+
+    structure = _candidate_structure_identity(ranked_candidate)
+    if structure:
+        exact = _unique_objective_rank_target(
+            candidates,
+            used_targets,
+            lambda candidate: _candidate_structure_identity(candidate) == structure,
+            ranked_candidate,
+        )
+        if exact is not None:
+            return exact
+
+    sequence_pair = _candidate_id_sequence_pair(ranked_candidate)
+    if sequence_pair is not None and ranked_pair_counts.get(sequence_pair) == 1:
+        exact = _unique_objective_rank_target(
+            candidates,
+            used_targets,
+            lambda candidate: (
+                _candidate_id_sequence_pair(candidate) == sequence_pair
+            ),
+            ranked_candidate,
+        )
+        if exact is not None:
+            return exact
+
+    ranked_alias = _candidate_path_alias_tokens(ranked_candidate)
+    if not ranked_alias:
+        return None
+    ranked_alias_peers = [
+        peer
+        for peer in ranked
+        if _candidate_path_alias_tokens(peer) == ranked_alias
+        and _report_candidates_material_compatible(peer, ranked_candidate)
+    ]
+    if len(ranked_alias_peers) != 1:
+        return None
+    alias_matches = [
+        index
+        for index, candidate in enumerate(candidates)
+        if index not in used_targets
+        and _candidate_path_alias_tokens(candidate) == ranked_alias
+        and _report_candidates_material_compatible(candidate, ranked_candidate)
+    ]
+    if len(alias_matches) == 1:
+        return alias_matches[0]
+    if len(alias_matches) > 1:
+        ranked_matches = sorted(
+            alias_matches,
+            key=lambda index: _rank_alias_merge_quality(candidates[index]),
+            reverse=True,
+        )
+        best = ranked_matches[0]
+        second = ranked_matches[1]
+        if _rank_alias_merge_quality(candidates[best]) != _rank_alias_merge_quality(
+            candidates[second]
+        ):
+            return best
+    return None
+
+
+def _unique_objective_rank_target(
+    candidates: list[ReportCandidate],
+    used_targets: set[int],
+    predicate: Callable[[ReportCandidate], bool],
+    ranked_candidate: ReportCandidate,
+) -> int | None:
+    matches = [
+        index
+        for index, candidate in enumerate(candidates)
+        if index not in used_targets
+        and predicate(candidate)
+        and _report_candidates_material_compatible(candidate, ranked_candidate)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _objective_rank_score_block(candidate: ReportCandidate) -> dict[str, Any]:
+    source_scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    block = dict(source_scores.get("objective_rank") or {})
+    allowed = {
+        "ranked_candidate_id",
+        "objective_name",
+        "objective_score",
+        "score_formula",
+        "formula_text",
+        "score_direction",
+        "gate_summary",
+        "score_components",
+        "passed_gates",
+        "failed_gates",
+        "warnings",
+        "tie_breaker_values",
+    }
+    block.update({key: value for key, value in source_scores.items() if key in allowed})
+    if candidate.score is not None:
+        block.setdefault("objective_score", candidate.score)
+        block.setdefault("score", candidate.score)
+    if candidate.rank is not None:
+        block.setdefault("rank", candidate.rank)
+    return block
+
+
+def _rank_alias_merge_quality(candidate: ReportCandidate) -> tuple[int, int, int, int]:
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    source_tool = str(source.get("tool") or "").lower()
+    return (
+        1 if candidate.sequence else 0,
+        1 if candidate.structure_path else 0,
+        1 if "protenix_v2" in scores or source_tool == "protenix_v2" else 0,
+        1 if "pyrosetta" in scores or source_tool == "pyrosetta" else 0,
+    )
+
+
+def _candidate_path_alias_tokens(candidate: ReportCandidate) -> set[str]:
+    tokens: set[str] = set()
+    if candidate.structure_path:
+        tokens.update(_split_stability_tokens(Path(candidate.structure_path).stem))
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    artifacts = source.get("candidate_artifacts")
+    if isinstance(artifacts, dict):
+        for value in _iter_string_values(artifacts):
+            tokens.update(_split_stability_tokens(Path(value).stem))
+    if not tokens:
+        tokens.update(_split_stability_tokens(candidate.candidate_id))
+    return _filter_stability_tokens(tokens)
+
+
+def _candidate_ranked_candidate_id(candidate: ReportCandidate) -> str | None:
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    for container in (
+        source,
+        source.get("objective_rank_evidence") if isinstance(source.get("objective_rank_evidence"), dict) else {},
+    ):
+        if isinstance(container, dict):
+            value = container.get("ranked_candidate_id")
+            if value not in (None, ""):
+                return str(value)
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    objective = scores.get("objective_rank")
+    if isinstance(objective, dict):
+        value = objective.get("ranked_candidate_id")
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _candidate_material_key(candidate: ReportCandidate) -> str | None:
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    for container in (
+        source,
+        source.get("objective_rank_evidence") if isinstance(source.get("objective_rank_evidence"), dict) else {},
+    ):
+        if isinstance(container, dict):
+            value = container.get("material_key")
+            if value not in (None, ""):
+                return str(value)
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    objective = scores.get("objective_rank")
+    if isinstance(objective, dict):
+        value = objective.get("material_key")
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _candidate_id_sequence_pair(candidate: ReportCandidate) -> tuple[str, str] | None:
+    candidate_id = str(candidate.candidate_id or "")
+    sequence = _candidate_sequence_identity(candidate)
+    if not candidate_id or not sequence:
+        return None
+    return candidate_id, sequence
+
+
+def _candidate_sequence_identity(candidate: ReportCandidate) -> str | None:
+    if candidate.sequence in (None, ""):
+        return None
+    return "".join(str(candidate.sequence).split()).upper()
+
+
+def _candidate_structure_identity(candidate: ReportCandidate) -> str | None:
+    if candidate.structure_path in (None, ""):
+        return None
+    return str(candidate.structure_path).strip()
+
+
+def _report_candidates_material_compatible(
+    left: ReportCandidate,
+    right: ReportCandidate,
+) -> bool:
+    left_ranked = _candidate_ranked_candidate_id(left)
+    right_ranked = _candidate_ranked_candidate_id(right)
+    if left_ranked and right_ranked and left_ranked != right_ranked:
+        return False
+    left_material = _candidate_material_key(left)
+    right_material = _candidate_material_key(right)
+    if left_material and right_material and left_material != right_material:
+        return False
+    left_sequence = _candidate_sequence_identity(left)
+    right_sequence = _candidate_sequence_identity(right)
+    if left_sequence and right_sequence and left_sequence != right_sequence:
+        return False
+    left_structure = _candidate_structure_identity(left)
+    right_structure = _candidate_structure_identity(right)
+    if left_structure and right_structure and left_structure != right_structure:
+        return False
+    return True
+
+
+def _row_ranked_candidate_id(row: dict[str, Any]) -> str | None:
+    value = row.get("ranked_candidate_id")
+    if value not in (None, ""):
+        return str(value)
+    candidate_ref = row.get("candidate_ref")
+    if isinstance(candidate_ref, dict):
+        value = candidate_ref.get("ranked_candidate_id")
+        if value not in (None, ""):
+            return str(value)
+    scores = row.get("scores")
+    if isinstance(scores, dict):
+        objective = scores.get("objective_rank")
+        if isinstance(objective, dict):
+            value = objective.get("ranked_candidate_id")
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _merge_sequence_analysis_candidates(
+    candidates: list[ReportCandidate],
+) -> list[ReportCandidate]:
+    sequence_analysis = [
+        candidate
+        for candidate in candidates
+        if str((candidate.source or {}).get("tool") or "").lower() == "sequence_analysis"
+    ]
+    if not sequence_analysis:
+        return candidates
+    base = [
+        candidate
+        for candidate in candidates
+        if str((candidate.source or {}).get("tool") or "").lower() != "sequence_analysis"
+    ]
+    if not base:
+        return candidates
+
+    by_id = {candidate.candidate_id: index for index, candidate in enumerate(base)}
+    sequence_to_indices: dict[str, list[int]] = {}
+    for index, candidate in enumerate(base):
+        if candidate.sequence:
+            sequence_to_indices.setdefault(candidate.sequence, []).append(index)
+
+    for enriched in sequence_analysis:
+        target_index = by_id.get(enriched.candidate_id)
+        if target_index is None and enriched.sequence:
+            matches = sequence_to_indices.get(enriched.sequence, [])
+            if len(matches) == 1:
+                target_index = matches[0]
+        if target_index is None:
+            continue
+        target = base[target_index]
+        base[target_index] = replace(
+            target,
+            scores={**(target.scores or {}), **(enriched.scores or {})},
+            qc_flags=target.qc_flags or enriched.qc_flags,
+            liabilities=target.liabilities or enriched.liabilities,
+            artifacts=target.artifacts or enriched.artifacts,
+        )
+    return base
 
 
 def _has_design_candidate_context(nodes: list[WorkflowNodeSummary]) -> bool:
@@ -1910,6 +2398,189 @@ def _enrich_final_candidates_from_current_candidates(
     return enriched
 
 
+def _enrich_final_candidates_from_objective_rank(
+    final_candidates: list[ReportCandidate],
+    nodes: list[WorkflowNodeSummary],
+) -> list[ReportCandidate]:
+    if not final_candidates:
+        return final_candidates
+    rank_rows = _objective_rank_candidate_rows(nodes)
+    if not rank_rows:
+        return final_candidates
+    enriched: list[ReportCandidate] = []
+    for candidate in final_candidates:
+        match = _objective_rank_match_for_candidate(candidate, rank_rows)
+        if match is None:
+            enriched.append(candidate)
+            continue
+        row = match["row"]
+        scores = dict(candidate.scores or {})
+        rank_scores = dict(scores.get("objective_rank") or {})
+        rank_scores.update(_candidate_score_map(row))
+        if match.get("ranked_candidate_id"):
+            rank_scores.setdefault("ranked_candidate_id", match.get("ranked_candidate_id"))
+        if row.get("formula_text") is not None:
+            rank_scores.setdefault("formula_text", row.get("formula_text"))
+        if row.get("gate_summary") is not None:
+            rank_scores.setdefault("gate_summary", row.get("gate_summary"))
+        if row.get("objective_score") is not None:
+            rank_scores.setdefault("objective_score", row.get("objective_score"))
+        rank = _as_int(row.get("rank"))
+        if rank is not None:
+            rank_scores.setdefault("rank", rank)
+        scores["objective_rank"] = rank_scores
+        source = dict(candidate.source or {})
+        source.setdefault(
+            "objective_rank_evidence",
+            {
+                "source": "objective_rank",
+                "candidate_id": row.get("candidate_id"),
+                "ranked_candidate_id": match.get("ranked_candidate_id"),
+                "identity_key": match.get("identity_key"),
+                "material_key": match.get("material_key"),
+                "node_id": match.get("node_id"),
+                "job_id": match.get("job_id"),
+            },
+        )
+        enriched.append(
+            replace(
+                candidate,
+                rank=rank or candidate.rank,
+                score=(
+                    _as_float(row.get("objective_score") if row.get("objective_score") is not None else row.get("score"))
+                    if candidate.score is None
+                    else candidate.score
+                ),
+                scores=scores,
+                source=source,
+            )
+        )
+    return enriched
+
+
+def _objective_rank_candidate_rows(
+    nodes: list[WorkflowNodeSummary],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for node in nodes:
+        if (node.tool or "").strip().lower() != "objective_rank":
+            continue
+        output = node.output if isinstance(node.output, dict) else {}
+        ranked = output.get("ranked_candidates")
+        if not isinstance(ranked, list):
+            continue
+        for idx, row in enumerate(ranked):
+            if not isinstance(row, dict):
+                continue
+            candidate_id = str(row.get("candidate_id") or row.get("name") or "")
+            if not candidate_id:
+                continue
+            ranked_candidate_id = _row_ranked_candidate_id(row)
+            token_seed = " ".join(
+                item
+                for item in (
+                    candidate_id,
+                    ranked_candidate_id or "",
+                    Path(str(row.get("structure_path") or "")).stem,
+                )
+                if item
+            )
+            row_tokens = _filter_stability_tokens(_split_stability_tokens(token_seed))
+            rows.append(
+                {
+                    "row": row,
+                    "index": idx,
+                    "node_id": node.node_id,
+                    "job_id": node.job_id,
+                    "candidate_id": candidate_id,
+                    "ranked_candidate_id": ranked_candidate_id,
+                    "identity_key": row.get("identity_key"),
+                    "material_key": row.get("material_key"),
+                    "tokens": row_tokens,
+                }
+            )
+    return rows
+
+
+def _objective_rank_match_for_candidate(
+    candidate: ReportCandidate,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    ranked_candidate_id = _candidate_ranked_candidate_id(candidate)
+    if ranked_candidate_id:
+        exact_ranked = [
+            row
+            for row in rows
+            if row.get("ranked_candidate_id") == ranked_candidate_id
+        ]
+        if len(exact_ranked) == 1:
+            return exact_ranked[0]
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    material_key = source.get("material_key")
+    if material_key:
+        material_matches = [
+            row for row in rows if row.get("material_key") == material_key
+        ]
+        if len(material_matches) == 1:
+            return material_matches[0]
+    candidate_id = str(candidate.candidate_id or "")
+    if candidate_id:
+        exact = [
+            row
+            for row in rows
+            if str(row["row"].get("candidate_id") or "") == candidate_id
+        ]
+        if len(exact) == 1:
+            return exact[0]
+    candidate_tokens = _candidate_path_alias_tokens(candidate)
+    if not candidate_tokens:
+        return None
+    matches = [
+        row
+        for row in rows
+        if row.get("tokens") and set(row["tokens"]) == candidate_tokens
+    ]
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda row: (
+            _as_int(row["row"].get("rank")) or row.get("index") or 999999,
+        )
+    )
+    return matches[0]
+
+
+def _merge_final_candidate_evidence_into_current_candidates(
+    candidates: list[ReportCandidate],
+    final_candidates: list[ReportCandidate],
+) -> list[ReportCandidate]:
+    if not candidates or not final_candidates:
+        return candidates
+    final_by_id = {
+        str(candidate.candidate_id): candidate
+        for candidate in final_candidates
+        if candidate.candidate_id
+    }
+    out: list[ReportCandidate] = []
+    for candidate in candidates:
+        final = final_by_id.get(str(candidate.candidate_id or ""))
+        if final is None:
+            out.append(candidate)
+            continue
+        out.append(
+            replace(
+                candidate,
+                rank=final.rank or candidate.rank,
+                score=final.score if candidate.score is None else candidate.score,
+                scores={**(candidate.scores or {}), **(final.scores or {})},
+                qc_flags=candidate.qc_flags or final.qc_flags,
+                liabilities=candidate.liabilities or final.liabilities,
+                artifacts=candidate.artifacts or final.artifacts,
+            )
+        )
+    return out
+
+
 def _enrich_final_candidates_from_pyrosetta_score_pairs(
     final_candidates: list[ReportCandidate],
     nodes: list[WorkflowNodeSummary],
@@ -1956,6 +2627,94 @@ def _enrich_final_candidates_from_pyrosetta_score_pairs(
         )
         enriched.append(replace(candidate, scores=scores, source=source))
     return enriched
+
+
+def _enrich_final_candidates_from_pyrosetta_relax_aliases(
+    final_candidates: list[ReportCandidate],
+    current_candidates: list[ReportCandidate],
+) -> list[ReportCandidate]:
+    if not final_candidates:
+        return final_candidates
+    records = _pyrosetta_relax_candidate_records(current_candidates)
+    references = [
+        record
+        for record in records
+        if _stability_tokens_mark_reference(record.get("tokens"))
+    ]
+    if not references:
+        return final_candidates
+    reference_scores = [record["total_score"] for record in references]
+    reference_mean = sum(reference_scores) / len(reference_scores)
+    enriched: list[ReportCandidate] = []
+    for candidate in final_candidates:
+        candidate_tokens = _candidate_path_alias_tokens(candidate)
+        matches = [
+            record
+            for record in records
+            if not _stability_tokens_mark_reference(record.get("tokens"))
+            and record.get("tokens")
+            and set(record["tokens"]) == candidate_tokens
+        ]
+        if not matches:
+            enriched.append(candidate)
+            continue
+        mutant_scores = [record["total_score"] for record in matches]
+        mutant_mean = sum(mutant_scores) / len(mutant_scores)
+        scores = dict(candidate.scores or {})
+        pyrosetta = dict(scores.get("pyrosetta") or {})
+        pyrosetta.setdefault("mode", "relax")
+        pyrosetta.setdefault("wild_type_mean_total_score", reference_mean)
+        pyrosetta.setdefault("replicate_count", len(mutant_scores))
+        if len(mutant_scores) == 1:
+            pyrosetta.setdefault("total_score", mutant_scores[0])
+            pyrosetta.setdefault("ddg_reu", mutant_scores[0] - reference_mean)
+        else:
+            pyrosetta.setdefault("mean_total_score", mutant_mean)
+            pyrosetta.setdefault("mean_ddg", mutant_mean - reference_mean)
+        scores["pyrosetta"] = pyrosetta
+        source = dict(candidate.source or {})
+        evidence = dict(source.get("stability_evidence") or {})
+        evidence.setdefault("source", "pyrosetta_relax_alias")
+        evidence.setdefault("mutant_candidate_ids", [record["candidate_id"] for record in matches])
+        evidence.setdefault(
+            "wild_type_candidate_ids",
+            [record["candidate_id"] for record in references],
+        )
+        source["stability_evidence"] = evidence
+        enriched.append(replace(candidate, scores=scores, source=source))
+    return enriched
+
+
+def _pyrosetta_relax_candidate_records(
+    candidates: list[ReportCandidate],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for candidate in candidates:
+        source = candidate.source if isinstance(candidate.source, dict) else {}
+        if str(source.get("tool") or "").strip().lower() != "pyrosetta":
+            continue
+        pyrosetta = (
+            candidate.scores.get("pyrosetta")
+            if isinstance(candidate.scores, dict)
+            else None
+        )
+        if not isinstance(pyrosetta, dict):
+            continue
+        mode = str(pyrosetta.get("mode") or "").lower()
+        if mode and mode != "relax":
+            continue
+        total_score = _as_float(pyrosetta.get("total_score"))
+        if total_score is None:
+            continue
+        records.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "structure_path": candidate.structure_path,
+                "total_score": total_score,
+                "tokens": _stability_record_tokens(candidate.structure_path),
+            }
+        )
+    return records
 
 
 def _pyrosetta_score_records(nodes: list[WorkflowNodeSummary]) -> list[dict[str, Any]]:
@@ -2195,14 +2954,35 @@ def _filter_stability_tokens(tokens: set[str]) -> set[str]:
         "candidate",
         "canonical",
         "cand",
+        "confidence",
+        "confidences",
+        "data",
         "design",
+        "full",
+        "json",
+        "mut",
         "mutant",
+        "cif",
+        "pdb",
+        "predictions",
+        "protenix",
+        "rank",
+        "relax",
         "sample",
         "score",
+        "seed",
         "structure",
+        "summary",
         "threaded",
+        "v2",
     }
-    return {token for token in tokens if token not in generic and len(token) >= 2}
+    return {
+        token
+        for token in tokens
+        if token not in generic
+        and len(token) >= 2
+        and not (token.isdigit() and int(token) == 0)
+    }
 
 
 def _stability_tokens_mark_reference(tokens: Any) -> bool:
@@ -2251,6 +3031,8 @@ def _ranked_candidates(
 ) -> list[ReportCandidate]:
     out: list[ReportCandidate] = []
     for node in nodes:
+        if (node.tool or "").strip().lower() != "objective_rank":
+            continue
         output = node.output if isinstance(node.output, dict) else {}
         rows = output.get("ranked_candidates")
         if not isinstance(rows, list):
@@ -2258,30 +3040,57 @@ def _ranked_candidates(
         for idx, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
+            ranked_row = dict(row)
+            ranked_row.setdefault("formula_text", output.get("formula_text"))
+            ranked_row.setdefault("gate_summary", output.get("gate_summary"))
+            ranked_row.setdefault("objective_name", output.get("objective_name"))
+            ranked_row.setdefault("score_direction", output.get("score_direction"))
             structure_path = _first_str(row, *_STRUCTURE_PATH_KEYS)
             stable_structure_path = _stable_structure_path(structure_path, artifacts)
             candidate_id = str(row.get("candidate_id") or row.get("name") or idx + 1)
+            ranked_candidate_id = _row_ranked_candidate_id(row)
+            scores = _candidate_score_map(ranked_row)
+            objective = dict(scores.get("objective_rank") or {})
+            if ranked_candidate_id:
+                objective.setdefault("ranked_candidate_id", ranked_candidate_id)
+            if ranked_row.get("formula_text") is not None:
+                objective.setdefault("formula_text", ranked_row.get("formula_text"))
+            if ranked_row.get("gate_summary") is not None:
+                objective.setdefault("gate_summary", ranked_row.get("gate_summary"))
+            if objective:
+                scores["objective_rank"] = objective
             out.append(
                 ReportCandidate(
                     candidate_id=candidate_id,
                     rank=_as_int(row.get("rank")) or idx + 1,
-                    score=_as_float(row.get("score")),
+                    score=_as_float(
+                        row.get("objective_score")
+                        if row.get("objective_score") is not None
+                        else row.get("score")
+                    ),
                     sequence=_first_str(row, "sequence"),
                     structure_path=stable_structure_path,
-                    scores=_candidate_score_map(row),
+                    scores=scores,
                     qc_flags=_string_list(row.get("qc_flags")),
                     liabilities=_list(row.get("liabilities")),
                     source={
                         "node_id": node.node_id,
                         "tool": node.tool,
                         "kind": "ranked_candidates",
+                        "local_id": ranked_candidate_id or candidate_id,
+                        "ranked_candidate_id": ranked_candidate_id,
+                        "identity_key": row.get("identity_key"),
+                        "material_key": row.get("material_key"),
+                        "candidate_ref": row.get("candidate_ref")
+                        if isinstance(row.get("candidate_ref"), dict)
+                        else {},
                         "candidate_artifacts": _candidate_artifact_metadata(row),
                     },
                     artifacts=_matching_artifacts(stable_structure_path, artifacts),
                 )
             )
     _attach_qc_and_analysis(out, nodes, merge_global_metrics=True)
-    return _dedupe_candidates(sorted(out, key=lambda c: (c.rank or 999999, -(c.score or 0.0))))
+    return sorted(out, key=lambda c: (c.rank or 999999, -(c.score or 0.0)))
 
 
 def _candidates_from_output(
@@ -2293,7 +3102,7 @@ def _candidates_from_output(
     exclude_reference_candidates: bool = False,
 ) -> list[ReportCandidate]:
     tool = (node.tool or "").lower()
-    if tool == "submit_candidate":
+    if tool in {"submit_candidate", "objective_rank"} | _HISTORICAL_NON_BOARD_TOOLS:
         return []
     if exclude_reference_candidates and tool in _REFERENCE_CANDIDATE_TOOLS:
         return []
@@ -2467,7 +3276,7 @@ def _attach_qc_and_analysis(
         # Candidate's own scores override only their bare-key counterparts.
         merged_scores.update(candidate.scores)
 
-        # Dedup qc_flags — rank_designs.ranked_candidates already carries the
+        # Dedup qc_flags — ranked candidate rows may already carry the
         # flags it counted, and protein_qc.flags is the same list source-of-
         # truth. Without dedup the user sees "low_plddt low_plddt
         # high_instability_index high_instability_index".
@@ -2772,13 +3581,13 @@ def _finalization_contract_warnings(
 
     source = final_submission.get("node_id") or final_submission.get("job_id")
     warnings: list[ReportWarning] = []
-    if "rank_designs" not in tools and (tools & _FINALIZATION_GENERATOR_TOOLS):
+    if "objective_rank" not in tools and (tools & _FINALIZATION_GENERATOR_TOOLS):
         warnings.append(
             ReportWarning(
                 level="warning",
                 message=(
-                    "The agent submitted candidates before running rank_designs to "
-                    "merge validation evidence."
+                    "The agent submitted candidates without objective_rank evidence. "
+                    "Selection rationale may not reflect explicit gates and formula scoring."
                 ),
                 source=source,
             )
@@ -3102,29 +3911,95 @@ def _score_map(row: dict[str, Any]) -> dict[str, Any]:
 def _dedupe_candidates(candidates: list[ReportCandidate]) -> list[ReportCandidate]:
     if not candidates:
         return []
+    protected: list[tuple[int, ReportCandidate]] = []
+    normal: list[tuple[int, ReportCandidate]] = []
+    for index, candidate in enumerate(candidates):
+        if _candidate_objective_dedupe_identity(candidate):
+            protected.append((index, candidate))
+        else:
+            normal.append((index, candidate))
+    if not protected:
+        return _dedupe_candidate_records(candidates)
+
+    out: list[tuple[int, ReportCandidate]] = list(protected)
+    if normal:
+        out.extend(_dedupe_indexed_candidate_records(normal))
+    out.sort(key=lambda item: item[0])
+    return [candidate for _index, candidate in out]
+
+
+def _dedupe_candidate_records(candidates: list[ReportCandidate]) -> list[ReportCandidate]:
+    return [
+        candidate
+        for _index, candidate in _dedupe_indexed_candidate_records(
+            list(enumerate(candidates))
+        )
+    ]
+
+
+def _dedupe_indexed_candidate_records(
+    candidates: list[tuple[int, ReportCandidate]],
+) -> list[tuple[int, ReportCandidate]]:
+    if not candidates:
+        return []
+    local_candidates = [candidate for _index, candidate in candidates]
+    original_indices = [index for index, _candidate in candidates]
     records = [
         _report_candidate_to_merge_record(candidate, index)
-        for index, candidate in enumerate(candidates)
+        for index, candidate in enumerate(local_candidates)
     ]
     result = merge_candidate_records(
         records,
         strip_private_keys=False,
         include_private_positions=True,
     )
-    return [
-        _report_candidate_from_merged_record(record, candidates)
-        for record in result.candidates
-    ]
+    out: list[tuple[int, ReportCandidate]] = []
+    for record in result.candidates:
+        positions = _report_candidate_merge_positions(record, len(local_candidates))
+        original_index = min(
+            original_indices[position]
+            for position in positions
+            if 0 <= position < len(original_indices)
+        )
+        out.append(
+            (
+                original_index,
+                _report_candidate_from_merged_record(record, local_candidates),
+            )
+        )
+    return out
+
+
+def _candidate_objective_dedupe_identity(candidate: ReportCandidate) -> str | None:
+    ranked_candidate_id = _candidate_ranked_candidate_id(candidate)
+    if ranked_candidate_id:
+        return f"ranked:{ranked_candidate_id}"
+    material_key = _candidate_material_key(candidate)
+    if material_key:
+        return f"material:{material_key}"
+    return None
 
 
 def _report_candidate_to_merge_record(candidate: ReportCandidate, index: int) -> dict[str, Any]:
     source = dict(candidate.source) if isinstance(candidate.source, dict) else {}
     source.setdefault("tool", "report")
-    source.setdefault("local_id", candidate.candidate_id)
+    ranked_candidate_id = _candidate_ranked_candidate_id(candidate)
+    material_key = _candidate_material_key(candidate)
+    merge_candidate_id = candidate.candidate_id
+    if ranked_candidate_id:
+        source["local_id"] = ranked_candidate_id
+        source.setdefault("ranked_candidate_id", ranked_candidate_id)
+        merge_candidate_id = f"{candidate.candidate_id}::ranked::{ranked_candidate_id}"
+    elif material_key:
+        source["local_id"] = material_key
+        source.setdefault("material_key", material_key)
+        merge_candidate_id = f"{candidate.candidate_id}::material::{material_key}"
+    else:
+        source.setdefault("local_id", candidate.candidate_id)
     record: dict[str, Any] = {
         "__report_index": index,
         "schema_version": "candidate_v1",
-        "candidate_id": candidate.candidate_id,
+        "candidate_id": merge_candidate_id,
         "source": source,
         "scores": dict(candidate.scores),
         "artifacts": {

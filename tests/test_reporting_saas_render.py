@@ -43,6 +43,22 @@ def _pdb(path: Path) -> Path:
     return path
 
 
+def _binder_complex_pdb(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "ATOM      1  CA  MET B   1       0.000   0.000   0.000  1.00 90.00           C",
+                "ATOM      2  CA  ALA B   2       1.000   0.000   0.000  1.00 90.00           C",
+                "ATOM      3  CA  GLY A   1       5.000   0.000   0.000  1.00 90.00           C",
+                "ATOM      4  CA  LEU A   2       6.000   0.000   0.000  1.00 90.00           C",
+                "TER",
+                "END",
+            ]
+        )
+    )
+    return path
+
+
 def _node(node_id: str, tool: str, *, upstream=None):
     return WorkflowNodeSummary(
         node_id=node_id,
@@ -77,7 +93,7 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
                 _node("n1", "pxdesign"),
                 _node("n2", "esm3", upstream=["n1"]),
                 _node("n3", "boltz2_affinity", upstream=["n2"]),
-                _node("n4", "rank_designs", upstream=["n3"]),
+                _node("n4", "objective_rank", upstream=["n3"]),
             ],
         ),
         candidates=[
@@ -155,6 +171,11 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "Design review summary" in html
     assert "Evidence Summary" in html
     assert "Top candidate evidence at a glance" in html
+    assert (
+        "Overview of the leading candidate evidence package before opening the "
+        "full candidate review board."
+    ) in html
+    assert "Structure inspection, risks, downloads, and provenance remain" not in html
     assert "Candidate evidence at a glance" not in html
     assert "ipSAE" in html
     assert "<strong>0.68</strong><span>ipSAE</span>" in html
@@ -181,8 +202,18 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "dossier-alert-grid" in html
     assert "candidate-comparison-matrix" in html
     assert "Decision matrix" in html
+    assert (
+        "Compare candidates by final status, recorded evidence, missing data, "
+        "and practical follow-up needs."
+    ) in html
+    assert "For binder selection" not in html
     assert "Compare candidate structures side by side" in html
     assert "Drag candidate panels to reorder them" in html
+    assert (
+        "Drag candidate panels into the order that makes the most useful "
+        "structural comparison."
+    ) in html
+    assert "keep candidate 1 beside candidate 9" not in html
     assert "structure-comparison-grid" in html
     assert "viewer-cand_1__compare_1" in html
     assert "viewer-cand_2__compare_2" in html
@@ -215,6 +246,11 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "Advanced node DAG" not in html
     assert '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' in html
     assert "Patterns across candidates" in html
+    assert (
+        "Adjust the filters to narrow candidates by recorded criteria; matching "
+        "candidates and downloads update with the current view."
+    ) in html
+    assert "Binder-level patterns" not in html
     assert "Filter candidates by metric ranges" in html
     assert 'data-candidate-range-filter' in html
     assert 'class="metric-filter-min"' in html
@@ -303,6 +339,123 @@ def test_saas_report_sections_render_and_structure_controls_are_preserved(tmp_pa
     assert "vpa-structures" in html
 
 
+def test_candidate_review_renders_ranking_basis_caption():
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_rank_caption", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id="wf_rank_caption",
+            nodes=[
+                WorkflowNodeSummary(
+                    node_id="rank",
+                    tool="objective_rank",
+                    version="1",
+                    state="completed",
+                    job_id="job_rank",
+                    output={
+                        "ranking_intent": "objective",
+                        "objective_name": "fold_stability",
+                        "formula_text": "-1 * ${pyrosetta.mean_ddg}",
+                        "score_direction": "higher",
+                        "gate_summary": ["pyrosetta.mean_ddg < 0"],
+                        "ranked_candidates": [{"candidate_id": "cand_alt", "rank": 1}],
+                    },
+                )
+            ],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_alt",
+                rank=1,
+                score=1.13745,
+                sequence="ACDE",
+                source={"tool": "objective_rank"},
+                scores={
+                    "objective_rank": {
+                        "rank": 1,
+                        "objective_score": 1.13745,
+                        "objective_name": "fold_stability",
+                        "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                        "score_direction": "higher",
+                        "passed_gates": [
+                            {
+                                "id": "stabilizing",
+                                "metric": "pyrosetta.mean_ddg",
+                                "op": "<",
+                                "threshold": 0,
+                            }
+                        ],
+                        "failed_gates": [],
+                    }
+                },
+            )
+        ],
+    )
+
+    html = render_report_html(model)
+
+    assert "Ranking: objective_rank for fold_stability." in html
+    assert "Score: -1 * ${pyrosetta.mean_ddg}; higher is better." in html
+    assert "Alternative: objective_score 1.137; gates passed" in html
+
+
+def test_candidate_review_renders_single_objective_rank_override_note():
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_rank_override", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id="wf_rank_override",
+            nodes=[
+                WorkflowNodeSummary(
+                    node_id="rank",
+                    tool="objective_rank",
+                    version="1",
+                    state="completed",
+                    job_id="job_rank",
+                    output={
+                        "ranking_intent": "objective",
+                        "objective_name": "fold_stability",
+                        "formula_text": "-1 * ${pyrosetta.mean_ddg}",
+                        "score_direction": "higher",
+                        "gate_summary": ["pyrosetta.mean_ddg < 0"],
+                        "ranked_candidates": [
+                            {"candidate_id": "cand_best", "rank": 1},
+                            {"candidate_id": "cand_final", "rank": 7},
+                        ],
+                    },
+                )
+            ],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_final",
+                rank=7,
+                score=1.13415,
+                sequence="ACDE",
+                scores={
+                    "objective_rank": {
+                        "rank": 7,
+                        "objective_score": 1.13415,
+                        "objective_name": "fold_stability",
+                        "score_formula": "-1 * ${pyrosetta.mean_ddg}",
+                        "formula_text": "-1 * ${pyrosetta.mean_ddg}",
+                        "score_direction": "higher",
+                        "gate_summary": ["pyrosetta.mean_ddg < 0"],
+                        "passed_gates": [],
+                        "failed_gates": [],
+                    }
+                },
+            )
+        ],
+        final_candidates=[ReportCandidate(candidate_id="cand_final", sequence="ACDE")],
+    )
+
+    html = render_report_html(model)
+
+    note = "Submitted objective rank #7: objective_score 1.134."
+    assert html.count(note) == 1
+    assert "Design" + "-ranking" not in html
+    assert "Design" + " ranking" not in html
+
+
 def test_liability_metrics_render_as_wrapping_tokens():
     model = ReportModel(
         summary=RunSummary(kind="workflow", id="wf_liability", workspace="ws", state="completed"),
@@ -348,8 +501,176 @@ def test_overview_keeps_full_long_query_and_formats_segments() -> None:
     assert long_query in html
     assert "Improve predicted fold stability while preserving length=426 and protected residues." in html
     assert "pLDDT within 3 points" in html
-    assert "overview-summary-list" in html
+    assert "overview-objective-block" in html
     assert "Enhance fold stability of a 426-aa protein by mutating only buried polar residues..." not in html
+
+
+def test_overview_does_not_split_single_query_at_with() -> None:
+    query = (
+        "Design a protein sequence with diacylglycerol O-acyltransferase activity "
+        "(acyl-CoA + 1,2-diacylglycerol -> CoA + triacylglycerol) participating "
+        "in triglyceride biosynthetic process"
+    )
+    objective = (
+        "Objective: design a sequence that plausibly adopts a DGAT-compatible fold "
+        "Thresholds/criteria: single-seq fold pLDDT>=80, TM-score>=0.5 vs natural scaffold"
+    )
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_semantic", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[]),
+        raw_summary={"user_query": query, "objective": objective},
+    )
+
+    html = render_report_html(model)
+    overview = html[html.index('id="overview"'):html.index('id="agent-rationale"')]
+
+    assert (
+        "Design a protein sequence with diacylglycerol O-acyltransferase activity "
+        "(acyl-CoA + 1,2-diacylglycerol -&gt; CoA + triacylglycerol) participating "
+        "in triglyceride biosynthetic process</p>"
+    ) in overview
+    assert "<li>Design a protein sequence</li>" not in overview
+    assert "<li>with diacylglycerol" not in overview
+    assert "<b>Objective</b>" in overview
+    assert "design a sequence that plausibly adopts a DGAT-compatible fold" in overview
+    assert "<b>Acceptance criteria</b>" in overview
+    assert "single-seq fold pLDDT&gt;=80, TM-score&gt;=0.5 vs natural scaffold" in overview
+    assert "<li>Objective: design a sequence" not in overview
+    assert "<li>Thresholds/criteria: single-seq fold" not in overview
+
+
+def test_agent_objective_renders_objective_and_acceptance_criteria_blocks() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_objective_blocks", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[]),
+        raw_summary={
+            "objective": (
+                "Design an amino-acid sequence that binds Gp23 specifically "
+                "and plausibly folds as a standalone protein."
+            ),
+            "acceptance_criteria": [
+                "Complex interface: ipSAE > 0.6 and iptm robust across multiple seeds",
+                "Standalone monomer pLDDT >= 80",
+                "Sequence QC pass",
+            ],
+        },
+    )
+
+    html = render_report_html(model)
+    overview = html[html.index('id="overview"'):html.index('id="agent-rationale"')]
+
+    assert "overview-objective-body" in overview
+    assert overview.count("overview-objective-block") == 2
+    assert "<b>Objective</b>" in overview
+    assert "<b>Acceptance criteria</b>" in overview
+    assert "Complex interface" in overview
+    assert "Standalone monomer pLDDT" in overview
+    assert "Thresholds/criteria" not in overview
+
+
+def test_agent_objective_extracts_parenthetical_gate_text_into_acceptance_block() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_parenthetical_gates", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[]),
+        raw_summary={
+            "objective": (
+                "Design a sequence that binds Gp23 specifically "
+                "(multi-seed-robust interface: ipSAE>0.6 and robust iptm) "
+                "and folds standalone (single-sequence monomer pLDDT>=80, sequence QC pass)."
+            ),
+        },
+    )
+
+    html = render_report_html(model)
+    overview = html[html.index('id="overview"'):html.index('id="agent-rationale"')]
+
+    assert overview.count("overview-objective-block") == 2
+    assert "Design a sequence that binds Gp23 specifically and folds standalone." in overview
+    assert "multi-seed-robust interface: ipSAE&gt;0.6 and robust iptm" in overview
+    assert "single-sequence monomer pLDDT&gt;=80, sequence QC pass" in overview
+
+
+def test_agent_rationale_structures_labeled_selection_rationale() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_reasoning", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[_node("submit", "submit_candidate")]),
+        final_submission={
+            "outcome": "accepted",
+            "reasoning": (
+                "OBJECTIVE: design a DGAT-like enzyme. "
+                "APPROACH: compare fold confidence, topology, and motif retention. "
+                "RESULT: selected dgat_1 because it retained the HPHG motif."
+            ),
+            "candidates_resolved": [
+                {"candidate_id": "dgat_1", "justification": "Best recorded evidence."}
+            ],
+        },
+    )
+
+    html = render_report_html(model)
+    rationale = html[html.index('id="agent-rationale"'):]
+
+    assert "decision-text-structured" in rationale
+    assert 'class="decision-label">Selection rationale</span>' in rationale
+    assert 'class="decision-label">Candidate justification</span>' in rationale
+    assert "decision-justification-card" in rationale
+    assert "<b>Objective</b>" in rationale
+    assert "<b>Approach</b>" in rationale
+    assert "<b>Result</b>" in rationale
+    assert "OBJECTIVE: design a DGAT-like enzyme. APPROACH:" not in rationale
+    assert "prov-exact" not in rationale
+
+
+def test_agent_rationale_structures_heading_with_parenthetical_context() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_reasoning_parenthetical", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[_node("submit", "submit_candidate")]),
+        final_submission={
+            "outcome": "accepted",
+            "reasoning": (
+                "OBJECTIVE: design a DGAT-like enzyme. "
+                "APPROACH (GO-grounded scaffold redesign): search reviewed DGAT sequences. "
+                "BACKBONE VALIDATION: fold the native scaffold with MSA. "
+                "RESULT: selected the strongest fold-compatible design."
+            ),
+        },
+    )
+
+    html = render_report_html(model)
+    rationale = html[html.index('id="agent-rationale"'):]
+
+    assert "decision-text-structured" in rationale
+    assert "<b>Objective</b>" in rationale
+    assert "<b>Approach</b>" in rationale
+    assert "<b>Backbone Validation</b>" in rationale
+    assert "<b>Result</b>" in rationale
+    assert "GO-grounded scaffold redesign" not in rationale
+
+
+def test_agent_rationale_structures_title_case_selection_rationale() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_gp23_reasoning", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[_node("submit", "submit_candidate")]),
+        final_submission={
+            "outcome": "accepted",
+            "reasoning": (
+                "Objective: de novo amino-acid sequence that binds Gp23 specifically. "
+                "Pipeline: generated binders, screened complexes, then validated monomers. "
+                "Acceptance gates: ipSAE>=0.6, robust iptm, standalone pLDDT>=80. "
+                "Validated alternatives: bg_18 and bg_11 remain usable profiles."
+            ),
+        },
+    )
+
+    html = render_report_html(model)
+    rationale = html[html.index('id="agent-rationale"'):]
+
+    assert "decision-text-structured" in rationale
+    assert "<b>Objective</b>" in rationale
+    assert "<b>Pipeline</b>" in rationale
+    assert "<b>Acceptance Gates</b>" in rationale
+    assert "<b>Validated Alternatives</b>" in rationale
+    assert "Objective: de novo amino-acid sequence" not in rationale
 
 
 def test_workflow_audit_failed_tool_calls_show_reason() -> None:
@@ -508,7 +829,209 @@ def test_rosetta_stability_metrics_render_on_candidate_cards() -> None:
     assert "REU" in html
     assert "-52.99" in html
     assert 'class="snapshot-score is-compact"' in html
+    assert "grid-template-columns:96px minmax(0,1fr)" in html
+    assert "width:92px" in html
     assert "font-variant-numeric:tabular-nums" in html
+
+
+def test_protenix_monomer_snapshot_uses_fold_confidence_not_iptm(tmp_path: Path) -> None:
+    structure = _pdb(tmp_path / "d6.pdb")
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_serine", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[
+                _node("fold", "protenix_v2"),
+                _node("submit", "submit_candidate"),
+            ],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="d6",
+                rank=1,
+                sequence="AC",
+                structure_path=str(structure),
+                scores={"protenix_v2": {"plddt": 90.45, "ptm": 0.912, "iptm": 0.0}},
+            )
+        ],
+        final_candidates=[
+            ReportCandidate(
+                candidate_id="d6",
+                sequence="AC",
+                structure_path=str(structure),
+                scores={"protenix_v2": {"plddt": 90.45, "ptm": 0.912, "iptm": 0.0}},
+            )
+        ],
+        raw_summary={
+            "user_query": "Design a protein sequence with serine-type peptidase activity."
+        },
+    )
+
+    html = render_report_html(model)
+
+    assert "De novo design review" in html
+    assert "<strong>90.5</strong><span>pLDDT</span>" in html
+    assert "<strong>0</strong><span>ipTM</span>" not in html
+    assert "No objective ranking formula was run." in html
+
+
+def test_candidate_review_hides_alternative_ranks_without_objective_rank(tmp_path: Path) -> None:
+    final_structure = _pdb(tmp_path / "cand_final.pdb")
+    alt_structure = _pdb(tmp_path / "cand_alt.pdb")
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_manual_rank", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[_node("fold", "protenix_v2"), _node("submit", "submit_candidate")],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_final",
+                rank=1,
+                sequence="AC",
+                structure_path=str(final_structure),
+                scores={"protenix_v2": {"plddt": 91.0, "ptm": 0.88}},
+            ),
+            ReportCandidate(
+                candidate_id="cand_alt",
+                rank=2,
+                sequence="AD",
+                structure_path=str(alt_structure),
+                scores={"protenix_v2": {"plddt": 89.0, "ptm": 0.86}},
+            ),
+        ],
+        final_candidates=[ReportCandidate(candidate_id="cand_final", sequence="AC")],
+    )
+
+    html = render_report_html(model)
+    candidates_section = html[html.index('id="candidates"'):html.index('id="structure-comparison"')]
+
+    assert "No objective ranking formula was run." in candidates_section
+    assert "Binding review:" not in candidates_section
+    assert "Foldability review:" not in candidates_section
+    assert "Open a dossier for full evidence" not in candidates_section
+    assert "<span class=\"board-group-title\">Alternatives</span>" in candidates_section
+    assert "<span class=\"crow-rank-num\">1</span>" in candidates_section
+    assert "<span class=\"crow-rank-num\">2</span>" not in candidates_section
+    assert "cand_alt" in candidates_section
+
+
+def test_evidence_summary_renders_submit_selection_summary(tmp_path: Path) -> None:
+    structure = _pdb(tmp_path / "cand_final.pdb")
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_selection_summary", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id=None,
+            nodes=[_node("fold", "protenix_v2"), _node("submit", "submit_candidate")],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="cand_final",
+                rank=1,
+                sequence="AC",
+                structure_path=str(structure),
+                scores={"protenix_v2": {"plddt": 91.0, "ptm": 0.88}},
+            )
+        ],
+        final_candidates=[ReportCandidate(candidate_id="cand_final", sequence="AC")],
+        final_submission={
+            "outcome": "accepted",
+            "selection_summary": {
+                "headline": "Best balance of confidence and catalytic geometry.",
+                "why_selected": "The final candidate passed the stated gates and had the clearest supporting evidence.",
+                "key_points": [
+                    "Highest fold confidence in the evaluated set",
+                    "Catalytic geometry matched the target checks",
+                ],
+            },
+        },
+    )
+
+    html = render_report_html(model)
+    evidence_section = html[
+        html.index('id="candidate-dossiers"'):html.index('id="candidates"')
+    ]
+
+    assert "Why this candidate" in evidence_section
+    assert "Best balance of confidence and catalytic geometry." in evidence_section
+    assert "The final candidate passed the stated gates" in evidence_section
+    assert "Highest fold confidence in the evaluated set" in evidence_section
+    assert "selection-summary-card" in evidence_section
+
+
+def test_binder_evidence_summary_keeps_final_complex_over_monomer_variant(
+    tmp_path: Path,
+) -> None:
+    complex_structure = _binder_complex_pdb(tmp_path / "bg_04_complex.pdb")
+    monomer_structure = _pdb(tmp_path / "bg_04_mono.pdb")
+    complex_source = {
+        "candidate_artifacts": {
+            "protenix_v2": {
+                "complex_chains": [
+                    {
+                        "role": "target",
+                        "input_order": 0,
+                        "sequence_length": 2,
+                        "observed_chain_id": "A",
+                    },
+                    {
+                        "role": "binder",
+                        "input_order": 1,
+                        "sequence_length": 2,
+                        "observed_chain_id": "B",
+                    },
+                ]
+            }
+        }
+    }
+    model = ReportModel(
+        summary=RunSummary(kind="trajectory", id="traj_binder_variant", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id=None, nodes=[_node("fold", "protenix_v2")]),
+        final_candidates=[
+            ReportCandidate(
+                candidate_id="bg_04",
+                sequence="MA",
+                structure_path=str(complex_structure),
+                scores={
+                    "protenix_v2": {"iptm": 0.94, "plddt": 93.6, "ptm": 0.94},
+                    "ipsae": {"ipsae": 0.91, "ipsae_score": 0.91},
+                },
+                source=complex_source,
+            )
+        ],
+        candidates=[
+            ReportCandidate(
+                candidate_id="bg_04_mono",
+                sequence="MA",
+                structure_path=str(monomer_structure),
+                scores={"protenix_v2": {"plddt": 95.0, "ptm": 0.91}},
+            ),
+            ReportCandidate(
+                candidate_id="bg_04_qc",
+                sequence="MA",
+                scores={
+                    "sequence_analysis": {"gravy": 0.2, "net_charge": -2.0},
+                    "protein_qc": {"passes_filters": True, "instability_index": 25.0},
+                },
+            ),
+        ],
+        raw_summary={"objective": "Design a binder for the target."},
+    )
+
+    html = render_report_html(model)
+    evidence_section = html[
+        html.index('id="candidate-dossiers"'):html.index('id="candidates"')
+    ]
+    candidates_section = html[
+        html.index('id="candidates"'):html.index('id="structure-comparison"')
+    ]
+
+    assert "<h3>bg_04</h3>" in evidence_section
+    assert "<h3>bg_04_mono</h3>" not in evidence_section
+    assert "<span>ipSAE</span>" in evidence_section
+    assert "<span>ipTM</span>" in evidence_section
+    assert "pLDDT</span>" in evidence_section
+    assert "bg_04_mono" not in candidates_section
 
 
 def test_candidate_comparison_marks_missing_paired_ddg_compactly() -> None:
@@ -737,6 +1260,45 @@ def test_non_binder_filter_highlights_fold_confidence_primary_metric(tmp_path: P
     assert "De novo design review" in html
     assert 'class="candidate-filter-primary-metric">pLDDT ' in html
     assert 'class="candidate-filter-primary-metric">ipSAE ' not in html
+
+
+def test_metric_range_filter_step_preserves_decimal_max_boundary(tmp_path: Path):
+    low_structure = _pdb(tmp_path / "low.pdb")
+    high_structure = _pdb(tmp_path / "high.pdb")
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_fold", workspace="ws", state="completed"),
+        graph=WorkflowGraph(
+            workflow_id="wf_fold",
+            nodes=[_node("fold", "protenix_v2")],
+        ),
+        candidates=[
+            ReportCandidate(
+                candidate_id="low",
+                rank=1,
+                sequence="ACDEFG",
+                structure_path=str(low_structure),
+                scores={"protenix_v2": {"plddt": 36.1, "ptm": 0.29}},
+            ),
+            ReportCandidate(
+                candidate_id="high",
+                rank=2,
+                sequence="ACDEFH",
+                structure_path=str(high_structure),
+                scores={"protenix_v2": {"plddt": 89.8, "ptm": 0.94}},
+            ),
+        ],
+    )
+
+    html = render_report_html(model)
+    cross = html[html.index('id="cross-candidate-analysis"'):html.index('id="workflow-audit"')]
+    plddt_card = cross[cross.index('data-metric="pLDDT"'):]
+    plddt_card = plddt_card[:plddt_card.index("</div></div>")]
+
+    assert 'min="36.1" max="89.8" step="0.01" value="36.1"' in plddt_card
+    assert 'min="36.1" max="89.8" step="0.01" value="89.8"' in plddt_card
+    assert 'min="0.29" max="0.94" step="0.001" value="0.29"' in cross
+    assert 'min="0.29" max="0.94" step="0.001" value="0.94"' in cross
+    assert "&quot;pLDDT&quot;:89.8" in cross
 
 
 def test_appendix_plots_are_suppressed_for_msa_context() -> None:

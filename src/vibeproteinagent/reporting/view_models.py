@@ -19,6 +19,7 @@ from .models import (
     MSABlock,
     Provenance,
     ReportModel,
+    ReportWarning,
     ReportReviewModel,
     RunSummary,
     ScoreGroup,
@@ -27,6 +28,7 @@ from .models import (
     WorkflowNodeSummary,
     WorkflowType,
 )
+from .metrics import SCORE_DEFINITIONS
 from .review import classify_tool_role
 
 
@@ -100,6 +102,9 @@ class CandidateBoardViewModel:
     rows: list[CandidateBoardRow] = field(default_factory=list)
     recommended_count: int = 0
     total_count: int = 0
+    ranking_basis_caption: str = ""
+    objective_override_note: str = ""
+    has_objective_rank: bool = False
 
 
 @dataclass(frozen=True)
@@ -284,9 +289,8 @@ def build_workflow_review_preset(
                 "metrics are shown only when recorded, not treated as primary."
             ),
             candidate_review_guidance=(
-                "Review candidates as stability-engineering designs. ddG/Rosetta "
-                "stability evidence is primary when present; pLDDT/pTM support fold "
-                "plausibility, and GRAVY/net charge/instability summarize sequence risk."
+                "Stability review: compare stabilization evidence, fold confidence, "
+                "and sequence risk."
             ),
             comparison_note=(
                 "For stability engineering, compare ddG/Rosetta stability scores, "
@@ -298,6 +302,7 @@ def build_workflow_review_preset(
             ),
             evidence_family_order=[
                 "Stability scoring",
+                "Objective ranking",
                 "Structure confidence",
                 "Sequence biophysics",
                 "Flags & liabilities",
@@ -347,9 +352,8 @@ def build_workflow_review_preset(
                 "pI, QC liabilities, and fold confidence when available."
             ),
             candidate_review_guidance=(
-                "Review candidates as solubility/developability designs. GRAVY and "
-                "charge-related sequence metrics are primary; structure confidence "
-                "is supporting evidence."
+                "Developability review: compare hydropathy, charge, liabilities, "
+                "and fold confidence."
             ),
             comparison_note=(
                 "For solubility engineering, compare GRAVY, net charge, instability, "
@@ -362,6 +366,7 @@ def build_workflow_review_preset(
             evidence_family_order=[
                 "Sequence biophysics",
                 "Flags & liabilities",
+                "Objective ranking",
                 "Structure confidence",
                 "Stability scoring",
                 "Novelty & similarity",
@@ -402,22 +407,20 @@ def build_workflow_review_preset(
                 "confidence, pTM, affinity/contact estimates, liabilities, and novelty."
             ),
             candidate_review_guidance=(
-                "Review candidates as target-binding designs. ipTM/interface evidence "
-                "and complex structure confidence are primary; pLDDT is presented as "
-                "model confidence, not binding evidence."
+                "Review the submitted candidate and alternatives using the recorded "
+                "evidence."
             ),
             comparison_note=(
-                "For binder selection, prioritize ipTM/interface evidence, complex "
-                "structure confidence, pTM, recorded affinity/contact estimates, "
-                "liabilities, and panel diversity where recorded."
+                "Compare candidates by final status, recorded evidence, missing data, "
+                "and practical follow-up needs."
             ),
             cross_candidate_focus=(
-                "Binder-level patterns emphasize ipTM, complex pLDDT/model confidence, "
-                "pTM, QC status, missing structure/evidence prevalence, and sequence "
-                "biophysics where recorded."
+                "Adjust the filters to narrow candidates by recorded criteria; matching "
+                "candidates and downloads update with the current view."
             ),
             evidence_family_order=[
                 "Interface & binding",
+                "Objective ranking",
                 "Structure confidence",
                 "Sequence biophysics",
                 "Flags & liabilities",
@@ -467,8 +470,7 @@ def build_workflow_review_preset(
                 "developability risks, and novelty."
             ),
             candidate_review_guidance=(
-                "Review candidates as foldability/stability designs. Structure "
-                "confidence and QC are weighted before other metrics."
+                "Foldability review: compare pLDDT, pTM, QC, and sequence risk."
             ),
             comparison_note=(
                 "For de novo selection, prioritize pLDDT, pTM, QC, sequence "
@@ -480,6 +482,7 @@ def build_workflow_review_preset(
             ),
             evidence_family_order=[
                 "Structure confidence",
+                "Objective ranking",
                 "Flags & liabilities",
                 "Sequence biophysics",
                 "Novelty & similarity",
@@ -510,8 +513,7 @@ def build_workflow_review_preset(
                 "coverage, and consistency."
             ),
             candidate_review_guidance=(
-                "Review retrieved hits as evidence records. Evidence availability and "
-                "source context are weighted before design metrics."
+                "Evidence review: compare source coverage, confidence, and gaps."
             ),
             comparison_note=(
                 "For retrieval review, compare evidence coverage, missing-source gaps, "
@@ -523,6 +525,7 @@ def build_workflow_review_preset(
             ),
             evidence_family_order=[
                 "Novelty & similarity",
+                "Objective ranking",
                 "Sequence biophysics",
                 "Flags & liabilities",
                 "Structure confidence",
@@ -551,8 +554,7 @@ def build_workflow_review_preset(
             "a task-specific metric hierarchy."
         ),
         candidate_review_guidance=(
-            "Review candidates using the available recorded evidence. "
-            "No workflow-specific priority was inferred."
+            "Review candidates using the available recorded evidence."
         ),
         comparison_note=(
             "Use the available metrics and explicit missing-evidence markers; "
@@ -565,6 +567,7 @@ def build_workflow_review_preset(
         evidence_family_order=[
             "Structure confidence",
             "Interface & binding",
+            "Objective ranking",
             "Sequence biophysics",
             "Flags & liabilities",
             "Novelty & similarity",
@@ -717,33 +720,70 @@ def build_candidate_board_view_model(
 ) -> CandidateBoardViewModel:
     preset = preset or _preset_from_review_only(review)
     bundles = _ordered_bundles(review)
+    has_objective_rank = _has_objective_rank_evidence(bundles)
+    renumber = _should_renumber_board_rows(bundles)
     rows = [
-        build_candidate_board_row(bundle, preset, display_rank=index)
+        build_candidate_board_row(
+            bundle,
+            preset,
+            display_rank=index if renumber else None,
+            show_rank=has_objective_rank or bundle.status == CandidateStatus.FINAL,
+            force_recommendation_label=(
+                "Alternative"
+                if not has_objective_rank and bundle.status != CandidateStatus.FINAL
+                else None
+            ),
+        )
         for index, bundle in enumerate(bundles, start=1)
     ]
     return CandidateBoardViewModel(
         rows=rows,
         recommended_count=sum(1 for row in rows if row.status == CandidateStatus.FINAL),
         total_count=len(rows),
+        ranking_basis_caption=_ranking_basis_caption(bundles),
+        objective_override_note=_objective_override_note(bundles),
+        has_objective_rank=has_objective_rank,
     )
+
+
+def _has_objective_rank_evidence(bundles: list[CandidateEvidenceBundle]) -> bool:
+    return any(
+        isinstance(bundle.candidate.scores, dict)
+        and isinstance(bundle.candidate.scores.get("objective_rank"), dict)
+        for bundle in bundles
+    )
+
+
+def _should_renumber_board_rows(bundles: list[CandidateEvidenceBundle]) -> bool:
+    if _has_objective_rank_evidence(bundles):
+        return False
+    ranks = [
+        bundle.display_rank if bundle.display_rank is not None else bundle.candidate.rank
+        for bundle in bundles
+    ]
+    numeric = [rank for rank in ranks if rank is not None]
+    return len(numeric) != len(bundles) or len(set(numeric)) != len(numeric)
 
 
 def build_candidate_board_row(
     bundle: CandidateEvidenceBundle,
     preset: WorkflowReviewPreset | None = None,
     display_rank: int | None = None,
+    show_rank: bool = True,
+    force_recommendation_label: str | None = None,
 ) -> CandidateBoardRow:
     preset = preset or _preset_for_workflow_type(bundle.workflow_type)
     candidate = bundle.candidate
     label = _status_label(bundle.status)
+    rank = display_rank if display_rank is not None else (
+        bundle.display_rank if bundle.display_rank is not None else candidate.rank
+    )
     return CandidateBoardRow(
         candidate_id=candidate.candidate_id,
-        rank=display_rank if display_rank is not None else (
-            bundle.display_rank if bundle.display_rank is not None else candidate.rank
-        ),
+        rank=rank if show_rank else None,
         status=bundle.status,
         status_label=label,
-        recommendation_label=label,
+        recommendation_label=force_recommendation_label or label,
         short_verdict=_candidate_verdict(bundle, preset),
         metric_chips=_metric_chips(bundle, preset),
         has_structure=bool(candidate.structure_path),
@@ -980,22 +1020,30 @@ def _candidate_verdict(
     strengths = _candidate_strength_phrases(bundle, preset)
     missing = _missing_evidence(bundle, preset)
     if bundle.status == CandidateStatus.FINAL:
+        objective = _objective_rank_summary(bundle)
+        if objective:
+            return f"Final: {objective}{_missing_tail(missing)}."
+        metric = _headline_metric(bundle)
         if preset.workflow_type == WorkflowType.BINDER:
             primary = _binder_primary_evidence_summary(strengths)
             if primary:
                 return f"Recommended due to {primary}{_missing_tail(missing)}."
         if strengths:
             return f"Recommended final candidate with {strengths[0]}{_missing_tail(missing)}."
-        metric = _headline_metric(bundle)
         return (
             "Recommended final candidate"
             f"{': ' + metric if metric else ''}{_missing_tail(missing)}."
         )
     if bundle.status == CandidateStatus.RANKED_ALTERNATIVE:
+        objective = _objective_rank_summary(bundle)
+        if objective:
+            return f"Alternative: {objective}{_missing_tail(missing)}."
+        metric = _headline_metric(bundle)
+        if metric:
+            return f"Alternative: {metric}{_missing_tail(missing)}."
         if strengths:
             return f"Alternative with {strengths[0]}{_missing_tail(missing)}."
-        metric = _headline_metric(bundle)
-        return f"Alternative{': ' + metric if metric else ''}{_missing_tail(missing)}."
+        return f"Alternative{_missing_tail(missing)}."
     if bundle.status == CandidateStatus.EVALUATED_NOT_SELECTED:
         if strengths:
             return f"Evaluated but not selected: {strengths[0]}{_missing_tail(missing)}."
@@ -1103,14 +1151,183 @@ def _chip_float(chip: MetricChip | None) -> float | None:
 
 
 def _headline_metric(bundle: CandidateEvidenceBundle) -> str:
+    score_metric = _candidate_score_headline(bundle.candidate)
+    if score_metric and _candidate_score_tool(bundle.candidate) == "objective_rank":
+        return score_metric
     for chip in _metric_chips(bundle, limit=4):
         if chip.label == "QC":
             continue
         unit = f" {chip.unit}" if chip.unit else ""
         return f"{chip.label} {chip.value}{unit}"
-    if bundle.candidate.score is not None:
-        return f"score {bundle.candidate.score:g}"
+    return score_metric
+
+
+def _candidate_score_headline(candidate: Any) -> str:
+    objective = _objective_rank_block(candidate)
+    if objective and objective.get("objective_score") is not None:
+        return f"objective_score {_fmt_score(objective.get('objective_score'))}"
+    if candidate.score is None:
+        return ""
+    return f"{_candidate_score_display_name(candidate)} {candidate.score:g}"
+
+
+def _candidate_score_display_name(candidate: Any) -> str:
+    tool = _candidate_score_tool(candidate)
+    if tool:
+        return f"{tool} candidate.score"
+    return "candidate.score"
+
+
+def _candidate_score_tool(candidate: Any) -> str:
+    scores = getattr(candidate, "scores", None)
+    if isinstance(scores, dict):
+        ordered_tools = [
+            tool for tool in ("objective_rank",) if tool in scores
+        ] + [tool for tool in scores if tool != "objective_rank"]
+        for tool in ordered_tools:
+            block = scores.get(tool)
+            tool_key = str(tool or "").strip().lower()
+            if tool_key not in SCORE_DEFINITIONS or not isinstance(block, dict):
+                continue
+            if any(
+                key in block
+                for key in ("objective_score", "score", "ranking_score", "candidate_score")
+            ):
+                return tool_key
+    source = getattr(candidate, "source", None)
+    if isinstance(source, dict):
+        tool = str(source.get("tool") or "").strip().lower()
+        if tool in SCORE_DEFINITIONS:
+            return tool
     return ""
+
+
+def _ranking_basis_caption(bundles: list[CandidateEvidenceBundle]) -> str:
+    if not bundles:
+        return ""
+    objective = _first_objective_rank_block(bundles)
+    if objective:
+        name = str(objective.get("objective_name") or "objective")
+        formula = str(objective.get("score_formula") or objective.get("formula_text") or "recorded formula")
+        direction = str(objective.get("score_direction") or "higher")
+        gates = _compact_gate_summary(objective)
+        gate_text = gates or "none"
+        return (
+            f"Ranking: objective_rank for {name}. Gates: {gate_text}. "
+            f"Score: {formula}; {direction} is better."
+        )
+    return (
+        "No objective ranking formula was run. Final is the submitted candidate; "
+        "alternatives are shown for evidence only."
+    )
+
+
+def _objective_override_note(bundles: list[CandidateEvidenceBundle]) -> str:
+    for bundle in bundles:
+        if bundle.status != CandidateStatus.FINAL or bundle.submitted_despite_rank is None:
+            continue
+        summary = _objective_rank_summary(bundle) or "submitted candidate was not objective rank #1"
+        return f"Submitted objective rank #{bundle.submitted_despite_rank}: {summary}."
+    return ""
+
+
+def _objective_rank_block(candidate: Any) -> dict[str, Any]:
+    scores = getattr(candidate, "scores", None)
+    if isinstance(scores, dict):
+        block = scores.get("objective_rank")
+        if isinstance(block, dict):
+            return block
+    source = getattr(candidate, "source", None)
+    if isinstance(source, dict):
+        evidence = source.get("selection_evidence")
+        if isinstance(evidence, dict) and evidence.get("status") == "objective_ranked":
+            return evidence
+    return {}
+
+
+def _first_objective_rank_block(
+    bundles: list[CandidateEvidenceBundle],
+) -> dict[str, Any]:
+    for bundle in bundles:
+        block = _objective_rank_block(bundle.candidate)
+        if block:
+            return block
+    return {}
+
+
+def _objective_rank_summary(bundle: CandidateEvidenceBundle) -> str:
+    block = _objective_rank_block(bundle.candidate)
+    if not block:
+        return ""
+    score = block.get("objective_score")
+    score_text = (
+        f"objective_score {_fmt_score(score)}"
+        if score is not None
+        else "objective_score missing"
+    )
+    failed = block.get("failed_gates") if isinstance(block.get("failed_gates"), list) else []
+    passed = block.get("passed_gates") if isinstance(block.get("passed_gates"), list) else []
+    if failed:
+        return f"{score_text}; {len(failed)} gate{'s' if len(failed) != 1 else ''} failed"
+    if passed:
+        key_metrics = _objective_key_metrics(block)
+        tail = f"; {key_metrics}" if key_metrics else ""
+        return f"{score_text}; gates passed{tail}"
+    return score_text
+
+
+def _objective_key_metrics(block: dict[str, Any], *, limit: int = 2) -> str:
+    components = block.get("score_components")
+    if not isinstance(components, list):
+        return ""
+    bits: list[str] = []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        metric = component.get("metric")
+        value = component.get("value")
+        if metric is None or value is None:
+            continue
+        bits.append(f"{metric} {_fmt_score(value)}")
+        if len(bits) >= limit:
+            break
+    return ", ".join(bits)
+
+
+def _compact_gate_summary(block: dict[str, Any], *, limit: int = 3) -> str:
+    explicit = block.get("gate_summary")
+    if isinstance(explicit, list) and explicit:
+        values = [str(item) for item in explicit if item]
+        return _join_limited(values, limit)
+    gates = []
+    for key in ("passed_gates", "failed_gates"):
+        values = block.get(key)
+        if isinstance(values, list):
+            gates.extend(item for item in values if isinstance(item, dict))
+    labels: list[str] = []
+    for gate in gates:
+        metric = gate.get("metric")
+        op = gate.get("op")
+        threshold = gate.get("threshold")
+        if metric and op and threshold is not None:
+            labels.append(f"{metric} {op} {_fmt_score(threshold)}")
+    return _join_limited(_dedup(labels), limit)
+
+
+def _join_limited(values: list[str], limit: int) -> str:
+    if len(values) <= limit:
+        return "; ".join(values)
+    return "; ".join(values[:limit]) + f"; +{len(values) - limit} more"
+
+
+def _fmt_score(value: Any) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(num - round(num)) < 1e-9:
+        return str(int(round(num)))
+    return f"{num:.4g}"
 
 
 def _ordered_score_groups(
@@ -1172,12 +1389,6 @@ def _missing_evidence(
     if "Sequence biophysics" not in families:
         missing.append("sequence biophysics metrics")
     if (
-        workflow_type != WorkflowType.GENERIC
-        and not bundle.msa_blocks
-        and "Novelty & similarity" not in families
-    ):
-        missing.append("novelty or similarity evidence")
-    if (
         bundle.status not in {CandidateStatus.FINAL, CandidateStatus.RANKED_ALTERNATIVE}
         and _has_rank_evidence(bundle) is False
     ):
@@ -1221,8 +1432,12 @@ def _count_warning(
 
 
 def _main_caveat(model: ReportModel, review: ReportReviewModel) -> str | None:
-    if model.warnings:
-        return _clip(model.warnings[0].message, 180)
+    warning = next(
+        (item for item in model.warnings if _is_executive_caveat_warning(item)),
+        None,
+    )
+    if warning is not None:
+        return str(warning.message or "").strip()
     failed = sum(1 for b in review.bundles if b.status == CandidateStatus.FAILED_OR_REJECTED)
     generated_only = sum(
         1 for b in review.bundles if b.status == CandidateStatus.GENERATED_NOT_EVALUATED
@@ -1267,6 +1482,18 @@ def _main_caveat(model: ReportModel, review: ReportReviewModel) -> str | None:
     return None
 
 
+def _is_executive_caveat_warning(warning: ReportWarning) -> bool:
+    message = str(warning.message or "").strip()
+    if not message:
+        return False
+    lower = message.lower()
+    # pydssp is the intended secondary-structure assignment fallback. Keep it
+    # available in the audit trail, but do not promote it to the executive caveat.
+    if "secondary_structure" in lower and "pydssp" in lower:
+        return False
+    return True
+
+
 def _agent_interpretation(model: ReportModel, review: ReportReviewModel) -> str:
     return _workflow_summary(review)
 
@@ -1276,21 +1503,90 @@ def _agent_objective_summary(
     preset: WorkflowReviewPreset,
 ) -> str:
     del preset  # Objective metadata is reported from recorded fields only.
-    objective = _recorded_objective(model)
+    objective, embedded_criteria = _split_recorded_objective_and_criteria(
+        _recorded_objective(model)
+    )
     thresholds = _recorded_thresholds(model)
+    criteria = _first_nonempty(thresholds, embedded_criteria)
     parts: list[str] = []
     if objective:
         parts.append(f"Objective: {objective}")
     else:
         parts.append(_OBJECTIVE_METADATA_FALLBACK)
-    if thresholds:
-        if thresholds != objective and not (
-            _objective_text_is_criteria(objective) and thresholds in objective
+    if criteria:
+        if criteria != objective and not (
+            _objective_text_is_criteria(objective) and criteria in objective
         ):
-            parts.append(f"Thresholds/criteria: {thresholds}")
+            parts.append(f"Acceptance criteria: {criteria}")
     elif not _objective_text_is_criteria(objective):
         parts.append("No explicit numeric thresholds were captured in VPA metadata.")
     return " ".join(parts)
+
+
+def _split_recorded_objective_and_criteria(objective: str) -> tuple[str, str]:
+    text = _strip_leading_objective_label(objective)
+    if not text:
+        return "", ""
+    match = re.search(
+        r"(?i)\b("
+        r"acceptance criteria|acceptance|accept if|thresholds/criteria|"
+        r"thresholds|criteria"
+        r")\s*:?\s*",
+        text,
+    )
+    if match:
+        objective_text = text[: match.start()].strip(" ;,")
+        criteria_text = text[match.end():].strip(" ;,")
+        return objective_text or text, criteria_text
+    objective_text, criteria_text = _split_parenthetical_criteria(text)
+    if criteria_text:
+        return objective_text, criteria_text
+    return text, ""
+
+
+def _split_parenthetical_criteria(text: str) -> tuple[str, str]:
+    criteria: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        if _looks_like_acceptance_criteria(inner):
+            criteria.append(inner)
+            return ""
+        return match.group(0)
+
+    objective = re.sub(r"\(([^()]*)\)", replace, text)
+    objective = re.sub(r"\s{2,}", " ", objective)
+    objective = re.sub(r"\s+([,.;:])", r"\1", objective).strip(" ;,")
+    return objective or text, "; ".join(criteria)
+
+
+def _looks_like_acceptance_criteria(text: str) -> bool:
+    lower = text.lower()
+    return (
+        bool(re.search(r"(?:[<>]=?|=)\s*-?\d", text))
+        or any(
+            token in lower
+            for token in (
+                "plddt",
+                "iptm",
+                "ipsae",
+                "tm-score",
+                "qc pass",
+                "passes_filters",
+                "robust",
+                "interface contact",
+            )
+        )
+    )
+
+
+def _strip_leading_objective_label(text: str) -> str:
+    return re.sub(
+        r"(?i)^\s*(?:objective|design objective)\s*:?\s*",
+        "",
+        str(text or "").strip(),
+        count=1,
+    )
 
 
 def _workflow_summary(review: ReportReviewModel) -> str:
@@ -1467,13 +1763,11 @@ def _recorded_user_query(model: ReportModel) -> str:
 def _recorded_objective(model: ReportModel) -> str:
     raw = model.raw_summary if isinstance(model.raw_summary, dict) else {}
     final_submission = model.final_submission if isinstance(model.final_submission, dict) else {}
-    reasoning = final_submission.get("reasoning")
     return _first_nonempty(
         str(raw.get("objective")) if raw.get("objective") is not None else None,
         str(raw.get("design_objective")) if raw.get("design_objective") is not None else None,
         _workflow_context_from_raw(raw, "objective"),
-        _final_submission_objective_metadata(final_submission),
-        _objective_excerpt_from_reasoning(reasoning) if isinstance(reasoning, str) else None,
+        _final_submission_objective_only(final_submission),
     )
 
 
@@ -1499,9 +1793,6 @@ def _recorded_thresholds(model: ReportModel) -> str:
     ):
         if final_submission.get(key) not in (None, "", {}, []):
             values.append(final_submission.get(key))
-    reasoning = final_submission.get("reasoning")
-    if not values and isinstance(reasoning, str):
-        values.append(_threshold_excerpt_from_reasoning(reasoning))
     return "; ".join(
         _format_threshold_value(value) for value in values if value not in (None, "", {}, [])
     )
@@ -1563,25 +1854,15 @@ def _objective_focus(model: ReportModel) -> str | None:
     return None
 
 
-def _final_submission_objective_metadata(final_submission: dict[str, Any]) -> str:
+def _final_submission_objective_only(final_submission: dict[str, Any]) -> str:
     for key in ("objective", "design_objective"):
         if final_submission.get(key) not in (None, "", {}, []):
             return _format_threshold_value(final_submission.get(key))
-    labels = {
-        "acceptance_criteria": "Acceptance criteria",
-        "success_criteria": "Success criteria",
-        "criteria": "Criteria",
-        "thresholds": "Thresholds",
-        "acceptance_thresholds": "Acceptance thresholds",
-    }
-    for key, label in labels.items():
-        if final_submission.get(key) not in (None, "", {}, []):
-            return f"{label}: {_format_threshold_value(final_submission.get(key))}"
     return ""
 
 
 def _objective_text_is_criteria(objective: str) -> bool:
-    return objective.startswith(
+    if objective.startswith(
         (
             "Acceptance criteria:",
             "Success criteria:",
@@ -1589,42 +1870,9 @@ def _objective_text_is_criteria(objective: str) -> bool:
             "Thresholds:",
             "Acceptance thresholds:",
         )
-    )
-
-
-def _objective_excerpt_from_reasoning(reasoning: str) -> str:
-    return _explicit_objective_or_criteria_section(reasoning, limit=260)
-
-
-def _threshold_excerpt_from_reasoning(reasoning: str) -> str:
-    return _explicit_objective_or_criteria_section(reasoning, limit=260)
-
-
-def _explicit_objective_or_criteria_section(reasoning: str, *, limit: int) -> str:
-    text = " ".join(str(reasoning or "").split())
-    if not text:
-        return ""
-    for marker in (
-        "OBJECTIVE & ACCEPTANCE CRITERIA:",
-        "OBJECTIVE AND ACCEPTANCE CRITERIA:",
-        "OBJECTIVE / ACCEPTANCE CRITERIA:",
-        "DESIGN OBJECTIVE:",
-        "OBJECTIVE:",
-        "ACCEPTANCE CRITERIA:",
-        "SUCCESS CRITERIA:",
-        "CRITERIA:",
     ):
-        index = text.upper().find(marker)
-        if index >= 0:
-            section = text[index + len(marker):]
-            next_heading = re.search(
-                r"\b[A-Z][A-Z &()0-9/-]{3,}\s*[-:]",
-                section,
-            )
-            if next_heading:
-                section = section[: next_heading.start()]
-            return _clip(section, limit)
-    return ""
+        return True
+    return bool(re.search(r"(?:[<>]=?|=)\s*-?\d", objective))
 
 
 def _format_threshold_value(value: Any) -> str:

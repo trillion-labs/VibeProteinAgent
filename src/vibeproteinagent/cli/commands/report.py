@@ -43,14 +43,6 @@ def report(
     ),
     share: bool = typer.Option(False, "--share", help="Prefer self-contained inline assets."),
     open_: bool = typer.Option(False, "--open", help="Open the generated report in a browser."),
-    enrich_sequence_analysis: bool = typer.Option(
-        True,
-        "--enrich-sequence-analysis/--no-enrich-sequence-analysis",
-        help=(
-            "Run sequence_analysis enrichment before rendering when sequence-bearing "
-            "candidates do not already have sequence_analysis scores."
-        ),
-    ),
     replace_report: bool = typer.Option(
         False,
         "--replace-report",
@@ -63,9 +55,7 @@ def report(
     try:
         ws = Workspace.resolve(workspace)
         model = collect_report_model(ws, id)
-        enrichment_job_ids: list[str] = []
-        if enrich_sequence_analysis:
-            enrichment_job_ids = ensure_sequence_analysis_enrichment(ws, model.summary.id, model)
+        enrichment_job_ids = ensure_sequence_analysis_enrichment(ws, model.summary.id, model)
         if enrichment_job_ids:
             model = collect_report_model(ws, id)
         default_name = f"{id}_report_bundle" if format_ == "bundle" else f"{id}_report.html"
@@ -105,7 +95,7 @@ def report(
             "source": {"kind": model.summary.kind, "id": model.summary.id},
             "candidate_count": len(model.candidates),
             "enrichment_job_ids": enrichment_job_ids,
-            "enrichment_enabled": enrich_sequence_analysis,
+            "enrichment_enabled": True,
             "top_k": top_k,
             "warnings": [
                 {"level": w.level, "message": w.message, "source": w.source}
@@ -126,8 +116,6 @@ def report(
                     if enrichment_job_ids
                     else (
                         "Sequence analysis enrichment: already present or no sequences"
-                        if enrich_sequence_analysis
-                        else "Sequence analysis enrichment: disabled"
                     )
                 ),
             ]

@@ -10,6 +10,11 @@ report protein candidates.
 
 ## Objective First
 
+Re-run this step for every request. Whether it is a fresh-session start or
+another query later in the same session, define the objective and acceptance
+criteria anew — do not reuse or assume the previous query's. Each query gets its
+own `traj_` trajectory started with its own `--objective`.
+
 Infer or ask for:
 
 - target and design family;
@@ -52,7 +57,7 @@ this list (names below are illustrative examples, not exhaustive):
 - Evidence — structure prediction, affinity, QC (e.g. `boltz2_affinity`,
   `protein_qc`, `ipsae`, `prodigy`, `tmalign`).
 - Candidate-stream control: `merge_candidates` (dedup/union only),
-  `rank_designs`, `submit_candidate`.
+  `objective_rank`, `submit_candidate`.
 
 These are hints, not a fixed script. Choose the optimal tool set that can
 maximize the objective.
@@ -87,7 +92,8 @@ Respect what each candidate actually contains:
 ## Posture: explore to maximize
 
 Lean toward exploration. For the hard steps, try more than one tool or approach
-(e.g. several generators or scorers), compare them with `rank_designs`, filter, and
+(e.g. several generators or scorers), compare them with `objective_rank` using
+explicit gates and a score formula, filter, and
 iterate — regenerate, re-score, adjust constraints — to push the objective
 higher. Stop when the evidence plateaus or thresholds are clearly met. VPA is
 stateless per job, so you own the loop; run as many jobs as the objective
@@ -137,16 +143,19 @@ objective:
 - [ ] one trajectory tracks this user query and was started with `--objective`
 - [ ] candidate tools/workflows tried, with reason
 - [ ] any top-k/subset validation rule recorded
-- [ ] evidence jobs run -> rank_designs when comparison helps
+- [ ] evidence jobs run -> objective_rank with explicit gates/formula run by
+      default before submit/report (even for a single candidate) so the report
+      renders ranking + score from tool output
 - [ ] verified against criteria (qc / structure_analysis / rank) -> if short, fix and re-run
 - [ ] explored alternatives / iterated while it improves the objective
 - [ ] submit_candidate (accepted | no_acceptable_candidate), preferably
       referencing the enriched/ranked candidate that carries final evidence
+- [ ] accepted submit_candidate includes selection_summary for the report
 - [ ] acceptance criteria recorded before final report rendering
 - [ ] one HTML trajectory report rendered
 ```
 
-If `rank_designs` returns fewer ranked rows than the distinct designs you
+If `objective_rank` returns fewer ranked rows than the distinct designs you
 validated, treat that as a candidate-identity contract failure rather than a
 normal tie. Inspect the per-tool outputs, proceed only with an explicit caveat
 when the evidence is otherwise decisive, and prefer fixing candidate wiring or
@@ -166,10 +175,10 @@ Goal: a binder for protein target X.
 -> pxdesign (generate binders vs X; emits canonical candidates)
 -> protenix_v2 (folds pxdesign candidates -> pLDDT + PAE)
 -> ipSAE (evidence from PAE)
--> rank_designs (pass job_ids for the predictor/scorer/QC jobs when available)
+-> objective_rank (pass job_ids plus objective_name, gates, score_formula, and tie_breakers)
 -> analyze the room for improvement + try other tools, or mask some
    structure/sequence and regenerate
 ...
--> submit_candidate (prefer rank=1 from the rank_designs job; accepted if a
+-> submit_candidate (prefer rank=1 from the objective_rank job; accepted if a
    design clears thresholds, else no_acceptable_candidate)
 -> run the submit_candidate next_report_command

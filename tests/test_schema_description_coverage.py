@@ -79,7 +79,7 @@ EXPECTED_REQUIRED_COUNTS: dict[str, int] = {
     "pxdesign": 0,
     "pxmeter": 0,
     "pyrosetta": 1,
-    "rank_designs": 0,
+    "objective_rank": 2,
     "rfdiffusion": 0,
     "rfdiffusion3": 1,
     "rfpeptides": 1,
@@ -88,7 +88,7 @@ EXPECTED_REQUIRED_COUNTS: dict[str, int] = {
     "sequence_edit": 1,
     "sequence_to_protenix_input": 0,
     "structure_analysis": 0,
-    "submit_candidate": 3,
+    "submit_candidate": 4,
     "template_select": 1,
     "tmalign": 0,
     "vina": 2,
@@ -170,7 +170,7 @@ def _validate_example(parent_schema: dict, field_schema: dict, example) -> list[
     """Validate `example` against `field_schema` and return error messages.
 
     The field subschema may carry `$ref` pointers to the parent's
-    `$defs` block (e.g. rank_designs rows). We re-attach the parent's
+    `$defs` block (e.g. objective_rank rows). We re-attach the parent's
     `$defs` so those refs resolve, and drop vendor-specific extension
     keys (e.g. `vpa:digest`) which are descriptive metadata, not schema
     vocabulary.

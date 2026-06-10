@@ -1,0 +1,18 @@
+name: objective_rank
+version: "1.0.0"
+category: analysis
+description: "Ranks candidate designs against an explicit objective supplied by the agent: gates, score formula, constants, missing-metric policies, and tie-breakers. Use before submit_candidate when comparing candidates."
+runtime: python
+backend: numpy
+gpu_required: false
+startup_cost: low
+estimated_runtime_s: 5
+warm_load_capable: false
+pin_warm: false
+supported_tasks: [ranking, objective_triage, design_triage]
+input_schema: schemas/objective_rank.input.json
+output_schema: schemas/objective_rank.output.json
+supported_precisions: [fp32]
+supports_batching: true
+weight_uris: []
+entry_point: "vibeproteinagent.adapters.objective_rank.adapter:ObjectiveRankAdapter"

@@ -6,6 +6,7 @@ SupervisorClient / ToolRegistry semantics.
 """
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -396,6 +397,10 @@ def test_mcp_render_report_enriches_sequence_analysis_by_default(
     assert len(out["enrichment_job_ids"]) == 1
     html = Path(out["report_html"]).read_text()
     assert "GRAVY" in html
+
+
+def test_mcp_render_report_has_no_sequence_analysis_disable_parameter() -> None:
+    assert "enrich_sequence_analysis" not in inspect.signature(render_report).parameters
 
 
 def test_mcp_render_bundle_report_default_path_is_workspace_root(

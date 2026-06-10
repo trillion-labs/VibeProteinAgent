@@ -629,19 +629,7 @@ class SequenceAnalysisAdapter(ToolAdapter):
             sequence_length=len(sequence),
             metrics=metrics,
             representative_sequences=representatives,
-            candidates=[
-                _canonical_candidate_from_representative(
-                    row,
-                    index,
-                    upstream=(
-                        params.candidates[index]
-                        if index < len(params.candidates)
-                        and _is_canonical_candidate(params.candidates[index])
-                        else None
-                    ),
-                )
-                for index, row in enumerate(representatives)
-            ],
+            candidates=_candidate_outputs(records, representatives, params, params.ph),
             liabilities=liabilities,
             top_annotations=top_annotations,
             artifacts={
@@ -664,6 +652,47 @@ class SequenceAnalysisAdapter(ToolAdapter):
 
 
 __all__ = ["SequenceAnalysisAdapter", "SequenceAnalysisInput", "SequenceAnalysisOutput"]
+
+
+def _candidate_outputs(
+    records: list[tuple[str | None, str]],
+    representatives: list[dict[str, Any]],
+    params: SequenceAnalysisInput,
+    ph: float,
+) -> list[dict[str, Any]]:
+    if params.candidates:
+        out: list[dict[str, Any]] = []
+        for index, (header, sequence) in enumerate(records):
+            metrics = _metrics(sequence, ph)
+            liabilities = _liabilities(sequence, metrics)
+            out.append(
+                _canonical_candidate_from_representative(
+                    {
+                        "candidate_id": header,
+                        "index": index + 1,
+                        "header": header,
+                        "sequence": sequence,
+                        "length": len(sequence),
+                        "gravy": metrics.get("gravy"),
+                        "pI": metrics.get("pI"),
+                        "net_charge": metrics.get("net_charge"),
+                        "liability_count": len(liabilities),
+                        "liability_types": sorted({item.type for item in liabilities}),
+                    },
+                    index,
+                    upstream=(
+                        params.candidates[index]
+                        if index < len(params.candidates)
+                        and _is_canonical_candidate(params.candidates[index])
+                        else None
+                    ),
+                )
+            )
+        return out
+    return [
+        _canonical_candidate_from_representative(row, index)
+        for index, row in enumerate(representatives)
+    ]
 
 
 def _canonical_candidate_from_representative(

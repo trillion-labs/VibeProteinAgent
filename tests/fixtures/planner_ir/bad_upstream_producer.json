@@ -13,9 +13,13 @@
     },
     {
       "id": "rank",
-      "tool": "rank_designs",
+      "tool": "objective_rank",
       "intent": "Rank candidate-like rows.",
-      "inputs": {},
+      "inputs": {
+        "objective_name": "candidate_like_rows",
+        "score_formula": "${score}",
+        "missing": "zero"
+      },
       "upstream": [{"node": "noop_step", "relationship": "candidate_source"}]
     }
   ]

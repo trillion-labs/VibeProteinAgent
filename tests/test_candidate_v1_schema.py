@@ -72,7 +72,7 @@ def test_scores_top_level_scalar_fails() -> None:
 
 def test_scores_top_level_array_fails() -> None:
     candidate = _valid_candidate()
-    candidate["scores"] = {"rank_designs": [0.8]}
+    candidate["scores"] = {"objective_rank": [0.8]}
     _invalid(candidate)
 
 
@@ -84,7 +84,7 @@ def test_artifacts_top_level_scalar_fails() -> None:
 
 def test_artifacts_top_level_array_fails() -> None:
     candidate = _valid_candidate()
-    candidate["artifacts"] = {"rank_designs": ["design.pdb"]}
+    candidate["artifacts"] = {"objective_rank": ["design.pdb"]}
     _invalid(candidate)
 
 

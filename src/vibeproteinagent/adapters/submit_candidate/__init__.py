@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .adapter import (
     CandidateRef,
+    SelectionSummary,
     SubmitCandidateAdapter,
     SubmitCandidateInput,
     SubmitCandidateOutput,
@@ -9,6 +10,7 @@ from .adapter import (
 
 __all__ = [
     "CandidateRef",
+    "SelectionSummary",
     "SubmitCandidateAdapter",
     "SubmitCandidateInput",
     "SubmitCandidateOutput",

@@ -20,6 +20,7 @@ from vibeproteinagent.reporting.models import (
     WorkflowGraph,
     WorkflowNodeSummary,
 )
+from vibeproteinagent.reporting.review import build_review_model
 from vibeproteinagent.reporting.render import (
     _chain_context_for,
     _dedup_candidate_view,
@@ -35,6 +36,7 @@ from vibeproteinagent.reporting.render import (
     _tool_display_name,
     _viewer_block,
 )
+from vibeproteinagent.reporting.view_models import build_report_view_model
 
 
 def _pt(cid, status_label, status_cls, is_final, rank=None, metric=""):
@@ -377,6 +379,36 @@ END
 """
 
 
+_PDB_BINDER_MONOMER = """\
+ATOM      1  CA  MET B   1      0.000   0.000   0.000  1.00  0.00           C
+ATOM      2  CA  ALA B   2      1.000   0.000   0.000  1.00  0.00           C
+END
+"""
+
+
+def _complex_source() -> dict:
+    return {
+        "candidate_artifacts": {
+            "protenix_v2": {
+                "complex_chains": [
+                    {
+                        "role": "target",
+                        "input_order": 0,
+                        "sequence_length": 2,
+                        "observed_chain_id": "A",
+                    },
+                    {
+                        "role": "binder",
+                        "input_order": 1,
+                        "sequence_length": 2,
+                        "observed_chain_id": "B",
+                    },
+                ]
+            }
+        }
+    }
+
+
 def test_extract_chains_keeps_hetatm_marked_standard_aa_chain(tmp_path: Path):
     # Target chain A is flagged HETATM (pxdesign / Protenix non-polymer); it
     # must still be returned so the binder complex is detected.
@@ -551,7 +583,7 @@ def test_report_dedup_merges_same_candidate_id_with_binder_sequence_metadata(
                 candidate_id="cand_ranked",
                 sequence="GL",
                 structure_path=str(p),
-                scores={"rank_designs": {"score": 1.0}},
+                scores={"objective_rank": {"objective_score": 1.0}},
             ),
             ReportCandidate(
                 candidate_id="cand_ranked",
@@ -600,6 +632,87 @@ def test_report_dedup_merges_same_candidate_id_with_binder_sequence_metadata(
     ][1]["role"] == "binder"
     assert deduped.candidates[0].scores["protenix_v2"]["iptm"] == 0.65
     assert deduped.candidates[0].scores["ipsae"]["ipsae_score"] == 0.24
+
+
+def test_report_dedup_keeps_final_complex_over_same_sequence_monomer(
+    tmp_path: Path,
+):
+    complex_path = tmp_path / "bg_04_complex.pdb"
+    monomer_path = tmp_path / "bg_04_mono.pdb"
+    complex_path.write_text(_PDB_BINDER_COMPLEX)
+    monomer_path.write_text(_PDB_BINDER_MONOMER)
+    final = ReportCandidate(
+        candidate_id="bg_04",
+        sequence="MA",
+        structure_path=str(complex_path),
+        scores={
+            "protenix_v2": {"iptm": 0.94, "plddt": 93.6, "ptm": 0.94},
+            "ipsae": {"ipsae": 0.91, "ipsae_score": 0.91},
+        },
+        source=_complex_source(),
+    )
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_complex_final", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id="wf_complex_final"),
+        final_candidates=[final],
+        candidates=[
+            ReportCandidate(
+                candidate_id="bg_04_mono",
+                sequence="MA",
+                structure_path=str(monomer_path),
+                scores={"protenix_v2": {"plddt": 95.0, "ptm": 0.91}},
+            ),
+            ReportCandidate(
+                candidate_id="bg_04_qc",
+                sequence="MA",
+                scores={
+                    "sequence_analysis": {"gravy": 0.2, "net_charge": -2.0},
+                    "protein_qc": {"passes_filters": True, "instability_index": 25.0},
+                },
+            ),
+        ],
+    )
+
+    deduped = _dedup_candidate_view(model)
+    review = build_review_model(deduped)
+    vm = build_report_view_model(deduped, review)
+
+    assert [candidate.candidate_id for candidate in deduped.final_candidates] == ["bg_04"]
+    assert deduped.final_candidates[0].structure_path == str(complex_path)
+    assert "sequence_analysis" in deduped.final_candidates[0].scores
+    assert all(candidate.candidate_id != "bg_04_mono" for candidate in deduped.candidates)
+    assert all(candidate.candidate_id != "bg_04_qc" for candidate in deduped.candidates)
+    assert vm.candidate_dossiers[0].candidate_id == "bg_04"
+    assert vm.candidate_dossiers[0].structure_path == str(complex_path)
+    chips = {(chip.label, chip.value) for chip in vm.candidate_dossiers[0].metric_chips}
+    assert ("ipSAE", "0.91") in chips
+    assert ("ipTM", "0.94") in chips
+    assert ("Instability", "25") in chips
+
+
+def test_report_dedup_collapses_sequence_only_duplicates() -> None:
+    model = ReportModel(
+        summary=RunSummary(kind="workflow", id="wf_seq_only", workspace="ws", state="completed"),
+        graph=WorkflowGraph(workflow_id="wf_seq_only"),
+        candidates=[
+            ReportCandidate(
+                candidate_id="seq_a",
+                sequence="ACDE",
+                scores={"sequence_analysis": {"gravy": -0.2}},
+            ),
+            ReportCandidate(
+                candidate_id="seq_b",
+                sequence="ACDE",
+                scores={"protein_qc": {"passes_filters": True, "instability_index": 31.0}},
+            ),
+        ],
+    )
+
+    deduped = _dedup_candidate_view(model)
+
+    assert len(deduped.candidates) == 1
+    assert deduped.candidates[0].sequence == "ACDE"
+    assert set(deduped.candidates[0].scores) == {"sequence_analysis", "protein_qc"}
 
 
 # --------------------------------------------------------------------------- #
@@ -732,7 +845,7 @@ def test_structure_has_plddt_reads_cif_b_iso_column():
 def test_tool_display_name_maps_known_tools():
     assert _tool_display_name("protein_qc") == "Protein QC"
     assert _tool_display_name("search_sequence") == "Sequence retrieval"
-    assert _tool_display_name("rank_designs") == "Design ranking"
+    assert _tool_display_name("objective_rank") == "Objective ranking"
 
 
 def test_tool_display_name_prettifies_unknown_tool():

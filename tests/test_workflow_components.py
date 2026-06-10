@@ -48,7 +48,7 @@ def test_state_machine_builds_ordered_foreach_scope():
 
 
 def test_state_machine_exposes_job_refs():
-    node = WorkflowNode(id="rank", tool="rank_designs", inputs={})
+    node = WorkflowNode(id="rank", tool="objective_rank", inputs={})
     runtime = NodeRuntime(
         desc=node,
         runtime_id="rank",

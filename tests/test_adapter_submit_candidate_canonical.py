@@ -10,9 +10,9 @@ from vibeproteinagent.adapters.submit_candidate.adapter import (
 from vibeproteinagent.workspace import JobState, JobStore, Workspace
 
 
-def _completed_job(workspace: Workspace, output: dict) -> str:
+def _completed_job(workspace: Workspace, output: dict, *, tool: str = "go_sequences") -> str:
     store = JobStore(workspace)
-    rec = store.submit("rank_designs", "1.0.0", {"top_k": 1})
+    rec = store.submit(tool, "1.0.0", {"top_k": 1})
     store.transition(rec.job_id, JobState.QUEUED)
     store.transition(rec.job_id, JobState.RUNNING)
     store.transition(rec.job_id, JobState.COMPLETED, output=output)
@@ -25,6 +25,14 @@ def _adapter(workspace: Workspace) -> SubmitCandidateAdapter:
         weights_dir=workspace.root / "weights",
         device=torch.device("cpu"),
     )
+
+
+def _selection_summary() -> dict[str, object]:
+    return {
+        "headline": "Best recorded evidence among submitted candidates.",
+        "why_selected": "The selected candidate best matched the stated objective using recorded tool outputs.",
+        "key_points": ["Passed required checks", "Had the strongest available evidence"],
+    }
 
 
 def _canonical_candidate(candidate_id: str, index: int, sequence: str, score: float) -> dict:
@@ -63,6 +71,7 @@ def test_submit_candidate_resolves_canonical_by_candidate_id(tmp_workspace: Work
                 }
             ],
             reasoning="submit canonical",
+            selection_summary=_selection_summary(),
         ),
         null_context(tmp_workspace.job_dir("job_submit")),
     )
@@ -90,6 +99,7 @@ def test_submit_candidate_resolves_canonical_by_index(tmp_workspace: Workspace) 
             outcome="accepted",
             candidates=[{"job_id": job_id, "index": 1, "justification": "second canonical"}],
             reasoning="submit canonical index",
+            selection_summary=_selection_summary(),
         ),
         null_context(tmp_workspace.job_dir("job_submit")),
     )
@@ -109,6 +119,7 @@ def test_submit_candidate_legacy_resolution_still_works(tmp_workspace: Workspace
             outcome="accepted",
             candidates=[{"job_id": job_id, "candidate_id": "legacy", "justification": "legacy"}],
             reasoning="submit legacy",
+            selection_summary=_selection_summary(),
         ),
         null_context(tmp_workspace.job_dir("job_submit")),
     )
@@ -149,6 +160,7 @@ def test_submit_candidate_preserves_ranked_candidate_artifact_metadata(
             outcome="accepted",
             candidates=[{"job_id": job_id, "rank": 1, "justification": "best complex"}],
             reasoning="submit ranked complex",
+            selection_summary=_selection_summary(),
         ),
         null_context(tmp_workspace.job_dir("job_submit")),
     )
@@ -175,6 +187,7 @@ def test_submit_candidate_canonical_candidates_win_over_legacy_lists(
             outcome="accepted",
             candidates=[{"job_id": job_id, "candidate_id": "shared", "justification": "wins"}],
             reasoning="canonical first",
+            selection_summary=_selection_summary(),
         ),
         null_context(tmp_workspace.job_dir("job_submit")),
     )

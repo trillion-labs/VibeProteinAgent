@@ -32,10 +32,11 @@ sha256sum vendor/ligandmpnn/weights/ligandmpnn_v_32_020_25.pt
 
 `LigandMPNNAdapter.healthcheck()` returns `False` until the file is present.
 
-Only one checkpoint is bundled. The adapter's `model_type` parameter accepts
-`protein_mpnn` / `ligand_mpnn` / `soluble_mpnn` / `ca_mpnn` for descriptor
-parity with the LigandMPNN suite; loading a non-`ligand_mpnn` model requires
-the matching checkpoint to be staged under `vendor/ligandmpnn/weights/`.
+Only one checkpoint is bundled. The VPA adapter exposes only
+`model_type="ligand_mpnn"` in its public schema so planners do not select
+uninstalled LigandMPNN-suite variants. Upstream also defines `protein_mpnn`,
+`soluble_mpnn`, and `ca_mpnn` variants, but those checkpoints are not installed
+or advertised by this tool.
 
 ## Modifications
 

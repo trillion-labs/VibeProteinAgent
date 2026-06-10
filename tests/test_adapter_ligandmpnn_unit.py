@@ -59,6 +59,12 @@ def test_input_pydantic_defaults():
     assert p.seed is None
 
 
+def test_input_pydantic_rejects_unbundled_model_types():
+    for model_type in ("protein_mpnn", "soluble_mpnn", "ca_mpnn"):
+        with pytest.raises(ValidationError):
+            LigandMPNNInput(pdb_path="/tmp/x.pdb", model_type=model_type)
+
+
 def test_input_pydantic_rejects_out_of_range():
     with pytest.raises(ValidationError):
         LigandMPNNInput(pdb_path="/tmp/x.pdb", num_designs=0)

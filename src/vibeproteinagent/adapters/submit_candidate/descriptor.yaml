@@ -1,7 +1,7 @@
 name: submit_candidate
 version: "1.0.0"
 category: analysis
-description: "Declares final candidate selections by resolving references to existing job outputs. This is the explicit terminal submission signal for agentic design workflows."
+description: "Declares final candidate selections from job outputs. Accepted submissions must include a short selection_summary for reports."
 runtime: python
 backend: numpy
 gpu_required: false

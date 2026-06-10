@@ -10,7 +10,7 @@ from vibeproteinagent.workflows.parameter_policies import (
 def test_high_risk_fields_have_explicit_ownership() -> None:
     assert policy_for("proteinmpnn", "pdb_path").ownership == "source_artifact"
     assert policy_for("proteinmpnn", "chains").ownership == "structural_selector"
-    assert policy_for("rank_designs", "candidates").ownership == "candidate_stream"
+    assert policy_for("objective_rank", "candidates").ownership == "candidate_stream"
     assert policy_for("rfdiffusion", "length_min").ownership == "length_constraint"
 
 

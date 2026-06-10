@@ -77,7 +77,7 @@ def test_classify_tool_role_known_roles():
     assert classify_tool_role("proteinmpnn") == ToolRole.GENERATOR
     assert classify_tool_role("esm3") == ToolRole.EVALUATOR
     assert classify_tool_role("protein_qc") == ToolRole.EVALUATOR
-    assert classify_tool_role("rank_designs") == ToolRole.RANKER
+    assert classify_tool_role("objective_rank") == ToolRole.RANKER
     assert classify_tool_role("submit_candidate") == ToolRole.SUBMISSION
     assert classify_tool_role("merge_candidates") == ToolRole.PLUMBING
 
@@ -231,13 +231,13 @@ def test_evaluated_not_selected_when_evaluation_evidence_present_without_rank():
     assert _bundle_for(review, "c1").status == CandidateStatus.EVALUATED_NOT_SELECTED
 
 
-def test_ranked_alternative_when_rank_designs_scored_candidate():
+def test_ranked_alternative_when_objective_rank_scored_candidate():
     cand = ReportCandidate(
         candidate_id="c1", sequence="AAAA",
         scores={"esm3": {"mean_plddt": 0.91, "ptm": 0.8}},
     )
     ranked = [{"candidate_id": "c1", "rank": 1, "score": 0.8}]
-    review = build_review_model(_model(nodes=[_rank_designs_node(ranked)], candidates=[cand]))
+    review = build_review_model(_model(nodes=[_objective_rank_node(ranked)], candidates=[cand]))
     assert _bundle_for(review, "c1").status == CandidateStatus.RANKED_ALTERNATIVE
 
 
@@ -386,21 +386,27 @@ def test_board_groups_ordered_and_failed_collapsed():
     assert final_group.collapsed is False
 
 
-def _rank_designs_node(ranked):
-    """A rank_designs node whose output carries a ranked_candidates list."""
+def _objective_rank_node(ranked):
+    """An objective_rank node whose output carries a ranked_candidates list."""
     return WorkflowNodeSummary(
         node_id="rank",
-        tool="rank_designs",
+        tool="objective_rank",
         version="1",
         state="completed",
         job_id="job_rank",
-        output={"ranked_candidates": ranked},
+        output={
+            "ranking_intent": "objective",
+            "objective_name": "test_objective",
+            "formula_text": "${score}",
+            "score_direction": "higher",
+            "ranked_candidates": ranked,
+        },
     )
 
 
 def test_display_rank_follows_ranker_not_collection_order():
     # The submitted design (hoisted to the front of model.candidates → would
-    # read as collection-order #1) was actually scored #5 by rank_designs. The
+    # read as collection-order #1) was actually scored #5 by objective_rank. The
     # board badge must follow the ranker, and the divergence must be flagged.
     cands = [
         ReportCandidate(candidate_id="cand_final", sequence="FFFF"),  # collection #1
@@ -416,7 +422,7 @@ def test_display_rank_follows_ranker_not_collection_order():
     ]
     final = ReportCandidate(candidate_id="cand_final", sequence="FFFF")
     review = build_review_model(
-        _model(nodes=[_rank_designs_node(ranked)], candidates=cands, finals=[final])
+        _model(nodes=[_objective_rank_node(ranked)], candidates=cands, finals=[final])
     )
     final_b = _bundle_for(review, "cand_final")
     best_b = _bundle_for(review, "cand_best")
@@ -429,9 +435,52 @@ def test_display_rank_follows_ranker_not_collection_order():
     assert best_b.submitted_despite_rank is None
 
 
+def test_duplicate_objective_rank_rows_keep_distinct_ranked_identities():
+    ranked = [
+        {
+            "candidate_id": "dup",
+            "ranked_candidate_id": "dup__v1_a1b2c3d4",
+            "rank": 1,
+            "objective_score": 2.0,
+        },
+        {
+            "candidate_id": "dup",
+            "ranked_candidate_id": "dup__v2_e5f6a7b8",
+            "rank": 2,
+            "objective_score": 1.0,
+        },
+    ]
+    candidates = [
+        ReportCandidate(
+            candidate_id="dup",
+            sequence="AAAA",
+            rank=2,
+            source={"ranked_candidate_id": "dup__v2_e5f6a7b8"},
+            scores={"objective_rank": {"ranked_candidate_id": "dup__v2_e5f6a7b8"}},
+        ),
+        ReportCandidate(
+            candidate_id="dup",
+            sequence="CCCC",
+            rank=1,
+            source={"ranked_candidate_id": "dup__v1_a1b2c3d4"},
+            scores={"objective_rank": {"ranked_candidate_id": "dup__v1_a1b2c3d4"}},
+        ),
+    ]
+
+    review = build_review_model(
+        _model(nodes=[_objective_rank_node(ranked)], candidates=candidates)
+    )
+
+    assert len([bundle for bundle in review.bundles if bundle.candidate.candidate_id == "dup"]) == 2
+    ranks_by_sequence = {
+        bundle.candidate.sequence: bundle.display_rank for bundle in review.bundles
+    }
+    assert ranks_by_sequence == {"CCCC": 1, "AAAA": 2}
+
+
 def test_display_rank_falls_back_to_recorded_rank_without_ranker():
-    # No rank_designs node → display_rank is the recorded candidate.rank, and no
-    # divergence note is ever attached.
+    # Without an objective ranking node, display_rank is the recorded
+    # candidate.rank and no divergence note is attached.
     cands = [
         ReportCandidate(candidate_id="c1", sequence="AAAA", rank=2,
                         scores={"esm3": {"ptm": 0.7}}),

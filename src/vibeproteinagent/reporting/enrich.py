@@ -16,6 +16,7 @@ from vibeproteinagent.workspace import ArtifactStore, JobState, JobStore, Worksp
 
 
 REPORT_ENRICHMENT_CALL_ID_PREFIX = "report_enrich_sequence_analysis"
+REPORT_ENRICHMENT_CONTRACT_VERSION = 3
 
 
 def ensure_sequence_analysis_enrichment(
@@ -99,18 +100,15 @@ def _sequence_analysis_candidates(model: ReportModel) -> list[dict[str, Any]]:
     seen: set[str] = set()
     all_candidates = [*model.final_candidates, *model.candidates]
     analyzed_ids: set[str] = set()
-    analyzed_sequences: set[str] = set()
     for candidate in all_candidates:
         if not _has_sequence_analysis(candidate):
             continue
         if candidate.candidate_id:
             analyzed_ids.add(candidate.candidate_id)
-        if candidate.sequence:
-            analyzed_sequences.add(candidate.sequence)
     for candidate in all_candidates:
         if not candidate.sequence or _has_sequence_analysis(candidate):
             continue
-        if candidate.candidate_id in analyzed_ids or candidate.sequence in analyzed_sequences:
+        if candidate.candidate_id in analyzed_ids:
             continue
         key = candidate.candidate_id or f"seq:{candidate.sequence}"
         if key in seen:
@@ -132,11 +130,8 @@ def _candidate_to_canonical(candidate: ReportCandidate) -> dict[str, Any]:
         "schema_version": "candidate_v1",
         "candidate_id": candidate.candidate_id,
         "sequence": candidate.sequence,
-        "source": {
-            **(candidate.source if isinstance(candidate.source, dict) else {}),
-            "report_enrichment": "sequence_analysis",
-        },
-        "scores": dict(candidate.scores or {}),
+        "source": _canonical_source(candidate),
+        "scores": _canonical_score_namespaces(candidate.scores),
         "artifacts": {
             f"{artifact.field}:{idx}": {
                 "field": artifact.field,
@@ -156,9 +151,48 @@ def _candidate_to_canonical(candidate: ReportCandidate) -> dict[str, Any]:
     return payload
 
 
+def _canonical_source(candidate: ReportCandidate) -> dict[str, Any]:
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    local_id = (
+        source.get("local_id")
+        or source.get("native_id")
+        or candidate.candidate_id
+        or "candidate"
+    )
+    out: dict[str, Any] = {
+        "tool": str(source.get("tool") or "report_enrichment"),
+        "local_id": str(local_id),
+    }
+    for key in ("node_id", "job_id", "native_id"):
+        value = source.get(key)
+        if isinstance(value, str) and value:
+            out[key] = value
+    index = source.get("index")
+    if isinstance(index, int) and index >= 0:
+        out["index"] = index
+    return out
+
+
+def _canonical_score_namespaces(scores: Any) -> dict[str, Any]:
+    if not isinstance(scores, dict):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in scores.items()
+        if isinstance(value, dict)
+    }
+
+
 def _enrichment_call_id(source_id: str, params: dict[str, Any]) -> str:
     digest = hashlib.sha256(
-        json.dumps(params, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            {
+                "contract_version": REPORT_ENRICHMENT_CONTRACT_VERSION,
+                "params": params,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()[:16]
     safe_source = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in source_id)
     return f"{REPORT_ENRICHMENT_CALL_ID_PREFIX}_{safe_source}_{digest}"

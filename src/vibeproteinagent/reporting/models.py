@@ -257,15 +257,15 @@ class CandidateEvidenceBundle:
     workflow_type: str  # WorkflowType.*
     status: str  # CandidateStatus.*
     status_basis: str = Provenance.DERIVED
-    # Authoritative display rank: the design's rank from the ranking tool
-    # (``rank_designs``) when available, else the recorded ``candidate.rank``.
+    # Authoritative display rank: the design's rank from the objective ranking
+    # tool when available, else the recorded ``candidate.rank``.
     # Drives both the board badge and the per-tool selector card so they agree
-    # with the Design-ranking widget (which reads the same node output).
+    # with the objective-ranking widget (which reads the same node output).
     display_rank: int | None = None
-    # When this is the FINAL pick but the ranking tool scored a *different*
-    # design #1, this carries this pick's own (worse) scoring rank so the UI can
-    # surface a "submitted despite Design-ranking #N" divergence note. ``None``
-    # when the final pick is also the #1-ranked design (or no ranking exists).
+    # When this is the FINAL pick but objective_rank scored a *different*
+    # design #1, this carries this pick's own rank so the UI can surface a
+    # concise objective-rank override note. ``None`` when the final pick is also
+    # the #1-ranked design (or no ranking exists).
     submitted_despite_rank: int | None = None
     # Structured, deterministic rule inputs behind the verdict (not prose).
     selection_basis: dict[str, Any] = field(default_factory=dict)

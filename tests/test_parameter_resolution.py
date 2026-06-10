@@ -235,10 +235,25 @@ def test_rfdiffusion_length_ranges_are_normalized() -> None:
 def test_planner_literal_candidate_stream_is_rejected() -> None:
     with pytest.raises(InvalidParamsError) as excinfo:
         normalize_tool_parameters(
-            tool="rank_designs",
-            inputs={"candidates": [{"candidate_id": "fake"}], "top_k": 1},
-            provenance={"candidates": "planner_literal", "top_k": "planner_literal"},
-            original_inputs={"candidates": [{"candidate_id": "fake"}], "top_k": 1},
+            tool="objective_rank",
+            inputs={
+                "candidates": [{"candidate_id": "fake"}],
+                "objective_name": "test",
+                "score_formula": "${score}",
+                "top_k": 1,
+            },
+            provenance={
+                "candidates": "planner_literal",
+                "objective_name": "planner_literal",
+                "score_formula": "planner_literal",
+                "top_k": "planner_literal",
+            },
+            original_inputs={
+                "candidates": [{"candidate_id": "fake"}],
+                "objective_name": "test",
+                "score_formula": "${score}",
+                "top_k": 1,
+            },
         )
 
     event = excinfo.value.details["parameter_conflict_event"]
@@ -249,10 +264,25 @@ def test_planner_literal_candidate_stream_is_rejected() -> None:
 
 def test_runtime_candidate_stream_is_allowed_when_wired() -> None:
     inputs, provenance, events = normalize_tool_parameters(
-        tool="rank_designs",
-        inputs={"candidates": [], "top_k": 1},
-        provenance={"candidates": "compiled_wiring", "top_k": "planner_literal"},
-        original_inputs={"candidates": "${outputs.external_candidates.candidates}", "top_k": 1},
+        tool="objective_rank",
+        inputs={
+            "candidates": [],
+            "objective_name": "test",
+            "score_formula": "${score}",
+            "top_k": 1,
+        },
+        provenance={
+            "candidates": "compiled_wiring",
+            "objective_name": "planner_literal",
+            "score_formula": "planner_literal",
+            "top_k": "planner_literal",
+        },
+        original_inputs={
+            "candidates": "${outputs.external_candidates.candidates}",
+            "objective_name": "test",
+            "score_formula": "${score}",
+            "top_k": 1,
+        },
     )
 
     assert inputs["candidates"] == []

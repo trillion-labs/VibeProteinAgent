@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeproteinagent.dev/schemas/objective_rank.output.json",
+  "type": "object",
+  "required": [
+    "ranking_intent",
+    "objective_name",
+    "formula_text",
+    "score_direction",
+    "gate_summary",
+    "candidate_count",
+    "ranked_candidates",
+    "ranked_json",
+    "ranked_tsv",
+    "runtime_ms"
+  ],
+  "properties": {
+    "ranking_intent": {"const": "objective"},
+    "objective_name": {"type": "string", "minLength": 1},
+    "formula_text": {"type": "string", "minLength": 1},
+    "score_direction": {"type": "string", "enum": ["higher", "lower"]},
+    "gate_summary": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Compact gate descriptions used by report captions."
+    },
+    "candidate_count": {"type": "integer", "minimum": 1},
+    "ranked_candidates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/ranked_candidate"}
+    },
+    "ranked_json": {"type": "string", "minLength": 1},
+    "ranked_tsv": {"type": "string", "minLength": 1},
+    "warnings": {"type": "array", "items": {"type": "string"}, "default": []},
+    "runtime_ms": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "gate_record": {"type": "object", "additionalProperties": true},
+    "score_component": {"type": "object", "additionalProperties": true},
+    "candidate_ref": {
+      "type": "object",
+      "required": ["candidate_id", "ranked_candidate_id"],
+      "properties": {
+        "candidate_id": {"type": "string", "minLength": 1},
+        "ranked_candidate_id": {"type": "string", "minLength": 1},
+        "identity_key": {"type": "string"},
+        "material_key": {"type": "string"},
+        "source_job_ids": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "ranked_candidate": {
+      "type": "object",
+      "required": [
+        "rank",
+        "candidate_id",
+        "ranked_candidate_id",
+        "objective_score",
+        "objective_name",
+        "score_formula",
+        "formula_text",
+        "score_direction",
+        "score_components",
+        "passed_gates",
+        "failed_gates",
+        "tie_breaker_values",
+        "candidate_ref"
+      ],
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "candidate_id": {"type": "string", "minLength": 1},
+        "ranked_candidate_id": {"type": "string", "minLength": 1},
+        "objective_score": {"type": ["number", "null"]},
+        "objective_name": {"type": "string", "minLength": 1},
+        "score_formula": {"type": "string", "minLength": 1},
+        "formula_text": {"type": "string", "minLength": 1},
+        "score_direction": {"type": "string", "enum": ["higher", "lower"]},
+        "gate_summary": {"type": "array", "items": {"type": "string"}},
+        "score_components": {"type": "array", "items": {"$ref": "#/$defs/score_component"}},
+        "passed_gates": {"type": "array", "items": {"$ref": "#/$defs/gate_record"}},
+        "failed_gates": {"type": "array", "items": {"$ref": "#/$defs/gate_record"}},
+        "tie_breaker_values": {"type": "object", "additionalProperties": {"type": ["number", "null"]}},
+        "candidate_ref": {"$ref": "#/$defs/candidate_ref"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

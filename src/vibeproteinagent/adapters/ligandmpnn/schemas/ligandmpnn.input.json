@@ -55,10 +55,10 @@
     },
     "model_type": {
       "type": "string",
-      "enum": ["protein_mpnn", "ligand_mpnn", "soluble_mpnn", "ca_mpnn"],
+      "enum": ["ligand_mpnn"],
       "default": "ligand_mpnn",
-      "description": "Which MPNN checkpoint to use. `ligand_mpnn` (default) conditions on heteroatoms; `protein_mpnn` ignores ligands; `soluble_mpnn` is biased toward solubility; `ca_mpnn` is a Cα-only variant for low-resolution backbones.",
-      "examples": ["ligand_mpnn", "protein_mpnn", "soluble_mpnn"]
+      "description": "Only `ligand_mpnn` is supported by this tool. It uses the bundled LigandMPNN checkpoint and conditions on heteroatoms when present.",
+      "examples": ["ligand_mpnn"]
     },
     "redesigned_residues": {
       "type": ["string", "null"],

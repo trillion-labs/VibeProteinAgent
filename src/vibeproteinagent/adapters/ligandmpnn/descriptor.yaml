@@ -1,7 +1,7 @@
 name: ligandmpnn
 version: "1.0.0"
 category: inverse_folding
-description: "Ligand-aware inverse folding for fixed backbones. Redesigned_positions are FASTA/sequence 1-indexed when sequence/fasta_path is provided; redesigned_residues is explicit PDB residue-id syntax."
+description: "Ligand-aware inverse folding for fixed backbones using the bundled ligand_mpnn checkpoint only; model_type is fixed to ligand_mpnn. Redesigned_positions are FASTA/sequence 1-indexed when sequence/fasta_path is provided; redesigned_residues is explicit PDB residue-id syntax."
 runtime: python
 backend: pytorch
 gpu_required: true

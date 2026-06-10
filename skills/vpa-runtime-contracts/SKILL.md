@@ -28,8 +28,11 @@ consumer may need. Example: Protenix -> ipSAE needs both the structure
 candidate and the matching PAE/confidence file; concrete YAML wiring belongs in
 vpa-run-and-workspace.
 
-Use `merge_candidates` when multiple streams must become one stream. Use
-`rank_designs` before final selection when objective evidence needs comparison.
+Use `merge_candidates` when multiple streams must become one stream. Run
+`objective_rank` before final selection by default once scoring/structure
+evidence exists (even for a single candidate, so the report renders ranking and
+score from tool output), and provide explicit gates, score_formula, direction,
+and tie-breakers.
 
 ## Reportable Evidence
 
@@ -44,7 +47,7 @@ paths are acceptable for one-off diagnostics, but do not use an unrecorded
 manual table or transcript-only calculation as the sole final-selection
 evidence. Put evidence in tool output or a structured recorded artifact.
 Raw manual complex JSON/path evidence is diagnostic until it is reattached to
-the logical candidate through canonical `candidates` output and `rank_designs`.
+the logical candidate through canonical `candidates` output and `objective_rank`.
 
 ## Reporting
 

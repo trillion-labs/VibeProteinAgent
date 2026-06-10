@@ -144,12 +144,22 @@ with a different tool. Don't abandon the whole objective on a single failed job.
 
 ## Finalization
 
-After validation/scoring evidence is available for multiple candidates or tools,
-run `rank_designs` before final selection and prefer `submit_candidate` with
-`rank=1` from that rank job. When the selected design has been enriched by
+By default, run `objective_rank` once before `submit_candidate` and before
+rendering the report — make it the standard last step of any run that produced
+scoring/structure evidence, not just an option for close calls. Pass explicit
+objective gates and a score formula, then prefer `submit_candidate` with
+`rank=1` from that rank job. Run it even when a single candidate survives: the
+ranked row carries the canonical id, gate verdicts, and score that the report's
+ranking and "Why this candidate" cards render from tool output instead of prose,
+which is exactly what makes the HTML report clean. Skip it only when there is
+genuinely nothing to rank (e.g. one throwaway diagnostic), and say so in the
+`submit_candidate` reasoning.
+When the selected design has been enriched by
 structure prediction or scoring, submit the enriched/ranked candidate rather
 than an earlier sequence-only upstream candidate so the final dossier retains
-the evidence. Then record accepted or no acceptable candidate. If
+the evidence. For accepted submissions, include `selection_summary` with a
+short headline, one concise explanation, and 2-4 evidence bullets; this feeds
+the report's "Why this candidate" card. Then record accepted or no acceptable candidate. If
 `submit_candidate` returns `next_report_command`, run that command from any
 directory; by default the report is written to the workspace root. Otherwise
 render `vpa report <traj_id>`. One user query should end with one trajectory
@@ -160,7 +170,7 @@ stays attached to the logical design. Use raw `pdb_path`/`structure_path`
 diagnostics only when candidate identity is unavailable or intentionally
 ambiguous, and note that such evidence may render as unmatched or missing from
 final candidate dossiers.
-If `rank_designs` collapses distinct logical designs into fewer rows than the
+If `objective_rank` collapses distinct logical designs into fewer rows than the
 evaluated population, treat it as a candidate-identity contract failure. Do not
 silently rely on the collapsed rank as final truth; inspect the per-candidate
 tool outputs, record the caveat in `submit_candidate` reasoning if proceeding,

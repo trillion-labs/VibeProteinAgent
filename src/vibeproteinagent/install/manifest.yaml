@@ -17,7 +17,7 @@ profiles:
       - sequence_edit
       - structure_analysis
       - protein_qc
-      - rank_designs
+      - objective_rank
   full:
     description: "Every supported first-class in-tree tool, sidecar, and required model weight."
     tools:
@@ -42,7 +42,7 @@ profiles:
       - pxdesign
       - pxmeter
       - pyrosetta
-      - rank_designs
+      - objective_rank
       - rfdiffusion
       - rfdiffusion3
       - rfpeptides
@@ -309,7 +309,7 @@ tools:
     artifact_policy: redistributable
     license_notice: "Installs without a VPA license key; follow upstream PyRosetta/Rosetta Commons terms. Upstream states commercial use requires a separate license."
     license_url: "https://www.pyrosetta.org/downloads"
-  rank_designs:
+  objective_rank:
     runtime: shared
   submit_candidate:
     runtime: shared

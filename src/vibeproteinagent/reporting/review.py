@@ -24,6 +24,7 @@ execution engine.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .collect import _as_float, _as_int, _string_list
@@ -84,7 +85,7 @@ _EVALUATOR_TOOLS = frozenset(
     }
 )
 
-_RANKER_TOOLS = frozenset({"rank_designs"})
+_RANKER_TOOLS = frozenset({"objective_rank"})
 _SUBMISSION_TOOLS = frozenset({"submit_candidate"})
 _PLUMBING_TOOLS = frozenset(
     {
@@ -274,6 +275,7 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
         "Stability scoring",
         [
             ("pyrosetta", "total_score", "Rosetta total score", "REU", _fmt),
+            ("pyrosetta", "mean_total_score", "Mean Rosetta total score", "REU", _fmt),
             ("pyrosetta", "ddg", "ddG", "REU", _fmt),
             ("pyrosetta", "ddg_reu", "ddG", "REU", _fmt),
             ("pyrosetta", "mean_ddg", "Mean ddG", "REU", _fmt),
@@ -282,6 +284,13 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
             ("pyrosetta", "dg", "Delta G", "REU", _fmt),
             ("submit_candidate", "ddg_reu", "ddG", "REU", _fmt),
             ("submit_candidate", "mean_ddg", "Mean ddG", "REU", _fmt),
+        ],
+    ),
+    (
+        "Objective ranking",
+        [
+            ("objective_rank", "objective_score", "Objective score", None, _fmt),
+            ("objective_rank", "rank", "Objective rank", None, _fmt),
         ],
     ),
     (
@@ -323,6 +332,7 @@ _METRIC_SOURCE_NAME: dict[str, str] = {
     "ipsae": "ipSAE",
     "prodigy": "PRODIGY",
     "pyrosetta": "PyRosetta",
+    "objective_rank": "Objective rank",
     "submit_candidate": "Submit candidate",
 }
 
@@ -335,11 +345,18 @@ def _build_score_groups(
     candidate: ReportCandidate, msa_blocks: list[MSABlock]
 ) -> list[ScoreGroup]:
     groups: list[ScoreGroup] = []
+    suppress_protenix_interface_metrics = _is_protenix_monomer_candidate(candidate)
     for family, specs in _FAMILY_SPECS:
         # (label, value, unit, source_tool) — source carries the producing tool
         # so the renderer can tag each confidence metric with its origin.
         metrics: list[tuple[str, str, str | None, str]] = []
         for tool, key, label, unit, transform in specs:
+            if (
+                suppress_protenix_interface_metrics
+                and family == "Interface & binding"
+                and tool == "protenix_v2"
+            ):
+                continue
             block = _score_namespace(candidate, tool)
             if key not in block:
                 continue
@@ -376,6 +393,110 @@ def _build_score_groups(
             )
         )
     return groups
+
+
+def _is_protenix_monomer_candidate(candidate: ReportCandidate) -> bool:
+    """Return true for Protenix-scored candidates with one protein chain.
+
+    Protenix emits ``iptm: 0.0`` for monomer predictions. That value should not
+    promote an enzyme/foldability report into a binder/interface review.
+    """
+
+    if "protenix_v2" not in (candidate.scores or {}):
+        return False
+    path = (candidate.structure_path or "").strip()
+    if not path:
+        return False
+    return _protein_chain_count(Path(path)) == 1
+
+
+def _protein_chain_count(path: Path) -> int | None:
+    try:
+        text = path.read_text(errors="ignore")
+    except OSError:
+        return None
+    if path.suffix.lower() in {".cif", ".mmcif"} or "_atom_site." in text:
+        return _cif_protein_chain_count(text)
+    return _pdb_protein_chain_count(text)
+
+
+def _pdb_protein_chain_count(text: str) -> int | None:
+    chains: set[str] = set()
+    for line in text.splitlines():
+        if not line.startswith(("ATOM  ", "HETATM")):
+            continue
+        residue = line[17:20].strip().upper()
+        if residue not in _STANDARD_AA3:
+            continue
+        chains.add(line[21:22].strip() or "_")
+    return len(chains) if chains else None
+
+
+def _cif_protein_chain_count(text: str) -> int | None:
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() != "loop_":
+            i += 1
+            continue
+        i += 1
+        cols: list[str] = []
+        while i < len(lines) and lines[i].strip().startswith("_atom_site."):
+            cols.append(lines[i].strip().split(".", 1)[1])
+            i += 1
+        if not cols:
+            continue
+        if "label_comp_id" not in cols:
+            continue
+        comp_idx = cols.index("label_comp_id")
+        chain_idx = next(
+            (cols.index(name) for name in ("label_asym_id", "auth_asym_id") if name in cols),
+            -1,
+        )
+        if chain_idx < 0:
+            continue
+        chains: set[str] = set()
+        while i < len(lines):
+            stripped = lines[i].strip()
+            if not stripped or stripped.startswith("#") or stripped == "loop_" or stripped.startswith("_"):
+                break
+            parts = stripped.split()
+            if len(parts) > max(comp_idx, chain_idx):
+                residue = parts[comp_idx].strip("'\"").upper()
+                if residue in _STANDARD_AA3:
+                    chains.add(parts[chain_idx].strip("'\"") or "_")
+            i += 1
+        if chains:
+            return len(chains)
+    return None
+
+
+_STANDARD_AA3: frozenset[str] = frozenset(
+    {
+        "ALA",
+        "ARG",
+        "ASN",
+        "ASP",
+        "CYS",
+        "GLN",
+        "GLU",
+        "GLY",
+        "HIS",
+        "ILE",
+        "LEU",
+        "LYS",
+        "MET",
+        "PHE",
+        "PRO",
+        "SER",
+        "THR",
+        "TRP",
+        "TYR",
+        "VAL",
+        "SEC",
+        "PYL",
+    }
+)
 
 
 def _liability_labels(candidate: ReportCandidate) -> list[str]:
@@ -421,22 +542,9 @@ def _qc_fails(candidate: ReportCandidate) -> bool:
 
 
 def _scoring_rank_map(model: ReportModel) -> dict[str, int]:
-    """Map ``candidate_id -> authoritative scoring rank`` from ``rank_designs``.
-
-    The board's ``candidate.rank`` is collection order (the final pick is hoisted
-    to the front of ``model.candidates``, so it reads ``#1`` regardless of how the
-    ranker actually scored it). The Design-ranking widget, by contrast, renders
-    the ``rank_designs`` node's own ``ranked_candidates[].rank`` — the real
-    scoring rank. The two disagree.
-
-    This reads the *last* ``rank_designs`` node (the final ranking in a
-    multi-round run) and returns its candidate_id -> rank map so the review layer
-    can present a single, consistent rank everywhere. Returns ``{}`` when the run
-    has no ``rank_designs`` node (e.g. some binder runs), in which case callers
-    fall back to ``candidate.rank``.
-    """
+    """Map objective-ranked identities to authoritative scoring ranks."""
     rank_nodes = [
-        n for n in model.graph.nodes if (n.tool or "").strip().lower() == "rank_designs"
+        n for n in model.graph.nodes if (n.tool or "").strip().lower() == "objective_rank"
     ]
     if not rank_nodes:
         return {}
@@ -446,14 +554,23 @@ def _scoring_rank_map(model: ReportModel) -> dict[str, int]:
         rows = output.get("ranked_candidates")
         if not isinstance(rows, list):
             continue
+        candidate_counts: dict[str, int] = {}
+        for row in rows:
+            if isinstance(row, dict):
+                cid = row.get("candidate_id")
+                if isinstance(cid, str) and cid:
+                    candidate_counts[cid] = candidate_counts.get(cid, 0) + 1
         for idx, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
             cid = row.get("candidate_id")
-            if not isinstance(cid, str) or not cid:
-                continue
             rank = _as_int(row.get("rank"))
-            out[cid] = rank if rank is not None else idx + 1
+            resolved_rank = rank if rank is not None else idx + 1
+            ranked_id = _row_ranked_candidate_id(row)
+            if ranked_id:
+                out[f"ranked:{ranked_id}"] = resolved_rank
+            if isinstance(cid, str) and cid and candidate_counts.get(cid) == 1:
+                out[f"candidate:{cid}"] = resolved_rank
     return out
 
 
@@ -465,6 +582,70 @@ def _rank_sort_key(candidate: ReportCandidate) -> tuple[float, float]:
         float(rank) if rank is not None else float("inf"),
         -score if score is not None else float("inf"),
     )
+
+
+def _candidate_scoring_rank(
+    candidate: ReportCandidate,
+    scoring_ranks: dict[str, int],
+) -> int | None:
+    ranked_id = _candidate_ranked_candidate_id(candidate)
+    if ranked_id:
+        direct = scoring_ranks.get(f"ranked:{ranked_id}")
+        if direct is not None:
+            return direct
+    direct = scoring_ranks.get(f"candidate:{candidate.candidate_id}")
+    if direct is not None:
+        return direct
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    objective_rank = scores.get("objective_rank")
+    if isinstance(objective_rank, dict):
+        return _as_int(objective_rank.get("rank"))
+    return None
+
+
+def _candidate_rank_identity(candidate: ReportCandidate) -> str:
+    ranked_id = _candidate_ranked_candidate_id(candidate)
+    if ranked_id:
+        return f"ranked:{ranked_id}"
+    return f"candidate:{candidate.candidate_id}" if candidate.candidate_id else ""
+
+
+def _candidate_ranked_candidate_id(candidate: ReportCandidate) -> str | None:
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    for container in (
+        source,
+        source.get("objective_rank_evidence") if isinstance(source.get("objective_rank_evidence"), dict) else {},
+    ):
+        if isinstance(container, dict):
+            value = container.get("ranked_candidate_id")
+            if value not in (None, ""):
+                return str(value)
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    objective_rank = scores.get("objective_rank")
+    if isinstance(objective_rank, dict):
+        value = objective_rank.get("ranked_candidate_id")
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _row_ranked_candidate_id(row: dict[str, Any]) -> str | None:
+    value = row.get("ranked_candidate_id")
+    if value not in (None, ""):
+        return str(value)
+    candidate_ref = row.get("candidate_ref")
+    if isinstance(candidate_ref, dict):
+        value = candidate_ref.get("ranked_candidate_id")
+        if value not in (None, ""):
+            return str(value)
+    scores = row.get("scores")
+    if isinstance(scores, dict):
+        objective_rank = scores.get("objective_rank")
+        if isinstance(objective_rank, dict):
+            value = objective_rank.get("ranked_candidate_id")
+            if value not in (None, ""):
+                return str(value)
+    return None
 
 
 def _resolve_final_records(model: ReportModel) -> dict[int, str]:
@@ -528,7 +709,7 @@ def _classify_status(
         return CandidateStatus.FAILED_OR_REJECTED
     if workflow_type == WorkflowType.RETRIEVAL:
         return CandidateStatus.REFERENCE_GROUNDING
-    if scoring_rank is not None:
+    if scoring_rank is not None or isinstance(candidate.scores.get("objective_rank"), dict):
         return CandidateStatus.RANKED_ALTERNATIVE
     if _has_evaluation_evidence(candidate):
         return CandidateStatus.EVALUATED_NOT_SELECTED
@@ -747,10 +928,10 @@ def _build_bundle(
         scoring_rank=scoring_rank,
     )
     cand_msa = _msa_for_candidate(candidate, msa_blocks)
-    # Authoritative rank for the board badge + selector card: the ranker's own
+    # Authoritative rank for the board badge + selector card: objective_rank's own
     # rank when known, else the recorded collection-order rank.
     display_rank = scoring_rank if scoring_rank is not None else _as_int(candidate.rank)
-    # Flag the case where the agent submitted a design the ranker did NOT score
+    # Flag the case where the agent submitted a design objective_rank did NOT score
     # #1, so the board badge (#N) doesn't read as a contradiction.
     submitted_despite_rank = (
         display_rank
@@ -759,7 +940,7 @@ def _build_bundle(
             and scoring_rank is not None
             and scoring_rank != 1
             and top_ranked_id is not None
-            and top_ranked_id != candidate.candidate_id
+            and top_ranked_id != _candidate_rank_identity(candidate)
         )
         else None
     )
@@ -797,8 +978,8 @@ _GROUP_ORDER: list[tuple[str, str, bool]] = [
 
 
 def _rank_key(bundle: CandidateEvidenceBundle) -> tuple[float, float]:
-    # Prefer the authoritative display rank (ranker's rank) so the board order
-    # matches the Design-ranking widget; fall back to the recorded rank.
+    # Prefer the authoritative objective_rank display rank; fall back to the
+    # recorded rank.
     rank = (
         bundle.display_rank
         if bundle.display_rank is not None
@@ -866,7 +1047,7 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
             ordered_nodes=ordered_nodes,
             msa_blocks=model.msa_blocks,
             final_provenance=final_map.get(idx),
-            scoring_rank=scoring_ranks.get(candidate.candidate_id),
+            scoring_rank=_candidate_scoring_rank(candidate, scoring_ranks),
             top_ranked_id=top_ranked_id,
         )
         for idx, candidate in enumerate(model.candidates)
@@ -894,7 +1075,7 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
                 ordered_nodes=ordered_nodes,
                 msa_blocks=model.msa_blocks,
                 final_provenance=Provenance.EXACT,
-                scoring_rank=scoring_ranks.get(fc.candidate_id),
+                scoring_rank=_candidate_scoring_rank(fc, scoring_ranks),
                 top_ranked_id=top_ranked_id,
             )
         )
