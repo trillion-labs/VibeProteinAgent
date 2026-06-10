@@ -87,6 +87,20 @@ Return the strongest candidates with structures, quality check, ranking, a final
 The external agent reads the skills in this repo, decides the command boundary,
 derives objective thresholds, runs the tools/workflows, analyzes the outputs, and generates the HTML summary report.
 
+## Prepare Your Agent Shell
+
+First, activate VPA in the shell where you plan to run jobs, then add any
+credentials and GPU settings your run needs:
+
+```bash
+export VPA_HOME=/path/to/your/.vibeproteinagent
+source "$VPA_HOME/env.sh"
+
+export HF_TOKEN="your_huggingface_token"
+export HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+```
+
 ## Use With Codex
 
 Open this repository in Codex and ask in natural language. For example:
@@ -119,7 +133,7 @@ auto-detection, run doctor, and report readiness.
 Then run a protein request through the same command:
 
 ```text
-Design 50-80 aa soluble mini-protein binders to chain A of `/path/to/target.pdb`.
+/vpa Design 50-80 aa soluble mini-protein binders to chain A of `/path/to/target.pdb`.
 Return the strongest candidates with structures, quality check, ranking, a final submission decision, and an HTML report.
 ```
 
