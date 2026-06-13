@@ -32,6 +32,10 @@ from .metrics import (
 from .metrics import (
     pretty_metric_name as _pretty_metric_name,
 )
+from .identity import (
+    candidate_material_key as _identity_candidate_material_key,
+    candidate_ranked_candidate_id as _identity_candidate_ranked_candidate_id,
+)
 from .models import (
     BoardGroup,
     CandidateEvidenceBundle,
@@ -1254,7 +1258,7 @@ def _split_overview_labeled_pair(text: str) -> tuple[str, str]:
         (
             "Acceptance criteria",
             re.compile(
-                r"(?i)(?<!\w)(acceptance criteria|thresholds/criteria|"
+                r"(?i)(?<!\w)(acceptance criteria|acceptance|thresholds/criteria|"
                 r"thresholds|criteria)\s*:\s*"
             ),
         ),
@@ -1286,9 +1290,6 @@ def _overview_summary_segments(text: str) -> list[str]:
     ]
     if len(clause_parts) > 1:
         return clause_parts
-    comma_parts = [part.strip(" ,") for part in re.split(r",\s+", text) if part.strip(" ,")]
-    if len(comma_parts) > 2 and len(text) > 180:
-        return comma_parts
     return [text]
 
 
@@ -3431,22 +3432,17 @@ def render_report_html(
     timestamp).
     """
     del share, report_format  # share/bundle behaviour handled upstream in write_report
-    # Deduplicate / enrich candidate records for display so one protein that
-    # appears as both a final pick and one or more explored records doesn't
-    # render as several near-empty cards. Display-only — the run record is
-    # untouched.
-    # Deduplicate / enrich candidates with scores still NESTED, then build the
-    # review console from that nested model — its status classification and
-    # per-tool evidence read ``scores[<tool>]`` namespaces (including the
-    # non-numeric ``passes_filters`` / ``flags`` leaves). Only afterwards do we
-    # flatten to ``tool:metric`` numeric leaves for the legacy score-bar / table
-    # renderers downstream. Flattening before the review build would erase those
-    # namespaces and make every candidate read as un-evaluated.
-    deduped = _dedup_candidate_view(model)
-    # Candidate review console — the report's primary surface. Derived purely
-    # from the (already display-prepared) model; never re-executes the engine.
-    review = build_review_model(deduped)
-    saas_vm = build_report_view_model(deduped, review)
+    # Candidate review console — the report's primary surface. When
+    # objective_rank rows exist, build their manifest from the raw collected
+    # model *before* display dedupe; otherwise a same-sequence final/support row
+    # can be removed before the manifest attaches structure/evaluator metrics.
+    # Without objective_rank, keep the legacy display dedupe first: it prevents
+    # same-material monomer/QC support rows from appearing as independent
+    # alternatives beside an accepted final submission.
+    review_input = model if _has_objective_rank_manifest(model) else _dedup_candidate_view(model)
+    review = build_review_model(review_input)
+    manifest_model = review.base
+    saas_vm = build_report_view_model(manifest_model, review)
     display_review, display_limit = _display_limited_review(review, top_k)
     display_board = _display_limited_board(saas_vm.candidate_board, display_review)
     display_dossiers = _display_limited_dossiers(
@@ -3454,7 +3450,11 @@ def render_report_html(
         display_review,
     )
     display_notice = _display_limit_notice(display_limit)
-    model = _flatten_candidate_view(deduped)
+    # Legacy score bars/tables still expect a flattened display model. Run the
+    # display-only duplicate collapse on the manifest-prepared model, not on the
+    # raw candidate stream, so objective-rank support evidence has already been
+    # attached to the canonical rows.
+    model = _flatten_candidate_view(_dedup_candidate_view(manifest_model))
     title = f"VPA report · {model.summary.id}"
 
     # Keep the removed product-stage "Why this workflow?" trace out of the
@@ -3538,7 +3538,7 @@ def render_report_html(
         _saas_candidate_dossiers_section(
             display_dossiers,
             saas_vm.review_preset,
-            deduped.final_submission,
+            manifest_model.final_submission,
         )
         if show_candidates
         else ""
@@ -5472,6 +5472,42 @@ def _same_material_final_support(
     ) or _same_structure_final_support(final_candidate, candidate)
 
 
+def _candidate_ranked_candidate_id(candidate: ReportCandidate) -> str | None:
+    return _identity_candidate_ranked_candidate_id(candidate, include_selection=True)
+
+
+def _candidate_material_key(candidate: ReportCandidate) -> str | None:
+    return _identity_candidate_material_key(candidate, include_selection=True)
+
+
+def _candidate_view_identity(candidate: ReportCandidate) -> str:
+    ranked_id = _candidate_ranked_candidate_id(candidate)
+    if ranked_id:
+        return f"ranked:{ranked_id}"
+    material_key = _candidate_material_key(candidate)
+    if material_key:
+        return f"material:{material_key}"
+    if candidate.candidate_id:
+        return f"candidate:{candidate.candidate_id}"
+    return ""
+
+
+def _final_support_for_display_merge(
+    final_candidate: ReportCandidate,
+    candidate: ReportCandidate,
+) -> bool:
+    final_ranked_id = _candidate_ranked_candidate_id(final_candidate)
+    if final_ranked_id:
+        return _candidate_ranked_candidate_id(candidate) == final_ranked_id
+    final_material_key = _candidate_material_key(final_candidate)
+    if final_material_key:
+        return _candidate_material_key(candidate) == final_material_key
+    return (
+        candidate.candidate_id == final_candidate.candidate_id
+        or _same_material_final_support(final_candidate, candidate)
+    )
+
+
 def _has_objective_rank_evidence(candidate: ReportCandidate) -> bool:
     scores = candidate.scores if isinstance(candidate.scores, dict) else {}
     if isinstance(scores.get("objective_rank"), dict):
@@ -5565,16 +5601,17 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
     1. **Enrich final picks.** A ranked/submitted record often carries only
        a couple of headline scores while the matching explored record holds
        the full evaluation suite (sequence_analysis, protein_qc, ...). We
-       merge same-``candidate_id`` scores, plus sequence-only support rows
-       whose sequence is a safe material key for that final pick.
+       merge support rows by ranked_candidate_id/material_key first, then by
+       safe legacy material checks.
     2. **Drop submitted material duplicates from the explored list.** Explored
-       rows with the same ``candidate_id`` as the final, or rows whose sequence
-       safely matches the submitted material, are removed so a complex final is
-       not replaced by a monomer/QC variant in the review board.
+       rows with the same ranked/material identity as the final, or rows whose
+       sequence safely matches the submitted material, are removed so a complex
+       final is not replaced by a monomer/QC variant in the review board.
     3. **Collapse remaining sequence-only duplicates.** Among non-final
        alternatives, keep distinct structured/interface rows separate, but
        merge duplicate sequence-only support rows into the richest
-       representative. Then restore rank order for display.
+       representative. Objective-ranked rows are not sequence-collapsed. Then
+       restore rank order for display.
 
     Scores are left in their original nested ``{tool: {metric: value}}`` form
     so the review console (which classifies status from ``passes_filters`` /
@@ -5588,15 +5625,14 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
     if not final and not explored:
         return model
 
-    final_ids = {c.candidate_id for c in final}
+    final_ids = {c.candidate_id for c in final if not _candidate_view_identity(c)}
+    final_identities = {_candidate_view_identity(c) for c in final} - {""}
 
     enriched_final: list[ReportCandidate] = []
     for fc in final:
         merged: dict[str, Any] = dict(fc.scores or {})
         for ec in explored:
-            if (
-                ec.candidate_id == fc.candidate_id or _same_material_final_support(fc, ec)
-            ) and ec.scores:
+            if _final_support_for_display_merge(fc, ec) and ec.scores:
                 merged = _merge_score_namespaces(merged, ec.scores)
         enriched_final.append(replace(fc, scores=merged))
 
@@ -5620,15 +5656,19 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
     # Prefer the objective-ranked structure row for submitted material, then
     # fall back to the richest representative for ordinary duplicate support.
     for ec in sorted(explored, key=explored_sort_key):
-        if ec.candidate_id in final_ids:
+        view_identity = _candidate_view_identity(ec)
+        id_key = view_identity or f"candidate:{ec.candidate_id}"
+        if view_identity and view_identity in final_identities:
+            continue
+        if not view_identity and ec.candidate_id in final_ids:
             continue
         if not _has_objective_rank_evidence(ec) and any(
             _same_material_final_support(fc, ec) for fc in final
         ):
             continue
-        can_sequence_dedupe = _can_sequence_dedupe(ec)
-        if ec.candidate_id in seen_ids:
-            kept_index = kept_by_id.get(ec.candidate_id)
+        can_sequence_dedupe = _can_sequence_dedupe(ec) and not _has_objective_rank_evidence(ec)
+        if id_key in seen_ids:
+            kept_index = kept_by_id.get(id_key)
             if kept_index is not None:
                 kept[kept_index] = _merge_duplicate_candidate_for_display(
                     kept[kept_index],
@@ -5644,16 +5684,16 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
                     ec,
                 )
             continue
-        seen_ids.add(ec.candidate_id)
-        kept_by_id[ec.candidate_id] = len(kept)
+        seen_ids.add(id_key)
+        kept_by_id[id_key] = len(kept)
         if can_sequence_dedupe and sequence_key:
             seen_seqs.add(sequence_key)
             kept_by_seq[sequence_key] = len(kept)
         kept.append(ec)
-        kept_rank_index[ec.candidate_id] = rank_index[id(ec)]
+        kept_rank_index[id_key] = rank_index[id(ec)]
     kept.sort(
         key=lambda ec: kept_rank_index.get(
-            ec.candidate_id,
+            _candidate_view_identity(ec) or f"candidate:{ec.candidate_id}",
             rank_index.get(id(ec), 999999),
         )
     )
@@ -5679,6 +5719,16 @@ def _prepare_candidate_view(model: ReportModel) -> ReportModel:
     wants the flat view in one shot.
     """
     return _flatten_candidate_view(_dedup_candidate_view(model))
+
+
+def _has_objective_rank_manifest(model: ReportModel) -> bool:
+    for node in model.graph.nodes:
+        if (node.tool or "").strip().lower() != "objective_rank":
+            continue
+        output = node.output if isinstance(node.output, dict) else {}
+        if isinstance(output.get("ranked_candidates"), list):
+            return True
+    return False
 
 
 # Structure-folding tools whose predictions write per-residue pLDDT into the

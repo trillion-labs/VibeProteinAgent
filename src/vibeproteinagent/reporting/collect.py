@@ -6,7 +6,7 @@ import sqlite3
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import quote
 
 import yaml
@@ -25,6 +25,14 @@ from vibeproteinagent.workspace.types import (
     WorkflowRecord,
 )
 
+from .identity import (
+    candidate_material_key as _candidate_material_key,
+    candidate_ranked_candidate_id as _candidate_ranked_candidate_id,
+    candidate_sequence_identity as _candidate_sequence_identity,
+    candidate_structure_identity as _candidate_structure_identity,
+    row_material_key as _row_material_key,
+    row_ranked_candidate_id as _row_ranked_candidate_id,
+)
 from .models import (
     MSABlock,
     ReportArtifact,
@@ -130,7 +138,7 @@ _REFERENCE_CANDIDATE_TOOLS = frozenset({
     "go_sequences",
     "family_profile",
 })
-_HISTORICAL_NON_BOARD_TOOLS = frozenset({"rank" "_designs"})
+_HISTORICAL_NON_BOARD_TOOLS = frozenset({"rank_designs"})
 _NON_BOARD_CANDIDATE_TOOLS = (
     _REFERENCE_CANDIDATE_TOOLS | _HISTORICAL_NON_BOARD_TOOLS | frozenset({"submit_candidate"})
 )
@@ -1666,6 +1674,7 @@ def _first_text(*values: Any) -> str:
 
 def _candidate_score_map(record: dict[str, Any]) -> dict[str, Any]:
     scores = record.get("scores")
+    record_scores = _score_map(record)
     if isinstance(scores, dict):
         out = deepcopy(scores)
         for namespace, block in list(out.items()):
@@ -1674,11 +1683,18 @@ def _candidate_score_map(record: dict[str, Any]) -> dict[str, Any]:
             normalized = _score_map(block)
             if normalized:
                 out[namespace] = {**block, **normalized}
-        for key, value in _score_map(record).items():
+        if len(out) == 1:
+            namespace, block = next(iter(out.items()))
+            if isinstance(block, dict) and record_scores:
+                merged_block = dict(block)
+                for key, value in record_scores.items():
+                    merged_block.setdefault(key, value)
+                out[namespace] = merged_block
+        for key, value in record_scores.items():
             if key not in out:
                 out[key] = value
         return out
-    return _score_map(record)
+    return record_scores
 
 
 def _candidate_artifact_metadata(record: dict[str, Any]) -> dict[str, Any]:
@@ -1853,7 +1869,7 @@ def _normalize_candidates(
     _attach_qc_and_analysis(candidates, nodes, merge_global_metrics=False)
     candidates = _merge_sequence_analysis_candidates(candidates)
     if ranked:
-        candidates = _merge_objective_ranked_aliases_into_candidates(ranked, candidates)
+        candidates = _combine_objective_rank_manifest_candidates(ranked, candidates)
     candidates = _merge_pyrosetta_relax_aliases_into_candidates(candidates)
     return _dedupe_candidates(candidates)
 
@@ -1905,217 +1921,24 @@ def _merge_pyrosetta_relax_aliases_into_candidates(
     return out
 
 
-def _merge_objective_ranked_aliases_into_candidates(
+def _combine_objective_rank_manifest_candidates(
     ranked: list[ReportCandidate],
     candidates: list[ReportCandidate],
 ) -> list[ReportCandidate]:
+    """Preserve objective_rank rows as the canonical ranked manifest.
+
+    ``objective_rank`` rows are the only deterministic source of ranking/gate
+    identity. Raw generator/evaluator rows can share candidate_id or sequence
+    with those ranked rows, but they are support evidence, not replacements for
+    the ranking manifest. Keep both populations in the collected model; the
+    review layer joins support evidence onto manifest rows for display.
+    """
+
     if not ranked:
         return candidates
     if not candidates:
         return ranked
-
-    ranked_pair_counts: dict[tuple[str, str], int] = {}
-    for candidate in ranked:
-        pair = _candidate_id_sequence_pair(candidate)
-        if pair is not None:
-            ranked_pair_counts[pair] = ranked_pair_counts.get(pair, 0) + 1
-    used_ranked: set[int] = set()
-    used_targets: set[int] = set()
-    out = list(candidates)
-    for ranked_index, ranked_candidate in enumerate(ranked):
-        target_index = _objective_rank_merge_target(
-            ranked_candidate,
-            ranked,
-            out,
-            ranked_pair_counts,
-            used_targets,
-        )
-        if target_index is None:
-            continue
-        target = out[target_index]
-        scores = dict(target.scores or {})
-        scores["objective_rank"] = _objective_rank_score_block(ranked_candidate)
-        source = dict(target.source or {})
-        ranked_source = (
-            ranked_candidate.source if isinstance(ranked_candidate.source, dict) else {}
-        )
-        source.setdefault(
-            "objective_rank_evidence",
-            {
-                "source": "objective_rank",
-                "candidate_id": ranked_candidate.candidate_id,
-                "ranked_candidate_id": _candidate_ranked_candidate_id(ranked_candidate),
-                "identity_key": ranked_source.get("identity_key"),
-                "material_key": _candidate_material_key(ranked_candidate),
-            },
-        )
-        ranked_candidate_id = _candidate_ranked_candidate_id(ranked_candidate)
-        if ranked_candidate_id:
-            source.setdefault("ranked_candidate_id", ranked_candidate_id)
-            source.setdefault("local_id", ranked_candidate_id)
-        material_key = _candidate_material_key(ranked_candidate)
-        if material_key:
-            source.setdefault("material_key", material_key)
-        out[target_index] = replace(
-            target,
-            rank=ranked_candidate.rank or target.rank,
-            score=ranked_candidate.score if ranked_candidate.score is not None else target.score,
-            scores=scores,
-            source=source,
-            qc_flags=target.qc_flags or ranked_candidate.qc_flags,
-            liabilities=target.liabilities or ranked_candidate.liabilities,
-        )
-        used_ranked.add(ranked_index)
-        used_targets.add(target_index)
-
-    out.extend(
-        ranked_candidate
-        for index, ranked_candidate in enumerate(ranked)
-        if index not in used_ranked
-    )
-    return out
-
-
-def _objective_rank_merge_target(
-    ranked_candidate: ReportCandidate,
-    ranked: list[ReportCandidate],
-    candidates: list[ReportCandidate],
-    ranked_pair_counts: dict[tuple[str, str], int],
-    used_targets: set[int],
-) -> int | None:
-    ranked_id = _candidate_ranked_candidate_id(ranked_candidate)
-    if ranked_id:
-        exact = _unique_objective_rank_target(
-            candidates,
-            used_targets,
-            lambda candidate: _candidate_ranked_candidate_id(candidate) == ranked_id,
-            ranked_candidate,
-        )
-        if exact is not None:
-            return exact
-
-    material_key = _candidate_material_key(ranked_candidate)
-    if material_key:
-        exact = _unique_objective_rank_target(
-            candidates,
-            used_targets,
-            lambda candidate: _candidate_material_key(candidate) == material_key,
-            ranked_candidate,
-        )
-        if exact is not None:
-            return exact
-
-    structure = _candidate_structure_identity(ranked_candidate)
-    if structure:
-        exact = _unique_objective_rank_target(
-            candidates,
-            used_targets,
-            lambda candidate: _candidate_structure_identity(candidate) == structure,
-            ranked_candidate,
-        )
-        if exact is not None:
-            return exact
-
-    sequence_pair = _candidate_id_sequence_pair(ranked_candidate)
-    if sequence_pair is not None and ranked_pair_counts.get(sequence_pair) == 1:
-        exact = _unique_objective_rank_target(
-            candidates,
-            used_targets,
-            lambda candidate: (
-                _candidate_id_sequence_pair(candidate) == sequence_pair
-            ),
-            ranked_candidate,
-        )
-        if exact is not None:
-            return exact
-
-    ranked_alias = _candidate_path_alias_tokens(ranked_candidate)
-    if not ranked_alias:
-        return None
-    ranked_alias_peers = [
-        peer
-        for peer in ranked
-        if _candidate_path_alias_tokens(peer) == ranked_alias
-        and _report_candidates_material_compatible(peer, ranked_candidate)
-    ]
-    if len(ranked_alias_peers) != 1:
-        return None
-    alias_matches = [
-        index
-        for index, candidate in enumerate(candidates)
-        if index not in used_targets
-        and _candidate_path_alias_tokens(candidate) == ranked_alias
-        and _report_candidates_material_compatible(candidate, ranked_candidate)
-    ]
-    if len(alias_matches) == 1:
-        return alias_matches[0]
-    if len(alias_matches) > 1:
-        ranked_matches = sorted(
-            alias_matches,
-            key=lambda index: _rank_alias_merge_quality(candidates[index]),
-            reverse=True,
-        )
-        best = ranked_matches[0]
-        second = ranked_matches[1]
-        if _rank_alias_merge_quality(candidates[best]) != _rank_alias_merge_quality(
-            candidates[second]
-        ):
-            return best
-    return None
-
-
-def _unique_objective_rank_target(
-    candidates: list[ReportCandidate],
-    used_targets: set[int],
-    predicate: Callable[[ReportCandidate], bool],
-    ranked_candidate: ReportCandidate,
-) -> int | None:
-    matches = [
-        index
-        for index, candidate in enumerate(candidates)
-        if index not in used_targets
-        and predicate(candidate)
-        and _report_candidates_material_compatible(candidate, ranked_candidate)
-    ]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _objective_rank_score_block(candidate: ReportCandidate) -> dict[str, Any]:
-    source_scores = candidate.scores if isinstance(candidate.scores, dict) else {}
-    block = dict(source_scores.get("objective_rank") or {})
-    allowed = {
-        "ranked_candidate_id",
-        "objective_name",
-        "objective_score",
-        "score_formula",
-        "formula_text",
-        "score_direction",
-        "gate_summary",
-        "score_components",
-        "passed_gates",
-        "failed_gates",
-        "warnings",
-        "tie_breaker_values",
-    }
-    block.update({key: value for key, value in source_scores.items() if key in allowed})
-    if candidate.score is not None:
-        block.setdefault("objective_score", candidate.score)
-        block.setdefault("score", candidate.score)
-    if candidate.rank is not None:
-        block.setdefault("rank", candidate.rank)
-    return block
-
-
-def _rank_alias_merge_quality(candidate: ReportCandidate) -> tuple[int, int, int, int]:
-    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
-    source = candidate.source if isinstance(candidate.source, dict) else {}
-    source_tool = str(source.get("tool") or "").lower()
-    return (
-        1 if candidate.sequence else 0,
-        1 if candidate.structure_path else 0,
-        1 if "protenix_v2" in scores or source_tool == "protenix_v2" else 0,
-        1 if "pyrosetta" in scores or source_tool == "pyrosetta" else 0,
-    )
+    return list(ranked) + list(candidates)
 
 
 def _candidate_path_alias_tokens(candidate: ReportCandidate) -> set[str]:
@@ -2130,106 +1953,6 @@ def _candidate_path_alias_tokens(candidate: ReportCandidate) -> set[str]:
     if not tokens:
         tokens.update(_split_stability_tokens(candidate.candidate_id))
     return _filter_stability_tokens(tokens)
-
-
-def _candidate_ranked_candidate_id(candidate: ReportCandidate) -> str | None:
-    source = candidate.source if isinstance(candidate.source, dict) else {}
-    for container in (
-        source,
-        source.get("objective_rank_evidence") if isinstance(source.get("objective_rank_evidence"), dict) else {},
-    ):
-        if isinstance(container, dict):
-            value = container.get("ranked_candidate_id")
-            if value not in (None, ""):
-                return str(value)
-    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
-    objective = scores.get("objective_rank")
-    if isinstance(objective, dict):
-        value = objective.get("ranked_candidate_id")
-        if value not in (None, ""):
-            return str(value)
-    return None
-
-
-def _candidate_material_key(candidate: ReportCandidate) -> str | None:
-    source = candidate.source if isinstance(candidate.source, dict) else {}
-    for container in (
-        source,
-        source.get("objective_rank_evidence") if isinstance(source.get("objective_rank_evidence"), dict) else {},
-    ):
-        if isinstance(container, dict):
-            value = container.get("material_key")
-            if value not in (None, ""):
-                return str(value)
-    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
-    objective = scores.get("objective_rank")
-    if isinstance(objective, dict):
-        value = objective.get("material_key")
-        if value not in (None, ""):
-            return str(value)
-    return None
-
-
-def _candidate_id_sequence_pair(candidate: ReportCandidate) -> tuple[str, str] | None:
-    candidate_id = str(candidate.candidate_id or "")
-    sequence = _candidate_sequence_identity(candidate)
-    if not candidate_id or not sequence:
-        return None
-    return candidate_id, sequence
-
-
-def _candidate_sequence_identity(candidate: ReportCandidate) -> str | None:
-    if candidate.sequence in (None, ""):
-        return None
-    return "".join(str(candidate.sequence).split()).upper()
-
-
-def _candidate_structure_identity(candidate: ReportCandidate) -> str | None:
-    if candidate.structure_path in (None, ""):
-        return None
-    return str(candidate.structure_path).strip()
-
-
-def _report_candidates_material_compatible(
-    left: ReportCandidate,
-    right: ReportCandidate,
-) -> bool:
-    left_ranked = _candidate_ranked_candidate_id(left)
-    right_ranked = _candidate_ranked_candidate_id(right)
-    if left_ranked and right_ranked and left_ranked != right_ranked:
-        return False
-    left_material = _candidate_material_key(left)
-    right_material = _candidate_material_key(right)
-    if left_material and right_material and left_material != right_material:
-        return False
-    left_sequence = _candidate_sequence_identity(left)
-    right_sequence = _candidate_sequence_identity(right)
-    if left_sequence and right_sequence and left_sequence != right_sequence:
-        return False
-    left_structure = _candidate_structure_identity(left)
-    right_structure = _candidate_structure_identity(right)
-    if left_structure and right_structure and left_structure != right_structure:
-        return False
-    return True
-
-
-def _row_ranked_candidate_id(row: dict[str, Any]) -> str | None:
-    value = row.get("ranked_candidate_id")
-    if value not in (None, ""):
-        return str(value)
-    candidate_ref = row.get("candidate_ref")
-    if isinstance(candidate_ref, dict):
-        value = candidate_ref.get("ranked_candidate_id")
-        if value not in (None, ""):
-            return str(value)
-    scores = row.get("scores")
-    if isinstance(scores, dict):
-        objective = scores.get("objective_rank")
-        if isinstance(objective, dict):
-            value = objective.get("ranked_candidate_id")
-            if value not in (None, ""):
-                return str(value)
-    return None
 
 
 def _merge_sequence_analysis_candidates(
@@ -2265,14 +1988,57 @@ def _merge_sequence_analysis_candidates(
         if target_index is None:
             continue
         target = base[target_index]
+        enriched_scores = _fold_flat_tool_metrics_into_namespace(
+            enriched.scores,
+            "sequence_analysis",
+        )
         base[target_index] = replace(
             target,
-            scores={**(target.scores or {}), **(enriched.scores or {})},
+            scores=_merge_candidate_score_namespaces(target.scores, enriched_scores),
             qc_flags=target.qc_flags or enriched.qc_flags,
             liabilities=target.liabilities or enriched.liabilities,
             artifacts=target.artifacts or enriched.artifacts,
         )
     return base
+
+
+def _merge_candidate_score_namespaces(
+    base: dict[str, Any] | None,
+    extra: dict[str, Any] | None,
+) -> dict[str, Any]:
+    out = dict(base or {})
+    for key, value in (extra or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            merged = dict(out[key])
+            merged.update(value)
+            out[key] = merged
+        else:
+            out[key] = value
+    return out
+
+
+def _fold_flat_tool_metrics_into_namespace(
+    scores: dict[str, Any] | None,
+    namespace: str,
+) -> dict[str, Any]:
+    out = deepcopy(scores or {})
+    block = out.get(namespace)
+    if not isinstance(block, dict):
+        block = {}
+    else:
+        block = dict(block)
+    prefix = f"{namespace}:"
+    for raw_key, value in list(out.items()):
+        key = str(raw_key)
+        if key.startswith(prefix):
+            metric = key[len(prefix) :]
+            if metric:
+                block.setdefault(metric, value)
+        elif key in _SCORE_KEYS:
+            block.setdefault(key, value)
+    if block:
+        out[namespace] = block
+    return out
 
 
 def _has_design_candidate_context(nodes: list[WorkflowNodeSummary]) -> bool:
@@ -2540,6 +2306,7 @@ def _objective_rank_candidate_rows(
             if not candidate_id:
                 continue
             ranked_candidate_id = _row_ranked_candidate_id(row)
+            material_key = _row_material_key(row)
             token_seed = " ".join(
                 item
                 for item in (
@@ -2559,7 +2326,7 @@ def _objective_rank_candidate_rows(
                     "candidate_id": candidate_id,
                     "ranked_candidate_id": ranked_candidate_id,
                     "identity_key": row.get("identity_key"),
-                    "material_key": row.get("material_key"),
+                    "material_key": material_key,
                     "tokens": row_tokens,
                 }
             )
@@ -2579,8 +2346,7 @@ def _objective_rank_match_for_candidate(
         ]
         if len(exact_ranked) == 1:
             return exact_ranked[0]
-    source = candidate.source if isinstance(candidate.source, dict) else {}
-    material_key = source.get("material_key")
+    material_key = _candidate_material_key(candidate)
     if material_key:
         material_matches = [
             row for row in rows if row.get("material_key") == material_key
@@ -3130,10 +2896,13 @@ def _ranked_candidates(
             stable_structure_path = _stable_structure_path(structure_path, artifacts)
             candidate_id = str(row.get("candidate_id") or row.get("name") or idx + 1)
             ranked_candidate_id = _row_ranked_candidate_id(row)
+            material_key = _row_material_key(row)
             scores = _candidate_score_map(ranked_row)
             objective = dict(scores.get("objective_rank") or {})
             if ranked_candidate_id:
                 objective.setdefault("ranked_candidate_id", ranked_candidate_id)
+            if material_key:
+                objective.setdefault("material_key", material_key)
             if ranked_row.get("formula_text") is not None:
                 objective.setdefault("formula_text", ranked_row.get("formula_text"))
             if ranked_row.get("gate_summary") is not None:
@@ -3161,7 +2930,7 @@ def _ranked_candidates(
                         "local_id": ranked_candidate_id or candidate_id,
                         "ranked_candidate_id": ranked_candidate_id,
                         "identity_key": row.get("identity_key"),
-                        "material_key": row.get("material_key"),
+                        "material_key": material_key,
                         "candidate_ref": row.get("candidate_ref")
                         if isinstance(row.get("candidate_ref"), dict)
                         else {},

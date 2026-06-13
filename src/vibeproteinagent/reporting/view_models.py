@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from vibeproteinagent.core.errors import InvalidParamsError
+
 from .metrics import SCORE_DEFINITIONS
 from .models import (
     CandidateEvidenceBundle,
@@ -731,6 +733,12 @@ def build_agent_rationale_view_model(
 ) -> AgentRationaleViewModel:
     preset = preset or build_workflow_review_preset(model, review)
     workflow_selection = f"{preset.label}: {preset.scientific_question}"
+    llm_rationale = _llm_agent_rationale_view_model(
+        model,
+        workflow_selection=workflow_selection,
+    )
+    if llm_rationale is not None:
+        return llm_rationale
     recorded_query = _recorded_user_query(model)
     recorded_objective = _recorded_objective(model)
     intent = _first_nonempty(recorded_query, recorded_objective)
@@ -1279,10 +1287,43 @@ def _ranking_basis_view_model(
             score_formula=formula,
             score_direction=direction,
         )
+    if any(bundle.status == CandidateStatus.FINAL for bundle in bundles):
+        return RankingBasisViewModel(
+            fallback_text=(
+                "No objective ranking formula was run. Ranking source: "
+                "submit_candidate (agent-selected). No objective_rank gates were "
+                "recorded; final is the accepted submission, and alternatives are "
+                "shown for evidence only."
+            )
+        )
+    ranked_count = sum(
+        1
+        for bundle in bundles
+        if (bundle.display_rank if bundle.display_rank is not None else bundle.candidate.rank)
+        is not None
+    )
+    if ranked_count > 1:
+        return RankingBasisViewModel(
+            fallback_text=(
+                "No objective ranking formula was run. Ranking source: recorded "
+                "tool-native candidate ranks. No objective_rank gates were recorded; "
+                "ranks are shown as provenance, not as objective-gated selection evidence."
+            )
+        )
+    if any(
+        (bundle.display_rank if bundle.display_rank is not None else bundle.candidate.rank)
+        is not None
+        for bundle in bundles
+    ):
+        return RankingBasisViewModel(
+            fallback_text=(
+                "No objective ranking formula was run. Final is the submitted candidate; "
+                "alternatives are shown for evidence only."
+            )
+        )
     return RankingBasisViewModel(
         fallback_text=(
-            "No objective ranking formula was run. Final is the submitted candidate; "
-            "alternatives are shown for evidence only."
+            "No objective ranking source was recorded. Candidates are shown for evidence only."
         )
     )
 
@@ -1714,7 +1755,7 @@ def _split_recorded_objective_and_criteria(objective: str) -> tuple[str, str]:
 
 def _objective_criteria_marker(text: str) -> re.Match[str] | None:
     explicit_label = re.search(
-        r"(?i)\b(?:acceptance criteria|thresholds/criteria|thresholds|criteria)\s*:\s*",
+        r"(?i)\b(?:acceptance criteria|acceptance|thresholds/criteria|thresholds|criteria)\s*:\s*",
         text,
     )
     accept_if = re.search(r"(?i)\baccept(?:\s+only)?\s+if\b\s*", text)
@@ -1831,6 +1872,326 @@ def _stage_plan_from_graph(nodes: list[WorkflowNodeSummary]) -> list[str]:
         if any(_stage_key(node) == key for node in nodes):
             stages.append(_stage_label(key))
     return stages
+
+
+_LLM_NARRATIVE_KEYS = (
+    "llm_narrative",
+    "report_narrative",
+    "agent_narrative",
+)
+_LLM_NARRATIVE_PROVENANCE = "llm_generated"
+
+
+def _llm_agent_rationale_view_model(
+    model: ReportModel,
+    *,
+    workflow_selection: str,
+) -> AgentRationaleViewModel | None:
+    narrative = _recorded_llm_narrative(model)
+    if narrative is None:
+        return None
+    _validate_narrative_refs(narrative, model)
+    user_intent = _narrative_text(
+        narrative.get("user_intent"),
+        narrative.get("intent_summary"),
+    )
+    review_framing = _narrative_text(
+        narrative.get("review_framing"),
+        narrative.get("review_frame"),
+    )
+    major_decisions = _llm_major_decisions(narrative, model)
+    if not any((user_intent, review_framing, major_decisions)):
+        return None
+    recorded_query = _recorded_user_query(model)
+    recorded_objective = _recorded_objective(model)
+    fallback_intent = _first_nonempty(recorded_query, recorded_objective)
+    return AgentRationaleViewModel(
+        user_query=user_intent or fallback_intent or None,
+        intent_summary=_clip(user_intent or fallback_intent, 220) or None,
+        workflow_selection=review_framing or workflow_selection,
+        stage_plan=_stage_plan_from_graph(model.graph.nodes),
+        major_decisions=major_decisions,
+        tool_call_count=len(model.graph.nodes),
+        has_full_transcript=False,
+    )
+
+
+def _recorded_llm_narrative(model: ReportModel) -> dict[str, Any] | None:
+    containers: list[dict[str, Any]] = []
+    final_submission = model.final_submission if isinstance(model.final_submission, dict) else {}
+    raw_summary = model.raw_summary if isinstance(model.raw_summary, dict) else {}
+    containers.extend([final_submission, raw_summary])
+    for container in containers:
+        for key in _LLM_NARRATIVE_KEYS:
+            value = container.get(key)
+            narrative = _coerce_narrative_dict(value)
+            if narrative is not None:
+                return narrative
+    return None
+
+
+def _coerce_narrative_dict(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise InvalidParamsError(
+                "invalid LLM report narrative JSON",
+                details={"error": str(exc)},
+            ) from exc
+        if isinstance(parsed, dict):
+            return parsed
+        raise InvalidParamsError(
+            "invalid LLM report narrative JSON",
+            details={"expected": "object", "actual": type(parsed).__name__},
+        )
+    return None
+
+
+def _llm_major_decisions(
+    narrative: dict[str, Any],
+    model: ReportModel,
+) -> list[AgentRationaleItem]:
+    decisions: list[AgentRationaleItem] = []
+    raw_decisions = narrative.get("major_decisions")
+    if isinstance(raw_decisions, list):
+        for idx, entry in enumerate(raw_decisions):
+            item = _llm_decision_item(entry, index=idx)
+            if item is not None:
+                _validate_narrative_refs(
+                    entry if isinstance(entry, dict) else {},
+                    model,
+                    context=f"major_decisions[{idx}]",
+                )
+                decisions.append(item)
+    if not _has_decision_label(decisions, "selection rationale"):
+        selection = _narrative_text(narrative.get("selection_rationale"))
+        if selection:
+            _validate_narrative_refs(
+                narrative.get("selection_rationale")
+                if isinstance(narrative.get("selection_rationale"), dict)
+                else {},
+                model,
+                context="selection_rationale",
+            )
+            decisions.append(
+                AgentRationaleItem(
+                    label="Selection rationale",
+                    value=selection,
+                    provenance=_LLM_NARRATIVE_PROVENANCE,
+                )
+            )
+    if not _has_decision_label(decisions, "candidate justification"):
+        justification = _candidate_justification_text(narrative)
+        if justification:
+            _validate_candidate_justification_refs(narrative, model)
+            decisions.append(
+                AgentRationaleItem(
+                    label="Candidate justification",
+                    value=justification,
+                    provenance=_LLM_NARRATIVE_PROVENANCE,
+                )
+            )
+    return decisions[:6]
+
+
+def _llm_decision_item(entry: Any, *, index: int) -> AgentRationaleItem | None:
+    if isinstance(entry, str):
+        value = " ".join(entry.split())
+        if not value:
+            return None
+        return AgentRationaleItem(
+            label=f"Decision {index + 1}",
+            value=value,
+            provenance=_LLM_NARRATIVE_PROVENANCE,
+        )
+    if not isinstance(entry, dict):
+        return None
+    label = _narrative_text(entry.get("label"), entry.get("title"), entry.get("type"))
+    value = _narrative_text(entry.get("value"), entry.get("body"), entry.get("summary"))
+    if not value:
+        return None
+    return AgentRationaleItem(
+        label=label or f"Decision {index + 1}",
+        value=value,
+        provenance=_LLM_NARRATIVE_PROVENANCE,
+    )
+
+
+def _candidate_justification_text(narrative: dict[str, Any]) -> str:
+    direct = _narrative_text(narrative.get("candidate_justification"))
+    if direct:
+        return direct
+    justifications = narrative.get("candidate_justifications")
+    if isinstance(justifications, dict):
+        for value in justifications.values():
+            text = _narrative_text(value)
+            if text:
+                return text
+    if isinstance(justifications, list):
+        for value in justifications:
+            text = _narrative_text(value)
+            if text:
+                return text
+    return ""
+
+
+def _validate_candidate_justification_refs(
+    narrative: dict[str, Any],
+    model: ReportModel,
+) -> None:
+    for key in ("candidate_justification", "candidate_justifications"):
+        value = narrative.get(key)
+        if isinstance(value, dict):
+            if key == "candidate_justifications":
+                for candidate_id, entry in value.items():
+                    payload = entry if isinstance(entry, dict) else {}
+                    payload = {**payload, "candidate_refs": [str(candidate_id)]}
+                    _validate_narrative_refs(payload, model, context=f"{key}.{candidate_id}")
+            else:
+                _validate_narrative_refs(value, model, context=key)
+        elif isinstance(value, list):
+            for idx, entry in enumerate(value):
+                _validate_narrative_refs(
+                    entry if isinstance(entry, dict) else {},
+                    model,
+                    context=f"{key}[{idx}]",
+                )
+
+
+def _has_decision_label(items: list[AgentRationaleItem], label: str) -> bool:
+    needle = label.strip().lower()
+    return any(item.label.strip().lower() == needle for item in items)
+
+
+def _narrative_text(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, str):
+            text = " ".join(value.split())
+            if text:
+                return text
+        if isinstance(value, dict):
+            text = _narrative_text(
+                value.get("text"),
+                value.get("body"),
+                value.get("summary"),
+                value.get("value"),
+            )
+            if text:
+                return text
+            parts: list[str] = []
+            for key in ("strengths", "caveats"):
+                raw = value.get(key)
+                if isinstance(raw, list):
+                    parts.extend(str(item).strip() for item in raw if str(item).strip())
+            if parts:
+                return " ".join(parts)
+    return ""
+
+
+def _validate_narrative_refs(
+    payload: dict[str, Any],
+    model: ReportModel,
+    *,
+    context: str = "llm_narrative",
+) -> None:
+    if not payload:
+        return
+    known_candidates = _known_candidate_refs(model)
+    unknown_candidates = [
+        ref
+        for ref in _ref_list(payload.get("candidate_refs"))
+        if ref not in known_candidates
+    ]
+    known_metrics = _known_metric_refs(model)
+    unknown_metrics = [
+        ref for ref in _ref_list(payload.get("metric_refs")) if ref not in known_metrics
+    ]
+    known_artifacts = _known_artifact_refs(model)
+    unknown_artifacts = [
+        ref
+        for ref in _ref_list(payload.get("artifact_refs"))
+        if ref not in known_artifacts
+    ]
+    if unknown_candidates or unknown_metrics or unknown_artifacts:
+        raise InvalidParamsError(
+            "LLM report narrative references unknown evidence",
+            details={
+                "context": context,
+                "unknown_candidate_refs": unknown_candidates,
+                "unknown_metric_refs": unknown_metrics,
+                "unknown_artifact_refs": unknown_artifacts,
+            },
+        )
+
+
+def _ref_list(value: Any) -> list[str]:
+    if value in (None, "", [], ()):
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _known_candidate_refs(model: ReportModel) -> set[str]:
+    refs: set[str] = set()
+    for candidate in [*model.candidates, *model.final_candidates]:
+        if candidate.candidate_id:
+            refs.add(str(candidate.candidate_id))
+        source = candidate.source if isinstance(candidate.source, dict) else {}
+        for key in ("ranked_candidate_id", "local_id", "material_key"):
+            value = source.get(key)
+            if value not in (None, ""):
+                refs.add(str(value))
+        objective = (
+            candidate.scores.get("objective_rank")
+            if isinstance(candidate.scores, dict)
+            else None
+        )
+        if isinstance(objective, dict):
+            for key in ("ranked_candidate_id", "material_key"):
+                value = objective.get(key)
+                if value not in (None, ""):
+                    refs.add(str(value))
+    return refs
+
+
+def _known_metric_refs(model: ReportModel) -> set[str]:
+    refs: set[str] = set()
+    for candidate in [*model.candidates, *model.final_candidates]:
+        scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+        for key, value in scores.items():
+            key_text = str(key)
+            refs.add(key_text)
+            if isinstance(value, dict):
+                for metric in value:
+                    metric_text = str(metric)
+                    refs.add(f"{key_text}.{metric_text}")
+                    refs.add(f"{key_text}:{metric_text}")
+            elif ":" in key_text:
+                namespace, metric = key_text.split(":", 1)
+                refs.add(f"{namespace}.{metric}")
+    return refs
+
+
+def _known_artifact_refs(model: ReportModel) -> set[str]:
+    refs: set[str] = set()
+    for artifact in model.artifacts:
+        for value in (artifact.artifact_id, artifact.field, artifact.path):
+            if value not in (None, ""):
+                refs.add(str(value))
+    for candidate in [*model.candidates, *model.final_candidates]:
+        if candidate.structure_path:
+            refs.add(str(candidate.structure_path))
+        for artifact in candidate.artifacts:
+            for value in (artifact.artifact_id, artifact.field, artifact.path):
+                if value not in (None, ""):
+                    refs.add(str(value))
+    return refs
 
 
 def _major_decisions_from_submission(model: ReportModel) -> list[AgentRationaleItem]:

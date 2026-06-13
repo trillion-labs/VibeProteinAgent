@@ -24,10 +24,23 @@ execution engine.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .collect import _as_float, _as_int, _string_list
+from .identity import (
+    candidate_manifest_identity as _candidate_manifest_identity,
+    candidate_material_key as _candidate_material_key,
+    candidate_ranked_candidate_id as _candidate_ranked_candidate_id,
+    candidate_sequence_identity as _candidate_sequence_identity,
+    candidate_structure_identity as _candidate_structure_identity,
+    row_material_key as _row_material_key,
+    row_ranked_candidate_id as _row_ranked_candidate_id,
+    strong_candidate_manifest_identity as _strong_candidate_manifest_identity,
+    submitted_material_key as _submitted_material_key,
+    submitted_ranked_candidate_id as _submitted_ranked_candidate_id,
+)
 from .models import (
     BoardGroup,
     CandidateEvidenceBundle,
@@ -127,6 +140,13 @@ _SEQUENCE_STAGE_GENERATOR_TOOLS = frozenset(
 _MODED_BINDER_TOOLS = {"proteina_complexa": frozenset({"protein_binder", "ligand_binder"})}
 _INTERFACE_EVALUATOR_TOOLS = frozenset({"boltz2_affinity", "ipsae", "prodigy", "pxmeter"})
 _RETRIEVAL_TOOLS = frozenset({"search_sequence", "go_sequences", "interpro_sequences"})
+_STRUCTURE_PATH_KEYS: tuple[str, ...] = (
+    "structure_path",
+    "pdb_path",
+    "cif_path",
+    "predicted_pdb",
+    "predicted_cif",
+)
 
 # Evaluator tools whose presence in candidate.scores counts as real evaluation
 # evidence (drives RANKED_ALTERNATIVE vs INCOMPLETE_EVIDENCE).
@@ -864,76 +884,280 @@ def _candidate_rank_identity(candidate: ReportCandidate) -> str:
     return f"candidate:{candidate.candidate_id}" if candidate.candidate_id else ""
 
 
-def _candidate_ranked_candidate_id(candidate: ReportCandidate) -> str | None:
-    source = candidate.source if isinstance(candidate.source, dict) else {}
-    for container in (
-        source,
-        source.get("objective_rank_evidence")
-        if isinstance(source.get("objective_rank_evidence"), dict)
-        else {},
-    ):
-        if isinstance(container, dict):
-            value = container.get("ranked_candidate_id")
-            if value not in (None, ""):
-                return str(value)
-    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
-    objective_rank = scores.get("objective_rank")
-    if isinstance(objective_rank, dict):
-        value = objective_rank.get("ranked_candidate_id")
-        if value not in (None, ""):
-            return str(value)
+def _first_str(mapping: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 
-def _row_ranked_candidate_id(row: dict[str, Any]) -> str | None:
-    value = row.get("ranked_candidate_id")
-    if value not in (None, ""):
-        return str(value)
-    candidate_ref = row.get("candidate_ref")
-    if isinstance(candidate_ref, dict):
-        value = candidate_ref.get("ranked_candidate_id")
-        if value not in (None, ""):
-            return str(value)
+def _row_score_map(row: dict[str, Any]) -> dict[str, Any]:
     scores = row.get("scores")
-    if isinstance(scores, dict):
-        objective_rank = scores.get("objective_rank")
-        if isinstance(objective_rank, dict):
-            value = objective_rank.get("ranked_candidate_id")
-            if value not in (None, ""):
-                return str(value)
+    out = dict(scores) if isinstance(scores, dict) else {}
+    objective = dict(out.get("objective_rank") or {})
+    for key in (
+        "ranked_candidate_id",
+        "objective_name",
+        "objective_score",
+        "score",
+        "score_formula",
+        "formula_text",
+        "score_direction",
+        "gate_summary",
+        "score_components",
+        "passed_gates",
+        "failed_gates",
+        "warnings",
+        "tie_breaker_values",
+        "rank",
+        "material_key",
+    ):
+        value = row.get(key)
+        if value is not None:
+            objective.setdefault(key, value)
+    if objective:
+        out["objective_rank"] = objective
+    return out
+
+
+def _merge_score_namespaces(
+    base: dict[str, Any] | None,
+    extra: dict[str, Any] | None,
+) -> dict[str, Any]:
+    out = dict(base or {})
+    for key, value in (extra or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            merged = dict(value)
+            merged.update(out[key])
+            out[key] = merged
+        elif key not in out:
+            out[key] = value
+    return out
+
+
+def _ranked_row_candidate(
+    row: dict[str, Any],
+    *,
+    node: WorkflowNodeSummary,
+    index: int,
+) -> ReportCandidate:
+    candidate_id = str(row.get("candidate_id") or row.get("name") or index + 1)
+    ranked_candidate_id = _row_ranked_candidate_id(row)
+    material_key = _row_material_key(row)
+    structure_path = _first_str(row, *_STRUCTURE_PATH_KEYS)
+    scores = _row_score_map(row)
+    objective = dict(scores.get("objective_rank") or {})
+    if ranked_candidate_id:
+        objective.setdefault("ranked_candidate_id", ranked_candidate_id)
+    if material_key:
+        objective.setdefault("material_key", material_key)
+    objective.setdefault("rank", _as_int(row.get("rank")) or index + 1)
+    objective_score = _as_float(
+        row.get("objective_score") if row.get("objective_score") is not None else row.get("score")
+    )
+    if objective_score is not None:
+        objective.setdefault("objective_score", objective_score)
+        objective.setdefault("score", objective_score)
+    if objective:
+        scores["objective_rank"] = objective
+    return ReportCandidate(
+        candidate_id=candidate_id,
+        rank=_as_int(row.get("rank")) or index + 1,
+        score=objective_score,
+        sequence=_first_str(row, "sequence"),
+        structure_path=structure_path,
+        scores=scores,
+        qc_flags=_string_list(row.get("qc_flags")),
+        liabilities=row.get("liabilities") if isinstance(row.get("liabilities"), list) else [],
+        source={
+            "node_id": node.node_id,
+            "job_id": node.job_id,
+            "tool": node.tool,
+            "kind": "ranking_manifest",
+            "local_id": ranked_candidate_id or candidate_id,
+            "ranked_candidate_id": ranked_candidate_id,
+            "identity_key": row.get("identity_key"),
+            "material_key": material_key,
+            "candidate_ref": row.get("candidate_ref")
+            if isinstance(row.get("candidate_ref"), dict)
+            else {},
+        },
+    )
+
+
+def _unique_support_candidate(
+    ranked: ReportCandidate,
+    candidates: list[ReportCandidate],
+) -> ReportCandidate | None:
+    ranked_id = _candidate_ranked_candidate_id(ranked)
+    if ranked_id:
+        matches = [c for c in candidates if _candidate_ranked_candidate_id(c) == ranked_id]
+        if len(matches) == 1:
+            return matches[0]
+    material_key = _candidate_material_key(ranked)
+    if material_key:
+        matches = [c for c in candidates if _candidate_material_key(c) == material_key]
+        if len(matches) == 1:
+            return matches[0]
+    structure = _candidate_structure_identity(ranked)
+    if structure:
+        matches = [c for c in candidates if _candidate_structure_identity(c) == structure]
+        if len(matches) == 1:
+            return matches[0]
+    candidate_id = str(ranked.candidate_id or "")
+    sequence = _candidate_sequence_identity(ranked)
+    if candidate_id and sequence:
+        matches = [
+            c
+            for c in candidates
+            if str(c.candidate_id or "") == candidate_id
+            and _candidate_sequence_identity(c) == sequence
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    if candidate_id:
+        matches = [c for c in candidates if str(c.candidate_id or "") == candidate_id]
+        if len(matches) == 1:
+            return matches[0]
     return None
+
+
+def _enrich_ranked_candidate(
+    ranked: ReportCandidate,
+    support: ReportCandidate | None,
+) -> ReportCandidate:
+    if support is None:
+        return ranked
+    source = dict(ranked.source if isinstance(ranked.source, dict) else {})
+    support_source = support.source if isinstance(support.source, dict) else {}
+    source.setdefault("support_candidate_id", support.candidate_id)
+    if support_source.get("tool"):
+        source.setdefault("support_tool", support_source.get("tool"))
+    artifacts = list(ranked.artifacts)
+    seen_artifacts = {artifact.path for artifact in artifacts}
+    for artifact in support.artifacts:
+        if artifact.path in seen_artifacts:
+            continue
+        seen_artifacts.add(artifact.path)
+        artifacts.append(artifact)
+    return replace(
+        ranked,
+        sequence=ranked.sequence or support.sequence,
+        structure_path=ranked.structure_path or support.structure_path,
+        scores=_merge_score_namespaces(ranked.scores, support.scores),
+        qc_flags=ranked.qc_flags or support.qc_flags,
+        liabilities=ranked.liabilities or support.liabilities,
+        source=source,
+        artifacts=artifacts or support.artifacts,
+    )
+
+
+def _ranking_manifest_candidates(model: ReportModel) -> list[ReportCandidate]:
+    """Build canonical ranked rows directly from objective_rank node output.
+
+    The collected candidate list may contain raw generator/evaluator aliases
+    that share sequence or candidate_id with ranked rows. The review board uses
+    these objective_rank rows as the manifest whenever they exist, then attaches
+    matching raw rows only as support evidence.
+    """
+
+    ranked: list[ReportCandidate] = []
+    for node in model.graph.nodes:
+        if (node.tool or "").strip().lower() != "objective_rank":
+            continue
+        output = node.output if isinstance(node.output, dict) else {}
+        rows = output.get("ranked_candidates")
+        if not isinstance(rows, list):
+            continue
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            ranked_row = dict(row)
+            ranked_row.setdefault("formula_text", output.get("formula_text"))
+            ranked_row.setdefault("gate_summary", output.get("gate_summary"))
+            ranked_row.setdefault("objective_name", output.get("objective_name"))
+            ranked_row.setdefault("score_direction", output.get("score_direction"))
+            canonical = _ranked_row_candidate(ranked_row, node=node, index=index)
+            support = _unique_support_candidate(canonical, model.candidates)
+            if support is None:
+                support = _unique_support_candidate(canonical, model.final_candidates)
+            ranked.append(
+                _enrich_ranked_candidate(
+                    canonical,
+                    support,
+                )
+            )
+    if not ranked:
+        return list(model.candidates)
+
+    ranked_identities = {_candidate_manifest_identity(candidate) for candidate in ranked}
+    out = list(ranked)
+    for candidate in model.candidates:
+        identity = _candidate_manifest_identity(candidate)
+        if identity and identity in ranked_identities:
+            continue
+        if _unique_support_candidate(candidate, ranked) is not None:
+            continue
+        out.append(candidate)
+    return out
 
 
 def _resolve_final_records(model: ReportModel) -> dict[int, str]:
     """Map ``model.candidates`` indices that are genuinely final → provenance.
 
-    Fragmented designs share one degapped sequence across several candidate
-    records with distinct ``candidate_id``s and no lineage key, so a naive
-    sequence match would promote *every* shard. The resolution is therefore:
-
-    1. **candidate_id match** (``Provenance.EXACT``): a recorded record whose id
-       equals a final pick's id is the submitted record.
-    2. **sequence fallback** (``Provenance.INFERRED``): only for final picks that
-       matched no record by id, credit the *single* best-ranked record sharing
-       the degapped sequence — never the whole shard set.
+    Fragmented designs can share candidate_id or sequence across objective-rank
+    rows. The submitted identity therefore wins in this order:
+    ranked_candidate_id, material_key, structure path, then unique candidate_id.
+    Sequence fallback is allowed only for old submissions that recorded no
+    stronger material key.
     """
-    final_ids: set[str] = {str(fc.candidate_id) for fc in model.final_candidates if fc.candidate_id}
     resolved: dict[int, str] = {}
+    matched_finals: set[int] = set()
 
-    # Pass 1: exact candidate_id match.
-    matched_ids: set[str] = set()
-    for idx, cand in enumerate(model.candidates):
-        cid = str(cand.candidate_id or "")
-        if cid and cid in final_ids:
-            resolved[idx] = Provenance.EXACT
-            matched_ids.add(cid)
+    def unique_match(predicate: Any) -> int | None:
+        matches = [
+            idx
+            for idx, cand in enumerate(model.candidates)
+            if idx not in resolved and predicate(cand)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    # Pass 1: exact submitted material identities.
+    for final_idx, fc in enumerate(model.final_candidates):
+        ranked_id = _submitted_ranked_candidate_id(fc)
+        if ranked_id:
+            match = unique_match(lambda cand: _candidate_ranked_candidate_id(cand) == ranked_id)
+            if match is not None:
+                resolved[match] = Provenance.EXACT
+                matched_finals.add(final_idx)
+                continue
+        material_key = _submitted_material_key(fc)
+        if material_key:
+            match = unique_match(lambda cand: _candidate_material_key(cand) == material_key)
+            if match is not None:
+                resolved[match] = Provenance.EXACT
+                matched_finals.add(final_idx)
+                continue
+        fc_structure = _candidate_structure_identity(fc)
+        if fc_structure:
+            match = unique_match(lambda cand: _candidate_structure_identity(cand) == fc_structure)
+            if match is not None:
+                resolved[match] = Provenance.EXACT
+                matched_finals.add(final_idx)
+                continue
+        fcid = str(fc.candidate_id or "")
+        if fcid:
+            match = unique_match(lambda cand: str(cand.candidate_id or "") == fcid)
+            if match is not None:
+                resolved[match] = Provenance.EXACT
+                matched_finals.add(final_idx)
 
     # Pass 2: sequence fallback, only for final picks unresolved by id. When
     # several records share the submitted sequence, prefer the record carrying
     # the submitted structure/objective-rank evidence over QC-only aliases.
-    for fc in model.final_candidates:
-        fcid = str(fc.candidate_id or "")
-        if fcid and fcid in matched_ids:
+    for final_idx, fc in enumerate(model.final_candidates):
+        if final_idx in matched_finals:
             continue
         seq = _degap(fc.sequence or "")
         if not seq:
@@ -959,6 +1183,12 @@ def _resolve_final_records(model: ReportModel) -> dict[int, str]:
             ]
             if structure_matches:
                 candidates = structure_matches
+            else:
+                # A submitted final with an explicit structure is already the
+                # authoritative material. Do not promote an older raw row just
+                # because it shares the binder sequence; doing so can attach
+                # the final rationale to preliminary triage metrics.
+                continue
         best = min(candidates, key=lambda i: _final_fallback_sort_key(model.candidates[i]))
         resolved[best] = Provenance.INFERRED
     return resolved
@@ -1331,7 +1561,15 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
     """Derive the candidate-centric :class:`ReportReviewModel` from a report."""
     workflow_type = detect_workflow_type(model)
     ordered_nodes = _topo_order(list(model.graph.nodes))
-    final_map = _resolve_final_records(model)
+    manifest_candidates = _ranking_manifest_candidates(model)
+    has_ranking_manifest = any(
+        (node.tool or "").strip().lower() == "objective_rank"
+        and isinstance(node.output, dict)
+        and isinstance(node.output.get("ranked_candidates"), list)
+        for node in model.graph.nodes
+    )
+    manifest_model = replace(model, candidates=manifest_candidates) if has_ranking_manifest else model
+    final_map = _resolve_final_records(manifest_model)
     scoring_ranks = _scoring_rank_map(model)
     top_ranked_id = next((cid for cid, rank in scoring_ranks.items() if rank == 1), None)
 
@@ -1345,19 +1583,35 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
             scoring_rank=_candidate_scoring_rank(candidate, scoring_ranks),
             top_ranked_id=top_ranked_id,
         )
-        for idx, candidate in enumerate(model.candidates)
+        for idx, candidate in enumerate(manifest_model.candidates)
     ]
 
     # A final pick may be recorded as its own candidate record that never appears
     # in ``model.candidates`` (distinct id *and* sequence — a genuinely disjoint
     # submission record). The submitted design must never be missing from the
     # board, so synthesise a FINAL bundle directly from any such record.
-    represented_ids = {str(model.candidates[i].candidate_id or "") for i in final_map} - {""}
-    represented_seqs = {_degap(model.candidates[i].sequence or "") for i in final_map} - {""}
+    represented_identities = {
+        _candidate_manifest_identity(manifest_model.candidates[i])
+        for i in final_map
+    } - {""}
+    represented_ids = {
+        str(manifest_model.candidates[i].candidate_id or "") for i in final_map
+    } - {""}
+    represented_seqs = {
+        _degap(manifest_model.candidates[i].sequence or "") for i in final_map
+    } - {""}
     for fc in model.final_candidates:
         fcid = str(fc.candidate_id or "")
         fseq = _degap(fc.sequence or "")
-        if (fcid and fcid in represented_ids) or (fseq and fseq in represented_seqs):
+        f_identity = _candidate_manifest_identity(fc)
+        strong_identity = _strong_candidate_manifest_identity(fc)
+        if strong_identity:
+            if f_identity in represented_identities:
+                continue
+        elif (
+            (fcid and fcid in represented_ids)
+            or (fseq and fseq in represented_seqs and not (fc.structure_path or "").strip())
+        ):
             continue
         bundles.append(
             _build_bundle(
@@ -1370,6 +1624,8 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
                 top_ranked_id=top_ranked_id,
             )
         )
+        if f_identity:
+            represented_identities.add(f_identity)
         if fcid:
             represented_ids.add(fcid)
         if fseq:
@@ -1377,11 +1633,11 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
 
     board_groups = _build_board_groups(bundles, workflow_type)
     return ReportReviewModel(
-        base=model,
+        base=manifest_model,
         workflow_type=workflow_type,
         board_groups=board_groups,
         bundles=bundles,
-        grouping_policy="raw",
+        grouping_policy="ranking_manifest" if manifest_candidates != list(model.candidates) else "raw",
     )
 
 
