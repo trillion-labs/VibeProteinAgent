@@ -1,7 +1,7 @@
 name: boltz2_affinity
 version: "2.0.0"
 category: structure_prediction
-description: "Predicts 3D structure of a protein-ligand or general biomolecular complex and emits a calibrated binding-affinity score for a designated binder chain. Input: Boltz YAML or inline typed sequences (protein/RNA/DNA/ligand). Prefer over `protenix_v2` when affinity is also needed."
+description: "Predicts a Boltz-2 complex structure and calibrated affinity for a designated small-molecule ligand chain. Do not use for protein-protein binder affinity; use ipSAE, PRODIGY, PyRosetta, or structure-confidence tools instead."
 runtime: python
 backend: pytorch
 gpu_required: true

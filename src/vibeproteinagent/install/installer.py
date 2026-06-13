@@ -3440,6 +3440,22 @@ try:
         "reason": availability.get("availability_reason"),
         "availability": availability,
     }}
+    if {encoded_name} == "proteina_complexa" and payload["ready"]:
+        from vibeproteinagent.adapters import _proteina_complexa_common as common
+
+        deep_reason = common.jax_dnn_skip_reason()
+        details = payload["availability"].setdefault("availability_details", {{}})
+        details["deep_runtime_probe"] = {{
+            "name": "proteina_complexa_jax_gpu_dnn",
+            "ready": deep_reason is None,
+            "reason": deep_reason,
+        }}
+        if deep_reason:
+            payload["ready"] = False
+            payload["reason"] = deep_reason
+            payload["availability"]["available"] = False
+            payload["availability"]["availability_status"] = "unavailable"
+            payload["availability"]["availability_reason"] = deep_reason
 except Exception as exc:
     payload = {{
         "ready": False,

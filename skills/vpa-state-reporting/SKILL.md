@@ -50,6 +50,9 @@ Prefer final submissions that reference enriched/ranked candidates carrying the
 selected evidence. Submitting an earlier sequence-only candidate can make the
 final dossier look incomplete even when downstream structure or scoring jobs
 exist elsewhere in the trajectory.
+If `vpa report` fails preflight because an accepted submission cannot be joined
+to `objective_rank` evidence, re-submit using the ranked candidate row,
+`ranked_candidate_id`, or another recorded stable identity, then render again.
 
 ## Evidence
 

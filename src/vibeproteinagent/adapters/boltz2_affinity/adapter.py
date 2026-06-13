@@ -44,9 +44,10 @@ from vibeproteinagent.adapters.msa_policy import (
     yaml_file_has_prepared_msa,
 )
 from vibeproteinagent.candidates.chain_roles import chain_role_entry
-from vibeproteinagent.candidates.schema import stable_candidate_id
+from vibeproteinagent.candidates.schema import source_job_ids, stable_candidate_id
 from vibeproteinagent.core.compat import ensure_rdkit_allchem_descriptors
 from vibeproteinagent.core.config import vpa_home
+from vibeproteinagent.core.errors import InvalidParamsError
 from vibeproteinagent.core.torch_compat import allow_full_torch_load
 
 # --------------------------------------------------------------------------- paths
@@ -129,7 +130,7 @@ class Boltz2AffinityInput(BaseModel):
         default=None,
         description=(
             "Absolute path to a Boltz-format input YAML "
-            "(protein + ligand + affinity block)."
+            "(protein target + small-molecule ligand affinity block)."
         ),
     )
     sequences: list[dict[str, Any]] | None = Field(
@@ -139,7 +140,10 @@ class Boltz2AffinityInput(BaseModel):
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     binder_chain: str | None = Field(
         default=None,
-        description="Chain id of the binder ligand to score (only used with `sequences`).",
+        description=(
+            "Chain id of the small-molecule ligand to score "
+            "(only used with `sequences`)."
+        ),
     )
     seeds: list[int] = Field(default_factory=lambda: [42], min_length=1)
     recycling_steps: int = Field(default=3, ge=1, le=20)
@@ -170,26 +174,30 @@ class Boltz2AffinityInput(BaseModel):
         out = dict(data)
         if out.get("input_yaml") is not None or out.get("sequences") is not None:
             return out
-        sequences = []
-        for index, candidate in enumerate(candidates):
-            sequence = candidate.get("sequence")
-            if not sequence:
-                raise ValueError(
-                    "boltz2_affinity canonical Candidate[] input requires sequence "
-                    "when input_yaml/sequences are not provided"
-                )
-            chain_id = chr(ord("A") + index)
-            sequences.append({"type": "protein", "id": chain_id, "sequence": sequence})
-        out["sequences"] = sequences
-        out.setdefault("binder_chain", sequences[-1]["id"])
-        return out
+        raise ValueError(
+            "boltz2_affinity canonical Candidate[] cannot be used as the only "
+            "input source because Boltz-2 affinity requires an explicit "
+            "small-molecule ligand binder. Provide input_yaml or sequences with "
+            "a ligand affinity binder; for protein-protein binders use ipSAE, "
+            "PRODIGY, PyRosetta, or structure-confidence tools instead."
+        )
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> Boltz2AffinityInput:
         if (self.input_yaml is None) == (self.sequences is None):
             raise ValueError("provide exactly one of input_yaml or sequences")
         if self.sequences is not None and self.binder_chain is None:
-            raise ValueError("binder_chain is required when sequences is provided")
+            self.binder_chain = _inline_binder_chain_from_flags(self.sequences)
+        if self.sequences is not None and self.binder_chain is None:
+            raise ValueError(
+                "binder_chain is required when sequences is provided "
+                "unless exactly one sequence entry has binder=true"
+            )
+        if self.sequences is not None and self.binder_chain is not None:
+            _validate_affinity_binder_is_ligand(
+                _inline_sequence_kind_by_id(self.sequences),
+                self.binder_chain,
+            )
         return self
 
 
@@ -401,6 +409,7 @@ def _stage_input(params: Boltz2AffinityInput, dest_dir: Path) -> Path:
                 f"input_yaml at {src} does not look like a Boltz input: "
                 f"missing top-level 'sequences' key"
             )
+        _validate_boltz_affinity_yaml(doc)
         if not params.use_msa or params.msa_backend == "none":
             doc = _force_single_sequence_msa(doc)
             target.write_text(yaml.safe_dump(doc, sort_keys=False))
@@ -430,6 +439,7 @@ def _stage_input(params: Boltz2AffinityInput, dest_dir: Path) -> Path:
     doc: dict[str, Any] = {"version": 1, "sequences": sequences}
     if params.binder_chain is not None:
         doc["properties"] = [{"affinity": {"binder": params.binder_chain}}]
+    _validate_boltz_affinity_yaml(doc)
     target.write_text(yaml.safe_dump(doc, sort_keys=False))
     return target
 
@@ -473,6 +483,22 @@ def _collect_outputs(job_outputs: Path, record_stem: str) -> dict[str, Any]:
     results_dir = job_outputs / f"boltz_results_{record_stem}"
     pred_dir = results_dir / "predictions" / record_stem
     if not pred_dir.is_dir():
+        manifest = _load_boltz_manifest(results_dir)
+        if manifest is not None and manifest.get("records") == []:
+            manifest_path = results_dir / "processed" / "manifest.json"
+            raise InvalidParamsError(
+                "Boltz-2 affinity preprocessing produced zero prediction records; "
+                "the staged YAML was not accepted as a runnable affinity input. "
+                "For protein-protein binders, use interface metrics such as "
+                "ipSAE, PRODIGY, PyRosetta, or structure-confidence tools instead "
+                "of boltz2_affinity.",
+                details={
+                    "record_stem": record_stem,
+                    "results_dir": str(results_dir),
+                    "manifest_path": str(manifest_path),
+                    "record_count": 0,
+                },
+            )
         raise RuntimeError(
             f"Boltz did not produce a predictions directory at {pred_dir}. "
             f"Check {results_dir} for error logs."
@@ -525,6 +551,120 @@ def _collect_outputs(job_outputs: Path, record_stem: str) -> dict[str, Any]:
     }
 
 
+def _validate_boltz_affinity_yaml(doc: dict[str, Any]) -> None:
+    binders = _affinity_binders(doc)
+    if not binders:
+        raise ValueError(
+            "boltz2_affinity requires a top-level properties affinity binder "
+            "(properties: [{affinity: {binder: <ligand_chain_id>}}])"
+        )
+    kind_by_id = _yaml_sequence_kind_by_id(doc)
+    for binder in binders:
+        _validate_affinity_binder_is_ligand(kind_by_id, binder)
+
+
+def _affinity_binders(doc: dict[str, Any]) -> list[str]:
+    binders: list[str] = []
+    properties = doc.get("properties")
+    if not isinstance(properties, list):
+        return binders
+    for item in properties:
+        if not isinstance(item, dict):
+            continue
+        affinity = item.get("affinity")
+        if not isinstance(affinity, dict):
+            continue
+        binder = affinity.get("binder")
+        if isinstance(binder, str) and binder:
+            binders.append(binder)
+        elif binder is not None:
+            raise ValueError("boltz2_affinity affinity binder must be a single chain id")
+    return binders
+
+
+def _yaml_sequence_kind_by_id(doc: dict[str, Any]) -> dict[str, str]:
+    sequences = doc.get("sequences")
+    if not isinstance(sequences, list):
+        raise ValueError("boltz2_affinity input YAML requires a sequences list")
+    kind_by_id: dict[str, str] = {}
+    for entry in sequences:
+        if not isinstance(entry, dict) or not entry:
+            continue
+        kind = str(next(iter(entry.keys()))).lower()
+        body = entry.get(kind)
+        if isinstance(body, dict):
+            _record_sequence_ids(kind_by_id, kind, body.get("id"))
+    return kind_by_id
+
+
+def _inline_sequence_kind_by_id(sequences: list[dict[str, Any]]) -> dict[str, str]:
+    kind_by_id: dict[str, str] = {}
+    for entry in sequences:
+        kind = str(entry.get("type") or "").lower()
+        _record_sequence_ids(kind_by_id, kind, entry.get("id"))
+    return kind_by_id
+
+
+def _inline_binder_chain_from_flags(sequences: list[dict[str, Any]]) -> str | None:
+    flagged: list[str] = []
+    for entry in sequences:
+        if entry.get("binder") is not True:
+            continue
+        chain_ids = entry.get("id")
+        if isinstance(chain_ids, str):
+            flagged.append(chain_ids)
+        elif isinstance(chain_ids, list) and len(chain_ids) == 1 and isinstance(chain_ids[0], str):
+            flagged.append(chain_ids[0])
+        else:
+            raise ValueError(
+                "boltz2_affinity binder=true must identify exactly one chain id"
+            )
+    if not flagged:
+        return None
+    if len(flagged) > 1:
+        raise ValueError("boltz2_affinity accepts exactly one binder=true entry")
+    return flagged[0]
+
+
+def _record_sequence_ids(kind_by_id: dict[str, str], kind: str, ids: Any) -> None:
+    if isinstance(ids, str):
+        kind_by_id[ids] = kind
+    elif isinstance(ids, list):
+        for item in ids:
+            if isinstance(item, str):
+                kind_by_id[item] = kind
+
+
+def _validate_affinity_binder_is_ligand(
+    kind_by_id: dict[str, str],
+    binder_chain: str,
+) -> None:
+    kind = kind_by_id.get(binder_chain)
+    if kind is None:
+        raise ValueError(
+            f"boltz2_affinity binder_chain {binder_chain!r} does not match any "
+            f"sequence id; available ids={sorted(kind_by_id)}"
+        )
+    if kind != "ligand":
+        raise ValueError(
+            "boltz2_affinity only supports affinity scoring for small-molecule "
+            f"ligand chains; binder_chain {binder_chain!r} is a {kind!r} entity. "
+            "For protein-protein binders, use ipSAE, PRODIGY, PyRosetta, or "
+            "structure-confidence tools instead."
+        )
+
+
+def _load_boltz_manifest(results_dir: Path) -> dict[str, Any] | None:
+    manifest_path = results_dir / "processed" / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _is_canonical_candidate(item: Any) -> bool:
     return isinstance(item, dict) and item.get("schema_version") == "candidate_v1"
 
@@ -537,12 +677,13 @@ def _boltz2_affinity_candidates(
     source = _select_source_candidate(params)
     sequence = source.get("sequence") if isinstance(source, dict) else None
     if not sequence:
-        sequence = _protein_sequence_for_chain(params, params.binder_chain)
+        sequence = _candidate_identity_sequence(params)
     local_id = (
         _source_local_id(source, "boltz2_affinity_0000")
         if isinstance(source, dict)
         else "boltz2_affinity_0000"
     )
+    source_jobs = source_job_ids(source) if isinstance(source, dict) else []
     if _is_canonical_candidate(source):
         candidate = {
             key: value
@@ -566,6 +707,12 @@ def _boltz2_affinity_candidates(
             "candidate_id": stable_candidate_id(
                 "boltz2_affinity",
                 local_id,
+                source_candidate_id=(
+                    str(source.get("candidate_id"))
+                    if isinstance(source, dict) and source.get("candidate_id")
+                    else None
+                ),
+                source_job_id=source_jobs[0] if source_jobs else None,
                 sequence=sequence,
                 structure_path=predicted_cif,
                 index=0,
@@ -593,6 +740,20 @@ def _boltz2_affinity_candidates(
         artifact["complex_chains"] = complex_rows
     candidate.setdefault("artifacts", {})["boltz2_affinity"] = artifact
     return [candidate]
+
+
+def _candidate_identity_sequence(params: Boltz2AffinityInput) -> str | None:
+    """Choose the protein material sequence used for raw-input candidate identity."""
+
+    chain_sequence = _protein_sequence_for_chain(params, params.binder_chain)
+    if chain_sequence:
+        return chain_sequence
+    protein_sequences = sorted(_protein_sequences_from_params(params))
+    if len(protein_sequences) == 1:
+        return protein_sequences[0]
+    if protein_sequences:
+        return "|".join(protein_sequences)
+    return None
 
 
 def _select_source_candidate(params: Boltz2AffinityInput) -> dict[str, Any]:

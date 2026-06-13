@@ -35,7 +35,7 @@
     "score_formula": {
       "type": "string",
       "minLength": 1,
-      "description": "Restricted formula DSL using metric placeholders such as ${pyrosetta.mean_ddg}. Supports +, -, *, /, parentheses, min, max, abs, and clamp.",
+      "description": "Restricted formula DSL using metric placeholders such as ${pyrosetta.mean_ddg}. Supports +, -, *, /, parentheses, min, max, abs, sqrt, log, log10, log2, exp, and clamp.",
       "examples": ["-1 * ${pyrosetta.mean_ddg}"]
     },
     "score_direction": {

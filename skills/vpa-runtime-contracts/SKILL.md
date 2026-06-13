@@ -48,12 +48,19 @@ manual table or transcript-only calculation as the sole final-selection
 evidence. Put evidence in tool output or a structured recorded artifact.
 Raw manual complex JSON/path evidence is diagnostic until it is reattached to
 the logical candidate through canonical `candidates` output and `objective_rank`.
+Evaluator-local ids are not global design ids when they can collide across
+jobs. Preserve upstream candidate identity, source job ids, and material
+identity through merge, rank, and submit.
 
 ## Reporting
 
 Reports are read-only over jobs, workflows, artifacts, candidate records, and
 legacy history. They must not create agent state, launch enrichment jobs by
 default, invent final selections, or be hand-edited as HTML.
+Final report preflight should be able to join accepted submissions to recorded
+`objective_rank` rows when rank evidence exists. If the join is ambiguous,
+record a better identifier through `submit_candidate` instead of explaining the
+match in prose.
 
 ## Audit
 

@@ -50,8 +50,9 @@ from .models import (
     WorkflowType,
 )
 from .plots import PLDDT_HOVER_JS
-from .review import build_review_model, classify_tool_role
+from .review import build_review_model, classify_tool_role, classify_workflow_stage_key
 from .view_models import (
+    AgentRationaleItem,
     AgentRationaleViewModel,
     CandidateBoardRow,
     CandidateBoardViewModel,
@@ -405,7 +406,12 @@ def _board_metric_parts(bundle: CandidateEvidenceBundle) -> tuple[str, str, str]
     candidate's composite score when no scored family exists.
     """
     by_family = {g.family: g for g in bundle.score_groups}
-    for fam in ("Structure confidence", "Interface & binding", "Sequence biophysics", "Novelty & similarity"):
+    for fam in (
+        "Structure confidence",
+        "Interface & binding",
+        "Sequence biophysics",
+        "Novelty & similarity",
+    ):
         grp = by_family.get(fam)
         if grp and grp.metrics:
             label, value, unit, source = grp.metrics[0]
@@ -428,8 +434,10 @@ def _board_card(bundle: CandidateEvidenceBundle, row: CandidateBoardRow | None =
     dom = _structure_dom_id(cand.candidate_id)
     status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
     is_final = bundle.status == CandidateStatus.FINAL
-    display_rank = row.rank if row is not None else (
-        bundle.display_rank if bundle.display_rank is not None else cand.rank
+    display_rank = (
+        row.rank
+        if row is not None
+        else (bundle.display_rank if bundle.display_rank is not None else cand.rank)
     )
     if display_rank is not None:
         rank_cell = f'<span class="crow-rank-num">{display_rank}</span>'
@@ -451,17 +459,17 @@ def _board_card(bundle: CandidateEvidenceBundle, row: CandidateBoardRow | None =
         f'<span class="candidate-card-title">'
         f'<span class="board-row-id" title="{_attr(cand.candidate_id)}">{_h(_short(cand.candidate_id, 32))}</span>'
         f'<span class="board-row-status status-badge status-badge-{status_cls}">{_h(row_status)}</span>'
-        f'</span>'
-        f'</span>'
+        f"</span>"
+        f"</span>"
         f'<span class="board-row-verdict">{_h(verdict)}</span>'
         f'<span class="board-row-metrics">{chips}</span>'
         f'<span class="board-row-footer">'
         f'<span class="candidate-assets">'
         f'<span class="asset-pill{" is-on" if has_structure else " is-missing"}">{_h(structure_note)}</span>'
         f'<span class="asset-pill{" is-on" if has_downloads else " is-missing"}">{_h(download_note)}</span>'
-        f'</span>'
+        f"</span>"
         f'<strong class="open-dossier-action">Open dossier</strong>'
-        f'</span>'
+        f"</span>"
         f"</button>"
     )
 
@@ -471,8 +479,7 @@ def _board_html(review: ReportReviewModel, board: CandidateBoardViewModel | None
     groups: list[str] = []
     for group in review.board_groups:
         cards = "".join(
-            _board_card(b, rows_by_id.get(b.candidate.candidate_id))
-            for b in group.bundles
+            _board_card(b, rows_by_id.get(b.candidate.candidate_id)) for b in group.bundles
         )
         # Incomplete / failed / rejected groups are marked ``collapsed`` by the
         # review layer: on a large retrieval/semantic run dozens of un-evaluated
@@ -615,15 +622,19 @@ def _score_family_grid(
     groups = _ordered_score_groups_for_preset(bundle.score_groups, preset)
     cards: list[str] = []
     for group in groups:
+        metric_count = len(group.metrics)
         rows = "".join(
             _score_family_metric_bar(group.family, label, value, unit, src)
             for label, value, unit, src in group.metrics
         )
         family_cls = _score_family_class(group.family)
+        body_cls = "score-family-body"
+        if metric_count >= 4:
+            body_cls += " is-scrollable"
         cards.append(
             f'<div class="score-family {family_cls}"><div class="score-family-head">'
             f'<span class="score-family-name">{_h(group.family)}</span>{_prov_chip(group.provenance)}</div>'
-            f'<div class="score-family-body">{rows}</div></div>'
+            f'<div class="{body_cls}" data-metric-count="{metric_count}">{rows}</div></div>'
         )
     body = "".join(cards) or '<p class="empty">No scored metrics for this candidate.</p>'
     return f'<div class="score-grid">{body}</div>'
@@ -658,26 +669,19 @@ def _score_family_metric_bar(
         f'<div class="metric-bar-row {_score_family_class(family)}{missing_cls}{categorical_cls}">'
         '<div class="metric-bar-top">'
         f'<span class="metric-label">{_h(label)}'
-        f'{f"<span class=\"metric-src\">{_h(source)}</span>" if source else ""}</span>'
-        f'{value_markup}'
-        '</div>'
-        f'{meter}'
-        '</div>'
+        f"{f'<span class="metric-src">{_h(source)}</span>' if source else ''}</span>"
+        f"{value_markup}"
+        "</div>"
+        f"{meter}"
+        "</div>"
     )
 
 
 def _categorical_metric_value_markup(value: str) -> str:
-    items = [
-        item.strip()
-        for item in re.split(r"\s*,\s*", str(value or ""))
-        if item.strip()
-    ]
+    items = [item.strip() for item in re.split(r"\s*,\s*", str(value or "")) if item.strip()]
     if not items:
         items = [str(value or "")]
-    tokens = "".join(
-        f'<span class="metric-token">{_h(item)}</span>'
-        for item in items[:8]
-    )
+    tokens = "".join(f'<span class="metric-token">{_h(item)}</span>' for item in items[:8])
     if len(items) > 8:
         tokens += f'<span class="metric-token metric-token-more">+{len(items) - 8}</span>'
     return f'<span class="metric-token-list">{tokens}</span>'
@@ -735,15 +739,20 @@ def _dossier_risk_missing_grid(
 ) -> str:
     risks = _bundle_risk_notes(bundle)
     missing = _bundle_missing_evidence_labels(bundle, preset)
-    risk_items = "".join(f"<li>{_h(item)}</li>" for item in risks) or "<li>No recorded risk notes.</li>"
-    missing_items = "".join(f"<li>{_h(item)}</li>" for item in missing) or "<li>No blocking missing evidence detected.</li>"
+    risk_items = (
+        "".join(f"<li>{_h(item)}</li>" for item in risks) or "<li>No recorded risk notes.</li>"
+    )
+    missing_items = (
+        "".join(f"<li>{_h(item)}</li>" for item in missing)
+        or "<li>No blocking missing evidence detected.</li>"
+    )
     return (
         '<div class="dossier-alert-grid">'
         '<div class="dossier-alert dossier-risk"><h4>Risk Notes</h4>'
-        f'<ul>{risk_items}</ul></div>'
+        f"<ul>{risk_items}</ul></div>"
         '<div class="dossier-alert dossier-missing"><h4>Missing Evidence</h4>'
-        f'<ul>{missing_items}</ul></div>'
-        '</div>'
+        f"<ul>{missing_items}</ul></div>"
+        "</div>"
     )
 
 
@@ -770,18 +779,30 @@ def _bundle_missing_evidence_labels(
     families = {group.family for group in bundle.score_groups}
     missing: list[str] = []
     if workflow_type == WorkflowType.RETRIEVAL:
-        if not (bundle.score_groups or bundle.artifacts or bundle.tool_evidence or bundle.msa_blocks):
+        if not (
+            bundle.score_groups or bundle.artifacts or bundle.tool_evidence or bundle.msa_blocks
+        ):
             missing.append("retrieved evidence or source coverage")
         return _dedupe_text(missing)
-    if workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO} and not bundle.candidate.structure_path:
+    if (
+        workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO}
+        and not bundle.candidate.structure_path
+    ):
         missing.append("structure")
     if workflow_type == WorkflowType.BINDER and "Interface & binding" not in families:
         missing.append("interface and binding metrics")
-    if workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO} and "Structure confidence" not in families:
+    if (
+        workflow_type in {WorkflowType.BINDER, WorkflowType.DENOVO}
+        and "Structure confidence" not in families
+    ):
         missing.append("structure confidence metrics")
     if "Sequence biophysics" not in families:
         missing.append("sequence biophysics metrics")
-    if workflow_type != WorkflowType.GENERIC and not bundle.msa_blocks and "Novelty & similarity" not in families:
+    if (
+        workflow_type != WorkflowType.GENERIC
+        and not bundle.msa_blocks
+        and "Novelty & similarity" not in families
+    ):
         missing.append("novelty or similarity evidence")
     return _dedupe_text(missing)
 
@@ -798,7 +819,9 @@ def _dedupe_text(values: list[str]) -> list[str]:
     return out
 
 
-def _bundle_metric(bundle: CandidateEvidenceBundle, target_label: str) -> tuple[str, str | None, str, str] | None:
+def _bundle_metric(
+    bundle: CandidateEvidenceBundle, target_label: str
+) -> tuple[str, str | None, str, str] | None:
     target = _metric_label_for_display(target_label)
     for group in bundle.score_groups:
         for label, value, unit, source in group.metrics:
@@ -859,7 +882,9 @@ def _dossier_verdict(
         lead += " with strong recorded binding-interface evidence"
     elif workflow_type == WorkflowType.BINDER and usable_interface:
         lead += " with usable recorded binding-interface evidence"
-    elif workflow_type == WorkflowType.RETRIEVAL and (bundle.score_groups or bundle.artifacts or bundle.msa_blocks):
+    elif workflow_type == WorkflowType.RETRIEVAL and (
+        bundle.score_groups or bundle.artifacts or bundle.msa_blocks
+    ):
         lead += " with recorded retrieval evidence"
     elif workflow_type == WorkflowType.RETRIEVAL and bundle.status == CandidateStatus.FINAL:
         lead += " with recorded final retrieval-hit status"
@@ -911,16 +936,14 @@ def _dossier_decision_points(
 def _dossier_summary_panel(
     bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
 ) -> str:
-    points = "".join(
-        f"<li>{_h(point)}</li>" for point in _dossier_decision_points(bundle, preset)
-    )
+    points = "".join(f"<li>{_h(point)}</li>" for point in _dossier_decision_points(bundle, preset))
     return (
         '<div class="dossier-summary-panel">'
         '<div><p class="saas-card-kicker">Why this candidate?</p>'
         f'<p class="dossier-verdict">{_h(_dossier_verdict(bundle, preset))}</p></div>'
         f'<ul class="dossier-decision-points">{points}</ul>'
-        f'{_prov_chip(Provenance.DERIVED, title="Summary derived from recorded candidate status, metrics, risks, and missing evidence.")}'
-        '</div>'
+        f"{_prov_chip(Provenance.DERIVED, title='Summary derived from recorded candidate status, metrics, risks, and missing evidence.')}"
+        "</div>"
     )
 
 
@@ -937,40 +960,33 @@ def _detail_template(
         f'<div class="cand-detail-head status-{status_cls}">'
         f'<div class="cand-detail-id"><span class="cand-detail-eyebrow">{_h(status_label)}</span>'
         f'<h3 title="{_attr(cand.candidate_id)}">{_h(_short(cand.candidate_id, 40))}</h3>'
-        f'{rank_note}</div>'
+        f"{rank_note}</div>"
         f"</div>"
     )
     chain_context = _chain_context_for(cand)
     if has_structure:
         primary_media = (
-            '<div class="dossier-structure-primary">'
-            f'{_viewer_block(cand, chain_context)}'
-            '</div>'
+            f'<div class="dossier-structure-primary">{_viewer_block(cand, chain_context)}</div>'
         )
     else:
         primary_media = (
             '<div class="dossier-structure-primary dossier-no-structure">'
             '<div class="viewer-empty">No structure artifact linked for this candidate.</div>'
-            f'{_candidate_sequence_block(cand, chain_context)}'
-            '</div>'
+            f"{_candidate_sequence_block(cand, chain_context)}"
+            "</div>"
         )
     evidence_primary = (
         '<aside class="dossier-evidence-primary">'
-        '<h4>Evidence Families</h4>'
-        f'{_score_family_grid(bundle, preset)}'
-        '</aside>'
+        "<h4>Evidence Families</h4>"
+        f"{_score_family_grid(bundle, preset)}"
+        "</aside>"
     )
-    primary = (
-        '<div class="candidate-dossier-primary">'
-        f'{primary_media}'
-        f'{evidence_primary}'
-        '</div>'
-    )
+    primary = f'<div class="candidate-dossier-primary">{primary_media}{evidence_primary}</div>'
     return (
         f'<template class="cand-detail-tpl" data-cand="{_attr(dom)}">'
         f'<div class="cand-detail-inner">{head}'
-        f'{primary}'
-        f'{_dossier_risk_missing_grid(bundle, preset)}'
+        f"{primary}"
+        f"{_dossier_risk_missing_grid(bundle, preset)}"
         f"</div></template>"
     )
 
@@ -1005,17 +1021,8 @@ def _review_console_section(
     meta = " · ".join(meta_bits) or f"{len(review.bundles)} candidates"
     board = _board_html(review, board_vm)
     templates = "".join(_detail_template(b, preset) for b in review.bundles)
-    ranking_caption = (
-        getattr(board_vm, "ranking_basis_caption", "") if board_vm is not None else ""
-    )
-    ranking_caption_html = (
-        f'<p class="saas-section-subtitle candidate-ranking-caption">{_h(ranking_caption)}</p>'
-        if ranking_caption
-        else ""
-    )
-    override_note = (
-        getattr(board_vm, "objective_override_note", "") if board_vm is not None else ""
-    )
+    ranking_caption_html = _candidate_ranking_basis_html(board_vm)
+    override_note = getattr(board_vm, "objective_override_note", "") if board_vm is not None else ""
     override_note_html = (
         f'<p class="saas-section-subtitle candidate-ranking-caption">{_h(override_note)}</p>'
         if override_note
@@ -1045,6 +1052,40 @@ def _review_console_section(
   {banner}
   {console_body}
 </section>"""
+
+
+def _candidate_ranking_basis_html(board_vm: CandidateBoardViewModel | None) -> str:
+    if board_vm is None:
+        return ""
+    basis = getattr(board_vm, "ranking_basis", None)
+    if basis is None:
+        caption = str(getattr(board_vm, "ranking_basis_caption", "") or "").strip()
+        return (
+            f'<p class="saas-section-subtitle candidate-ranking-caption">{_h(caption)}</p>'
+            if caption
+            else ""
+        )
+    fallback = str(getattr(basis, "fallback_text", "") or "").strip()
+    if fallback:
+        return f'<p class="saas-section-subtitle candidate-ranking-caption">{_h(fallback)}</p>'
+    objective = str(getattr(basis, "objective_name", "") or "objective").strip()
+    method = str(getattr(basis, "method", "") or "objective_rank").strip()
+    formula = str(getattr(basis, "score_formula", "") or "recorded formula").strip()
+    direction = str(getattr(basis, "score_direction", "") or "higher").strip()
+    gates = [str(gate).strip() for gate in getattr(basis, "gates", []) if str(gate).strip()]
+    gate_text = "; ".join(gates) if gates else "No gates recorded"
+    label = (
+        f"Ranking basis: {method} for {objective}. Gates: {gate_text}. "
+        f"Score: {formula}; {direction} is better."
+    )
+    return f"""<div class="candidate-ranking-panel" aria-label="{_attr(label)}">
+      <div class="candidate-ranking-head">
+        <span class="candidate-ranking-label">Ranking basis</span>
+        <span class="candidate-ranking-meta"><strong>{_h(method)}</strong><span>{_h(objective)}</span><span>{_h(direction)} is better</span></span>
+      </div>
+      <p class="candidate-ranking-line"><b>Gates</b><span>{_h(gate_text)}</span></p>
+      <p class="candidate-ranking-line"><b>Score</b><code>{_h(formula)}</code></p>
+    </div>"""
 
 
 def _no_acceptable_candidate_banner(reason: str) -> str:
@@ -1129,20 +1170,18 @@ def _saas_overview_section(vm: OverviewViewModel) -> str:
         f'<span class="saas-stat-value">{_h(count.value)}</span>'
         f'<span class="saas-stat-label">{_h(count.label)}</span>'
         f'<span class="saas-stat-detail">{_h(count.detail)}</span>'
-        f'{_prov_chip(count.provenance)}'
+        f"{_prov_chip(count.provenance)}"
         f"</div>"
         for count in vm.counts
     )
     caveat = (
         f'<div class="saas-card saas-caveat"><p class="saas-card-kicker">Main Caveat</p>'
-        f'<p>{_h(vm.main_caveat)}</p>{_prov_chip(vm.caveat_provenance)}</div>'
+        f"<p>{_h(vm.main_caveat)}</p>{_prov_chip(vm.caveat_provenance)}</div>"
         if vm.main_caveat
         else '<div class="saas-card saas-caveat saas-caveat-ok"><p class="saas-card-kicker">Main Caveat</p><p>No blocking caveat recorded.</p></div>'
     )
     count_warning = (
-        f'<p class="saas-count-warning">{_h(vm.count_warning)}</p>'
-        if vm.count_warning
-        else ""
+        f'<p class="saas-count-warning">{_h(vm.count_warning)}</p>' if vm.count_warning else ""
     )
     return f"""<section id="overview" class="card saas-section saas-overview">
   <header class="card-header saas-title-row">
@@ -1169,9 +1208,9 @@ def _overview_summary_card(title: str, body: str, icon_name: str) -> str:
         '<div class="saas-icon-card-head">'
         f'<span class="overview-card-icon">{_icon_svg(icon_name)}</span>'
         f'<p class="saas-card-kicker">{_h(title)}</p>'
-        '</div>'
-        f'{_overview_summary_body_html(title, body)}'
-        '</div>'
+        "</div>"
+        f"{_overview_summary_body_html(title, body)}"
+        "</div>"
     )
 
 
@@ -1183,10 +1222,7 @@ def _overview_summary_body_html(title: str, body: str) -> str:
         objective_sections = _overview_objective_sections(text)
         if objective_sections:
             blocks = "".join(
-                '<div class="overview-objective-block">'
-                f"<b>{_h(label)}</b>"
-                f"<p>{_h(value)}</p>"
-                "</div>"
+                f'<div class="overview-objective-block"><b>{_h(label)}</b><p>{_h(value)}</p></div>'
                 for label, value in objective_sections
                 if value
             )
@@ -1195,7 +1231,9 @@ def _overview_summary_body_html(title: str, body: str) -> str:
     if len(segments) <= 1:
         return f'<div class="overview-summary-body"><p>{_h(text)}</p></div>'
     items = "".join(f"<li>{_h(segment)}</li>" for segment in segments)
-    return f'<div class="overview-summary-body"><ul class="overview-summary-list">{items}</ul></div>'
+    return (
+        f'<div class="overview-summary-body"><ul class="overview-summary-list">{items}</ul></div>'
+    )
 
 
 def _overview_objective_sections(text: str) -> list[tuple[str, str]]:
@@ -1212,12 +1250,12 @@ def _overview_objective_sections(text: str) -> list[tuple[str, str]]:
 
 def _split_overview_labeled_pair(text: str) -> tuple[str, str]:
     labels = [
-        ("Objective", re.compile(r"(?i)(?<!\w)objective\s*:?\s*")),
+        ("Objective", re.compile(r"(?i)(?<!\w)objective\s*:\s*")),
         (
             "Acceptance criteria",
             re.compile(
-                r"(?i)(?<!\w)(acceptance criteria|acceptance|accept if|"
-                r"thresholds/criteria|thresholds|criteria)\s*:?\s*"
+                r"(?i)(?<!\w)(acceptance criteria|thresholds/criteria|"
+                r"thresholds|criteria)\s*:\s*"
             ),
         ),
     ]
@@ -1232,7 +1270,7 @@ def _split_overview_labeled_pair(text: str) -> tuple[str, str]:
     values: dict[str, str] = {}
     for idx, (label, match) in enumerate(matches):
         end = matches[idx + 1][1].start() if idx + 1 < len(matches) else len(text)
-        values[label] = text[match.end():end].strip(" ;,")
+        values[label] = text[match.end() : end].strip(" ;,")
     return values.get("Objective", ""), values.get("Acceptance criteria", "")
 
 
@@ -1240,17 +1278,11 @@ def _overview_summary_segments(text: str) -> list[str]:
     labeled_parts = _split_labeled_summary_segments(text)
     if len(labeled_parts) > 1:
         return labeled_parts
-    sentence_parts = [
-        part.strip()
-        for part in re.split(r"(?<=[.!?])\s+", text)
-        if part.strip()
-    ]
+    sentence_parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
     if len(sentence_parts) > 1:
         return sentence_parts
     clause_parts = [
-        part.strip(" ;,")
-        for part in re.split(r"\s*;\s+|\s+-\s+", text)
-        if part.strip(" ;,")
+        part.strip(" ;,") for part in re.split(r"\s*;\s+|\s+-\s+", text) if part.strip(" ;,")
     ]
     if len(clause_parts) > 1:
         return clause_parts
@@ -1293,16 +1325,19 @@ def _report_brand_mark() -> str:
     return (
         '<span class="brand-lockup" role="img" aria-label="VibeProteinAgent">'
         f'<img src="{_attr(src)}" alt="" aria-hidden="true" loading="eager" decoding="async">'
-        '</span>'
+        "</span>"
     )
 
 
 def _saas_agent_rationale_section(vm: AgentRationaleViewModel) -> str:
-    decisions = "".join(
-        _agent_decision_item_html(item)
-        for item in vm.major_decisions
-    ) or '<li><span class="decision-label">Decision rationale</span><p>No structured agent decisions were recorded.</p></li>'
-    stages = "".join(f"<span>{_h(stage)}</span>" for stage in vm.stage_plan) or "<span>No stage plan recorded</span>"
+    decisions = (
+        "".join(_agent_decision_item_html(item) for item in vm.major_decisions)
+        or '<li><span class="decision-label">Decision rationale</span><p>No structured agent decisions were recorded.</p></li>'
+    )
+    stages = (
+        "".join(f"<span>{_h(stage)}</span>" for stage in vm.stage_plan)
+        or "<span>No stage plan recorded</span>"
+    )
     query = vm.user_query or "No agent user query was recorded for this run."
     return f"""<section id="agent-rationale" class="card saas-section agent-rationale-section">
   <header class="card-header">
@@ -1357,19 +1392,22 @@ def _agent_decision_value_html(label: str, value: str) -> str:
         )
         return f'<div class="decision-text decision-text-structured">{blocks}</div>'
     if label.strip().lower() == "candidate justification":
-        return (
-            '<div class="decision-text decision-justification-card">'
-            f'<p>{_h(text)}</p>'
-            "</div>"
-        )
+        return f'<div class="decision-text decision-justification-card"><p>{_h(text)}</p></div>'
+    if _is_rationale_decision_label(label):
+        return f'<div class="decision-text decision-rationale-card"><p>{_h(text)}</p></div>'
     return f'<p class="decision-text">{_h(text)}</p>'
+
+
+def _is_rationale_decision_label(label: str) -> bool:
+    normalized = str(label or "").strip().lower()
+    return "rationale" in normalized or normalized in {"decision", "decision rationale"}
 
 
 def _capitalize_first_alpha(value: str) -> str:
     text = str(value or "")
     for idx, char in enumerate(text):
         if char.isalpha():
-            return f"{text[:idx]}{char.upper()}{text[idx + 1:]}"
+            return f"{text[:idx]}{char.upper()}{text[idx + 1 :]}"
     return text
 
 
@@ -1452,9 +1490,7 @@ def _decision_sentences(text: str) -> list[str]:
     if not compact:
         return []
     return [
-        part.strip()
-        for part in re.split(r"(?<=[.!?])\s+(?=[A-Za-z_])", compact)
-        if part.strip()
+        part.strip() for part in re.split(r"(?<=[.!?])\s+(?=[A-Za-z_])", compact) if part.strip()
     ]
 
 
@@ -1468,7 +1504,7 @@ def _decision_sentence_label_and_body(
     if heading_match:
         return (
             _decision_heading_label(heading_match.group(1)),
-            stripped[heading_match.end():].strip(" .;:-"),
+            stripped[heading_match.end() :].strip(" .;:-"),
         )
     lowered = stripped.lower()
     if first_sentence and len(stripped) > 80:
@@ -1536,11 +1572,12 @@ def _saas_candidate_comparison_section(
         else {}
     )
     rows = "".join(
-        _comparison_row(row, metric_cols, bundles_by_id.get(row.candidate_id))
-        for row in board.rows
+        _comparison_row(row, metric_cols, bundles_by_id.get(row.candidate_id)) for row in board.rows
     )
     if not rows:
-        rows = '<tr><td colspan="12" class="empty">No candidates available for comparison.</td></tr>'
+        rows = (
+            '<tr><td colspan="12" class="empty">No candidates available for comparison.</td></tr>'
+        )
     status_counts: dict[str, int] = {}
     for row in board.rows:
         status_counts[row.recommendation_label] = status_counts.get(row.recommendation_label, 0) + 1
@@ -1605,8 +1642,7 @@ def _comparison_row(
 ) -> str:
     metric_map = {_metric_label_for_display(chip.label): chip for chip in row.metric_chips}
     cells = "".join(
-        _comparison_metric_cell(metric_map.get(label), label=label)
-        for label in metric_cols
+        _comparison_metric_cell(metric_map.get(label), label=label) for label in metric_cols
     )
     rank = row.rank if row.rank is not None else "-"
     asset_html = _comparison_asset_actions(row, bundle)
@@ -1617,7 +1653,7 @@ def _comparison_row(
     return (
         f'<tr class="comparison-row status-{_attr(row.status)}">'
         f'<td><span class="comparison-rank">{_h(rank)}</span></td>'
-        f'<td>{candidate_cell}</td>'
+        f"<td>{candidate_cell}</td>"
         f'<td><span class="status-badge">{_h(row.recommendation_label)}</span></td>'
         f'<td class="comparison-verdict">{_h(row.short_verdict)}</td>'
         f'{cells}<td><span class="comparison-assets">{asset_html}</span></td></tr>'
@@ -1637,35 +1673,19 @@ def _comparison_asset_actions(
             f'title="Open the candidate dossier structure viewer">Structure</a>'
         )
     else:
-        actions.append('<span class="asset-pill is-missing" aria-disabled="true">No structure</span>')
+        actions.append(
+            '<span class="asset-pill is-missing" aria-disabled="true">No structure</span>'
+        )
 
-    download_links: list[str] = []
-    seen: set[str] = set()
-    if candidate is not None:
-        for artifact in candidate.artifacts:
-            if _is_structure_artifact_path(artifact.path, artifact.kind):
-                continue
-            if artifact.path in seen:
-                continue
-            seen.add(artifact.path)
-            download_links.append(
-                _download_link(
-                    artifact.path,
-                    artifact.field,
-                    kind=artifact.kind,
-                    css="asset-pill is-on asset-download-link",
-                )
-            )
-    if not download_links:
-        actions.append('<span class="asset-pill is-missing" aria-disabled="true">No downloads</span>')
-    elif len(download_links) == 1:
-        actions.append(download_links[0])
+    if row.has_downloads:
+        actions.append(
+            '<span class="asset-pill is-on" '
+            'title="Download links are centralized in Cross-Candidate Analysis">'
+            "Downloads below</span>"
+        )
     else:
         actions.append(
-            '<details class="asset-download-menu">'
-            '<summary class="asset-pill is-on">Downloads</summary>'
-            f'<span class="asset-download-menu-body">{"".join(download_links)}</span>'
-            '</details>'
+            '<span class="asset-pill is-missing" aria-disabled="true">No downloads</span>'
         )
     return "".join(actions)
 
@@ -1676,13 +1696,13 @@ def _comparison_metric_cell(chip: Any | None, *, label: str = "") -> str:
         return (
             '<td class="metric-cell-missing">'
             f'<span class="metric-missing" title="{_attr(missing_title)}">—</span>'
-            '</td>'
+            "</td>"
         )
     unit = f" {chip.unit}" if chip.unit else ""
     title = _comparison_recorded_metric_title(label, chip)
     return (
         f'<td><span class="matrix-chip" title="{_attr(title)}">'
-        f'{_h(chip.value)}{_h(unit)}</span></td>'
+        f"{_h(chip.value)}{_h(unit)}</span></td>"
     )
 
 
@@ -1815,9 +1835,9 @@ def _display_limit_notice(meta: _DisplayLimit) -> str:
     )
     return (
         '<div class="display-limit-notice" data-display-limit-notice>'
-        f'Showing top {meta.requested} of {meta.total} candidates; final submitted '
-        f'candidates are always included.{_h(effective)}'
-        '</div>'
+        f"Showing top {meta.requested} of {meta.total} candidates; final submitted "
+        f"candidates are always included.{_h(effective)}"
+        "</div>"
     )
 
 
@@ -1880,22 +1900,24 @@ def _structure_comparison_card(
         _structure_comparison_metric(bundle, label)
         for label in _structure_comparison_metric_labels(preset)
     )
-    metrics = metrics or '<span class="structure-compare-metric is-missing">No scalar metrics</span>'
+    metrics = (
+        metrics or '<span class="structure-compare-metric is-missing">No scalar metrics</span>'
+    )
     status_label, status_cls = _STATUS_DISPLAY.get(bundle.status, (bundle.status, "other"))
     open_target = _structure_dom_id(candidate.candidate_id)
     return (
         f'<article class="structure-compare-card" draggable="true" data-structure-compare-card data-compare-index="{index}">'
         '<header class="structure-compare-head">'
         f'<div><span class="structure-compare-rank">#{_h(index)}</span>'
-        f'<h3>{_h(candidate.candidate_id)}</h3></div>'
+        f"<h3>{_h(candidate.candidate_id)}</h3></div>"
         f'<span class="status-badge status-{_attr(status_cls)}">{_h(status_label)}</span>'
-        '</header>'
+        "</header>"
         f'<div class="structure-compare-metrics">{metrics}</div>'
-        f'{_viewer_block(candidate, _chain_context_for(candidate), dom_id=dom_id, compact=True)}'
+        f"{_viewer_block(candidate, _chain_context_for(candidate), dom_id=dom_id, compact=True)}"
         '<footer class="structure-compare-foot">'
         f'<a href="#candidates" data-open-cand="{_attr(open_target)}">Open full dossier</a>'
-        '</footer>'
-        '</article>'
+        "</footer>"
+        "</article>"
     )
 
 
@@ -1925,10 +1947,10 @@ def _structure_comparison_metric(
     unit_text = f" {unit}" if unit else ""
     return (
         '<span class="structure-compare-metric">'
-        f'<b>{_h(_metric_label_for_display(label))}</b>'
-        f'<strong>{_h(value)}{_h(unit_text)}</strong>'
-        f'<em>{_h(source)}</em>'
-        '</span>'
+        f"<b>{_h(_metric_label_for_display(label))}</b>"
+        f"<strong>{_h(value)}{_h(unit_text)}</strong>"
+        f"<em>{_h(source)}</em>"
+        "</span>"
     )
 
 
@@ -1938,14 +1960,17 @@ def _saas_candidate_dossiers_section(
     final_submission: dict[str, Any] | None = None,
 ) -> str:
     selection_summary = _selection_summary_from_submission(final_submission)
-    cards = "".join(
-        _evidence_snapshot_card(
-            d,
-            preset,
-            selection_summary=selection_summary if idx == 0 else None,
+    cards = (
+        "".join(
+            _evidence_snapshot_card(
+                d,
+                preset,
+                selection_summary=selection_summary if idx == 0 else None,
+            )
+            for idx, d in enumerate(dossiers[:1])
         )
-        for idx, d in enumerate(dossiers[:1])
-    ) or '<p class="empty">No candidate dossiers are available.</p>'
+        or '<p class="empty">No candidate dossiers are available.</p>'
+    )
     top_msa = _top_candidate_msa_block(dossiers)
     return f"""<section id="candidate-dossiers" class="card saas-section">
   <header class="card-header">
@@ -1971,9 +1996,7 @@ def _selection_summary_from_submission(
     headline = str(summary.get("headline") or "").strip()
     why_selected = str(summary.get("why_selected") or "").strip()
     key_points = [
-        str(item).strip()
-        for item in (summary.get("key_points") or [])
-        if str(item).strip()
+        str(item).strip() for item in (summary.get("key_points") or []) if str(item).strip()
     ]
     if not headline and not why_selected and not key_points:
         return None
@@ -1990,14 +2013,9 @@ def _selection_summary_card(summary: dict[str, Any] | None) -> str:
     headline = str(summary.get("headline") or "").strip()
     why_selected = str(summary.get("why_selected") or "").strip()
     key_points = [
-        str(item).strip()
-        for item in (summary.get("key_points") or [])
-        if str(item).strip()
+        str(item).strip() for item in (summary.get("key_points") or []) if str(item).strip()
     ][:4]
-    bullets = "".join(
-        f"<li>{_h(point)}</li>"
-        for point in key_points
-    )
+    bullets = "".join(f"<li>{_h(point)}</li>" for point in key_points)
     bullets_html = f"<ul>{bullets}</ul>" if bullets else ""
     return (
         '<div class="selection-summary-card">'
@@ -2037,18 +2055,18 @@ def _evidence_snapshot_card(
         '<article class="evidence-snapshot-card">'
         '<div class="evidence-snapshot-head">'
         f'<div><p class="saas-card-kicker">{_h(dossier.status_label)}</p>'
-        f'<h3>{_h(dossier.candidate_id)}</h3></div>'
+        f"<h3>{_h(dossier.candidate_id)}</h3></div>"
         f'<span class="status-badge">{_h(dossier.status_label)}</span>'
         "</div>"
         '<div class="evidence-snapshot-body">'
         f'<div class="{score_class}" style="{_attr(score_style)}">'
-        f'<strong>{_h(score_text)}</strong><span>{_h(primary.label if primary else "Score")}</span></div>'
+        f"<strong>{_h(score_text)}</strong><span>{_h(primary.label if primary else 'Score')}</span></div>"
         f'<div class="snapshot-bars">{bars}</div>'
         "</div>"
         f"{_selection_summary_card(selection_summary)}"
         '<div class="evidence-snapshot-foot">'
         f'<span class="asset-pill{" is-missing" if dossier.missing_evidence else " is-on"}">{_h(missing_label)}</span>'
-        f'<span>{_h("Structure" if dossier.structure_path else "No structure")}</span>'
+        f"<span>{_h('Structure' if dossier.structure_path else 'No structure')}</span>"
         f'<a href="#candidates" data-open-cand="{_attr("viewer-" + dossier.candidate_id)}">Open dossier</a>'
         "</div>"
         "</article>"
@@ -2065,12 +2083,12 @@ def _top_candidate_msa_block(dossiers: list[CandidateDossierViewModel]) -> str:
         stats += f" · {block.mean_identity * 100:.0f}% mean identity"
     return (
         '<div class="top-candidate-msa-block">'
-        '<h3>Top candidate MSA context</h3>'
+        "<h3>Top candidate MSA context</h3>"
         '<details class="evidence-snapshot-msa" open>'
-        f'<summary><span>{_h(top.candidate_id)} MSA context</span><em>{_h(stats)}</em></summary>'
-        f'{_msa_html([block])}'
-        '</details>'
-        '</div>'
+        f"<summary><span>{_h(top.candidate_id)} MSA context</span><em>{_h(stats)}</em></summary>"
+        f"{_msa_html([block])}"
+        "</details>"
+        "</div>"
     )
 
 
@@ -2107,8 +2125,7 @@ def _snapshot_metric_labels(
     observed = [
         chip.label
         for chip in dossier.metric_chips
-        if _metric_label_for_display(chip.label) != "QC"
-        and _chip_numeric_value(chip) is not None
+        if _metric_label_for_display(chip.label) != "QC" and _chip_numeric_value(chip) is not None
     ]
     return list(dict.fromkeys([*preferred, *observed]))[:7]
 
@@ -2170,7 +2187,7 @@ def _evidence_metric_bar(
     return (
         '<div class="snapshot-bar">'
         f'<span>{_h(title)}</span><em><i style="width:{max(2.0, min(100.0, pct)):.0f}%"></i></em>'
-        f'<b>{_h(str(chip.value))}{_h((" " + unit) if unit else "")}</b></div>'
+        f"<b>{_h(str(chip.value))}{_h((' ' + unit) if unit else '')}</b></div>"
     )
 
 
@@ -2211,9 +2228,7 @@ def _saas_cross_candidate_section(
         else:
             missing_metric_labels.append(_cross_candidate_metric_title(label, preset))
     missing_metrics_card = (
-        _saas_missing_metrics_card(missing_metric_labels)
-        if missing_metric_labels
-        else ""
+        _saas_missing_metrics_card(missing_metric_labels) if missing_metric_labels else ""
     )
     diversity = _diversity_notice(dossiers)
     filter_panel = _cross_candidate_filter_panel(
@@ -2230,7 +2245,7 @@ def _saas_cross_candidate_section(
       <p class="saas-section-subtitle">{_h(preset.cross_candidate_focus if preset else "Adjust the filters to narrow candidates by recorded criteria; matching candidates and downloads update with the current view.")}</p>
     </div>
   </header>
-  <div class="saas-pattern-grid">{length_card}{status_card}{qc_card}{missing_card}{''.join(metric_cards)}{missing_metrics_card}</div>
+  <div class="saas-pattern-grid">{length_card}{status_card}{qc_card}{missing_card}{"".join(metric_cards)}{missing_metrics_card}</div>
   {filter_panel}
   <div class="saas-insight-note">{diversity}{_prov_chip(Provenance.DERIVED)}</div>
 </section>"""
@@ -2262,7 +2277,11 @@ def _workflow_audit_section(model: ReportModel, vm: WorkflowTraceViewModel) -> s
         has_final=has_final,
     )
     completed = str(model.summary.state or "completed").strip().lower()
-    status_label = "Completed" if completed in {"", "completed", "success"} else completed.replace("_", " ").title()
+    status_label = (
+        "Completed"
+        if completed in {"", "completed", "success"}
+        else completed.replace("_", " ").title()
+    )
     status_cls = "is-complete" if completed in {"", "completed", "success"} else "is-recorded"
     node_count = len(model.graph.nodes)
     tool_calls = _workflow_audit_tool_call_list(
@@ -2302,10 +2321,10 @@ def _workflow_audit_selection_events(model: ReportModel) -> str:
     rows = "".join(_candidate_capability_filter_event_html(event) for event in events[:12])
     return (
         '<details class="workflow-tool-call-list" open>'
-        '<summary><strong>Candidate selection and filters</strong>'
-        '<em>Recorded subset coverage before downstream tools</em></summary>'
+        "<summary><strong>Candidate selection and filters</strong>"
+        "<em>Recorded subset coverage before downstream tools</em></summary>"
         f'<div class="artifact-list">{rows}</div>'
-        '</details>'
+        "</details>"
     )
 
 
@@ -2327,10 +2346,10 @@ def _workflow_audit_tool_call_list(
     )
     return (
         '<details class="workflow-tool-call-list" open>'
-        '<summary><strong>Recorded tool calls</strong>'
-        '<em>Grouped by tool and outcome</em></summary>'
-        f'<ol>{rows}</ol>'
-        '</details>'
+        "<summary><strong>Recorded tool calls</strong>"
+        "<em>Grouped by tool and outcome</em></summary>"
+        f"<ol>{rows}</ol>"
+        "</details>"
     )
 
 
@@ -2384,22 +2403,18 @@ def _workflow_audit_tool_call_group_row(
         count,
         final_submission=final_submission,
     )
-    error_html = (
-        f'<small class="tool-call-error">{_h(error_text)}</small>'
-        if error_text
-        else ""
-    )
+    error_html = f'<small class="tool-call-error">{_h(error_text)}</small>' if error_text else ""
     return (
-        f'<li{class_attr}{title_attr}>'
+        f"<li{class_attr}{title_attr}>"
         f'<span class="tool-call-group-index">{idx}</span>'
         '<div class="tool-call-group-main">'
-        f'<strong>{_h(tool_name)}</strong>'
+        f"<strong>{_h(tool_name)}</strong>"
         f'<em class="state-{state_cls}">{_h(state_label)}</em>'
-        '</div>'
+        "</div>"
         f'<span class="tool-call-count">{_h(str(count))} call{"s" if count != 1 else ""}</span>'
         f'<p class="tool-call-outcome">{_h(outcome)}</p>'
-        f'{error_html}'
-        '</li>'
+        f"{error_html}"
+        "</li>"
     )
 
 
@@ -2457,10 +2472,7 @@ def _final_rationale_marks_tool_unused(
     normalized = str(tool or "").lower().replace("_", "").replace("-", "")
     compact_text = text.replace("_", "").replace("-", "")
     return normalized in compact_text and (
-        "not used" in text
-        or "not selected" in text
-        or "did not use" in text
-        or "blind to" in text
+        "not used" in text or "not selected" in text or "did not use" in text or "blind to" in text
     )
 
 
@@ -2546,8 +2558,8 @@ def _workflow_audit_stage_band_html(
         if key == "intent":
             continue
         stage = stage_map.get(key)
-        include_synthetic_final = key == "recommendation" and has_final and (
-            stage is None or stage.node_count == 0
+        include_synthetic_final = (
+            key == "recommendation" and has_final and (stage is None or stage.node_count == 0)
         )
         if stage is None and not include_synthetic_final:
             continue
@@ -2572,11 +2584,11 @@ def _workflow_audit_stage_band_html(
     return (
         '<li class="audit-stage-band">'
         '<div class="audit-stage-head">'
-        '<span>Recorded steps</span>'
-        f'<em>{_h(str(step_count))} step{"s" if step_count != 1 else ""}</em>'
-        '</div>'
+        "<span>Recorded steps</span>"
+        f"<em>{_h(str(step_count))} step{'s' if step_count != 1 else ''}</em>"
+        "</div>"
         f'<ol class="audit-stage-group">{"".join(cards)}</ol>'
-        '</li>',
+        "</li>",
         step_count,
     )
 
@@ -2596,9 +2608,7 @@ def _workflow_audit_stage_map(
             completed_count=sum(
                 1 for node in stage_nodes if str(node.state).lower() == "completed"
             ),
-            failed_count=sum(
-                1 for node in stage_nodes if str(node.state).lower() == "failed"
-            ),
+            failed_count=sum(1 for node in stage_nodes if str(node.state).lower() == "failed"),
             evidence_label=_workflow_audit_evidence_label(key),
             provenance=Provenance.DERIVED,
         )
@@ -2607,46 +2617,14 @@ def _workflow_audit_stage_map(
 
 
 def _workflow_audit_node_stage_key(node: WorkflowNodeSummary) -> str:
-    tool = (node.tool or "").strip().lower()
-    if tool in {"agent_intent", "user_request"}:
-        return "intent"
-    explicit = {
-        "sequence_edit": "engineering",
-        "esm2": "generation",
-        "protein_qc": "qc",
-        "sequence_analysis": "qc",
-        "protenix_v2": "structure",
-        "structure_analysis": "structure",
-        "tmalign": "structure_comparison",
-        "pyrosetta": "energy",
-    }
-    if tool in explicit:
-        return explicit[tool]
-    role = classify_tool_role(tool)
-    if role == ToolRole.GENERATOR:
-        return "structure" if tool in {"esm3", "boltzgen"} else "generation"
-    if role == ToolRole.RANKER:
-        return "ranking"
-    if role == ToolRole.SUBMISSION:
-        return "recommendation"
-    if role == ToolRole.EVALUATOR:
-        if tool in {"protein_qc", "sequence_analysis"}:
-            return "qc"
-        if tool in {"esm3", "protenix_v2", "structure_analysis"}:
-            return "structure"
-        if tool in {"tmalign"}:
-            return "structure_comparison"
-        if tool in {"pyrosetta"}:
-            return "energy"
-        if tool in {"boltz2_affinity", "pxmeter", "ipsae", "prodigy", "vina"}:
-            return "interface"
-        return "other"
-    return "other"
+    return classify_workflow_stage_key(node, include_intent=True)
 
 
 def _workflow_audit_evidence_label(key: str) -> str:
     return {
         "engineering": "Edited sequence variants",
+        "backbone_generation": "Generated backbone scaffolds",
+        "binder_generation": "Generated target-conditioned binder candidates",
         "generation": "Sequence model suggestions",
         "qc": "QC state and flags",
         "structure": "Structure confidence and structure artifacts",
@@ -2683,9 +2661,8 @@ def _workflow_audit_stage_html(
             evidence = spec["evidence"]
     else:
         state_cls = "is-complete" if stage.failed_count == 0 else "has-failures"
-        count = (
-            f"{stage.node_count} nodes - {stage.completed_count} completed"
-            + (f" - {stage.failed_count} failed" if stage.failed_count else "")
+        count = f"{stage.node_count} nodes - {stage.completed_count} completed" + (
+            f" - {stage.failed_count} failed" if stage.failed_count else ""
         )
         evidence = stage.evidence_label or spec["evidence"]
     tool_label = ""
@@ -2698,11 +2675,11 @@ def _workflow_audit_stage_html(
         f'<span class="audit-stage-icon">{_icon_svg(icon)}</span>'
         f'<span class="audit-stage-line"></span>'
         "</div>"
-        f'<strong>{index}. {_h(spec["title"])}</strong>'
-        f'<p>{_h(spec["purpose"])}</p>'
-        f'<small><b>Evidence:</b> {_h(evidence)}</small>'
-        f'<small>{_h(count)}</small>'
-        f'{f"<em>{_h(tool_label)}</em>" if tool_label else ""}'
+        f"<strong>{index}. {_h(spec['title'])}</strong>"
+        f"<p>{_h(spec['purpose'])}</p>"
+        f"<small><b>Evidence:</b> {_h(evidence)}</small>"
+        f"<small>{_h(count)}</small>"
+        f"{f'<em>{_h(tool_label)}</em>' if tool_label else ''}"
         "</li>"
     )
 
@@ -2720,7 +2697,7 @@ def _workflow_audit_endpoint_html(
         f'<li class="audit-stage audit-flow-endpoint is-complete" data-stage="{_attr(key)}">'
         f'<span class="audit-stage-number">{index}</span>'
         f'<span class="audit-stage-icon">{_icon_svg(icon)}</span>'
-        f'<strong>{_h(title)}</strong>'
+        f"<strong>{_h(title)}</strong>"
         f'<span class="audit-stage-status">{_h(state_label)}</span>'
         f'<div class="audit-tool-row"><span class="audit-tool-chip">{_h(tool_label)}</span></div>'
         "</li>"
@@ -2747,9 +2724,7 @@ def _workflow_audit_recorded_stage_html(
         if len(compact_tools) > len(tools):
             tools.append(f"+{len(compact_tools) - len(tools)} more")
     tool_html = "".join(
-        f'<span class="audit-tool-chip">{_h(tool)}</span>'
-        for tool in tools
-        if tool
+        f'<span class="audit-tool-chip">{_h(tool)}</span>' for tool in tools if tool
     )
     if not tool_html:
         tool_html = '<span class="audit-tool-chip is-muted">Recorded</span>'
@@ -2757,7 +2732,7 @@ def _workflow_audit_recorded_stage_html(
         f'<li class="audit-stage {state_cls}" data-stage="{_attr(key)}">'
         f'<span class="audit-stage-number">{index}</span>'
         f'<span class="audit-stage-icon">{_icon_svg(_workflow_stage_icon_name(key))}</span>'
-        f'<strong>{_h(spec["title"])}</strong>'
+        f"<strong>{_h(spec['title'])}</strong>"
         f'<span class="audit-stage-status">{_h(state_label)}</span>'
         f'<div class="audit-tool-row">{tool_html}</div>'
         "</li>"
@@ -2765,12 +2740,14 @@ def _workflow_audit_recorded_stage_html(
 
 
 def _workflow_audit_empty_stage_html(index: int, *, workflow_type: str) -> str:
-    label = "Evidence not recorded" if workflow_type == WorkflowType.RETRIEVAL else "No tools recorded"
+    label = (
+        "Evidence not recorded" if workflow_type == WorkflowType.RETRIEVAL else "No tools recorded"
+    )
     return (
         f'<li class="audit-stage is-skipped" data-stage="empty-stage">'
         f'<span class="audit-stage-number">{index}</span>'
         f'<span class="audit-stage-icon">{_icon_svg("search")}</span>'
-        '<strong>Recorded step</strong>'
+        "<strong>Recorded step</strong>"
         '<span class="audit-stage-status">Not recorded</span>'
         f'<div class="audit-tool-row"><span class="audit-tool-chip is-muted">{_h(label)}</span></div>'
         "</li>"
@@ -2781,6 +2758,8 @@ def _workflow_stage_icon_name(key: str) -> str:
     return {
         "intent": "intent",
         "engineering": "tools",
+        "backbone_generation": "cube",
+        "binder_generation": "bind",
         "generation": "spark",
         "qc": "shield",
         "structure": "cube",
@@ -2824,10 +2803,7 @@ def _icon_svg(name: str) -> str:
         "chevron-left": '<path d="M15 18l-6-6l6-6"/>',
     }
     body = paths.get(name, paths["overview"])
-    return (
-        '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
-        f'{body}</svg>'
-    )
+    return f'<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">{body}</svg>'
 
 
 def _saas_workflow_trace_section(vm: WorkflowTraceViewModel) -> str:
@@ -2855,22 +2831,120 @@ def _workflow_trace_stage_specs(
 ) -> list[dict[str, str]]:
     if workflow_type == WorkflowType.RETRIEVAL:
         return [
-            {"key": "intent", "title": "User Intent", "icon": "?", "purpose": "Understand the evidence question and constraints.", "evidence": "Recorded objective"},
-            {"key": "other", "title": "Evidence Retrieval", "icon": "R", "purpose": "Search or retrieve relevant sequence/source evidence.", "evidence": "Retrieved hits and source context"},
-            {"key": "ranking", "title": "Evidence Synthesis", "icon": "S", "purpose": "Prioritize records by available support.", "evidence": "Ranked evidence records"},
-            {"key": "recommendation", "title": "Final Recommendation", "icon": "F", "purpose": "Select the strongest supported answer.", "evidence": "Final recommendation"},
+            {
+                "key": "intent",
+                "title": "User Intent",
+                "icon": "?",
+                "purpose": "Understand the evidence question and constraints.",
+                "evidence": "Recorded objective",
+            },
+            {
+                "key": "other",
+                "title": "Evidence Retrieval",
+                "icon": "R",
+                "purpose": "Search or retrieve relevant sequence/source evidence.",
+                "evidence": "Retrieved hits and source context",
+            },
+            {
+                "key": "ranking",
+                "title": "Evidence Synthesis",
+                "icon": "S",
+                "purpose": "Prioritize records by available support.",
+                "evidence": "Ranked evidence records",
+            },
+            {
+                "key": "recommendation",
+                "title": "Final Recommendation",
+                "icon": "F",
+                "purpose": "Select the strongest supported answer.",
+                "evidence": "Final recommendation",
+            },
         ]
     specs = [
-        {"key": "intent", "title": "User Intent", "icon": "?", "purpose": "Understand design goal and constraints.", "evidence": "Recorded objective"},
-        {"key": "engineering", "title": "Engineering", "icon": "E", "purpose": "Create constrained sequence edits and variants.", "evidence": "Edited candidate sequences"},
-        {"key": "generation", "title": "Sequence Generation", "icon": "G", "purpose": "Explore sequence-model suggestions.", "evidence": "Sequence model output"},
-        {"key": "qc", "title": "Sequence QC", "icon": "Q", "purpose": "Filter liabilities and basic biophysical issues.", "evidence": "QC state and flags"},
-        {"key": "structure", "title": "Structure Prediction", "icon": "3D", "purpose": "Predict 3D structures and confidence.", "evidence": "pLDDT, pTM, PAE, structures"},
-        {"key": "structure_comparison", "title": "Structure Comparison", "icon": "C", "purpose": "Compare candidate folds against the reference.", "evidence": "TM-score, RMSD, alignment"},
-        {"key": "energy", "title": "Energy Analysis", "icon": "ΔG", "purpose": "Score stability with molecular energy functions.", "evidence": "Rosetta total score, ddG"},
-        {"key": "interface", "title": "Interface Scoring", "icon": "I", "purpose": "Assess target binding and interface quality.", "evidence": "ipTM, affinity, contacts"},
-        {"key": "ranking", "title": "Ranking", "icon": "R", "purpose": "Integrate evidence and rank candidates.", "evidence": "Composite review order"},
-        {"key": "recommendation", "title": "Final Recommendation", "icon": "F", "purpose": "Select final candidates for experimental follow-up.", "evidence": "Final submitted candidates"},
+        {
+            "key": "intent",
+            "title": "User Intent",
+            "icon": "?",
+            "purpose": "Understand design goal and constraints.",
+            "evidence": "Recorded objective",
+        },
+        {
+            "key": "engineering",
+            "title": "Engineering",
+            "icon": "E",
+            "purpose": "Create constrained sequence edits and variants.",
+            "evidence": "Edited candidate sequences",
+        },
+        {
+            "key": "backbone_generation",
+            "title": "Backbone Generation",
+            "icon": "3D",
+            "purpose": "Generate backbone scaffolds before sequence design.",
+            "evidence": "Backbone structures",
+        },
+        {
+            "key": "binder_generation",
+            "title": "Binder Generation",
+            "icon": "B",
+            "purpose": "Generate target-conditioned binder candidates.",
+            "evidence": "Binder candidates and complex models",
+        },
+        {
+            "key": "generation",
+            "title": "Sequence Generation",
+            "icon": "G",
+            "purpose": "Explore sequence-model suggestions.",
+            "evidence": "Sequence model output",
+        },
+        {
+            "key": "qc",
+            "title": "Sequence QC",
+            "icon": "Q",
+            "purpose": "Filter liabilities and basic biophysical issues.",
+            "evidence": "QC state and flags",
+        },
+        {
+            "key": "structure",
+            "title": "Structure Prediction",
+            "icon": "3D",
+            "purpose": "Predict 3D structures and confidence.",
+            "evidence": "pLDDT, pTM, PAE, structures",
+        },
+        {
+            "key": "structure_comparison",
+            "title": "Structure Comparison",
+            "icon": "C",
+            "purpose": "Compare candidate folds against the reference.",
+            "evidence": "TM-score, RMSD, alignment",
+        },
+        {
+            "key": "energy",
+            "title": "Energy Analysis",
+            "icon": "ΔG",
+            "purpose": "Score stability with molecular energy functions.",
+            "evidence": "Rosetta total score, ddG",
+        },
+        {
+            "key": "interface",
+            "title": "Interface Scoring",
+            "icon": "I",
+            "purpose": "Assess target binding and interface quality.",
+            "evidence": "ipTM, affinity, contacts",
+        },
+        {
+            "key": "ranking",
+            "title": "Ranking",
+            "icon": "R",
+            "purpose": "Integrate evidence and rank candidates.",
+            "evidence": "Composite review order",
+        },
+        {
+            "key": "recommendation",
+            "title": "Final Recommendation",
+            "icon": "F",
+            "purpose": "Select final candidates for experimental follow-up.",
+            "evidence": "Final submitted candidates",
+        },
     ]
     if workflow_type == WorkflowType.DENOVO and not stage_map.get("interface", None):
         # Keep interface visible but skipped so users do not read it as a
@@ -2896,9 +2970,8 @@ def _workflow_trace_stage_html(
         evidence = spec["evidence"]
     else:
         state_cls = "is-complete" if stage.failed_count == 0 else "has-failures"
-        count = (
-            f"{stage.node_count} nodes - {stage.completed_count} completed"
-            + (f" - {stage.failed_count} failed" if stage.failed_count else "")
+        count = f"{stage.node_count} nodes - {stage.completed_count} completed" + (
+            f" - {stage.failed_count} failed" if stage.failed_count else ""
         )
         evidence = stage.evidence_label or spec["evidence"]
     marker_label, marker_title = _workflow_stage_marker_label(key, spec, stage)
@@ -2907,11 +2980,11 @@ def _workflow_trace_stage_html(
         f'<div class="workflow-stage-marker"><span class="workflow-stage-index">{index}</span>'
         f'<span class="workflow-stage-icon" title="{_attr(marker_title)}">{_h(marker_label)}</span></div>'
         f'<div class="workflow-stage-body">'
-        f'<h3>{_h(spec["title"])}</h3>'
-        f'<p>{_h(spec["purpose"])}</p>'
-        f'<small><strong>Evidence:</strong> {_h(evidence)}</small>'
-        f'<small>{_h(count)}</small>'
-        f'</div></li>'
+        f"<h3>{_h(spec['title'])}</h3>"
+        f"<p>{_h(spec['purpose'])}</p>"
+        f"<small><strong>Evidence:</strong> {_h(evidence)}</small>"
+        f"<small>{_h(count)}</small>"
+        f"</div></li>"
     )
 
 
@@ -2968,8 +3041,8 @@ def _saas_metric_chip_html(chips: list[Any]) -> str:
         return '<span class="saas-chip saas-chip-muted">No metrics</span>'
     return "".join(
         f'<span class="saas-chip" title="{_attr(chip.source)}">'
-        f'<b>{_h(chip.label)}</b> {_h(chip.value)}{(" " + _h(chip.unit)) if chip.unit else ""}'
-        f'</span>'
+        f"<b>{_h(chip.label)}</b> {_h(chip.value)}{(' ' + _h(chip.unit)) if chip.unit else ''}"
+        f"</span>"
         for chip in chips
     )
 
@@ -2978,14 +3051,18 @@ def _dossier_summary(dossier: CandidateDossierViewModel) -> str:
     if dossier.risk_notes:
         return f"Risks to review: {', '.join(dossier.risk_notes[:2])}."
     if dossier.missing_evidence:
-        return f"Missing evidence: {', '.join(item.label for item in dossier.missing_evidence[:2])}."
+        return (
+            f"Missing evidence: {', '.join(item.label for item in dossier.missing_evidence[:2])}."
+        )
     return "Evidence package is available for candidate review."
 
 
 def _saas_hist_card(title: str, values: list[int]) -> str:
     if not values:
         return _saas_empty_pattern_card(title, "No values available.")
-    return _saas_distribution_card(title, [float(v) for v in values], value_formatter=lambda v: str(int(v)))
+    return _saas_distribution_card(
+        title, [float(v) for v in values], value_formatter=lambda v: str(int(v))
+    )
 
 
 def _saas_count_card(title: str, counts: dict[str, int]) -> str:
@@ -2995,13 +3072,15 @@ def _saas_count_card(title: str, counts: dict[str, int]) -> str:
     rows = "".join(
         f'<div class="saas-count-row"><span>{_h(label)}</span>'
         f'<em><i style="width:{max(6, int(count / total * 100))}%"></i></em>'
-        f'<b>{_h(count)}</b></div>'
+        f"<b>{_h(count)}</b></div>"
         for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]
     )
     return f'<div class="saas-pattern-card saas-count-card"><h3>{_h(title)}</h3>{rows}</div>'
 
 
-def _metric_values_from_dossiers(dossiers: list[CandidateDossierViewModel], label: str) -> list[float]:
+def _metric_values_from_dossiers(
+    dossiers: list[CandidateDossierViewModel], label: str
+) -> list[float]:
     values: list[float] = []
     target = _metric_label_for_display(label)
     for dossier in dossiers:
@@ -3042,15 +3121,15 @@ def _saas_filter_metric_card(label: str, title: str, values: list[float]) -> str
         f'data-filter-card data-metric="{_attr(title)}" '
         f'data-default-min="{_attr(_fmt_filter_value(lo))}" '
         f'data-default-max="{_attr(_fmt_filter_value(hi))}">'
-        f'<h3>{_h(title)}</h3>'
+        f"<h3>{_h(title)}</h3>"
         f'<div class="saas-bars saas-bars-distribution">{bars}</div>'
         '<div class="range-filter-control">'
         '<div class="range-filter-track"><span class="range-filter-window"></span></div>'
         f'<input class="metric-filter-min" type="range" min="{_attr(_fmt_filter_value(lo))}" max="{_attr(_fmt_filter_value(hi))}" step="{_attr(step)}" value="{_attr(_fmt_filter_value(lo))}" aria-label="{_attr(title)} minimum"{disabled}>'
         f'<input class="metric-filter-max" type="range" min="{_attr(_fmt_filter_value(lo))}" max="{_attr(_fmt_filter_value(hi))}" step="{_attr(step)}" value="{_attr(_fmt_filter_value(hi))}" aria-label="{_attr(title)} maximum"{disabled}>'
-        '</div>'
+        "</div>"
         f'<p><span class="range-filter-label"><b>{_h(_fmt_range_value(lo))}</b> to <b>{_h(_fmt_range_value(hi))}</b></span> · avg {_h(_fmt_range_value(avg))}</p>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -3076,13 +3155,13 @@ def _cross_candidate_filter_panel(
     return (
         '<div class="candidate-range-filter" data-candidate-range-filter>'
         '<div class="candidate-range-filter-head">'
-        '<div><h3>Filter candidates by metric ranges</h3>'
-        '<p>Move the min and max handles for any metric. Matching candidates must satisfy every adjusted range, and structure downloads appear below.</p></div>'
+        "<div><h3>Filter candidates by metric ranges</h3>"
+        "<p>Move the min and max handles for any metric. Matching candidates must satisfy every adjusted range, and structure downloads appear below.</p></div>"
         '<span class="candidate-filter-count" data-filter-count></span>'
-        '</div>'
+        "</div>"
         f'<div class="candidate-filter-results" data-filter-results>{result_cards}</div>'
         '<p class="candidate-filter-empty" data-filter-empty hidden>No structure-linked candidates match the current metric ranges.</p>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -3107,9 +3186,9 @@ def _cross_candidate_filter_result(
             metrics[length_title] = float(length_value)
     metric_summary = "".join(
         '<span class="candidate-filter-primary-metric">'
-        f'{_h(metric_labels[0])} {_h(_fmt_range_value(metrics[metric_labels[0]]))}</span>'
+        f"{_h(metric_labels[0])} {_h(_fmt_range_value(metrics[metric_labels[0]]))}</span>"
         if metric_labels and label == metric_labels[0]
-        else f'<span>{_h(label)} {_h(_fmt_range_value(value))}</span>'
+        else f"<span>{_h(label)} {_h(_fmt_range_value(value))}</span>"
         for label, value in metrics.items()
     )
     download = (
@@ -3125,11 +3204,11 @@ def _cross_candidate_filter_result(
     return (
         f'<article class="candidate-filter-result" data-filter-result '
         f'data-metrics="{_attr(json.dumps(metrics, separators=(",", ":")))}">'
-        f'<div><strong>{_h(dossier.candidate_id)}</strong>'
-        f'<span>{_h(dossier.status_label)}</span></div>'
+        f"<div><strong>{_h(dossier.candidate_id)}</strong>"
+        f"<span>{_h(dossier.status_label)}</span></div>"
         f'<div class="candidate-filter-result-metrics">{metric_summary}</div>'
-        f'{download}'
-        '</article>'
+        f"{download}"
+        "</article>"
     )
 
 
@@ -3221,9 +3300,7 @@ def _saas_empty_pattern_card(title: str, message: str) -> str:
     )
 
 
-def _cross_candidate_metric_title(
-    label: str, preset: WorkflowReviewPreset | None = None
-) -> str:
+def _cross_candidate_metric_title(label: str, preset: WorkflowReviewPreset | None = None) -> str:
     if (
         preset is not None
         and preset.workflow_type == WorkflowType.BINDER
@@ -3236,8 +3313,7 @@ def _cross_candidate_metric_title(
 def _saas_missing_metrics_card(labels: list[str]) -> str:
     unique = list(dict.fromkeys(label for label in labels if label))
     chips = "".join(
-        f'<span class="missing-metric-token">{_h(label)}</span>'
-        for label in unique[:8]
+        f'<span class="missing-metric-token">{_h(label)}</span>' for label in unique[:8]
     )
     more = (
         f'<span class="missing-metric-token">+{len(unique) - 8} more</span>'
@@ -3275,7 +3351,7 @@ def _saas_distribution_card(
         f'<div class="range-line"><span style="left:{_range_pct(lo, lo, hi)}%"></span>'
         f'<b style="left:{_range_pct(avg, lo, hi)}%"></b>'
         f'<span style="left:{_range_pct(hi, lo, hi)}%"></span></div>'
-        f'<p>{_h(value_formatter(lo))} to {_h(value_formatter(hi))} · avg {_h(value_formatter(avg))}</p></div>'
+        f"<p>{_h(value_formatter(lo))} to {_h(value_formatter(hi))} · avg {_h(value_formatter(avg))}</p></div>"
     )
 
 
@@ -3448,20 +3524,14 @@ def render_report_html(
     # the offline-viewer JS render an "unavailable" notice.
     threedmol_src = _load_3dmol_min_js()
     threedmol_script = (
-        f'<script>/* 3Dmol-min.js (vendored) */{threedmol_src}</script>'
-        if threedmol_src
-        else ""
+        f"<script>/* 3Dmol-min.js (vendored) */{threedmol_src}</script>" if threedmol_src else ""
     )
 
     overview_section = _saas_overview_section(saas_vm.overview)
     agent_rationale_section = _saas_agent_rationale_section(saas_vm.agent_rationale)
 
-    availability_section = (
-        _candidate_availability_section(model) if show_availability else ""
-    )
-    merge_audit_section = (
-        _candidate_merge_audit_section(model) if show_merge_audit else ""
-    )
+    availability_section = _candidate_availability_section(model) if show_availability else ""
+    merge_audit_section = _candidate_merge_audit_section(model) if show_merge_audit else ""
 
     # ----- Candidate review console (primary surface) -----
     candidate_dossiers_section = (
@@ -3499,9 +3569,7 @@ def render_report_html(
         else ""
     )
     workflow_audit_section = (
-        _workflow_audit_section(model, saas_vm.workflow_trace)
-        if show_workflow_audit
-        else ""
+        _workflow_audit_section(model, saas_vm.workflow_trace) if show_workflow_audit else ""
     )
 
     return f"""<!doctype html>
@@ -3565,12 +3633,10 @@ def render_report_html(
 
 def _candidate_availability_section(model: ReportModel) -> str:
     satisfied_items = "".join(
-        _satisfied_semantic_facet_html(facet)
-        for facet in model.satisfied_semantic_facets[:12]
+        _satisfied_semantic_facet_html(facet) for facet in model.satisfied_semantic_facets[:12]
     )
     empty_items = "".join(
-        _empty_candidate_event_html(event)
-        for event in model.empty_candidate_events[:12]
+        _empty_candidate_event_html(event) for event in model.empty_candidate_events[:12]
     )
     filter_items = "".join(
         _candidate_capability_filter_event_html(event)
@@ -3585,8 +3651,7 @@ def _candidate_availability_section(model: ReportModel) -> str:
         if not _is_trivial_param_resolution(event)
     ]
     parameter_items = "".join(
-        _parameter_resolution_event_html(event)
-        for event in meaningful_param_events[:12]
+        _parameter_resolution_event_html(event) for event in meaningful_param_events[:12]
     )
     empty_block = (
         f"""
@@ -3673,14 +3738,12 @@ def _candidate_merge_audit_section(model: ReportModel) -> str:
 def _candidate_merge_event_html(event: dict[str, Any]) -> str:
     groups = event.get("groups") if isinstance(event.get("groups"), list) else []
     group_html = "".join(
-        _candidate_merge_group_pill_html(group)
-        for group in groups[:6]
-        if isinstance(group, dict)
+        _candidate_merge_group_pill_html(group) for group in groups[:6] if isinstance(group, dict)
     )
     counts = (
-        f'{event.get("duplicates_removed") or 0} merged / '
-        f'{event.get("duplicate_group_count") or 0} group(s) / '
-        f'{event.get("conflict_count") or 0} conflict(s)'
+        f"{event.get('duplicates_removed') or 0} merged / "
+        f"{event.get('duplicate_group_count') or 0} group(s) / "
+        f"{event.get('conflict_count') or 0} conflict(s)"
     )
     truncated = " · truncated" if event.get("truncated") else ""
     return f"""
@@ -3699,9 +3762,7 @@ def _candidate_merge_event_html(event: dict[str, Any]) -> str:
 def _candidate_merge_group_pill_html(group: dict[str, Any]) -> str:
     label = str(group.get("retained_candidate_id") or group.get("identity_key") or "candidate")
     details = [
-        f"type {group.get('identity_type')}"
-        if group.get("identity_type")
-        else "",
+        f"type {group.get('identity_type')}" if group.get("identity_type") else "",
         f"versions {group.get('merged_count')}"
         if group.get("merged_count") not in (None, "")
         else "",
@@ -3722,7 +3783,12 @@ def _satisfied_semantic_facet_html(facet: dict[str, Any]) -> str:
         ("query", facet.get("query")),
         ("selected", ", ".join(_bounded_str_list(facet.get("selected_terms"), limit=3))),
         ("candidates", facet.get("candidate_count")),
-        ("best score", _fmt(facet.get("best_sequence_relevance_score")) if facet.get("best_sequence_relevance_score") is not None else None),
+        (
+            "best score",
+            _fmt(facet.get("best_sequence_relevance_score"))
+            if facet.get("best_sequence_relevance_score") is not None
+            else None,
+        ),
         ("examples", ", ".join(_bounded_str_list(facet.get("candidate_ids"), limit=3))),
     ]
     facts_html = "".join(
@@ -3767,14 +3833,24 @@ def _empty_candidate_event_html(event: dict[str, Any]) -> str:
 
 
 def _candidate_capability_filter_event_html(event: dict[str, Any]) -> str:
-    filtered = event.get("filtered_candidates") if isinstance(event.get("filtered_candidates"), list) else []
-    filtered_html = "".join(
-        _filtered_candidate_pill_html(item)
-        for item in filtered[:5]
-        if isinstance(item, dict)
+    filtered = (
+        event.get("filtered_candidates")
+        if isinstance(event.get("filtered_candidates"), list)
+        else []
     )
-    selected = event.get("selected_candidate_ids") if isinstance(event.get("selected_candidate_ids"), list) else []
-    skipped = event.get("skipped_candidate_ids") if isinstance(event.get("skipped_candidate_ids"), list) else []
+    filtered_html = "".join(
+        _filtered_candidate_pill_html(item) for item in filtered[:5] if isinstance(item, dict)
+    )
+    selected = (
+        event.get("selected_candidate_ids")
+        if isinstance(event.get("selected_candidate_ids"), list)
+        else []
+    )
+    skipped = (
+        event.get("skipped_candidate_ids")
+        if isinstance(event.get("skipped_candidate_ids"), list)
+        else []
+    )
     selected_html = (
         f'<span class="artifact-pill"><strong>selected</strong> {_h(", ".join(map(str, selected)))}</span>'
         if selected
@@ -3786,10 +3862,14 @@ def _candidate_capability_filter_event_html(event: dict[str, Any]) -> str:
         else ""
     )
     counts = (
-        f'{event.get("compatible_candidate_count") or 0} compatible / '
-        f'{event.get("skipped_candidate_count") or 0} skipped'
+        f"{event.get('compatible_candidate_count') or 0} compatible / "
+        f"{event.get('skipped_candidate_count') or 0} skipped"
     )
-    label = "candidate subset selection" if event.get("event_type") == "candidate_selection_event" else "candidate consumer"
+    label = (
+        "candidate subset selection"
+        if event.get("event_type") == "candidate_selection_event"
+        else "candidate consumer"
+    )
     return f"""
       <div class="artifact-row">
         <div>
@@ -4003,12 +4083,7 @@ def _executive_dashboard(model: ReportModel) -> str:
     No metric cards, no donuts, no decorative colour: structure and type carry
     the hierarchy; colour appears only as a small status dot.
     """
-    return (
-        '<div class="exec-summary">'
-        f'{_exec_stat_strip(model)}'
-        f'{_exec_signal_band(model)}'
-        '</div>'
-    )
+    return f'<div class="exec-summary">{_exec_stat_strip(model)}{_exec_signal_band(model)}</div>'
 
 
 def _exec_stat_strip(model: ReportModel) -> str:
@@ -4076,25 +4151,26 @@ def _exec_confidence_col(model: ReportModel) -> str:
         quality = _quality_class(key, num)
         src = (
             f'<span class="exec-cm-src">&middot; {_h(_tool_display_name(src_tool))}</span>'
-            if src_tool else ""
+            if src_tool
+            else ""
         )
         rows.append(
             f'<div class="exec-cm" title="{_attr(tip)}">'
             f'<span class="exec-cm-dot dot-{quality}"></span>'
             f'<span class="exec-cm-val">{_h(_fmt_donut(num))}</span>'
             f'<span class="exec-cm-lbl">{_h(label)}{src}</span>'
-            f'</div>'
+            f"</div>"
         )
     if not rows:
         rows.append(
             f'<div class="exec-cm exec-cm-empty"><span class="exec-cm-lbl">'
-            f'Top candidate <code>{_h(top.candidate_id)}</code> &middot; no scalar confidence metrics</span></div>'
+            f"Top candidate <code>{_h(top.candidate_id)}</code> &middot; no scalar confidence metrics</span></div>"
         )
     return (
         '<div class="exec-col">'
         '<div class="exec-col-head">Confidence <span class="exec-col-sub">top candidate</span></div>'
         f'<div class="exec-cm-list">{"".join(rows)}</div>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -4104,7 +4180,9 @@ def _exec_pipeline_col(model: ReportModel) -> str:
         return ""
     counts: dict[str, int] = {}
     for node in nodes:
-        counts[(node.state or "unknown").lower()] = counts.get((node.state or "unknown").lower(), 0) + 1
+        counts[(node.state or "unknown").lower()] = (
+            counts.get((node.state or "unknown").lower(), 0) + 1
+        )
     total = len(nodes)
     n_done = counts.get("completed", 0) + counts.get("cached", 0)
     chips: list[str] = []
@@ -4113,13 +4191,13 @@ def _exec_pipeline_col(model: ReportModel) -> str:
         chips.append(
             f'<span class="exec-node" title="{_attr(state)}">'
             f'<span class="exec-node-dot dot-{_state_class(node.state)}"></span>'
-            f'{_h(node.tool or node.node_id or "tool")}</span>'
+            f"{_h(node.tool or node.node_id or 'tool')}</span>"
         )
     return (
         '<div class="exec-col">'
         f'<div class="exec-col-head">Pipeline <span class="exec-col-sub">{n_done}/{total} completed</span></div>'
         f'<div class="exec-node-list">{"".join(chips)}</div>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -4153,14 +4231,12 @@ def _exec_verdict_callout(model: ReportModel) -> str:
             '<div class="exec-verdict-body">'
             '<div class="exec-verdict-head">No candidate designs produced</div>'
             '<div class="exec-verdict-detail">Review the per-tool widgets and artifact list to inspect inputs and intermediate outputs.</div>'
-            '</div></div>'
+            "</div></div>"
         )
     cautions: list[str] = []
     plddt = _as_unit(_lookup_candidate_metric(top, "plddt"))
     if plddt is not None and plddt < 0.7:
-        cautions.append(
-            f"mean pLDDT {plddt * 100:.0f} suggests low structural confidence"
-        )
+        cautions.append(f"mean pLDDT {plddt * 100:.0f} suggests low structural confidence")
     ptm = _as_unit(_lookup_candidate_metric(top, "ptm"))
     if ptm is not None and ptm < 0.5:
         cautions.append(f"pTM {ptm:.2f} below 0.5 — overall fold may be unreliable")
@@ -4172,9 +4248,7 @@ def _exec_verdict_callout(model: ReportModel) -> str:
     if not _is_monomer_candidate(top):
         iptm = _as_unit(_lookup_candidate_metric(top, "iptm"))
         if iptm is not None and iptm < 0.5:
-            cautions.append(
-                f"ipTM {iptm:.2f} below 0.5 — interface unlikely to be trustworthy"
-            )
+            cautions.append(f"ipTM {iptm:.2f} below 0.5 — interface unlikely to be trustworthy")
     if top.qc_flags:
         cautions.append(f"{len(top.qc_flags)} QC flag(s) on the top candidate")
     n_err = sum(1 for w in model.warnings if w.level == "error")
@@ -4188,7 +4262,7 @@ def _exec_verdict_callout(model: ReportModel) -> str:
             '<div class="exec-verdict-body">'
             '<div class="exec-verdict-head">No confidence or QC red flags on the top candidate.</div>'
             '<div class="exec-verdict-detail">Scores fall in the trustworthy range — proceed to downstream validation.</div>'
-            '</div></div>'
+            "</div></div>"
         )
     severity = "poor" if (n_err or len(cautions) >= 3) else "ok"
     icon = "✕" if severity == "poor" else "⚠"
@@ -4198,7 +4272,7 @@ def _exec_verdict_callout(model: ReportModel) -> str:
         '<div class="exec-verdict-body">'
         '<div class="exec-verdict-head">Review before downstream use</div>'
         f'<div class="exec-verdict-detail">{_h("; ".join(cautions))}.</div>'
-        '</div></div>'
+        "</div></div>"
     )
 
 
@@ -4215,9 +4289,9 @@ def _hero_sequence_block(model: ReportModel) -> str:
         f'<div class="hero-sequence-head">'
         f'<span class="eyebrow">Candidate sequence · {len(seq)} residues</span>'
         f'<button class="copy-btn" data-copy="{_attr(seq)}">Copy</button>'
-        f'</div>'
+        f"</div>"
         f'<div class="hero-sequence-body"><code>{seq_html}</code></div>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -4240,9 +4314,7 @@ def _executive_headline(model: ReportModel) -> str:
     }.get(state, state.title())
     runtime = _duration(model.summary.runtime_ms)
     pieces: list[str] = [
-        f"{state_phrase} in {runtime}"
-        if runtime != "runtime n/a"
-        else state_phrase
+        f"{state_phrase} in {runtime}" if runtime != "runtime n/a" else state_phrase
     ]
 
     n_candidates = _summary_candidate_count(model)
@@ -4280,7 +4352,11 @@ def _executive_headline(model: ReportModel) -> str:
 def _state_clause(model: ReportModel) -> str:
     state = model.summary.state
     if model.warnings:
-        worst = max((w.level for w in model.warnings), default="warning", key=lambda level: {"error": 2, "warning": 1}.get(level, 0))
+        worst = max(
+            (w.level for w in model.warnings),
+            default="warning",
+            key=lambda level: {"error": 2, "warning": 1}.get(level, 0),
+        )
         return f"{len(model.warnings)} {worst}(s) need review"
     if state == "completed":
         return "no warnings"
@@ -4399,7 +4475,11 @@ def _chain_sidechain_flags(content: str, fmt: str) -> list[tuple[str, bool]]:
                 if in_header and stripped.startswith("_atom_site."):
                     cols.append(stripped.split(".", 1)[1].strip())
                     continue
-                if in_header and stripped.startswith("_") and not stripped.startswith("_atom_site."):
+                if (
+                    in_header
+                    and stripped.startswith("_")
+                    and not stripped.startswith("_atom_site.")
+                ):
                     in_header, cols = False, []
                     continue
                 if in_header and cols and not stripped.startswith("_"):
@@ -4407,14 +4487,20 @@ def _chain_sidechain_flags(content: str, fmt: str) -> list[tuple[str, bool]]:
                     break
             if not (cols and start >= 0):
                 return []
-            atom_idx = cols.index("label_atom_id") if "label_atom_id" in cols else (
-                cols.index("auth_atom_id") if "auth_atom_id" in cols else -1
+            atom_idx = (
+                cols.index("label_atom_id")
+                if "label_atom_id" in cols
+                else (cols.index("auth_atom_id") if "auth_atom_id" in cols else -1)
             )
-            comp_idx = cols.index("label_comp_id") if "label_comp_id" in cols else (
-                cols.index("auth_comp_id") if "auth_comp_id" in cols else -1
+            comp_idx = (
+                cols.index("label_comp_id")
+                if "label_comp_id" in cols
+                else (cols.index("auth_comp_id") if "auth_comp_id" in cols else -1)
             )
-            chain_idx = cols.index("label_asym_id") if "label_asym_id" in cols else (
-                cols.index("auth_asym_id") if "auth_asym_id" in cols else -1
+            chain_idx = (
+                cols.index("label_asym_id")
+                if "label_asym_id" in cols
+                else (cols.index("auth_asym_id") if "auth_asym_id" in cols else -1)
             )
             elem_idx = cols.index("type_symbol") if "type_symbol" in cols else -1
             if atom_idx < 0 or comp_idx < 0:
@@ -4432,8 +4518,12 @@ def _chain_sidechain_flags(content: str, fmt: str) -> list[tuple[str, bool]]:
                     continue
                 chain = parts[chain_idx].strip('"') if 0 <= chain_idx < len(parts) else "?"
                 atom_name = parts[atom_idx].strip('"').upper()
-                _note(chain, bool(atom_name) and atom_name not in _BACKBONE_ATOMS
-                      and not atom_name.startswith(("H", "D")))
+                _note(
+                    chain,
+                    bool(atom_name)
+                    and atom_name not in _BACKBONE_ATOMS
+                    and not atom_name.startswith(("H", "D")),
+                )
         else:
             # PDB / ent: fixed-column ATOM/HETATM records.
             for line in content.splitlines():
@@ -4446,8 +4536,12 @@ def _chain_sidechain_flags(content: str, fmt: str) -> list[tuple[str, bool]]:
                     continue
                 chain = line[21].strip() or "?"
                 atom_name = line[12:16].strip().upper()
-                _note(chain, bool(atom_name) and atom_name not in _BACKBONE_ATOMS
-                      and not atom_name.startswith(("H", "D")))
+                _note(
+                    chain,
+                    bool(atom_name)
+                    and atom_name not in _BACKBONE_ATOMS
+                    and not atom_name.startswith(("H", "D")),
+                )
     except Exception:
         # Never let a parsing hiccup break report generation.
         return []
@@ -4525,9 +4619,7 @@ def _ca_bfactors(content: str, fmt: str) -> list[float]:
         return vals
     if fmt == "cif":
         cols = [
-            line.strip()
-            for line in content.splitlines()
-            if line.strip().startswith("_atom_site.")
+            line.strip() for line in content.splitlines() if line.strip().startswith("_atom_site.")
         ]
         if not cols:
             return vals
@@ -4587,7 +4679,11 @@ def _normalize_structure_for_viewer(content: str, fmt: str) -> str:
         out: list[str] = []
         changed = False
         for line in content.splitlines():
-            if line.startswith("HETATM") and len(line) >= 20 and line[17:20].strip().upper() in _AA3_TO_1:
+            if (
+                line.startswith("HETATM")
+                and len(line) >= 20
+                and line[17:20].strip().upper() in _AA3_TO_1
+            ):
                 line = "ATOM  " + line[6:]
                 changed = True
             out.append(line)
@@ -4622,8 +4718,10 @@ def _cif_mark_protein_as_atom(content: str) -> str:
     if not (cols and start >= 0 and "group_PDB" in cols):
         return content
     g_idx = cols.index("group_PDB")
-    comp_idx = cols.index("label_comp_id") if "label_comp_id" in cols else (
-        cols.index("auth_comp_id") if "auth_comp_id" in cols else -1
+    comp_idx = (
+        cols.index("label_comp_id")
+        if "label_comp_id" in cols
+        else (cols.index("auth_comp_id") if "auth_comp_id" in cols else -1)
     )
     if comp_idx < 0:
         return content
@@ -4649,10 +4747,26 @@ def _structure_dom_id(candidate_id: str) -> str:
 # 3-letter → 1-letter map for structure-file → FASTA fallback. Mirrors the
 # JS-side AA3_TO_1 used by the Pick-mode info card.
 _AA3_TO_1: dict[str, str] = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
-    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
-    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
-    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+    "ALA": "A",
+    "ARG": "R",
+    "ASN": "N",
+    "ASP": "D",
+    "CYS": "C",
+    "GLN": "Q",
+    "GLU": "E",
+    "GLY": "G",
+    "HIS": "H",
+    "ILE": "I",
+    "LEU": "L",
+    "LYS": "K",
+    "MET": "M",
+    "PHE": "F",
+    "PRO": "P",
+    "SER": "S",
+    "THR": "T",
+    "TRP": "W",
+    "TYR": "Y",
+    "VAL": "V",
 }
 
 
@@ -4737,10 +4851,24 @@ def _extract_sequence_from_structure(path: Path) -> str:
             return ""
         try:
             grp = cols.index("group_PDB") if "group_PDB" in cols else -1
-            comp_idx = cols.index("label_comp_id") if "label_comp_id" in cols else cols.index("auth_comp_id")
-            atom_idx = cols.index("label_atom_id") if "label_atom_id" in cols else cols.index("auth_atom_id")
-            asym_idx = cols.index("label_asym_id") if "label_asym_id" in cols else cols.index("auth_asym_id")
-            seq_idx = cols.index("label_seq_id") if "label_seq_id" in cols else cols.index("auth_seq_id")
+            comp_idx = (
+                cols.index("label_comp_id")
+                if "label_comp_id" in cols
+                else cols.index("auth_comp_id")
+            )
+            atom_idx = (
+                cols.index("label_atom_id")
+                if "label_atom_id" in cols
+                else cols.index("auth_atom_id")
+            )
+            asym_idx = (
+                cols.index("label_asym_id")
+                if "label_asym_id" in cols
+                else cols.index("auth_asym_id")
+            )
+            seq_idx = (
+                cols.index("label_seq_id") if "label_seq_id" in cols else cols.index("auth_seq_id")
+            )
         except ValueError:
             return ""
         seq2: list[str] = []
@@ -4852,10 +4980,24 @@ def _extract_chains_from_structure(path: Path) -> list[tuple[str, str]]:
             return []
         try:
             grp = cols.index("group_PDB") if "group_PDB" in cols else -1
-            comp_idx = cols.index("label_comp_id") if "label_comp_id" in cols else cols.index("auth_comp_id")
-            atom_idx = cols.index("label_atom_id") if "label_atom_id" in cols else cols.index("auth_atom_id")
-            asym_idx = cols.index("label_asym_id") if "label_asym_id" in cols else cols.index("auth_asym_id")
-            seq_idx = cols.index("label_seq_id") if "label_seq_id" in cols else cols.index("auth_seq_id")
+            comp_idx = (
+                cols.index("label_comp_id")
+                if "label_comp_id" in cols
+                else cols.index("auth_comp_id")
+            )
+            atom_idx = (
+                cols.index("label_atom_id")
+                if "label_atom_id" in cols
+                else cols.index("auth_atom_id")
+            )
+            asym_idx = (
+                cols.index("label_asym_id")
+                if "label_asym_id" in cols
+                else cols.index("auth_asym_id")
+            )
+            seq_idx = (
+                cols.index("label_seq_id") if "label_seq_id" in cols else cols.index("auth_seq_id")
+            )
         except ValueError:
             return []
         for raw in lines[start:]:
@@ -4942,8 +5084,7 @@ def _chain_context_from_metadata(
     if not rows or len(chains) <= 1:
         return _ChainContext(), False
     chain_by_order = {
-        index: (chain_id, sequence)
-        for index, (chain_id, sequence) in enumerate(chains)
+        index: (chain_id, sequence) for index, (chain_id, sequence) in enumerate(chains)
     }
 
     def chain_for(row: dict[str, Any]) -> tuple[str, int] | None:
@@ -4995,11 +5136,7 @@ def _chain_context_from_metadata(
 
     binder_roles = {"binder", "design", "query", "peptide"}
     binder = next(
-        (
-            chain_for(row)
-            for row in rows
-            if str(row.get("role") or "").lower() in binder_roles
-        ),
+        (chain_for(row) for row in rows if str(row.get("role") or "").lower() in binder_roles),
         None,
     )
     if binder is None:
@@ -5014,7 +5151,9 @@ def _chain_context_from_metadata(
         elif chain is not None and chain[0] == binder[0]:
             return _ChainContext(), True
     if not targets:
-        targets = [(chain_id, len(sequence)) for chain_id, sequence in chains if chain_id != binder[0]]
+        targets = [
+            (chain_id, len(sequence)) for chain_id, sequence in chains if chain_id != binder[0]
+        ]
     return _ChainContext(binder_chain_id=binder[0], target_chains=tuple(targets)), False
 
 
@@ -5056,21 +5195,30 @@ def _chain_context_for(candidate: ReportCandidate) -> _ChainContext:
 # binding affinity (dG, affinity*, *_probability) presupposes a binding
 # partner. Conservative — leaves plddt / ptm / sequence-design metrics
 # alone since those describe the chain itself.
-_INTERFACE_ONLY_METRICS: frozenset[str] = frozenset({
-    "iptm", "mean_iptm",
-    "ipsae",
-    "dockq",
-    "iplddt",
-    "pae_interaction",
-    "sap_score",
-    "interface_residues", "interface_contacts", "interface_size",
-    "binding_probability", "binder_probability",
-    "affinity", "affinity_value",
-    "affinity_pred_value",
-    "affinity_probability", "affinity_probability_binary",
-    "confidence_score",  # Boltz-2 affinity composite head, complex-only
-    "dg", "delta_g",
-})
+_INTERFACE_ONLY_METRICS: frozenset[str] = frozenset(
+    {
+        "iptm",
+        "mean_iptm",
+        "ipsae",
+        "dockq",
+        "iplddt",
+        "pae_interaction",
+        "sap_score",
+        "interface_residues",
+        "interface_contacts",
+        "interface_size",
+        "binding_probability",
+        "binder_probability",
+        "affinity",
+        "affinity_value",
+        "affinity_pred_value",
+        "affinity_probability",
+        "affinity_probability_binary",
+        "confidence_score",  # Boltz-2 affinity composite head, complex-only
+        "dg",
+        "delta_g",
+    }
+)
 
 
 def _is_interface_only_metric(canonical: str) -> bool:
@@ -5132,13 +5280,8 @@ def _structure_sequence_track(
         # visible coordinate.
         if long_seq and (idx == 1 or idx % ruler_every == 1):
             cells.append(f'<span class="sst-tick" aria-hidden="true">{idx}</span>')
-        cells.append(
-            f'<span class="sst-cell" data-resi="{idx}" '
-            f'data-aa="{_h(aa)}">{_h(aa)}</span>'
-        )
-    meta_extra = (
-        f' · ruler every {ruler_every} residues' if long_seq else ''
-    )
+        cells.append(f'<span class="sst-cell" data-resi="{idx}" data-aa="{_h(aa)}">{_h(aa)}</span>')
+    meta_extra = f" · ruler every {ruler_every} residues" if long_seq else ""
     # For binder-design complex outputs, prepend the binder-chain id and
     # follow with a target-context note so the sequence track stops looking
     # like it disagrees with the rendered structure size.
@@ -5148,23 +5291,23 @@ def _structure_sequence_track(
         )
         meta_html = (
             f'<span class="sst-meta">{len(sequence)} residues · '
-            f'hover the structure to highlight · '
-            f'complex also shows {_h(chain_context.target_summary())}{meta_extra}</span>'
+            f"hover the structure to highlight · "
+            f"complex also shows {_h(chain_context.target_summary())}{meta_extra}</span>"
         )
     else:
         label_html = '<span class="sst-label">Sequence</span>'
         meta_html = (
             f'<span class="sst-meta">{len(sequence)} residues · '
-            f'hover the structure to highlight{meta_extra}</span>'
+            f"hover the structure to highlight{meta_extra}</span>"
         )
     return (
         f'<div class="structure-sequence-track" data-target="{_attr(dom_id)}">'
         '<div class="sst-head">'
-        f'{label_html}'
-        f'{meta_html}'
-        '</div>'
+        f"{label_html}"
+        f"{meta_html}"
+        "</div>"
         f'<code class="sst-strip">{"".join(cells)}</code>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -5280,8 +5423,7 @@ def _final_sequence_is_safe_material_key(candidate: ReportCandidate) -> bool:
         # Multi-chain structures without role metadata are ambiguous: the stored
         # sequence could be the target, binder, or concatenated context.
         return not (
-            candidate.structure_path
-            and _structure_chain_count(candidate.structure_path) > 1
+            candidate.structure_path and _structure_chain_count(candidate.structure_path) > 1
         )
     binder_lengths = [
         int(row.get("sequence_length"))
@@ -5296,10 +5438,48 @@ def _same_sequence_final_support(
     final_candidate: ReportCandidate,
     candidate: ReportCandidate,
 ) -> bool:
-    return (
-        _final_sequence_is_safe_material_key(final_candidate)
-        and _same_material_sequence(final_candidate, candidate)
+    return _final_sequence_is_safe_material_key(final_candidate) and _same_material_sequence(
+        final_candidate, candidate
     )
+
+
+def _normalized_structure_identity(path: str | None) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return str(Path(raw).expanduser())
+
+
+def _same_structure_final_support(
+    final_candidate: ReportCandidate,
+    candidate: ReportCandidate,
+) -> bool:
+    left = _normalized_structure_identity(final_candidate.structure_path)
+    right = _normalized_structure_identity(candidate.structure_path)
+    return bool(left and right and left == right)
+
+
+def _same_material_final_support(
+    final_candidate: ReportCandidate,
+    candidate: ReportCandidate,
+) -> bool:
+    return _same_sequence_final_support(
+        final_candidate,
+        candidate,
+    ) or _same_structure_final_support(final_candidate, candidate)
+
+
+def _has_objective_rank_evidence(candidate: ReportCandidate) -> bool:
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    if isinstance(scores.get("objective_rank"), dict):
+        return True
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    if source.get("ranked_candidate_id") or source.get("objective_rank_evidence"):
+        return True
+    return False
 
 
 def _sequence_support_for_final(
@@ -5415,8 +5595,7 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
         merged: dict[str, Any] = dict(fc.scores or {})
         for ec in explored:
             if (
-                ec.candidate_id == fc.candidate_id
-                or _sequence_support_for_final(fc, ec)
+                ec.candidate_id == fc.candidate_id or _same_material_final_support(fc, ec)
             ) and ec.scores:
                 merged = _merge_score_namespaces(merged, ec.scores)
         enriched_final.append(replace(fc, scores=merged))
@@ -5428,12 +5607,24 @@ def _dedup_candidate_view(model: ReportModel) -> ReportModel:
     kept_rank_index: dict[str, int] = {}
     seen_ids: set[str] = set()
     seen_seqs: set[str] = set()
-    # Richest first so the representative we keep per id/sequence is the one
-    # carrying the most metrics.
-    for ec in sorted(explored, key=_candidate_metric_richness, reverse=True):
+
+    def explored_sort_key(candidate: ReportCandidate) -> tuple[int, int, int]:
+        final_structure = any(_same_structure_final_support(fc, candidate) for fc in final)
+        final_sequence = any(_same_sequence_final_support(fc, candidate) for fc in final)
+        return (
+            0 if final_structure else (1 if final_sequence else 2),
+            0 if _has_objective_rank_evidence(candidate) else 1,
+            -_candidate_metric_richness(candidate),
+        )
+
+    # Prefer the objective-ranked structure row for submitted material, then
+    # fall back to the richest representative for ordinary duplicate support.
+    for ec in sorted(explored, key=explored_sort_key):
         if ec.candidate_id in final_ids:
             continue
-        if any(_same_sequence_final_support(fc, ec) for fc in final):
+        if not _has_objective_rank_evidence(ec) and any(
+            _same_material_final_support(fc, ec) for fc in final
+        ):
             continue
         can_sequence_dedupe = _can_sequence_dedupe(ec)
         if ec.candidate_id in seen_ids:
@@ -5605,9 +5796,7 @@ def _viewer_block(
     if not has_plddt:
         # No per-residue confidence in this artifact: keep the option visible
         # for orientation but disabled, and relabel so the reason is explicit.
-        plddt_option = (
-            '<option value="plddt" disabled>pLDDT (not in this model)</option>'
-        )
+        plddt_option = '<option value="plddt" disabled>pLDDT (not in this model)</option>'
     else:
         plddt_option = f'<option value="plddt">{_h(plddt_label)}</option>'
     if default_colour == "spectrum":
@@ -5629,9 +5818,7 @@ def _viewer_block(
     # For binder-design complexes the sequence strip belongs to the binder
     # chain ONLY; expose its id so the picker restricts FASTA highlighting to
     # that chain (hovering the target must not light up the binder strip).
-    binder_chain_attr = (
-        chain_context.binder_chain_id if is_complex and chain_context else ""
-    )
+    binder_chain_attr = chain_context.binder_chain_id if is_complex and chain_context else ""
     # When the artifact carries no per-residue confidence, say so once so the
     # absence of a pLDDT view doesn't read as a broken viewer. A chain-level QC
     # mean pLDDT may still be reported elsewhere in the report (protein_qc emits
@@ -5642,21 +5829,23 @@ def _viewer_block(
     if not has_plddt and scalar_plddt is not None:
         plddt_note = (
             '<p class="structure-coverage-note">This model carries no '
-            'per-residue pLDDT — only a chain-level QC mean '
-            f'(&asymp;{scalar_plddt * 100:.0f}). The 3D view colours residues '
+            "per-residue pLDDT — only a chain-level QC mean "
+            f"(&asymp;{scalar_plddt * 100:.0f}). The 3D view colours residues "
             "by the structure file's per-residue confidence, which is absent "
-            'here, so the pLDDT colour option is disabled.</p>'
+            "here, so the pLDDT colour option is disabled.</p>"
         )
     elif not has_plddt and not is_complex:
         plddt_note = (
             '<p class="structure-coverage-note">No per-residue pLDDT in this '
-            'artifact — this structure was produced by a coordinate-only generator '
-            '(e.g. PXDesign / RFdiffusion), so it is coloured N&rarr;C spectrum '
-            'instead of by confidence.</p>'
+            "artifact — this structure was produced by a coordinate-only generator "
+            "(e.g. PXDesign / RFdiffusion), so it is coloured N&rarr;C spectrum "
+            "instead of by confidence.</p>"
         )
     else:
         plddt_note = ""
-    sequence_track = "" if compact else _structure_sequence_track(sequence_str, dom_id, chain_context)
+    sequence_track = (
+        "" if compact else _structure_sequence_track(sequence_str, dom_id, chain_context)
+    )
     residue_info = (
         ""
         if compact
@@ -5680,14 +5869,14 @@ def _viewer_block(
             data-target="{_attr(dom_id)}" aria-pressed="false"
             title="Pick mode: hover residues for an instant residue card (RCSB-style)">&#x2316; Pick</button>"""
     )
-    return f"""<section class="structure-section{' structure-section-compact' if compact else ''}" data-target="{_attr(dom_id)}" data-format="{_attr(fmt)}"
+    return f"""<section class="structure-section{" structure-section-compact" if compact else ""}" data-target="{_attr(dom_id)}" data-format="{_attr(fmt)}"
          data-candidate-id="{_attr(candidate.candidate_id)}"
          data-structure-name="{_attr(structure_label)}"
          data-sequence="{_attr(sequence_str)}"
          data-binder-chain="{_attr(binder_chain_attr)}"
          data-default-colour="{_attr(default_colour)}">
   <header class="structure-header">
-    <span class="structure-title">{_h('Compare structure' if compact else '3D structure')}</span>
+    <span class="structure-title">{_h("Compare structure" if compact else "3D structure")}</span>
     <span class="structure-hint">{_h(hint_text)}</span>
     <label class="structure-control"><span>Colour</span>
       <select class="structure-color" data-target="{_attr(dom_id)}">
@@ -5750,11 +5939,7 @@ def _candidate_sequence_block(
     # When the structure is a binder-design complex, surface the binder
     # chain id in the head and add a small caption pointing at the target
     # so the reader sees the sequence-vs-structure size gap is intentional.
-    head_suffix = (
-        f' · binder chain {_h(chain_context.binder_chain_id)}'
-        if is_complex
-        else ''
-    )
+    head_suffix = f" · binder chain {_h(chain_context.binder_chain_id)}" if is_complex else ""
     target_note = (
         f"<p class='note'>Structure also shows {_h(chain_context.target_summary())}.</p>"
         if is_complex
@@ -5768,7 +5953,7 @@ def _candidate_sequence_block(
     return (
         '<div class="sequence-block">'
         f'<div class="sequence-head"><strong>Sequence</strong> · {len(sequence)} aa'
-        f'{head_suffix}'
+        f"{head_suffix}"
         f' <button class="copy-btn" data-copy="{_attr(sequence)}">Copy</button></div>'
         f"<code class='msa-seq'>{_colored_sequence(sequence[:240])}</code>"
         f"{truncation_note}"
@@ -5786,7 +5971,9 @@ def _candidate_downloads(candidate: ReportCandidate) -> str:
         if artifact.path in seen:
             continue
         seen.add(artifact.path)
-        links.append(_download_link(artifact.path, artifact.field, kind=artifact.kind, css="dl-link"))
+        links.append(
+            _download_link(artifact.path, artifact.field, kind=artifact.kind, css="dl-link")
+        )
     if candidate.structure_path and candidate.structure_path not in seen:
         links.append(
             _download_link(
@@ -5827,7 +6014,7 @@ def _topo_sort_nodes(
     indeg: dict[str, int] = {n.node_id: 0 for n in nodes}
     deps: dict[str, list[str]] = {n.node_id: [] for n in nodes}
     for n in nodes:
-        for u in (n.upstream or []):
+        for u in n.upstream or []:
             if u in by_id and u != n.node_id:
                 indeg[n.node_id] += 1
                 deps[u].append(n.node_id)
@@ -5888,18 +6075,17 @@ def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
     height = PAD_Y * 2 + NODE_H
 
     positions = {
-        node.node_id: (PAD_X + idx * (NODE_W + H_GAP), PAD_Y)
-        for idx, node in enumerate(nodes)
+        node.node_id: (PAD_X + idx * (NODE_W + H_GAP), PAD_Y) for idx, node in enumerate(nodes)
     }
 
     parts: list[str] = []
     parts.append(
-        '<defs>'
+        "<defs>"
         # Real, very subtle dual-layer drop shadow (Linear / Vercel style).
         '<filter id="dag-shadow" x="-20%" y="-20%" width="140%" height="160%">'
         '<feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.05"/>'
         '<feDropShadow dx="0" dy="3" stdDeviation="6" flood-opacity="0.04"/>'
-        '</filter>'
+        "</filter>"
         # Solid filled chevron — bold enough to read as a directional cue
         # without dominating the diagram. ``refX="10"`` lands the chevron
         # tip exactly at the line's endpoint, so the arrow visually touches
@@ -5907,8 +6093,8 @@ def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
         '<marker id="dag-chev" viewBox="0 0 12 12" refX="10" refY="6" '
         'markerWidth="9" markerHeight="9" orient="auto-start-reverse">'
         '<path d="M1,1 L10,6 L1,11 Z" fill="#a78bfa" stroke="none"/>'
-        '</marker>'
-        '</defs>'
+        "</marker>"
+        "</defs>"
     )
 
     # ---------- edges (drawn behind cards) ----------
@@ -5916,8 +6102,8 @@ def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
     for idx, node in enumerate(nodes):
         x, _ = positions[node.node_id]
         # Use declared upstreams when present, else fall back to sequential.
-        upstreams = list(node.upstream) if node.upstream else (
-            [nodes[idx - 1].node_id] if idx > 0 else []
+        upstreams = (
+            list(node.upstream) if node.upstream else ([nodes[idx - 1].node_id] if idx > 0 else [])
         )
         for upstream in upstreams:
             if upstream not in positions or (upstream, node.node_id) in seen_edges:
@@ -5983,12 +6169,12 @@ def _workflow_svg(nodes: list[WorkflowNodeSummary]) -> str:
             f'<rect x="{title_x - 2}" y="{y}" width="{clip_w}" height="{NODE_H}"/></clipPath>'
             f'<g clip-path="url(#{text_clip})">'
             f'<text x="{title_x}" y="{y + 26}" class="dag-title">'
-            f'{_svg_text(title_text)}</text>'
+            f"{_svg_text(title_text)}</text>"
             f'<text x="{title_x}" y="{y + 44}" class="dag-tool">'
-            f'{_svg_text(sub_text)}</text>'
-            f'</g>'
+            f"{_svg_text(sub_text)}</text>"
+            f"</g>"
         )
-        parts.append('</g>')
+        parts.append("</g>")
 
     return (
         f'<div class="dag-wrap">'
@@ -6017,8 +6203,7 @@ def _dag_status_circle(state_class: str, cx: float, cy: float, step_num: int) ->
             'stroke-linecap="round" stroke-linejoin="round"/>'
         )
         return (
-            f'<circle cx="{cx}" cy="{cy}" r="{r}" class="dag-circle state-{state_class}"/>'
-            + check
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" class="dag-circle state-{state_class}"/>' + check
         )
     if state_class == "failed":
         return (
@@ -6042,7 +6227,7 @@ def _dag_status_circle(state_class: str, cx: float, cy: float, step_num: int) ->
     return (
         f'<circle cx="{cx}" cy="{cy}" r="{r}" class="dag-circle state-pending"/>'
         f'<text x="{cx}" y="{cy + 4}" text-anchor="middle" class="dag-step-num">'
-        f'{step_num}</text>'
+        f"{step_num}</text>"
     )
 
 
@@ -6078,10 +6263,17 @@ def _fmt_param_value(value: Any) -> str:
 # the workflow panel surfaces *how the MSA was done* for these. New tools
 # are also picked up automatically when their params carry one of these keys.
 _WF_MSA_AWARE_TOOLS = frozenset({"protenix_v2", "boltz2_affinity"})
-_WF_MSA_KEYS = frozenset({
-    "use_msa", "msa_backend", "use_rna_msa", "use_template",
-    "msa_paths", "msa_index_csv", "msa",
-})
+_WF_MSA_KEYS = frozenset(
+    {
+        "use_msa",
+        "msa_backend",
+        "use_rna_msa",
+        "use_template",
+        "msa_paths",
+        "msa_index_csv",
+        "msa",
+    }
+)
 # Documented input-parameter defaults for the MSA-aware predictors. A run
 # that recorded no resolved params still has a known *effective* config —
 # these let the panel show it (tagged "default" so it reads as inferred).
@@ -6103,9 +6295,7 @@ def _wf_msa_info(node: WorkflowNodeSummary) -> list[tuple[str, str]]:
     params = node.params if isinstance(node.params, dict) else {}
     out = node.output if isinstance(node.output, dict) else {}
     tool = (node.tool or "").lower()
-    if tool not in _WF_MSA_AWARE_TOOLS and not any(
-        k in params for k in _WF_MSA_DEFAULTS
-    ):
+    if tool not in _WF_MSA_AWARE_TOOLS and not any(k in params for k in _WF_MSA_DEFAULTS):
         return []
     items: list[tuple[str, str]] = []
 
@@ -6119,16 +6309,15 @@ def _wf_msa_info(node: WorkflowNodeSummary) -> list[tuple[str, str]]:
     else:
         mp = out.get("msa_paths")
         if isinstance(mp, list) and mp:
-            items.append(
-                ("MSA", f"{len(mp)} alignment{'s' if len(mp) != 1 else ''} used")
-            )
+            items.append(("MSA", f"{len(mp)} alignment{'s' if len(mp) != 1 else ''} used"))
         elif isinstance(mp, list) or out.get("msa_index_csv"):
             # boltz2_affinity echoed its MSA inputs — empty means single-sequence.
-            items.append((
-                "MSA",
-                "MSA index supplied" if out.get("msa_index_csv")
-                else "off — single-sequence",
-            ))
+            items.append(
+                (
+                    "MSA",
+                    "MSA index supplied" if out.get("msa_index_csv") else "off — single-sequence",
+                )
+            )
         else:
             items.append(("MSA", "off — single-sequence (default)"))
 
@@ -6225,7 +6414,10 @@ def _wf_node_inputs_from_output(node: WorkflowNodeSummary) -> list[tuple[str, st
         add("backend", out.get("backend"))
         df = out.get("date_filter")
         if isinstance(df, dict) and (df.get("published_after") or df.get("published_before")):
-            add("dates", f"{df.get('published_after') or '...'} - {df.get('published_before') or '...'}")
+            add(
+                "dates",
+                f"{df.get('published_after') or '...'} - {df.get('published_before') or '...'}",
+            )
     elif tool == "template_select":
         add("engine", out.get("engine"))
         add("query kind", out.get("query_kind"))
@@ -6267,8 +6459,12 @@ def _wf_node_inputs_from_output(node: WorkflowNodeSummary) -> list[tuple[str, st
     if not items:
         seen: set[str] = set()
         for key, label in (
-            ("model_name", "model"), ("mode", "mode"), ("task_name", "task"),
-            ("num_samples", "samples"), ("seed", "seed"), ("seed_used", "seed"),
+            ("model_name", "model"),
+            ("mode", "mode"),
+            ("task_name", "task"),
+            ("num_samples", "samples"),
+            ("seed", "seed"),
+            ("seed_used", "seed"),
             ("seeds_used", "seeds"),
         ):
             if key in out and out[key] is not None and label not in seen:
@@ -6318,7 +6514,7 @@ def _workflow_composition(model: ReportModel) -> str:
     if edges > 0:
         stats.append(
             f'<span class="wf-comp-stat"><b>{edges}</b> data '
-            f'dependenc{"y" if edges == 1 else "ies"}</span>'
+            f"dependenc{'y' if edges == 1 else 'ies'}</span>"
         )
     else:
         stats.append('<span class="wf-comp-stat"><b>independent</b> execution</span>')
@@ -6330,18 +6526,14 @@ def _workflow_composition(model: ReportModel) -> str:
         ups = [by_id[u].tool for u in (n.upstream or []) if u in by_id]
         if ups:
             chips.append(
-                '<span class="wf-param wf-param-dep">consumes '
-                f'{_h(", ".join(ups))}</span>'
+                f'<span class="wf-param wf-param-dep">consumes {_h(", ".join(ups))}</span>'
             )
         for label, value in _wf_node_inputs(n):
-            chips.append(
-                f'<span class="wf-param"><b>{_h(label)}</b>{_h(value)}</span>'
-            )
+            chips.append(f'<span class="wf-param"><b>{_h(label)}</b>{_h(value)}</span>')
         params_html = (
             f'<span class="wf-step-params">{"".join(chips)}</span>'
             if chips
-            else '<span class="wf-step-params wf-step-noparam">'
-            "no input parameters recorded</span>"
+            else '<span class="wf-step-params wf-step-noparam">no input parameters recorded</span>'
         )
         rows.append(
             '<div class="wf-step">'
@@ -6366,10 +6558,7 @@ def _workflow_composition(model: ReportModel) -> str:
 def _plots_html(plots: list[PlotSpec]) -> str:
     if not plots:
         return "<p class='empty'>No numeric distributions were detected.</p>"
-    return "".join(
-        f"<div class='plot'><h3>{_h(plot.title)}</h3>{plot.svg}</div>"
-        for plot in plots
-    )
+    return "".join(f"<div class='plot'><h3>{_h(plot.title)}</h3>{plot.svg}</div>" for plot in plots)
 
 
 def _msa_html(blocks: list[MSABlock]) -> str:
@@ -6386,9 +6575,7 @@ def _msa_html(blocks: list[MSABlock]) -> str:
     html_blocks = []
     for idx, block in enumerate(blocks):
         seqs = list(block.sequences)
-        column_count = block.column_count or (
-            max((len(seq) for _, seq in seqs), default=0)
-        )
+        column_count = block.column_count or (max((len(seq) for _, seq in seqs), default=0))
         conservation = _conservation(seqs, column_count)
         ruler_cells = "".join(
             f'<span class="msa-cell msa-ruler-cell">{(col + 1) if (col % 10 == 0 or col == column_count - 1) else "&nbsp;"}</span>'
@@ -6426,7 +6613,7 @@ def _msa_html(blocks: list[MSABlock]) -> str:
         block_id = f"msa-{idx}"
         html_blocks.append(
             f'<div class="msa-section" id="{_attr(block_id)}" data-scheme="clustal">'
-            f'<h3>{_h(block.label)}</h3>'
+            f"<h3>{_h(block.label)}</h3>"
             f'<p class="msa-stats">{_h(" · ".join(meta_bits))}</p>'
             f'<p class="note">{_h(_short(block.path, 110))}'
             f"{' · truncated' if block.truncated else ''}</p>"
@@ -6437,11 +6624,11 @@ def _msa_html(blocks: list[MSABlock]) -> str:
             f'<option value="charge">Charge</option>'
             f'<option value="taylor">Taylor</option>'
             f'<option value="none">None</option>'
-            f'</select></label>'
+            f"</select></label>"
             f'<label>Zoom <input type="range" class="msa-zoom" min="6" max="18" value="11"></label>'
             f'<span class="msa-cursor">Col - / {column_count}</span>'
             f'<span class="msa-hover">hover a residue</span>'
-            f'</div>'
+            f"</div>"
             f'<div class="msa-grid-wrap">'
             f'<div class="msa-grid" style="--msa-cell-w:11px">'
             f'<div class="msa-row msa-row-ruler"><span class="msa-label"></span>'
@@ -6459,11 +6646,13 @@ def _msa_html(blocks: list[MSABlock]) -> str:
 # in _node_details to avoid duplicating the same file links twice. Other
 # tools (proteinmpnn / sequence_edit / sequence_analysis / etc.) still get
 # the generic list as their only artifact surface.
-_WIDGETS_OWN_ARTIFACTS = frozenset({
-    "structure_analysis",
-    "boltz2_affinity",
-    "protenix_v2",
-})
+_WIDGETS_OWN_ARTIFACTS = frozenset(
+    {
+        "structure_analysis",
+        "boltz2_affinity",
+        "protenix_v2",
+    }
+)
 
 
 # Tools whose job is purely to *transform* one tool's output into another
@@ -6475,23 +6664,25 @@ _WIDGETS_OWN_ARTIFACTS = frozenset({
 #
 # Add a new tool here when its only output is "convert X to Y format" —
 # i.e. nothing a human reviewer would want to inspect in the report.
-_TOOLS_WITHOUT_DELIVERABLE = frozenset({
-    "mpnn_to_protenix_input",
-    "sequence_to_protenix_input",
-    "noop",
-    # Candidate-stream plumbing. ``merge_candidates`` only unions/dedupes
-    # candidate lists between steps (node ids like
-    # "merge_rank_<x>_candidates") — it carries no deliverable a reviewer
-    # needs to inspect, and the merged pool is already shown in the
-    # Candidates section. Keep it in the DAG, drop the per-tool widget.
-    "merge_candidates",
-    # The explicit termination tool — its deliverable is already shown as
-    # the prominent "Final picks" / "Final outcome" panel at the top of
-    # the candidates section, so a second copy of the resolved-candidates
-    # JSON inside Per-tool widgets would be pure noise. Failures still
-    # surface because ``_node_details`` keeps failed passthrough nodes.
-    "submit_candidate",
-})
+_TOOLS_WITHOUT_DELIVERABLE = frozenset(
+    {
+        "mpnn_to_protenix_input",
+        "sequence_to_protenix_input",
+        "noop",
+        # Candidate-stream plumbing. ``merge_candidates`` only unions/dedupes
+        # candidate lists between steps (node ids like
+        # "merge_rank_<x>_candidates") — it carries no deliverable a reviewer
+        # needs to inspect, and the merged pool is already shown in the
+        # Candidates section. Keep it in the DAG, drop the per-tool widget.
+        "merge_candidates",
+        # The explicit termination tool — its deliverable is already shown as
+        # the prominent "Final picks" / "Final outcome" panel at the top of
+        # the candidates section, so a second copy of the resolved-candidates
+        # JSON inside Per-tool widgets would be pure noise. Failures still
+        # surface because ``_node_details`` keeps failed passthrough nodes.
+        "submit_candidate",
+    }
+)
 
 
 def _node_candidate_ids(output: dict[str, Any]) -> list[str]:
@@ -6608,17 +6799,12 @@ def _slice_node_output_for_candidate(
     for key in ("candidates", "ranked_candidates"):
         items = output.get(key)
         if isinstance(items, list):
-            match = [
-                c for c in items
-                if isinstance(c, dict) and c.get("candidate_id") == cid
-            ]
+            match = [c for c in items if isinstance(c, dict) and c.get("candidate_id") == cid]
             sliced[key] = match or [cand]
     scores = cand.get("scores") if isinstance(cand.get("scores"), dict) else {}
     pq = scores.get("protein_qc")
     if isinstance(pq, dict):
-        sliced["metrics"] = {
-            k: v for k, v in pq.items() if k not in ("flags", "passes_filters")
-        }
+        sliced["metrics"] = {k: v for k, v in pq.items() if k not in ("flags", "passes_filters")}
         sliced["flags"] = pq.get("flags") or []
     sa = scores.get("structure_analysis")
     if isinstance(sa, dict):
@@ -6660,8 +6846,7 @@ def _slice_node_output_for_candidate(
         # use its own scored descriptors and its own residue count, and drop the
         # pool framing so the widget renders one protein, not the batch blob.
         per_metrics = {
-            k: v for k, v in seq_an.items()
-            if k not in ("liability_count", "liability_types")
+            k: v for k, v in seq_an.items() if k not in ("liability_count", "liability_types")
         }
         per_metrics["analysis_mode"] = "single"
         seq_str = cand.get("sequence")
@@ -6707,9 +6892,7 @@ def _node_cand_toolbar(cand_order: list[_PerToolCand]) -> str:
         else:
             token = '<span class="cbc-token-num cbc-token-dash">&middot;</span>'
         eyebrow = "Final pick" if c.is_final else _h(c.status_label)
-        metric_html = (
-            f'<span class="cbc-metric">{_h(c.metric)}</span>' if c.metric else ""
-        )
+        metric_html = f'<span class="cbc-metric">{_h(c.metric)}</span>' if c.metric else ""
         cards.append(
             f'<button type="button" class="node-cand-btn cbrowse-card status-{_h(c.status_cls)}{final_cls}{active}" '
             f'data-pt-cand="{_attr(c.candidate_id)}" role="tab" '
@@ -6719,8 +6902,8 @@ def _node_cand_toolbar(cand_order: list[_PerToolCand]) -> str:
             f'<span class="cbc-body">'
             f'<span class="cbc-eyebrow">{eyebrow}</span>'
             f'<span class="cbc-name">{_h(c.short_id)}</span>'
-            f'{metric_html}'
-            f'</span>'
+            f"{metric_html}"
+            f"</span>"
             f'<span class="cbc-check" aria-hidden="true">&#10003;</span>'
             f"</button>"
         )
@@ -6730,9 +6913,9 @@ def _node_cand_toolbar(cand_order: list[_PerToolCand]) -> str:
         '<div class="cbrowse-head">'
         '<span class="cbrowse-title">View results for design</span>'
         f'<span class="cbrowse-count">{n} designs</span>'
-        '</div>'
+        "</div>"
         f'<div class="node-cand-btnrow" role="tablist">{"".join(cards)}</div>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -6758,7 +6941,7 @@ def _node_cand_variants(
         return (
             '<div class="node-cand-variants">'
             f'<div class="node-cand-variant is-active" data-cand="{_NODE_SHARED_CAND}">'
-            f'{widget}</div></div>'
+            f"{widget}</div></div>"
         )
     variants: list[str] = []
     for idx, c in enumerate(cand_order):
@@ -6770,7 +6953,7 @@ def _node_cand_variants(
         else:
             body = (
                 '<p class="node-cand-na-note">This sample did not pass through '
-                'this tool, so it has no result here.</p>'
+                "this tool, so it has no result here.</p>"
             )
         variants.append(
             f'<div class="node-cand-variant{active}" data-cand="{_attr(cid)}">{body}</div>'
@@ -6874,7 +7057,10 @@ def _node_details(
     for node in nodes:
         tool_lc = (node.tool or "").lower()
         is_passthrough = tool_lc in _TOOLS_WITHOUT_DELIVERABLE
-        node_failed = bool(node.error_code or node.error_message) or node.state in {"failed", "skipped"}
+        node_failed = bool(node.error_code or node.error_message) or node.state in {
+            "failed",
+            "skipped",
+        }
         # Skip passthrough nodes that succeeded — nothing to show. If they
         # failed, render them so the operator can see why the bridge step
         # blocked the rest of the workflow.
@@ -6925,7 +7111,7 @@ def _node_details(
             '<header class="nodeband-head"><span class="nb-glyph" aria-hidden="true">&#9707;</span>'
             '<span class="nodeband-title">All-designs results</span>'
             '<span class="nodeband-sub">Generators &amp; rankers — these span every design, '
-            'so they are not filtered by the selector</span></header>'
+            "so they are not filtered by the selector</span></header>"
             f"{''.join(cohort)}</section>"
         )
     return "".join(sections)
@@ -6938,11 +7124,7 @@ def _cohort_badge(output: dict[str, Any]) -> str:
     badge drops the count and just states it spans every design.
     """
     n = len(_node_candidate_ids(output))
-    label = (
-        f"Shows all {n} designs · not filtered"
-        if n
-        else "Shows all designs · not filtered"
-    )
+    label = f"Shows all {n} designs · not filtered" if n else "Shows all designs · not filtered"
     return f'<span class="node-block-cohort" title="This result covers every design at once and does not change with the sample selector.">{_h(label)}</span>'
 
 
@@ -6976,7 +7158,7 @@ def _node_block_article(
         f'<header class="node-block-head">'
         f'<div><span class="node-block-title">{_h(_tool_display_name(node.tool))}</span>'
         f'<span class="node-block-meta">{_h(node.tool)}@{_h(node.version)} '
-        f'· step <code>{_h(node.node_id)}</code></span></div>'
+        f"· step <code>{_h(node.node_id)}</code></span></div>"
         f'<span class="node-block-headright">{cohort_badge}'
         f'<span class="node-block-state state-{_state_class(node.state)}">{_h(node.state)}</span></span>'
         "</header>"
@@ -6995,7 +7177,7 @@ def _node_artifacts_list(node: WorkflowNodeSummary) -> str:
         '<div class="node-block-artifacts">'
         '<span class="artifact-section-label">Artifacts</span>'
         f'<div class="artifact-row">{items}</div>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -7006,9 +7188,7 @@ def _node_artifacts_list(node: WorkflowNodeSummary) -> str:
 #   (key, display_name, one-sentence_explanation, quality_fn)
 # ``quality_fn(value) -> "good"|"ok"|"poor"|"neutral"`` keeps the coloring
 # rule explicit (not LLM-generated, fully reproducible across runs).
-_QC_METRIC_SPECS: tuple[
-    tuple[str, str, str, Callable[[float], str]], ...
-] = (
+_QC_METRIC_SPECS: tuple[tuple[str, str, str, Callable[[float], str]], ...] = (
     (
         "plddt",
         "Mean pLDDT",
@@ -7107,10 +7287,22 @@ _NESTED_METRIC_KEYS = ("confidence_scores", "metrics", "scores")
 # Footer-only keys: shown as kv rows under the card grid rather than cards
 # themselves (they're context, not headline metrics).
 _FOOTER_METRIC_KEYS = (
-    "model_name", "model", "tool", "version", "device", "seed",
-    "seed_used", "seeds_used",
-    "num_residues", "length", "n_residues", "n_atoms",
-    "runtime_ms", "runtime_s", "elapsed_ms", "elapsed_s",
+    "model_name",
+    "model",
+    "tool",
+    "version",
+    "device",
+    "seed",
+    "seed_used",
+    "seeds_used",
+    "num_residues",
+    "length",
+    "n_residues",
+    "n_atoms",
+    "runtime_ms",
+    "runtime_s",
+    "elapsed_ms",
+    "elapsed_s",
 )
 
 
@@ -7141,7 +7333,12 @@ def _resolve_metric_spec(canonical: str) -> tuple[str, str, float, float] | None
     if canonical == "lddt" or canonical.endswith("_lddt"):
         return (pretty, "Local Distance Difference Test — structural accuracy (0-1).", 0.0, 1.0)
     if canonical == "seq_identity" or canonical.endswith("_identity"):
-        return (pretty, "Sequence identity — fraction of identical aligned residues (0-1).", 0.0, 1.0)
+        return (
+            pretty,
+            "Sequence identity — fraction of identical aligned residues (0-1).",
+            0.0,
+            1.0,
+        )
     return None
 
 
@@ -7164,7 +7361,8 @@ def _auto_score_card(key: str, value: Any) -> str | None:
         # No defensible range — render a range-less frame ring so the metric
         # still reads as a circular card alongside the gauged ones.
         return _score_card(
-            _pretty_metric_name(canonical), _fmt(num),
+            _pretty_metric_name(canonical),
+            _fmt(num),
             "Tool-emitted metric. No reference range registered — value shown as-is.",
             quality,
             gauge={"value": num, "frame": True},
@@ -7174,7 +7372,10 @@ def _auto_score_card(key: str, value: Any) -> str | None:
     if canonical in _DUAL_SCALE_METRICS and num <= 1.5 and hi >= 50.0:
         hi = 1.0
     return _score_card(
-        label, _fmt(num), explainer, quality,
+        label,
+        _fmt(num),
+        explainer,
+        quality,
         gauge={"value": num, "lo": lo, "hi": hi},
     )
 
@@ -7260,21 +7461,12 @@ def _qc_widget(output: dict[str, Any]) -> str:
         if quality not in {"good", "ok", "poor", "neutral"}:
             quality = "neutral"
         gauge_range = _QC_GAUGE_RANGES.get(key)
-        gauge = (
-            {"value": num, "lo": gauge_range[0], "hi": gauge_range[1]}
-            if gauge_range else None
-        )
+        gauge = {"value": num, "lo": gauge_range[0], "hi": gauge_range[1]} if gauge_range else None
         # Tag the confidence metrics with the tool that reported them so a
         # pLDDT / pTM / ipTM number here is traceable, not free-floating.
         src = "Protein QC" if key in {"plddt", "ptm", "iptm"} else ""
-        cards.append(
-            _score_card(name, _fmt(num), explanation, quality, gauge=gauge, source=src)
-        )
-    cards_html = (
-        _card_grid(cards)
-        if cards
-        else '<p class="empty">No QC metrics emitted.</p>'
-    )
+        cards.append(_score_card(name, _fmt(num), explanation, quality, gauge=gauge, source=src))
+    cards_html = _card_grid(cards) if cards else '<p class="empty">No QC metrics emitted.</p>'
     flags_html = ""
     if flags:
         chips: list[str] = []
@@ -7285,7 +7477,7 @@ def _qc_widget(output: dict[str, Any]) -> str:
             )
             chips.append(
                 f'<div class="qc-flag" title="{_attr(explainer)}">'
-                f'<strong>⚠️ {_h(flag)}</strong>'
+                f"<strong>⚠️ {_h(flag)}</strong>"
                 f'<span class="qc-flag-explain">{_h(explainer)}</span></div>'
             )
         flags_html = f'<div class="qc-flag-list">{"".join(chips)}</div>'
@@ -7398,9 +7590,7 @@ def _render_residues_html(seq: str, overlap: set[int]) -> str:
         if not buf:
             return
         chunk = _h("".join(buf))
-        parts.append(
-            f'<span class="seqret-hl">{chunk}</span>' if highlight else chunk
-        )
+        parts.append(f'<span class="seqret-hl">{chunk}</span>' if highlight else chunk)
         buf.clear()
 
     for i, ch in enumerate(seq):
@@ -7474,17 +7664,16 @@ def _sequence_retrieval_widget(output: dict[str, Any]) -> str:
     query_html = ""
     if query_id:
         label = (
-            f'<span class="seqret-query-label">{_h(str(query_label))}</span>'
-            if query_label else ""
+            f'<span class="seqret-query-label">{_h(str(query_label))}</span>' if query_label else ""
         )
         query_html = (
             f'<div class="seqret-query"><span class="seqret-query-id">'
-            f'{_h(str(query_id))}</span>{label}</div>'
+            f"{_h(str(query_id))}</span>{label}</div>"
         )
     summary_html = (
         '<div class="seqret-summary">'
         f'{query_html}<div class="seqret-stats">{"".join(stats)}</div>'
-        '</div>'
+        "</div>"
     )
 
     records = _read_fasta_file(output.get("fasta_path"))
@@ -7509,7 +7698,8 @@ def _sequence_retrieval_widget(output: dict[str, Any]) -> str:
             length = meta.get("length") or len(seq)
             dot = (
                 '<span class="seqret-rev" title="reviewed entry"></span>'
-                if meta.get("reviewed") is True else ""
+                if meta.get("reviewed") is True
+                else ""
             )
             label = (
                 f'<span class="seqret-row-label">{dot}'
@@ -7529,9 +7719,10 @@ def _sequence_retrieval_widget(output: dict[str, Any]) -> str:
         legend = (
             '<div class="seqret-legend"><span>'
             '<span class="seqret-legend-pip seqret-hl"></span>'
-            'cross-sequence overlap — a stretch of ≥10 residues identical '
-            'in another retrieved sequence</span></div>'
-            if any(masks) else ""
+            "cross-sequence overlap — a stretch of ≥10 residues identical "
+            "in another retrieved sequence</span></div>"
+            if any(masks)
+            else ""
         )
         list_html = (
             f'<div class="seqret-align-head">Retrieved sequences · {len(records)} shown</div>'
@@ -7541,7 +7732,8 @@ def _sequence_retrieval_widget(output: dict[str, Any]) -> str:
         dropped = summary.get("dropped") if isinstance(summary.get("dropped"), dict) else {}
         reason = (
             " — " + ", ".join(f"{v} {str(k).replace('_', ' ')}" for k, v in dropped.items())
-            if dropped else ""
+            if dropped
+            else ""
         )
         note = f'<p class="note">No sequences passed the retrieval filters{reason}.</p>'
     else:
@@ -7576,13 +7768,23 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
     summary = output.get("summary") if isinstance(output.get("summary"), dict) else {}
     source_summaries = output.get("source_summaries")
     if not isinstance(source_summaries, dict):
-        source_summaries = summary.get("source_summaries") if isinstance(summary.get("source_summaries"), dict) else {}
+        source_summaries = (
+            summary.get("source_summaries")
+            if isinstance(summary.get("source_summaries"), dict)
+            else {}
+        )
     retrieval_sources = output.get("retrieval_sources")
     if not isinstance(retrieval_sources, list):
-        retrieval_sources = summary.get("retrieval_sources") if isinstance(summary.get("retrieval_sources"), list) else []
+        retrieval_sources = (
+            summary.get("retrieval_sources")
+            if isinstance(summary.get("retrieval_sources"), list)
+            else []
+        )
     empty_facets = output.get("empty_facets")
     if not isinstance(empty_facets, list):
-        empty_facets = summary.get("empty_facets") if isinstance(summary.get("empty_facets"), list) else []
+        empty_facets = (
+            summary.get("empty_facets") if isinstance(summary.get("empty_facets"), list) else []
+        )
 
     resolved_terms = output.get("resolved_terms")
     if not isinstance(resolved_terms, dict):
@@ -7627,18 +7829,19 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
                 f'<span class="seqret-term-src">{_h(source_label)}</span>'
                 f'<span class="seqret-term-id">{_h(tid)}</span>'
                 f'<span class="seqret-term-label">{_h(label)}</span>'
-                '</div>'
+                "</div>"
                 '<div class="seqret-relrow">'
                 '<span class="seqret-relbar">'
                 f'<span class="seqret-relbar-fill" style="width:{pct:.0f}%"></span></span>'
                 f'<span class="seqret-relval">{_h(score_txt)}</span>'
                 f'<span class="seqret-term-reason">{_h(reason)}</span>'
-                '</div></div>'
+                "</div></div>"
             )
     terms_html = (
         '<div class="seqret-align-head">Resolved terms · relevance score</div>'
         f'<div class="seqret-terms">{"".join(term_rows)}</div>'
-        if term_rows else ""
+        if term_rows
+        else ""
     )
 
     # ---- Per-source yield: how many sequences each retrieval stream returned,
@@ -7657,7 +7860,9 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
         width = (count / max_count * 100) if max_count > 0 else 0.0
         empty_cls = " is-empty" if count == 0 else ""
         note = (
-            f' · {src_status}' if count == 0 else f' · {term_count} term{"s" if term_count != 1 else ""}'
+            f" · {src_status}"
+            if count == 0
+            else f" · {term_count} term{'s' if term_count != 1 else ''}"
         )
         yield_rows.append(
             f'<div class="seqret-yield{empty_cls}">'
@@ -7665,12 +7870,13 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
             '<span class="seqret-yield-track">'
             f'<span class="seqret-yield-fill" style="width:{width:.0f}%"></span></span>'
             f'<span class="seqret-yield-val">{count}<span class="muted">{_h(note)}</span></span>'
-            '</div>'
+            "</div>"
         )
     yield_html = (
         '<div class="seqret-align-head">Sequences retrieved per source</div>'
         f'<div class="seqret-yields">{"".join(yield_rows)}</div>'
-        if yield_rows else ""
+        if yield_rows
+        else ""
     )
 
     # ---- Concise note for sources that resolved no term (replaces the raw
@@ -7687,18 +7893,18 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
         err_txt = ""
         if isinstance(errs, list) and errs:
             err_txt = f" ({_short(str(errs[0]), 140)})"
-        unresolved.append(
-            f'<li><b>{_h(stage)}</b> — {_h(reason)}{_h(err_txt)}</li>'
-        )
+        unresolved.append(f"<li><b>{_h(stage)}</b> — {_h(reason)}{_h(err_txt)}</li>")
     unresolved_html = (
         '<div class="seqret-align-head">Unresolved sources</div>'
         f'<ul class="seqret-unresolved">{"".join(unresolved)}</ul>'
-        if unresolved else ""
+        if unresolved
+        else ""
     )
 
     query_html = (
         f'<div class="seqret-query"><span class="seqret-query-id">{_h(query)}</span></div>'
-        if query else ""
+        if query
+        else ""
     )
     explainer = (
         '<p class="widget-explainer">'
@@ -7713,15 +7919,18 @@ def _search_sequence_widget(output: dict[str, Any]) -> str:
         '<h4 class="widget-title">Sequence retrieval</h4>'
         f'{explainer}<div class="seqret-summary">{query_html}'
         f'<div class="seqret-stats">{"".join(stats)}</div></div>'
-        f'{terms_html}{yield_html}{unresolved_html}</div>'
+        f"{terms_html}{yield_html}{unresolved_html}</div>"
     )
 
 
 # DSSP 8-state secondary-structure codes -> 3-state buckets for the SS bar.
 # H/G/I = helices, E/B = strands; turn / bend / polyproline / coil -> loop.
 _DSSP_SS_3STATE: dict[str, str] = {
-    "H": "helix", "G": "helix", "I": "helix",
-    "E": "sheet", "B": "sheet",
+    "H": "helix",
+    "G": "helix",
+    "I": "helix",
+    "E": "sheet",
+    "B": "sheet",
 }
 
 
@@ -7741,16 +7950,15 @@ def _dssp_ss_strip(chain_label: str, first_resi: int, ss_string: str) -> str:
         ri = first_resi + i
         bucket = _DSSP_SS_3STATE.get(code.upper(), "loop")
         tip = f"{ri} · {bucket} · DSSP '{code}'"
-        ss_cells.append(
-            f'<span class="strip-cell ss-{bucket}" title="{_attr(tip)}"></span>'
-        )
+        ss_cells.append(f'<span class="strip-cell ss-{bucket}" title="{_attr(tip)}"></span>')
         show = ri in (first_resi, last) or (ri % 10 == 0 and abs(ri - last) > 2)
         ruler_cells.append(
             f'<span class="strip-cell strip-ruler-cell">{ri if show else "&nbsp;"}</span>'
         )
     head = (
         f"Chain {_h(chain_label)} · residues {first_resi}-{last}"
-        if chain_label else f"Residues {first_resi}-{last}"
+        if chain_label
+        else f"Residues {first_resi}-{last}"
     )
     return (
         '<div class="strip-block">'
@@ -7760,13 +7968,13 @@ def _dssp_ss_strip(chain_label: str, first_resi: int, ss_string: str) -> str:
         f'<div class="strip-cells">{"".join(ss_cells)}</div></div>'
         '<div class="strip-row strip-ruler"><span class="strip-label"></span>'
         f'<div class="strip-cells">{"".join(ruler_cells)}</div></div>'
-        '</div>'
+        "</div>"
         '<div class="strip-legend">'
         '<span class="legend-pip ss-helix"></span>helix'
         '<span class="legend-pip ss-sheet"></span>sheet'
         '<span class="legend-pip ss-loop"></span>loop'
-        '</div>'
-        '</div>'
+        "</div>"
+        "</div>"
     )
 
 
@@ -7845,7 +8053,8 @@ def _selected_positions_note(scope: Any, warnings: Any = None) -> str:
 
     missing_chip = (
         f'<span class="scope-note-missing">not in structure: {_h(missing_txt)}</span>'
-        if missing_txt else ""
+        if missing_txt
+        else ""
     )
     return (
         '<div class="scope-note">'
@@ -7880,13 +8089,8 @@ def _template_card(rank: int, t: dict[str, Any]) -> str:
         val = t.get(key)
         if val:
             badges.append(f'<span class="tmpl-badge">{_h(str(val))}</span>')
-    badge_html = (
-        f'<span class="tmpl-badges">{"".join(badges)}</span>' if badges else ""
-    )
-    desc_html = (
-        f'<span class="tmpl-desc">{_h(desc)}</span>'
-        if desc and desc != tid else ""
-    )
+    badge_html = f'<span class="tmpl-badges">{"".join(badges)}</span>' if badges else ""
+    desc_html = f'<span class="tmpl-desc">{_h(desc)}</span>' if desc and desc != tid else ""
     head = (
         '<div class="tmpl-card-head">'
         f'<span class="tmpl-rank">#{rank}</span>'
@@ -7895,8 +8099,10 @@ def _template_card(rank: int, t: dict[str, Any]) -> str:
     )
 
     bars: list[str] = []
-    for label, frac in (("Identity", _num(t.get("identity"))),
-                        ("Coverage", _num(t.get("coverage")))):
+    for label, frac in (
+        ("Identity", _num(t.get("identity"))),
+        ("Coverage", _num(t.get("coverage"))),
+    ):
         if frac is None:
             continue
         pct = max(0.0, min(100.0, frac * 100.0))
@@ -7915,20 +8121,15 @@ def _template_card(rank: int, t: dict[str, Any]) -> str:
             f'<span class="tmpl-chip">E-value <b>{_h(_fmt_evalue(t.get("evalue")))}</b></span>'
         )
     if t.get("length") is not None:
-        chips.append(
-            f'<span class="tmpl-chip">Length <b>{_h(str(t.get("length")))} aa</b></span>'
-        )
+        chips.append(f'<span class="tmpl-chip">Length <b>{_h(str(t.get("length")))} aa</b></span>')
     chip_html = f'<div class="tmpl-chips">{"".join(chips)}</div>' if chips else ""
     metrics = (
-        f'<div class="tmpl-metrics">{"".join(bars)}{chip_html}</div>'
-        if bars or chip_html else ""
+        f'<div class="tmpl-metrics">{"".join(bars)}{chip_html}</div>' if bars or chip_html else ""
     )
     return f'<div class="tmpl-card">{head}{metrics}</div>'
 
 
-def _template_sequences_html(
-    templates: list[dict[str, Any]], seqs: dict[str, str]
-) -> str:
+def _template_sequences_html(templates: list[dict[str, Any]], seqs: dict[str, str]) -> str:
     """MSA-style comparison strip — every template sequence stacked in one
     horizontally-scrollable container with a shared position ruler."""
     present: list[tuple[dict[str, Any], str]] = []
@@ -7945,8 +8146,7 @@ def _template_sequences_html(
         tid = str(t.get("template_id") or t.get("description") or "?")
         ident = _num(t.get("identity"))
         badge = (
-            f'<span class="tmpl-seq-id">{ident * 100:.0f}% id</span>'
-            if ident is not None else ""
+            f'<span class="tmpl-seq-id">{ident * 100:.0f}% id</span>' if ident is not None else ""
         )
         rows.append(
             '<div class="tmpl-seq-row">'
@@ -7996,12 +8196,10 @@ def _template_select_widget(output: dict[str, Any]) -> str:
 
     meta_bits: list[str] = []
     if output.get("engine"):
-        meta_bits.append(f'{output["engine"]} engine')
+        meta_bits.append(f"{output['engine']} engine")
     if output.get("query_kind"):
-        meta_bits.append(f'{output["query_kind"]} query')
-    meta_bits.append(
-        f"{len(templates)} template{'s' if len(templates) != 1 else ''}"
-    )
+        meta_bits.append(f"{output['query_kind']} query")
+    meta_bits.append(f"{len(templates)} template{'s' if len(templates) != 1 else ''}")
     rt = _num(output.get("runtime_ms"))
     if rt is not None:
         meta_bits.append(_duration(int(rt)))
@@ -8020,10 +8218,7 @@ def _template_select_widget(output: dict[str, Any]) -> str:
     seq_html = _template_sequences_html(templates, seqs)
     note = ""
     if not seq_html and isinstance(fasta_path, str):
-        note = (
-            '<p class="note">Template sequences are not embedded in this '
-            "report.</p>"
-        )
+        note = '<p class="note">Template sequences are not embedded in this report.</p>'
     return (
         '<div class="widget widget-tmpl">'
         '<h4 class="widget-title">Template selection</h4>'
@@ -8069,18 +8264,16 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
     burial = summary.get("burial") if isinstance(summary.get("burial"), dict) else {}
     interface = summary.get("interface") if isinstance(summary.get("interface"), dict) else {}
     site_contacts = (
-        summary.get("site_contacts")
-        if isinstance(summary.get("site_contacts"), dict)
-        else {}
+        summary.get("site_contacts") if isinstance(summary.get("site_contacts"), dict) else {}
     )
     ligand_pocket = (
-        summary.get("ligand_pocket")
-        if isinstance(summary.get("ligand_pocket"), dict)
-        else {}
+        summary.get("ligand_pocket") if isinstance(summary.get("ligand_pocket"), dict) else {}
     )
     chains = summary.get("chains") if isinstance(summary.get("chains"), list) else []
     liabilities = summary.get("liabilities") if isinstance(summary.get("liabilities"), list) else []
-    scope = summary.get("annotation_scope") if isinstance(summary.get("annotation_scope"), dict) else {}
+    scope = (
+        summary.get("annotation_scope") if isinstance(summary.get("annotation_scope"), dict) else {}
+    )
     annotated = scope.get("annotated_residue_count") if isinstance(scope, dict) else None
 
     # Per-residue parsed rows (chain, resi, aa, rsa, burial_class, ss, neighbours)
@@ -8115,84 +8308,104 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
     sheet_pct = (ss_counts.get("sheet", 0) / n_total) * 100 if n_total else 0
     loop_pct = (ss_counts.get("loop", 0) / n_total) * 100 if n_total else 0
     if n_total:
-        cards.append(_score_card(
-            "% helix", f"{helix_pct:.0f}%",
-            "Fraction of residues classified as alpha-helix by DSSP / pydssp.",
-            "neutral",
-            gauge={"value": helix_pct, "lo": 0.0, "hi": 100.0},
-        ))
-        cards.append(_score_card(
-            "% sheet", f"{sheet_pct:.0f}%",
-            "Fraction of residues classified as beta-sheet / strand.",
-            "neutral",
-            gauge={"value": sheet_pct, "lo": 0.0, "hi": 100.0},
-        ))
-        cards.append(_score_card(
-            "% loop", f"{loop_pct:.0f}%",
-            "Fraction of residues classified as loop / coil.",
-            "neutral",
-            gauge={"value": loop_pct, "lo": 0.0, "hi": 100.0},
-        ))
+        cards.append(
+            _score_card(
+                "% helix",
+                f"{helix_pct:.0f}%",
+                "Fraction of residues classified as alpha-helix by DSSP / pydssp.",
+                "neutral",
+                gauge={"value": helix_pct, "lo": 0.0, "hi": 100.0},
+            )
+        )
+        cards.append(
+            _score_card(
+                "% sheet",
+                f"{sheet_pct:.0f}%",
+                "Fraction of residues classified as beta-sheet / strand.",
+                "neutral",
+                gauge={"value": sheet_pct, "lo": 0.0, "hi": 100.0},
+            )
+        )
+        cards.append(
+            _score_card(
+                "% loop",
+                f"{loop_pct:.0f}%",
+                "Fraction of residues classified as loop / coil.",
+                "neutral",
+                gauge={"value": loop_pct, "lo": 0.0, "hi": 100.0},
+            )
+        )
     if isinstance(burial, dict) and burial:
         buried = int(burial.get("buried") or 0)
         exposed = int(burial.get("exposed") or 0)
         intermediate = int(burial.get("intermediate") or 0)
         burial_total = buried + exposed + intermediate
         if burial_total:
-            cards.append(_score_card(
-                "Buried residues", f"{buried} / {burial_total}",
-                "Residues with relative solvent accessibility <0.25 (DSSP convention).",
-                "neutral",
-                gauge={"value": buried, "lo": 0.0, "hi": float(burial_total)},
-            ))
+            cards.append(
+                _score_card(
+                    "Buried residues",
+                    f"{buried} / {burial_total}",
+                    "Residues with relative solvent accessibility <0.25 (DSSP convention).",
+                    "neutral",
+                    gauge={"value": buried, "lo": 0.0, "hi": float(burial_total)},
+                )
+            )
     if isinstance(interface, dict) and interface:
         ligand_contacts = interface.get("ligand_contact_count")
         if ligand_contacts is not None:
             n_lc = _num(ligand_contacts) or 0.0
-            cards.append(_score_card(
-                "Ligand contacts", _fmt(ligand_contacts),
-                "Heavy-atom contacts (<5 A) between the protein and any non-protein hetero residue.",
-                "neutral",
-                gauge={"value": n_lc, "lo": 0.0, "hi": max(20.0, n_lc * 2)},
-            ))
+            cards.append(
+                _score_card(
+                    "Ligand contacts",
+                    _fmt(ligand_contacts),
+                    "Heavy-atom contacts (<5 A) between the protein and any non-protein hetero residue.",
+                    "neutral",
+                    gauge={"value": n_lc, "lo": 0.0, "hi": max(20.0, n_lc * 2)},
+                )
+            )
         buried_fraction = (
-            ligand_pocket.get("ligand_buried_fraction")
-            if isinstance(ligand_pocket, dict)
-            else None
+            ligand_pocket.get("ligand_buried_fraction") if isinstance(ligand_pocket, dict) else None
         )
         if buried_fraction is not None:
             n_bf = _num(buried_fraction)
             if n_bf is not None:
-                cards.append(_score_card(
-                    "Ligand buried", f"{n_bf * 100:.0f}%",
-                    "Fraction of ligand heavy atoms with at least one protein heavy-atom contact.",
-                    "neutral",
-                    gauge={"value": n_bf * 100, "lo": 0.0, "hi": 100.0},
-                ))
+                cards.append(
+                    _score_card(
+                        "Ligand buried",
+                        f"{n_bf * 100:.0f}%",
+                        "Fraction of ligand heavy atoms with at least one protein heavy-atom contact.",
+                        "neutral",
+                        gauge={"value": n_bf * 100, "lo": 0.0, "hi": 100.0},
+                    )
+                )
         interface_residues = interface.get("interface_residue_count")
         if interface_residues:
             n_ir = _num(interface_residues) or 0.0
-            cards.append(_score_card(
-                "Interface residues", _fmt(interface_residues),
-                "Residues with at least one inter-chain contact within 5 A.",
-                "neutral",
-                gauge={"value": n_ir, "lo": 0.0, "hi": max(20.0, n_ir * 2)},
-            ))
+            cards.append(
+                _score_card(
+                    "Interface residues",
+                    _fmt(interface_residues),
+                    "Residues with at least one inter-chain contact within 5 A.",
+                    "neutral",
+                    gauge={"value": n_ir, "lo": 0.0, "hi": max(20.0, n_ir * 2)},
+                )
+            )
     if isinstance(site_contacts, dict) and site_contacts:
         site_contact_count = site_contacts.get("contact_count")
         mapped_count = site_contacts.get("mapped_position_count")
         if site_contact_count is not None and mapped_count:
             n_sc = _num(site_contact_count) or 0.0
             n_mapped = _num(mapped_count) or 0.0
-            cards.append(_score_card(
-                "Site contacts", f"{_fmt(site_contact_count)} / {_fmt(mapped_count)}",
-                "Requested target-site positions with at least one partner-chain heavy-atom contact.",
-                "neutral",
-                gauge={"value": n_sc, "lo": 0.0, "hi": max(1.0, n_mapped)},
-            ))
-    cards_html = (
-        _card_grid(cards)
-    )
+            cards.append(
+                _score_card(
+                    "Site contacts",
+                    f"{_fmt(site_contact_count)} / {_fmt(mapped_count)}",
+                    "Requested target-site positions with at least one partner-chain heavy-atom contact.",
+                    "neutral",
+                    gauge={"value": n_sc, "lo": 0.0, "hi": max(1.0, n_mapped)},
+                )
+            )
+    cards_html = _card_grid(cards)
 
     # ---------- sequence rulers (SS strip + burial strip) ----------
     ruler_html = _structure_ruler_html(annotations_rows, liabilities)
@@ -8230,8 +8443,7 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
                 "liabilities_json": "structural liabilities",
             }
             notes = [
-                _h(label_map.get(field, field.replace("_", " ")))
-                for field in empty_artifact_fields
+                _h(label_map.get(field, field.replace("_", " "))) for field in empty_artifact_fields
             ]
             bits.append(
                 '<p class="note">No '
@@ -8258,10 +8470,14 @@ def _structure_analysis_widget(output: dict[str, Any]) -> str:
         )
 
     chains_label = (
-        f'<p class="note">Chains: {", ".join(_h(str(c)) for c in chains)}'
-        + (f" · annotated {annotated} residues" if annotated else "")
-        + "</p>"
-    ) if chains else ""
+        (
+            f'<p class="note">Chains: {", ".join(_h(str(c)) for c in chains)}'
+            + (f" · annotated {annotated} residues" if annotated else "")
+            + "</p>"
+        )
+        if chains
+        else ""
+    )
     scope_note = _selected_positions_note(scope, output.get("warnings"))
 
     return (
@@ -8426,14 +8642,17 @@ def _structure_ruler_html(
                 ri = int(resseq) if resseq is not None else 0
             except (ValueError, TypeError):
                 ri = 0
-            aa = (r.get("aa") or "?")
+            aa = r.get("aa") or "?"
             ss = (r.get("secondary_structure") or "").lower()
             ss_class = "ss-helix" if ss == "helix" else ("ss-sheet" if ss == "sheet" else "ss-loop")
             burial = (r.get("burial_class") or "").lower()
             b_class = (
-                "burial-buried" if burial == "buried"
-                else "burial-intermediate" if burial == "intermediate"
-                else "burial-exposed" if burial == "exposed"
+                "burial-buried"
+                if burial == "buried"
+                else "burial-intermediate"
+                if burial == "intermediate"
+                else "burial-exposed"
+                if burial == "exposed"
                 else "burial-na"
             )
             tip = f"{aa}{ri} · {ss or '?'} · {burial or 'n/a'}"
@@ -8456,15 +8675,13 @@ def _structure_ruler_html(
             elif ri % 10 == 0 and abs(ri - last_resseq) > 2:
                 show_label = True
             ruler_cells.append(
-                f'<span class="strip-cell strip-ruler-cell">'
-                f'{ri if show_label else "&nbsp;"}'
-                "</span>"
+                f'<span class="strip-cell strip-ruler-cell">{ri if show_label else "&nbsp;"}</span>'
             )
 
         blocks.append(
             f'<div class="strip-block">'
             f'<div class="strip-head">Chain {_h(chain) or "?"} · residues '
-            f'{first_resseq}-{last_resseq}</div>'
+            f"{first_resseq}-{last_resseq}</div>"
             f'<div class="strip-scroll">'
             f'<div class="strip-row"><span class="strip-label">SS</span>'
             f'<div class="strip-cells">{"".join(ss_cells)}</div></div>'
@@ -8474,14 +8691,14 @@ def _structure_ruler_html(
                 f'<div class="strip-row"><span class="strip-label" '
                 f'title="Structural liability candidates flagged by protein_qc / structure_analysis '
                 f'(e.g. buried polar residues, aggregation-prone stretches). Hover a marker for the type.">'
-                f'Liability</span>'
+                f"Liability</span>"
                 f'<div class="strip-cells">{"".join(liab_cells)}</div></div>'
                 if any(liab_positions.get((chain, int(r.get("resseq") or -1))) for r in chain_rows)
                 else ""
             )
             + f'<div class="strip-row strip-ruler"><span class="strip-label"></span>'
             f'<div class="strip-cells">{"".join(ruler_cells)}</div></div>'
-            f'</div>'  # close .strip-scroll
+            f"</div>"  # close .strip-scroll
             f'<div class="strip-legend">'
             '<span class="legend-pip ss-helix"></span>helix'
             '<span class="legend-pip ss-sheet"></span>sheet'
@@ -8491,7 +8708,7 @@ def _structure_ruler_html(
             '<span class="legend-pip burial-exposed"></span>exposed'
             + (
                 '<span class="legend-pip strip-liab"></span>liability flag'
-                ' (e.g. buried polar / aggregation-prone residue)'
+                " (e.g. buried polar / aggregation-prone residue)"
                 if any(liab_positions.values())
                 else ""
             )
@@ -8514,9 +8731,7 @@ def _residue_annotations_table(rows: list[dict[str, Any]]) -> str:
         ("neighbor_count", "Neighbours"),
     ]
     # Drop columns entirely absent from this dataset.
-    present_cols = [
-        (k, name) for k, name in header_cols if any(k in r for r in rows)
-    ]
+    present_cols = [(k, name) for k, name in header_cols if any(k in r for r in rows)]
     head = "".join(f"<th>{_h(name)}</th>" for _, name in present_cols)
     body_rows: list[str] = []
     for r in rows:
@@ -8527,14 +8742,19 @@ def _residue_annotations_table(rows: list[dict[str, Any]]) -> str:
                 cells.append(f"<td>{v:.2f}</td>")
             elif key == "secondary_structure":
                 s = str(v).lower()
-                ss_class = "ss-helix" if s == "helix" else ("ss-sheet" if s == "sheet" else "ss-loop")
+                ss_class = (
+                    "ss-helix" if s == "helix" else ("ss-sheet" if s == "sheet" else "ss-loop")
+                )
                 cells.append(f'<td><span class="ss-chip {ss_class}">{_h(v)}</span></td>')
             elif key == "burial_class":
                 b = str(v).lower()
                 b_class = (
-                    "burial-buried" if b == "buried"
-                    else "burial-intermediate" if b == "intermediate"
-                    else "burial-exposed" if b == "exposed"
+                    "burial-buried"
+                    if b == "buried"
+                    else "burial-intermediate"
+                    if b == "intermediate"
+                    else "burial-exposed"
+                    if b == "exposed"
                     else "burial-na"
                 )
                 cells.append(f'<td><span class="ss-chip {b_class}">{_h(v)}</span></td>')
@@ -8543,7 +8763,7 @@ def _residue_annotations_table(rows: list[dict[str, Any]]) -> str:
         body_rows.append("<tr>" + "".join(cells) + "</tr>")
     return (
         '<details class="residue-annotations">'
-        f'<summary>Per-residue annotations table ({len(rows)} residues)</summary>'
+        f"<summary>Per-residue annotations table ({len(rows)} residues)</summary>"
         '<div class="table-wrap"><table class="residue-annotations-table">'
         f"<thead><tr>{head}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody></table></div></details>"
@@ -8555,23 +8775,29 @@ def _residue_annotations_table(rows: list[dict[str, Any]]) -> str:
 _SEQANA_PROP_SPECS: dict[str, tuple[str, str, float | None, float | None]] = {
     "length": ("Length", "Total residue count.", None, None),
     "molecular_weight": (
-        "Molecular weight (Da)", "Mass of the chain in daltons.", None, None,
+        "Molecular weight (Da)",
+        "Mass of the chain in daltons.",
+        None,
+        None,
     ),
     "pI": (
         "Isoelectric point",
         "pH of net-zero charge. Typical soluble proteins span pI 4-9.",
-        0.0, 14.0,
+        0.0,
+        14.0,
     ),
     "gravy": (
         "GRAVY",
         "Grand average of hydropathy (Kyte-Doolittle). Negative = hydrophilic / soluble.",
-        -2.0, 2.0,
+        -2.0,
+        2.0,
     ),
     "net_charge": ("Net charge", "Net charge estimated at pH 7.", None, None),
     "instability_index": (
         "Instability index",
         "Guruprasad heuristic. <40 predicts a protein stable in vitro.",
-        0.0, 80.0,
+        0.0,
+        80.0,
     ),
 }
 
@@ -8586,11 +8812,7 @@ def _seqana_prop_card(key: str, value: Any) -> str | None:
         return None
     label, explainer, lo, hi = spec
     quality = _quality_class(key.lower(), num)
-    gauge = (
-        {"value": num, "frame": True}
-        if lo is None
-        else {"value": num, "lo": lo, "hi": hi}
-    )
+    gauge = {"value": num, "frame": True} if lo is None else {"value": num, "lo": lo, "hi": hi}
     return _score_card(label, _fmt(num), explainer, quality, gauge=gauge)
 
 
@@ -8737,7 +8959,7 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
     if metrics.get("analysis_mode"):
         meta_bits.append(str(metrics["analysis_mode"]).replace("_", " "))
     if metrics.get("metric_backend"):
-        meta_bits.append(f'{metrics["metric_backend"]} backend')
+        meta_bits.append(f"{metrics['metric_backend']} backend")
     length = metrics.get("length", output.get("sequence_length"))
     if length is not None:
         noncanon = _num(metrics.get("noncanonical_residue_count")) or 0
@@ -8750,7 +8972,8 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
         else:
             meta_bits.append(
                 f"{length} residues ({int(noncanon)} non-canonical)"
-                if noncanon else f"{length} residues"
+                if noncanon
+                else f"{length} residues"
             )
     meta = f'<p class="note">{_h(" · ".join(meta_bits))}</p>' if meta_bits else ""
 
@@ -8764,13 +8987,12 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
         else ("length", "molecular_weight", "pI", "gravy", "net_charge", "instability_index")
     )
     prop_cards = [
-        card
-        for key in prop_keys
-        if (card := _seqana_prop_card(key, metrics.get(key))) is not None
+        card for key in prop_keys if (card := _seqana_prop_card(key, metrics.get(key))) is not None
     ]
     props_html = (
         '<h5 class="widget-subhead">Key properties</h5>' + _card_grid(prop_cards)
-        if prop_cards else ""
+        if prop_cards
+        else ""
     )
 
     # ---- residue composition (labelled bars) ----
@@ -8796,17 +9018,20 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
     comp_html = (
         '<h5 class="widget-subhead">Residue composition</h5>'
         f'<div class="seqana-comp">{"".join(comp_rows)}</div>'
-        if comp_rows else ""
+        if comp_rows
+        else ""
     )
 
     # ---- amino-acid distribution (sequence logo) ----
     aa_fracs = (
         metrics.get("amino_acid_fractions")
-        if isinstance(metrics.get("amino_acid_fractions"), dict) else {}
+        if isinstance(metrics.get("amino_acid_fractions"), dict)
+        else {}
     )
     aa_counts = (
         metrics.get("amino_acid_counts")
-        if isinstance(metrics.get("amino_acid_counts"), dict) else {}
+        if isinstance(metrics.get("amino_acid_counts"), dict)
+        else {}
     )
     fractions: dict[str, float] = {}
     if aa_fracs:
@@ -8837,12 +9062,11 @@ def _sequence_analysis_widget(output: dict[str, Any]) -> str:
     liab_html = (
         f'<p class="note">{len(liabs)} sequence-liability flag(s) recorded — '
         "see the raw output below.</p>"
-        if liabs else ""
+        if liabs
+        else ""
     )
 
-    scope_note = _selected_positions_note(
-        output.get("annotation_scope"), output.get("warnings")
-    )
+    scope_note = _selected_positions_note(output.get("annotation_scope"), output.get("warnings"))
     return (
         '<div class="widget widget-seqana">'
         '<h4 class="widget-title">Sequence analysis</h4>'
@@ -8912,12 +9136,9 @@ def _sequence_edit_widget(output: dict[str, Any]) -> str:
 
     mutant = output.get("mutant_sequence") or output.get("edited_sequence")
     wt = output.get("wild_type_sequence") or output.get("original_sequence")
-    raw_muts = (
-        output.get("mutations") if isinstance(output.get("mutations"), list) else []
-    )
+    raw_muts = output.get("mutations") if isinstance(output.get("mutations"), list) else []
     parsed = [
-        _seqedit_parse_mutation(m.get("change") if isinstance(m, dict) else m)
-        for m in raw_muts
+        _seqedit_parse_mutation(m.get("change") if isinstance(m, dict) else m) for m in raw_muts
     ]
 
     # Reconstruct the wild-type sequence when only the mutant is stored:
@@ -8953,7 +9174,7 @@ def _sequence_edit_widget(output: dict[str, Any]) -> str:
     operation = str(output.get("operation") or "").strip()
     op_html = (
         f'<span class="seqedit-op">'
-        f'{_h(_SEQEDIT_OP_LABELS.get(operation, operation.replace("_", " ").title()))}'
+        f"{_h(_SEQEDIT_OP_LABELS.get(operation, operation.replace('_', ' ').title()))}"
         "</span>"
         if operation
         else ""
@@ -9006,9 +9227,7 @@ def _sequence_edit_widget(output: dict[str, Any]) -> str:
                     f'<b class="sm-to">{_h(p["mut"])}</b></span>'
                 )
             else:
-                chips.append(
-                    f'<span class="seqedit-mut-chip">{_h(p["raw"])}</span>'
-                )
+                chips.append(f'<span class="seqedit-mut-chip">{_h(p["raw"])}</span>')
         muts_html = (
             '<div class="seqedit-align-head">Mutations applied</div>'
             f'<div class="seqedit-muts">{"".join(chips)}</div>'
@@ -9051,19 +9270,14 @@ def _sequence_edit_widget(output: dict[str, Any]) -> str:
             f'<div class="seqedit-align-scroll">{"".join(rows)}</div>{legend}'
         )
     else:
-        alignment_html = (
-            '<p class="note">No sequence data was emitted for this edit.</p>'
-        )
+        alignment_html = '<p class="note">No sequence data was emitted for this edit.</p>'
 
     # ---- warnings -----------------------------------------------------
     warnings = output.get("warnings") if isinstance(output.get("warnings"), list) else []
-    warn_html = "".join(
-        f'<div class="seqedit-warn">{_h(str(w))}</div>' for w in warnings
-    )
+    warn_html = "".join(f'<div class="seqedit-warn">{_h(str(w))}</div>' for w in warnings)
 
     recon_note = (
-        " The wild-type row is reconstructed from the mutant sequence and the "
-        "substitution list."
+        " The wild-type row is reconstructed from the mutant sequence and the substitution list."
         if wt_reconstructed
         else ""
     )
@@ -9110,15 +9324,15 @@ def _objective_rank_widget(output: dict[str, Any]) -> str:
         if k in candidate_keys
     ][:8]
     header = "".join(f"<th>{_h(_pretty_metric_name(k))}</th>" for k in display_keys)
+
     # Sort by the tool's own rank ascending so #1 (best) leads the table and the
     # ordering agrees with the board badges (rows are often emitted in archive
     # order, not rank order). Rows without a numeric rank sink to the bottom.
     def _rank_of(c: dict[str, Any]) -> float:
         r = _num(c.get("rank")) if isinstance(c, dict) else None
         return r if r is not None else float("inf")
-    candidates = sorted(
-        (c for c in candidates if isinstance(c, dict)), key=_rank_of
-    )
+
+    candidates = sorted((c for c in candidates if isinstance(c, dict)), key=_rank_of)
     body_rows: list[str] = []
     for c in candidates[:10]:
         if not isinstance(c, dict):
@@ -9164,34 +9378,38 @@ def _boltz2_widget(output: dict[str, Any]) -> str:
         num = _num(aff) or 0.0
         # Boltz-2 pIC50 normally falls in 0-12 — gauge ring tracks that range
         # so the user gets a quick "how high is this value" sense.
-        cards.append(_score_card(
-            "Predicted affinity (pIC50)",
-            _fmt(num),
-            "Boltz-2 predicted pIC50. Higher = tighter. Calibrated only when the target/ligand pair is within training distribution.",
-            "neutral",
-            gauge={"value": num, "lo": 0.0, "hi": 12.0},
-        ))
+        cards.append(
+            _score_card(
+                "Predicted affinity (pIC50)",
+                _fmt(num),
+                "Boltz-2 predicted pIC50. Higher = tighter. Calibrated only when the target/ligand pair is within training distribution.",
+                "neutral",
+                gauge={"value": num, "lo": 0.0, "hi": 12.0},
+            )
+        )
     if aff_prob is not None:
         num = _num(aff_prob) or 0.0
-        cards.append(_score_card(
-            "Binary binding probability",
-            f"{num * 100:.0f}%" if num <= 1.0 else _fmt(num),
-            "Probability the predicted complex binds at experimentally relevant concentrations.",
-            "good" if num >= 0.7 else ("ok" if num >= 0.4 else "poor"),
-            gauge={"value": num, "lo": 0.0, "hi": 1.0},
-        ))
+        cards.append(
+            _score_card(
+                "Binary binding probability",
+                f"{num * 100:.0f}%" if num <= 1.0 else _fmt(num),
+                "Probability the predicted complex binds at experimentally relevant concentrations.",
+                "good" if num >= 0.7 else ("ok" if num >= 0.4 else "poor"),
+                gauge={"value": num, "lo": 0.0, "hi": 1.0},
+            )
+        )
     if conf is not None:
         num = _num(conf) or 0.0
-        cards.append(_score_card(
-            "Model confidence",
-            _fmt(num),
-            "Aggregate Boltz-2 confidence (akin to AlphaFold's confidence head).",
-            "good" if num >= 0.7 else ("ok" if num >= 0.4 else "poor"),
-            gauge={"value": num, "lo": 0.0, "hi": 1.0},
-        ))
-    cards_html = (
-        _card_grid(cards)
-    )
+        cards.append(
+            _score_card(
+                "Model confidence",
+                _fmt(num),
+                "Aggregate Boltz-2 confidence (akin to AlphaFold's confidence head).",
+                "good" if num >= 0.7 else ("ok" if num >= 0.4 else "poor"),
+                gauge={"value": num, "lo": 0.0, "hi": 1.0},
+            )
+        )
+    cards_html = _card_grid(cards)
     refs: list[str] = []
     if isinstance(cif_path, str):
         refs.append(("Predicted complex (CIF)", cif_path))
@@ -9230,13 +9448,36 @@ def _boltz2_widget(output: dict[str, Any]) -> str:
 # (HD/HS) and uses aromatic-carbon (A) and H-bond-acceptor (NA/OA/SA)
 # subtypes that a plain element symbol would otherwise lose.
 _PDBQT_ELEMENT = {
-    "A": "C", "C": "C", "CA": "C", "CG0": "C", "CG1": "C", "G0": "C", "G1": "C",
-    "N": "N", "NA": "N", "NS": "N", "NX": "N",
-    "O": "O", "OA": "O", "OS": "O", "OX": "O",
-    "S": "S", "SA": "S",
-    "H": "H", "HD": "H", "HS": "H",
-    "P": "P", "F": "F", "CL": "Cl", "BR": "Br", "I": "I", "SI": "Si",
-    "MG": "Mg", "MN": "Mn", "ZN": "Zn", "FE": "Fe",
+    "A": "C",
+    "C": "C",
+    "CA": "C",
+    "CG0": "C",
+    "CG1": "C",
+    "G0": "C",
+    "G1": "C",
+    "N": "N",
+    "NA": "N",
+    "NS": "N",
+    "NX": "N",
+    "O": "O",
+    "OA": "O",
+    "OS": "O",
+    "OX": "O",
+    "S": "S",
+    "SA": "S",
+    "H": "H",
+    "HD": "H",
+    "HS": "H",
+    "P": "P",
+    "F": "F",
+    "CL": "Cl",
+    "BR": "Br",
+    "I": "I",
+    "SI": "Si",
+    "MG": "Mg",
+    "MN": "Mn",
+    "ZN": "Zn",
+    "FE": "Fe",
 }
 _PDBQT_ACCEPTOR_TYPES = {"NA", "NS", "OA", "OS", "SA"}
 _PDBQT_DONOR_H_TYPES = {"HD", "HS"}
@@ -9244,9 +9485,16 @@ _PDBQT_DONOR_H_TYPES = {"HD", "HS"}
 # Element swatch colours for the ligand-composition bar — brand-aligned and
 # mutually distinct rather than literal CPK colouring.
 _VINA_ELEMENT_COLOR = {
-    "C": "#4b4565", "N": "#4cc4e4", "O": "#cc0980", "H": "#c9bbed",
-    "S": "#f39e3a", "P": "#6b1ea8", "F": "#2bb59a", "Cl": "#2bb59a",
-    "Br": "#a3553a", "I": "#7c2d8a",
+    "C": "#4b4565",
+    "N": "#4cc4e4",
+    "O": "#cc0980",
+    "H": "#c9bbed",
+    "S": "#f39e3a",
+    "P": "#6b1ea8",
+    "F": "#2bb59a",
+    "Cl": "#2bb59a",
+    "Br": "#a3553a",
+    "I": "#7c2d8a",
 }
 
 
@@ -9277,9 +9525,16 @@ def _parse_pdbqt(text: str) -> list[dict[str, Any]]:
 
     def _fresh() -> dict[str, Any]:
         return {
-            "affinity": None, "rmsd_lb": None, "rmsd_ub": None,
-            "inter": None, "intra": None, "inter_intra": None,
-            "unbound": None, "torsions": None, "torsdof": None, "atoms": [],
+            "affinity": None,
+            "rmsd_lb": None,
+            "rmsd_ub": None,
+            "inter": None,
+            "intra": None,
+            "inter_intra": None,
+            "unbound": None,
+            "torsions": None,
+            "torsdof": None,
+            "atoms": [],
         }
 
     for raw in text.splitlines():
@@ -9355,8 +9610,12 @@ def _pdbqt_ligand_profile(atoms: list[dict[str, Any]]) -> dict[str, Any]:
             have_charge = True
     heavy = sum(c for el, c in elements.items() if el != "H")
     return {
-        "elements": elements, "donors": donors, "acceptors": acceptors,
-        "aromatic": aromatic, "heavy": heavy, "total": len(atoms),
+        "elements": elements,
+        "donors": donors,
+        "acceptors": acceptors,
+        "aromatic": aromatic,
+        "heavy": heavy,
+        "total": len(atoms),
         "charge_sum": charge_sum if have_charge else None,
     }
 
@@ -9378,10 +9637,7 @@ def _vina_formula(elements: dict[str, int]) -> str:
     if not heavy:
         return "—"
     order = (["C"] if "C" in heavy else []) + sorted(e for e in heavy if e != "C")
-    return "".join(
-        _h(el) + (f"<sub>{heavy[el]}</sub>" if heavy[el] != 1 else "")
-        for el in order
-    )
+    return "".join(_h(el) + (f"<sub>{heavy[el]}</sub>" if heavy[el] != 1 else "") for el in order)
 
 
 def _vina_poses_html(modes: list[dict[str, Any]]) -> str:
@@ -9399,8 +9655,9 @@ def _vina_poses_html(modes: list[dict[str, Any]]) -> str:
         width = (abs(aff) / denom * 100.0) if (aff is not None and aff < 0 and denom) else 0.0
         lb, ub = _num(m.get("rmsd_lb")), _num(m.get("rmsd_ub"))
         rmsd = (
-            f'RMSD <b>{lb:.2f}</b> / <b>{ub:.2f}</b> Å'
-            if lb is not None and ub is not None else "—"
+            f"RMSD <b>{lb:.2f}</b> / <b>{ub:.2f}</b> Å"
+            if lb is not None and ub is not None
+            else "—"
         )
         aff_txt = f"{aff:+.2f}" if aff is not None else "—"
         rows.append(
@@ -9410,13 +9667,13 @@ def _vina_poses_html(modes: list[dict[str, Any]]) -> str:
             f'<i class="vina-pose-bar" style="width:{width:.1f}%;'
             f'background:{colour}"></i></div>'
             f'<span class="vina-pose-aff" style="color:{colour}">{aff_txt} '
-            '<small>kcal/mol</small></span>'
+            "<small>kcal/mol</small></span>"
             f'<span class="vina-pose-rmsd">{rmsd}</span></div>'
         )
     head = (
         '<div class="vina-pose vina-pose-head">'
         '<span class="vina-pose-rank">Pose</span>'
-        '<span>Binding affinity</span>'
+        "<span>Binding affinity</span>"
         '<span class="vina-pose-aff">score</span>'
         '<span class="vina-pose-rmsd">RMSD l.b. / u.b.</span></div>'
     )
@@ -9426,12 +9683,21 @@ def _vina_poses_html(modes: list[dict[str, Any]]) -> str:
 def _vina_energy_html(pose: dict[str, Any]) -> str:
     """Vina score-term breakdown — diverging bars about a zero axis."""
     terms = [
-        ("Intermolecular", pose.get("inter"),
-         "Receptor-ligand interaction energy - the actual binding contribution."),
-        ("Intramolecular", pose.get("intra"),
-         "Ligand internal (strain) energy in the bound conformation."),
-        ("Unbound reference", pose.get("unbound"),
-         "Ligand energy in the free state, subtracted as the scoring reference."),
+        (
+            "Intermolecular",
+            pose.get("inter"),
+            "Receptor-ligand interaction energy - the actual binding contribution.",
+        ),
+        (
+            "Intramolecular",
+            pose.get("intra"),
+            "Ligand internal (strain) energy in the bound conformation.",
+        ),
+        (
+            "Unbound reference",
+            pose.get("unbound"),
+            "Ligand energy in the free state, subtracted as the scoring reference.",
+        ),
     ]
     present = [(lbl, _num(v), ex) for lbl, v, ex in terms if _num(v) is not None]
     if not present:
@@ -9459,7 +9725,7 @@ def _vina_energy_html(pose: dict[str, Any]) -> str:
             '<div class="vina-ed-result">'
             '<span class="vina-ed-result-label">Predicted binding free energy</span>'
             f'<span class="vina-ed-result-val">{affinity:+.2f} '
-            '<small>kcal/mol</small></span></div>'
+            "<small>kcal/mol</small></span></div>"
         )
     return (
         f'<div class="vina-energy">{"".join(rows)}{result}</div>'
@@ -9508,7 +9774,7 @@ def _vina_ligand_html(profile: dict[str, Any], rotatable: int | None) -> str:
         legend.append(
             '<span class="vina-el-legend-item">'
             f'<span class="vina-el-pip" style="background:{colour}"></span>'
-            f'{_h(el)} <b>{count}</b></span>'
+            f"{_h(el)} <b>{count}</b></span>"
         )
     comp = (
         '<div class="vina-el-head">Atom composition</div>'
@@ -9544,9 +9810,7 @@ def _vina_widget(output: dict[str, Any]) -> str:
         p = Path(pdbqt_path)
         if p.is_file():
             try:
-                pq_poses = _parse_pdbqt(
-                    p.read_text(encoding="utf-8", errors="replace")
-                )
+                pq_poses = _parse_pdbqt(p.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 pq_poses = []
 
@@ -9570,8 +9834,7 @@ def _vina_widget(output: dict[str, Any]) -> str:
 
     best_pose = pq_poses[0] if pq_poses else None
     profile = (
-        _pdbqt_ligand_profile(best_pose["atoms"])
-        if best_pose and best_pose.get("atoms") else None
+        _pdbqt_ligand_profile(best_pose["atoms"]) if best_pose and best_pose.get("atoms") else None
     )
     rotatable = None
     if best_pose:
@@ -9582,33 +9845,39 @@ def _vina_widget(output: dict[str, Any]) -> str:
     # ---- summary cards ----
     cards: list[str] = []
     if best_aff is not None:
-        cards.append(_score_card(
-            "Best affinity (kcal/mol)",
-            _fmt(best_aff),
-            "Predicted free energy of binding for the top-ranked pose. More "
-            "negative is tighter; weak / non-binders sit near 0.",
-            _vina_affinity_quality(best_aff),
-            gauge={"value": best_aff, "frame": True},
-        ))
+        cards.append(
+            _score_card(
+                "Best affinity (kcal/mol)",
+                _fmt(best_aff),
+                "Predicted free energy of binding for the top-ranked pose. More "
+                "negative is tighter; weak / non-binders sit near 0.",
+                _vina_affinity_quality(best_aff),
+                gauge={"value": best_aff, "frame": True},
+            )
+        )
     if profile and best_aff is not None and profile["heavy"]:
         le = -best_aff / profile["heavy"]
         leq = "good" if le >= 0.35 else ("ok" if le >= 0.25 else "poor")
-        cards.append(_score_card(
-            "Ligand efficiency",
-            f"{le:.3f}",
-            "Binding free energy per heavy atom (-dG / N) - a medicinal-"
-            "chemistry yardstick; ≈0.3 kcal/mol per atom marks a useful hit.",
-            leq,
-            gauge={"value": le, "lo": 0.0, "hi": 0.5},
-        ))
+        cards.append(
+            _score_card(
+                "Ligand efficiency",
+                f"{le:.3f}",
+                "Binding free energy per heavy atom (-dG / N) - a medicinal-"
+                "chemistry yardstick; ≈0.3 kcal/mol per atom marks a useful hit.",
+                leq,
+                gauge={"value": le, "lo": 0.0, "hi": 0.5},
+            )
+        )
     if modes:
-        cards.append(_score_card(
-            "Binding poses",
-            str(len(modes)),
-            "Distinct docked conformations Vina retained and scored.",
-            "neutral",
-            gauge={"value": len(modes), "frame": True},
-        ))
+        cards.append(
+            _score_card(
+                "Binding poses",
+                str(len(modes)),
+                "Distinct docked conformations Vina retained and scored.",
+                "neutral",
+                gauge={"value": len(modes), "frame": True},
+            )
+        )
     cards_html = _card_grid(cards) if cards else ""
 
     runtime = _num(output.get("runtime_ms"))
@@ -9617,25 +9886,21 @@ def _vina_widget(output: dict[str, Any]) -> str:
         meta_bits.append(f"{len(modes)} pose{'s' if len(modes) != 1 else ''}")
     if runtime is not None:
         meta_bits.append(f"docked in {_duration(int(runtime))}")
-    meta = (
-        f'<p class="note">{_h(" · ".join(meta_bits))}</p>' if meta_bits else ""
-    )
+    meta = f'<p class="note">{_h(" · ".join(meta_bits))}</p>' if meta_bits else ""
 
     poses_html = (
-        '<h5 class="widget-subhead">Binding poses</h5>' + _vina_poses_html(modes)
-        if modes else ""
+        '<h5 class="widget-subhead">Binding poses</h5>' + _vina_poses_html(modes) if modes else ""
     )
     energy_html = ""
     if best_pose:
         ed = _vina_energy_html(best_pose)
         if ed:
-            energy_html = (
-                '<h5 class="widget-subhead">Top-pose score breakdown</h5>' + ed
-            )
+            energy_html = '<h5 class="widget-subhead">Top-pose score breakdown</h5>' + ed
     ligand_html = (
         '<h5 class="widget-subhead">Docked ligand profile</h5>'
         + _vina_ligand_html(profile, rotatable)
-        if profile else ""
+        if profile
+        else ""
     )
     note = ""
     if not pq_poses and isinstance(pdbqt_path, str):
@@ -9760,8 +10025,7 @@ def _design_widget(output: dict[str, Any], *, tool: str) -> str:
     designs = [d for d in (output.get("designs") or []) if isinstance(d, dict)]
     title, body = _DESIGN_TOOL_INFO.get(
         tool,
-        (f"{tool} designs",
-         f"<strong>{_h(tool)}</strong> emitted the protein designs below."),
+        (f"{tool} designs", f"<strong>{_h(tool)}</strong> emitted the protein designs below."),
     )
     explainer = f'<p class="widget-explainer">{body}</p>'
 
@@ -9788,10 +10052,12 @@ def _design_widget(output: dict[str, Any], *, tool: str) -> str:
             chips.append(_dsn_chip("task", output["task_name"]))
     seeds = output.get("seeds_used")
     if isinstance(seeds, list) and seeds:
-        chips.append(_dsn_chip(
-            "seed" + ("s" if len(seeds) > 1 else ""),
-            ", ".join(str(s) for s in seeds),
-        ))
+        chips.append(
+            _dsn_chip(
+                "seed" + ("s" if len(seeds) > 1 else ""),
+                ", ".join(str(s) for s in seeds),
+            )
+        )
     rt = _num(output.get("runtime_ms"))
     if rt is not None:
         chips.append(f'<span class="dsn-chip">{_h(_duration(int(rt)))}</span>')
@@ -9802,11 +10068,12 @@ def _design_widget(output: dict[str, Any], *, tool: str) -> str:
         return (
             '<div class="widget widget-design">'
             f'<h4 class="widget-title">{_h(title)}</h4>'
-            f'{explainer}{chips_html}'
+            f"{explainer}{chips_html}"
             '<p class="empty">No designs were emitted.</p></div>'
         )
     present = [
-        (key, label) for key, label in _DESIGN_COLUMNS
+        (key, label)
+        for key, label in _DESIGN_COLUMNS
         if any(_num(d.get(key)) is not None for d in designs)
     ]
     has_seq = any(not _is_placeholder_seq(d.get("sequence")) for d in designs)
@@ -9824,7 +10091,8 @@ def _design_widget(output: dict[str, Any], *, tool: str) -> str:
         cells = [
             f"<td>{i}</td>",
             f"<td>{_h(_fmt(length)) if length is not None else '—'} aa</td>"
-            if length is not None else "<td>—</td>",
+            if length is not None
+            else "<td>—</td>",
         ]
         for key, _ in present:
             num = _num(_plddt_on_100(key, d.get(key)))
@@ -9844,15 +10112,13 @@ def _design_widget(output: dict[str, Any], *, tool: str) -> str:
         # already carries the downloadable copy, so don't re-embed it here.
         struct = d.get("pdb_path") or d.get("cif_path")
         if isinstance(struct, str):
-            cells.append(
-                f'<td><span class="dsn-file">{_h(Path(struct).name)}</span></td>'
-            )
+            cells.append(f'<td><span class="dsn-file">{_h(Path(struct).name)}</span></td>')
         else:
             cells.append("<td>—</td>")
         body_rows.append("<tr>" + "".join(cells) + "</tr>")
     table_html = (
         '<div class="table-wrap"><table><thead><tr>'
-        f'{head}</tr></thead><tbody>{"".join(body_rows)}</tbody></table></div>'
+        f"{head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
     )
     return (
         '<div class="widget widget-design">'
@@ -9902,8 +10168,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
     designs = [d for d in (output.get("designs") or []) if isinstance(d, dict)]
     title, body = _MPNN_TOOL_INFO.get(
         tool,
-        (f"{tool} designs",
-         f"<strong>{_h(tool)}</strong> emitted the sequence designs below."),
+        (f"{tool} designs", f"<strong>{_h(tool)}</strong> emitted the sequence designs below."),
     )
     explainer = f'<p class="widget-explainer">{body}</p>'
 
@@ -9919,7 +10184,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
         return (
             f'<div class="widget widget-mpnn">'
             f'<h4 class="widget-title">{_h(title)}</h4>'
-            f'{explainer}{chips_html}'
+            f"{explainer}{chips_html}"
             '<p class="empty">No designs were emitted.</p></div>'
         )
 
@@ -9934,9 +10199,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
     # and only draw the recovery column when it's actually meaningful; below
     # the floor we show a score-only table plus a one-line caveat so the run
     # stays auditable without implying a real 2% recovery.
-    recoveries = [
-        r for r in (_num(d.get("seq_recovery")) for d in designs) if r is not None
-    ]
+    recoveries = [r for r in (_num(d.get("seq_recovery")) for d in designs) if r is not None]
     has_recovery = bool(recoveries)
     meaningful_recovery = any(r > _SEQ_RECOVERY_MEANINGFUL_FLOOR for r in recoveries)
 
@@ -9953,7 +10216,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
                     '<td><div class="dsn-bar-cell">'
                     f'<div class="dsn-bar"><i class="metric-{quality}" '
                     f'style="width:{pct:.0f}%"></i></div>'
-                    f'<span>{pct:.0f}%</span></div></td>'
+                    f"<span>{pct:.0f}%</span></div></td>"
                 )
             else:
                 rec_cell = "<td>—</td>"
@@ -9966,7 +10229,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
             '<h5 class="widget-subhead">Score &amp; sequence recovery</h5>'
             '<div class="table-wrap"><table><thead><tr>'
             "<th>#</th><th>Score</th><th>Sequence recovery</th>"
-            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         )
     elif has_recovery and any(_num(d.get("score")) is not None for d in designs):
         # Recovery was reported but is at the random baseline (no native
@@ -9982,7 +10245,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
             '<h5 class="widget-subhead">Score</h5>'
             '<div class="table-wrap"><table><thead><tr>'
             "<th>#</th><th>Score</th>"
-            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         )
 
     # Designed sequences, MSA-style scroll. With no recovery table the
@@ -10009,12 +10272,12 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
                 pct = 100.0 * fully_conserved / max_len
                 conservation_caption = (
                     '<p class="widget-subexplain">'
-                    f'Highlighted cells are positions where all {len(present)} '
-                    'designs agree on the same residue '
-                    f'(<strong>{fully_conserved}/{max_len}</strong> &middot; '
-                    f'{pct:.0f}% fully conserved). Dimmed cells are positions '
-                    'where the model picked different residues across designs.'
-                    '</p>'
+                    f"Highlighted cells are positions where all {len(present)} "
+                    "designs agree on the same residue "
+                    f"(<strong>{fully_conserved}/{max_len}</strong> &middot; "
+                    f"{pct:.0f}% fully conserved). Dimmed cells are positions "
+                    "where the model picked different residues across designs."
+                    "</p>"
                 )
         seq_rows: list[str] = []
         for i, d in present:
@@ -10040,7 +10303,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
         )
         seq_html = (
             '<h5 class="widget-subhead">Designed sequences</h5>'
-            f'{conservation_caption}'
+            f"{conservation_caption}"
             f'<div class="tmpl-seq-scroll">{"".join(seq_rows)}</div>'
         )
     return (
@@ -10050,9 +10313,7 @@ def _mpnn_widget(output: dict[str, Any], *, tool: str) -> str:
     )
 
 
-def _mpnn_seq_cells(
-    sequence: str, max_len: int, conservation: list[float]
-) -> str:
+def _mpnn_seq_cells(sequence: str, max_len: int, conservation: list[float]) -> str:
     """Render an MPNN design sequence as per-residue spans with conservation highlight.
 
     Each residue becomes a ``<span>`` carrying either ``mpnn-cell-conserved``
@@ -10075,13 +10336,13 @@ def _mpnn_seq_cells(
                 cells.append(
                     f'<span class="mpnn-cell-conserved" '
                     f'title="Position {idx + 1}: conserved across all designs">'
-                    f'{_h(aa)}</span>'
+                    f"{_h(aa)}</span>"
                 )
             else:
                 cells.append(
                     f'<span class="mpnn-cell-variable" '
                     f'title="Position {idx + 1}: varies across designs">'
-                    f'{_h(aa)}</span>'
+                    f"{_h(aa)}</span>"
                 )
         else:
             # Shorter design — pad with a space to keep ruler alignment.
@@ -10117,12 +10378,10 @@ def _embedding_strip_svg(vec: list[Any]) -> str:
     for i, x in enumerate(nums):
         t = max(-1.0, min(1.0, x / scale)) if scale else 0.0
         colour = (
-            _lerp_hex("#ece8fb", "#cc0980", t) if t >= 0
-            else _lerp_hex("#ece8fb", "#1f9bd0", -t)
+            _lerp_hex("#ece8fb", "#cc0980", t) if t >= 0 else _lerp_hex("#ece8fb", "#1f9bd0", -t)
         )
         rects.append(
-            f'<rect x="{i * bw:.4f}" y="0" width="{bw:.4f}" '
-            f'height="{height}" fill="{colour}"/>'
+            f'<rect x="{i * bw:.4f}" y="0" width="{bw:.4f}" height="{height}" fill="{colour}"/>'
         )
     return (
         f'<svg class="esm-emb-svg" viewBox="0 0 {width} {height}" '
@@ -10192,11 +10451,15 @@ def _esm_widget(output: dict[str, Any], *, tool: str) -> str:
             value = _plddt_on_100(key, value)
             num = _num(value) or 0.0
             gauge_hi = 1.0 if num <= 1.5 else 100.0
-            cards.append(_score_card(
-                label, _fmt(value), tip,
-                _quality_class(key.replace("mean_", ""), value),
-                gauge={"value": num, "lo": 0.0, "hi": gauge_hi},
-            ))
+            cards.append(
+                _score_card(
+                    label,
+                    _fmt(value),
+                    tip,
+                    _quality_class(key.replace("mean_", ""), value),
+                    gauge={"value": num, "lo": 0.0, "hi": gauge_hi},
+                )
+            )
     cards_html = _card_grid(cards) if cards else ""
 
     # Pooled-embedding fingerprint.
@@ -10209,11 +10472,11 @@ def _esm_widget(output: dict[str, Any], *, tool: str) -> str:
                 f'<div class="esm-emb">{strip}</div>'
                 '<div class="esm-emb-legend">'
                 '<span><span class="esm-emb-pip" style="background:#1f9bd0"></span>'
-                'negative</span>'
+                "negative</span>"
                 '<span><span class="esm-emb-pip" style="background:#ece8fb"></span>'
-                '~zero</span>'
+                "~zero</span>"
                 '<span><span class="esm-emb-pip" style="background:#cc0980"></span>'
-                'positive</span></div>'
+                "positive</span></div>"
             )
 
     # Generated sequences (ESM-2 sequence-generation mode).
@@ -10236,10 +10499,7 @@ def _esm_widget(output: dict[str, Any], *, tool: str) -> str:
         filled = output.get("filled_positions")
         cap = ""
         if isinstance(filled, list) and filled:
-            cap = (
-                '<p class="note">Filled positions: '
-                f'{_h(_format_position_list(filled))}</p>'
-            )
+            cap = f'<p class="note">Filled positions: {_h(_format_position_list(filled))}</p>'
         gen_html = (
             '<h5 class="widget-subhead">Generated sequences</h5>'
             f'<div class="tmpl-seq-scroll">{"".join(rows)}</div>{cap}'
@@ -10280,20 +10540,27 @@ def _protenix_widget(output: dict[str, Any]) -> str:
         value = _plddt_on_100(key, value)
         num = _num(value) or 0.0
         gauge_hi = 1.0 if (key == "plddt" and num <= 1.5) else hi
-        cards.append(_score_card(
-            label, _fmt(value), tip, _quality_class(key, value),
-            gauge={"value": num, "lo": lo, "hi": gauge_hi},
-        ))
+        cards.append(
+            _score_card(
+                label,
+                _fmt(value),
+                tip,
+                _quality_class(key, value),
+                gauge={"value": num, "lo": lo, "hi": gauge_hi},
+            )
+        )
     cards_html = _card_grid(cards)
 
     # ---- summary chips ----
     chips: list[str] = []
     seeds = output.get("seeds_used")
     if isinstance(seeds, list) and seeds:
-        chips.append(_dsn_chip(
-            "seed" + ("s" if len(seeds) > 1 else ""),
-            ", ".join(str(s) for s in seeds),
-        ))
+        chips.append(
+            _dsn_chip(
+                "seed" + ("s" if len(seeds) > 1 else ""),
+                ", ".join(str(s) for s in seeds),
+            )
+        )
     preds = [p for p in (output.get("all_predictions") or []) if isinstance(p, dict)]
     if preds:
         chips.append(_dsn_chip("predictions", len(preds)))
@@ -10309,9 +10576,11 @@ def _protenix_widget(output: dict[str, Any]) -> str:
         for p in preds:
             cells = [
                 f"<td>{_h(_fmt(p.get('seed')))}</td>"
-                if p.get("seed") is not None else "<td>—</td>",
+                if p.get("seed") is not None
+                else "<td>—</td>",
                 f"<td>{_h(_fmt(p.get('rank')))}</td>"
-                if p.get("rank") is not None else "<td>—</td>",
+                if p.get("rank") is not None
+                else "<td>—</td>",
             ]
             for key in ("plddt", "iptm", "ptm", "ranking_score"):
                 num = _num(p.get(key))
@@ -10324,7 +10593,8 @@ def _protenix_widget(output: dict[str, Any]) -> str:
             cif = p.get("cif_path")
             cells.append(
                 f'<td><span class="dsn-file">{_h(Path(str(cif)).name)}</span></td>'
-                if isinstance(cif, str) else "<td>—</td>"
+                if isinstance(cif, str)
+                else "<td>—</td>"
             )
             rows.append("<tr>" + "".join(cells) + "</tr>")
         table_html = (
@@ -10332,7 +10602,7 @@ def _protenix_widget(output: dict[str, Any]) -> str:
             '<div class="table-wrap"><table><thead><tr>'
             "<th>Seed</th><th>Rank</th><th>pLDDT</th><th>ipTM</th><th>pTM</th>"
             "<th>Ranking score</th><th>Structure</th>"
-            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         )
     return (
         '<div class="widget widget-protenix">'
@@ -10423,13 +10693,9 @@ def _generic_metric_widget(output: dict[str, Any], *, include_shape: bool = True
     # Cards were produced; if there's also complex output, append a brief
     # inventory so sequences / lists don't disappear silently. Tools that opt
     # out (``include_shape=False``) skip this block entirely.
-    shape_html = (
-        _output_shape_widget(output) if has_complex_output and include_shape else ""
-    )
+    shape_html = _output_shape_widget(output) if has_complex_output and include_shape else ""
 
-    cards_html = (
-        _card_grid(cards)
-    )
+    cards_html = _card_grid(cards)
     footer_html = (
         f'<table class="kv-table"><tbody>{"".join(footer_rows)}</tbody></table>'
         if footer_rows
@@ -10465,43 +10731,50 @@ _PXMETER_SPECS: dict[str, tuple[str, str, float | None, float | None]] = {
     "lddt": (
         "lDDT",
         "Local Distance Difference Test (0-1). Higher = closer to the reference.",
-        0.0, 1.0,
+        0.0,
+        1.0,
     ),
     "bb_lddt": (
         "Backbone lDDT",
         "lDDT restricted to backbone atoms (0-1).",
-        0.0, 1.0,
+        0.0,
+        1.0,
     ),
     "dockq": (
         "DockQ",
         "Interface quality (0-1). >0.23 acceptable, >0.49 medium, >0.80 high.",
-        0.0, 1.0,
+        0.0,
+        1.0,
     ),
     "fnat": (
         "fnat",
         "Fraction of native interface contacts recovered (0-1).",
-        0.0, 1.0,
+        0.0,
+        1.0,
     ),
     "f1": (
         "F1",
         "F1 score over interface contacts (0-1).",
-        0.0, 1.0,
+        0.0,
+        1.0,
     ),
     "fnonnat": (
         "fnonnat",
-        "Fraction of model interface contacts absent from the reference (0-1). "
-        "Lower = better.",
-        0.0, 1.0,
+        "Fraction of model interface contacts absent from the reference (0-1). Lower = better.",
+        0.0,
+        1.0,
     ),
     "irmsd": (
         "iRMSD (Å)",
         "Interface RMSD after superposition. Lower = better; <2 A is high quality.",
-        None, None,
+        None,
+        None,
     ),
     "lrmsd": (
         "LRMSD (Å)",
         "Ligand RMSD after receptor superposition. Lower = better.",
-        None, None,
+        None,
+        None,
     ),
 }
 
@@ -10516,11 +10789,7 @@ def _px_metric_card(key: str, value: Any) -> str | None:
         return None
     label, explainer, lo, hi = spec
     quality = _quality_class(key.lower(), num)
-    gauge = (
-        {"value": num, "frame": True}
-        if lo is None
-        else {"value": num, "lo": lo, "hi": hi}
-    )
+    gauge = {"value": num, "frame": True} if lo is None else {"value": num, "lo": lo, "hi": hi}
     return _score_card(label, _fmt(num), explainer, quality, gauge=gauge)
 
 
@@ -10545,21 +10814,19 @@ def _px_section(title: str, subtitle: str, metrics: dict[str, Any]) -> str:
     if info:
         bits: list[str] = []
         if info.get("class1") and info.get("len1") is not None:
-            bits.append(f'{info["class1"]} · {info["len1"]} aa')
+            bits.append(f"{info['class1']} · {info['len1']} aa")
         if info.get("class2") and info.get("len2") is not None:
-            bits.append(f'{info["class2"]} · {info["len2"]} aa')
+            bits.append(f"{info['class2']} · {info['len2']} aa")
         nat_c, nat_t = info.get("nat_correct"), info.get("nat_total")
         if nat_c is not None and nat_t:
             bits.append(f"{nat_c}/{nat_t} native contacts recovered")
         if bits:
             context = f'<p class="px-context">{_h(" · ".join(str(b) for b in bits))}</p>'
-    sub_html = (
-        f'<span class="px-section-sub">{_h(subtitle)}</span>' if subtitle else ""
-    )
+    sub_html = f'<span class="px-section-sub">{_h(subtitle)}</span>' if subtitle else ""
     return (
         '<section class="px-section">'
         f'<div class="px-section-head"><h5 class="px-section-title">{_h(title)}</h5>'
-        f'{sub_html}</div>{_card_grid(cards)}{context}'
+        f"{sub_html}</div>{_card_grid(cards)}{context}"
         "</section>"
     )
 
@@ -10582,7 +10849,8 @@ def _pxmeter_widget(output: dict[str, Any]) -> str:
         metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
         card = _px_metric_card("lddt", metrics.get("lddt"))
         body = (
-            _card_grid([card]) if card
+            _card_grid([card])
+            if card
             else '<p class="note">The PXMeter report is not embedded in this report.</p>'
         )
         return (
@@ -10596,7 +10864,9 @@ def _pxmeter_widget(output: dict[str, Any]) -> str:
     if isinstance(cx, dict):
         sections.append(_px_section("Complex", "whole structure vs reference", cx))
     chains = report.get("chain")
-    ref_info = report.get("ref_chain_info") if isinstance(report.get("ref_chain_info"), dict) else {}
+    ref_info = (
+        report.get("ref_chain_info") if isinstance(report.get("ref_chain_info"), dict) else {}
+    )
     if isinstance(chains, dict):
         for cid, cmetrics in chains.items():
             if isinstance(cmetrics, dict):
@@ -10608,13 +10878,12 @@ def _pxmeter_widget(output: dict[str, Any]) -> str:
     if isinstance(ifaces, dict):
         for iid, imetrics in ifaces.items():
             if isinstance(imetrics, dict):
-                sections.append(
-                    _px_section(f"Interface {iid}", "chain-chain interface", imetrics)
-                )
+                sections.append(_px_section(f"Interface {iid}", "chain-chain interface", imetrics))
     entry = report.get("entry_id")
     header = (
         f'<p class="note">Scored against reference entry <code>{_h(str(entry))}</code>.</p>'
-        if entry else ""
+        if entry
+        else ""
     )
     if not sections:
         sections.append('<p class="note">The PXMeter report carried no metrics.</p>')
@@ -10675,20 +10944,18 @@ def _lit_card(rec: dict[str, Any], idx: int) -> str:
     title_html = (
         f'<a class="lit-title" href="{_attr(link)}" target="_blank" '
         f'rel="noopener noreferrer">{title}</a>'
-        if link else f'<span class="lit-title">{title}</span>'
+        if link
+        else f'<span class="lit-title">{title}</span>'
     )
-    oa = (
-        '<span class="lit-badge lit-oa">Open access</span>'
-        if rec.get("open_access") else ""
-    )
+    oa = '<span class="lit-badge lit-oa">Open access</span>' if rec.get("open_access") else ""
     cite: list[str] = []
     if rec.get("journal"):
         cite.append(f'<em class="lit-journal">{_h(rec["journal"])}</em>')
     vip = rec.get("volume") or ""
     if rec.get("issue"):
-        vip += f'({rec["issue"]})'
+        vip += f"({rec['issue']})"
     if rec.get("page"):
-        vip += f':{rec["page"]}'
+        vip += f":{rec['page']}"
     if vip:
         cite.append(_h(vip))
     if rec.get("year"):
@@ -10706,18 +10973,15 @@ def _lit_card(rec: dict[str, Any], idx: int) -> str:
         chips.append(
             f'<a class="lit-id" href="https://europepmc.org/article/MED/'
             f'{_attr(rec["pmid"])}" target="_blank" rel="noopener noreferrer">'
-            f'PMID {_h(rec["pmid"])}</a>'
+            f"PMID {_h(rec['pmid'])}</a>"
         )
     if rec.get("pmcid"):
         chips.append(
             f'<a class="lit-id" href="https://europepmc.org/article/PMC/'
             f'{_attr(rec["pmcid"])}" target="_blank" rel="noopener noreferrer">'
-            f'{_h(rec["pmcid"])}</a>'
+            f"{_h(rec['pmcid'])}</a>"
         )
-    snippet = (
-        f'<p class="lit-snippet">{_h(rec["snippet"])}</p>'
-        if rec.get("snippet") else ""
-    )
+    snippet = f'<p class="lit-snippet">{_h(rec["snippet"])}</p>' if rec.get("snippet") else ""
     return (
         '<article class="lit-card">'
         f'<div class="lit-card-num">{idx}</div>'
@@ -10747,9 +11011,7 @@ def _literature_search_widget(output: dict[str, Any]) -> str:
     result_count = _num(output.get("result_count"))
     total_hits = _num(output.get("total_hits"))
     status = output.get("status")
-    date_filter = (
-        output.get("date_filter") if isinstance(output.get("date_filter"), dict) else {}
-    )
+    date_filter = output.get("date_filter") if isinstance(output.get("date_filter"), dict) else {}
 
     top = output.get("top_records") if isinstance(output.get("top_records"), list) else []
     records = [_lit_normalize(r) for r in top if isinstance(r, dict)]
@@ -10760,7 +11022,7 @@ def _literature_search_widget(output: dict[str, Any]) -> str:
     if total_hits is not None:
         stats.append(
             f'<span class="lit-stat"><b>{len(records)}</b> shown · '
-            f'<b>{int(total_hits)}</b> total hits</span>'
+            f"<b>{int(total_hits)}</b> total hits</span>"
         )
     elif result_count is not None:
         stats.append(f'<span class="lit-stat"><b>{int(result_count)}</b> results</span>')
@@ -10778,12 +11040,11 @@ def _literature_search_widget(output: dict[str, Any]) -> str:
     query_html = (
         '<div class="lit-query"><span class="lit-query-label">Search query</span>'
         f'<code class="lit-query-text">{_h(str(query))}</code></div>'
-        if query else ""
+        if query
+        else ""
     )
     summary_html = (
-        '<div class="lit-summary">'
-        f'{query_html}<div class="lit-stats">{"".join(stats)}</div>'
-        '</div>'
+        f'<div class="lit-summary">{query_html}<div class="lit-stats">{"".join(stats)}</div></div>'
     )
     if records:
         cards = "".join(_lit_card(rec, i + 1) for i, rec in enumerate(records))
@@ -10793,7 +11054,7 @@ def _literature_search_widget(output: dict[str, Any]) -> str:
     elif status == "filtered_out":
         body = (
             '<p class="note">Europe PMC matched records, but all were dropped '
-            'by the local date filter.</p>'
+            "by the local date filter.</p>"
         )
     else:
         body = '<p class="note">No literature records were returned for this query.</p>'
@@ -10820,8 +11081,14 @@ def _literature_search_widget(output: dict[str, Any]) -> str:
 # card so the reader sees length + first-30 aa preview rather than a 400-char
 # unreadable string.
 _SEQUENCE_OUTPUT_KEYS = (
-    "sequence", "designed_sequence", "wild_type_sequence", "mutant_sequence",
-    "query_sequence", "edited_sequence", "fasta", "a3m",
+    "sequence",
+    "designed_sequence",
+    "wild_type_sequence",
+    "mutant_sequence",
+    "query_sequence",
+    "edited_sequence",
+    "fasta",
+    "a3m",
 )
 
 
@@ -10947,9 +11214,9 @@ _QUALITY_COLOR = {
     # poor = pink (warm critical), neutral = yellow/orange (informational
     # — distinct from the cool "good" sky so the reader can tell a
     # threshold-less metric apart from a passing one).
-    "good": "#4cc4e4",     # matches --good
-    "ok": "#f39e3a",       # matches --ok
-    "poor": "#cc0980",     # matches --poor
+    "good": "#4cc4e4",  # matches --good
+    "ok": "#f39e3a",  # matches --ok
+    "poor": "#cc0980",  # matches --poor
     "neutral": "#f39e3a",  # matches --accent-4
 }
 
@@ -11209,10 +11476,7 @@ def _card_grid(cards: list[str]) -> str:
     if not cards:
         return ""
     cols = _balanced_cols(len(cards))
-    return (
-        f'<div class="qc-card-grid" style="--cols:{cols}">'
-        f'{"".join(cards)}</div>'
-    )
+    return f'<div class="qc-card-grid" style="--cols:{cols}">{"".join(cards)}</div>'
 
 
 def _score_card(
@@ -11309,12 +11573,12 @@ def _repro_html(model: ReportModel) -> str:
         '<div class="repro-panel">'
         '<div class="repro-copy-block">'
         '<p class="note">Run from the same workspace to regenerate this report '
-        'from stored job results. No design tools are re-executed.</p>'
-        f'{commands}'
-        '</div>'
-        f'{support_cards}'
-        f'{id_line}'
-        '</div>'
+        "from stored job results. No design tools are re-executed.</p>"
+        f"{commands}"
+        "</div>"
+        f"{support_cards}"
+        f"{id_line}"
+        "</div>"
     )
 
 
@@ -11360,10 +11624,17 @@ _SCORE_BAR_PRIORITY: tuple[str, ...] = (
 
 # Context-only metrics that should never appear as score bars (they belong
 # in the candidate header / footer instead).
-_SCORE_BAR_SKIP: frozenset[str] = frozenset({
-    "num_residues", "length", "runtime_ms", "n_residues",
-    "elapsed_ms", "elapsed_s", "seed",
-})
+_SCORE_BAR_SKIP: frozenset[str] = frozenset(
+    {
+        "num_residues",
+        "length",
+        "runtime_ms",
+        "n_residues",
+        "elapsed_ms",
+        "elapsed_s",
+        "seed",
+    }
+)
 
 
 def _score_bars(candidate: ReportCandidate) -> str:
@@ -11625,8 +11896,18 @@ def _quality_class(key: str, value: Any) -> str:
     if num is None:
         return "neutral"
     k = key.lower()
-    if k in {"plddt", "mean_plddt", "ptm", "iptm", "dockq", "ipsae", "seq_recovery",
-             "recovery", "lddt", "bb_lddt"}:
+    if k in {
+        "plddt",
+        "mean_plddt",
+        "ptm",
+        "iptm",
+        "dockq",
+        "ipsae",
+        "seq_recovery",
+        "recovery",
+        "lddt",
+        "bb_lddt",
+    }:
         scaled = num * 100 if num <= 1.5 else num
         if scaled >= 70:
             return "good"
@@ -11778,9 +12059,15 @@ def _num(value: object) -> float | None:
 # (<= 1.5) is scaled up by 100 before it drives any label, gauge fill, or
 # quality colour. Keyed on the canonical (provenance-prefix-stripped) base
 # metric name so ``esm3:mean_plddt`` and bare ``plddt`` both match.
-_PLDDT_FAMILY_KEYS = frozenset({
-    "plddt", "mean_plddt", "scaffold_plddt", "binder_plddt", "iplddt",
-})
+_PLDDT_FAMILY_KEYS = frozenset(
+    {
+        "plddt",
+        "mean_plddt",
+        "scaffold_plddt",
+        "binder_plddt",
+        "iplddt",
+    }
+)
 
 
 def _plddt_on_100(key: str, value: Any) -> Any:
@@ -14419,6 +14706,16 @@ code {
 .score-family { border:1px solid var(--line); border-radius:11px; padding:12px 14px; background:var(--panel); }
 .score-family-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
 .score-family-name { font-size:13px; font-weight:700; color:var(--ink); }
+.score-family-body.is-scrollable {
+  max-height:174px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  padding-right:6px;
+  scrollbar-gutter:stable;
+}
+.score-family-body.is-scrollable::-webkit-scrollbar { width:8px; }
+.score-family-body.is-scrollable::-webkit-scrollbar-track { background:#eef1f7; border-radius:999px; }
+.score-family-body.is-scrollable::-webkit-scrollbar-thumb { background:#c7cedd; border-radius:999px; }
 .metric-row { display:flex; align-items:baseline; justify-content:space-between; gap:10px; padding:4px 0; border-top:1px solid var(--line); }
 .metric-row:first-child { border-top:none; }
 .metric-label { font-size:12px; color:var(--ink); display:flex; align-items:baseline; gap:5px; flex-wrap:wrap; }
@@ -14678,11 +14975,22 @@ body { background:var(--saas-bg); }
   background:linear-gradient(180deg,#f7fdff 0%,#eef9fb 100%);
   box-shadow:0 5px 14px rgba(15,118,128,.06);
 }
-.decision-justification-card p {
+.decision-rationale-card {
+  padding:9px 11px;
+  border:1px solid #ece8ff;
+  border-radius:8px;
+  background:linear-gradient(180deg,#fbfaff 0%,#f5f1ff 100%);
+  box-shadow:0 5px 14px rgba(91,53,230,.06);
+}
+.decision-justification-card p,
+.decision-rationale-card p {
   margin:0;
   color:#29485a;
   font-size:12.7px;
   line-height:1.58;
+}
+.decision-rationale-card p {
+  color:#3b3268;
 }
 .saas-table-wrap { overflow:auto; }
 .saas-table { width:100%; border-collapse:separate; border-spacing:0; font-size:13px; }
@@ -14914,6 +15222,76 @@ body { background:var(--saas-bg); }
 }
 .card-console > .card-header {
   padding:0 0 12px; border-bottom:none;
+}
+.candidate-ranking-panel {
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  max-width:1120px;
+  margin-top:10px;
+  padding:10px 12px;
+  border:1px solid var(--line-strong);
+  border-radius:8px;
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
+  box-shadow:0 1px 2px rgba(15,23,42,.035);
+}
+.candidate-ranking-head {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  min-width:0;
+}
+.candidate-ranking-label {
+  flex:0 0 auto;
+  color:#6b5aa9;
+  font-size:10px;
+  font-weight:850;
+  letter-spacing:.055em;
+  text-transform:uppercase;
+}
+.candidate-ranking-meta {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:6px;
+  min-width:0;
+  color:var(--muted);
+  font-size:12px;
+}
+.candidate-ranking-meta strong {
+  color:var(--ink);
+  font-weight:840;
+}
+.candidate-ranking-meta span {
+  min-width:0;
+}
+.candidate-ranking-line {
+  display:grid;
+  grid-template-columns:48px minmax(0,1fr);
+  gap:8px;
+  margin:0;
+  color:var(--text-soft);
+  font-size:12px;
+  line-height:1.45;
+}
+.candidate-ranking-line b {
+  color:var(--muted);
+  font-weight:800;
+}
+.candidate-ranking-line span,
+.candidate-ranking-line code {
+  min-width:0;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  word-break:normal;
+}
+.candidate-ranking-line code {
+  padding:0;
+  border-radius:0;
+  background:transparent;
+  color:#1f2937;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:11.8px;
 }
 .candidate-review-board {
   max-height:clamp(760px, 84vh, 1120px);
@@ -16799,6 +17177,14 @@ body {
   color:#0e7490;
   background:#e6f7fb;
 }
+.audit-stage[data-stage="backbone_generation"] .audit-stage-icon {
+  color:#1570ef;
+  background:#eaf3ff;
+}
+.audit-stage[data-stage="binder_generation"] .audit-stage-icon {
+  color:#7f56d9;
+  background:#f4ebff;
+}
 .audit-stage[data-stage="generation"] .audit-stage-icon {
   color:#7f56d9;
   background:#f4ebff;
@@ -17535,7 +17921,8 @@ def _js() -> str:
     # and the absence of external viewer CDN imports. The report's narrative and visuals
     # are produced deterministically from JobStore data — re-running
     # ``vpa report <id>`` yields byte-equivalent output for the same inputs.
-    return """
+    return (
+        """
 // VPA_OFFLINE_VIEWER · deterministic offline 3D viewer · no external CDN, no LLM calls
 (function () {
   // ----- Sidebar collapse -----
@@ -18617,7 +19004,9 @@ def _js() -> str:
     b.addEventListener('click', () => select(b.dataset.ptCand));
   });
 })();
-""" + PLDDT_HOVER_JS
+"""
+        + PLDDT_HOVER_JS
+    )
 
 
 __all__ = ["render_report_html", "resolve_report_output_path", "write_report"]

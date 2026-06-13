@@ -154,6 +154,9 @@ ranking and "Why this candidate" cards render from tool output instead of prose,
 which is exactly what makes the HTML report clean. Skip it only when there is
 genuinely nothing to rank (e.g. one throwaway diagnostic), and say so in the
 `submit_candidate` reasoning.
+Prefer ranking the enriched canonical candidate stream, not a hand-built
+scalar-only copy. If a structure/scoring tool consumed an upstream candidate,
+keep that candidate identity attached through rank and submit.
 When the selected design has been enriched by
 structure prediction or scoring, submit the enriched/ranked candidate rather
 than an earlier sequence-only upstream candidate so the final dossier retains

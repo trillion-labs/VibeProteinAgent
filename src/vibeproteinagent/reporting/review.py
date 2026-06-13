@@ -101,9 +101,31 @@ _PLUMBING_TOOLS = frozenset(
 
 # Structure-producing generators — used only for workflow-type detection.
 _STRUCTURE_GENERATOR_TOOLS = frozenset(
-    {"rfdiffusion", "rfdiffusion3", "rfpeptides", "pxdesign", "bindcraft", "boltzgen"}
+    {
+        "rfdiffusion",
+        "rfdiffusion3",
+        "rfpeptides",
+        "pxdesign",
+        "bindcraft",
+        "boltzgen",
+        "proteina_complexa",
+    }
 )
-_BINDER_TOOLS = frozenset({"pxdesign", "bindcraft"})
+_BINDER_GENERATOR_TOOLS = frozenset({"pxdesign", "bindcraft", "boltzgen"})
+_BACKBONE_STAGE_GENERATOR_TOOLS = frozenset({"rfdiffusion", "rfdiffusion3", "rfpeptides"})
+_BINDER_STAGE_GENERATOR_TOOLS = frozenset({"pxdesign", "bindcraft", "boltzgen"})
+_SEQUENCE_STAGE_GENERATOR_TOOLS = frozenset(
+    {
+        "esm2",
+        "proteinmpnn",
+        "ligandmpnn",
+        "search_sequence",
+        "go_sequences",
+        "interpro_sequences",
+    }
+)
+_MODED_BINDER_TOOLS = {"proteina_complexa": frozenset({"protein_binder", "ligand_binder"})}
+_INTERFACE_EVALUATOR_TOOLS = frozenset({"boltz2_affinity", "ipsae", "prodigy", "pxmeter"})
 _RETRIEVAL_TOOLS = frozenset({"search_sequence", "go_sequences", "interpro_sequences"})
 
 # Evaluator tools whose presence in candidate.scores counts as real evaluation
@@ -129,13 +151,127 @@ def classify_tool_role(tool: str | None) -> str:
     return ToolRole.OTHER
 
 
+def classify_generation_stage_key(node: WorkflowNodeSummary) -> str | None:
+    """Return the product-stage key for generator-like tools, if known."""
+    tool = (node.tool or "").strip().lower()
+    if tool == "esm3":
+        return _esm3_stage_key(node)
+    if tool in _BACKBONE_STAGE_GENERATOR_TOOLS:
+        return "backbone_generation"
+    if tool in _BINDER_STAGE_GENERATOR_TOOLS:
+        return "binder_generation"
+    if tool == "proteina_complexa":
+        allowed_modes = _MODED_BINDER_TOOLS.get(tool, frozenset())
+        if _node_mode(node) in allowed_modes:
+            return "binder_generation"
+        return "backbone_generation"
+    if tool in _SEQUENCE_STAGE_GENERATOR_TOOLS:
+        return "generation"
+    return None
+
+
+def classify_workflow_stage_key(
+    node: WorkflowNodeSummary,
+    *,
+    include_intent: bool = False,
+) -> str:
+    """Map a recorded tool call to the report workflow stage it contributed to."""
+    tool = (node.tool or "").strip().lower()
+    if include_intent and tool in {"agent_intent", "user_request"}:
+        return "intent"
+    explicit = {
+        "sequence_edit": "engineering",
+        "protein_qc": "qc",
+        "sequence_analysis": "qc",
+        "protenix_v2": "structure",
+        "structure_analysis": "structure",
+        "tmalign": "structure_comparison",
+        "pyrosetta": "energy",
+    }
+    if tool in explicit:
+        return explicit[tool]
+    generator_stage = classify_generation_stage_key(node)
+    if generator_stage:
+        return generator_stage
+    role = classify_tool_role(tool)
+    if role == ToolRole.RANKER:
+        return "ranking"
+    if role == ToolRole.SUBMISSION:
+        return "recommendation"
+    if role == ToolRole.EVALUATOR:
+        if tool in {"boltz2_affinity", "pxmeter", "ipsae", "prodigy", "vina"}:
+            return "interface"
+        return "other"
+    if role == ToolRole.GENERATOR:
+        return "generation"
+    return "other"
+
+
+def _esm3_stage_key(node: WorkflowNodeSummary) -> str:
+    if _esm3_has_structure_output(node):
+        return "backbone_generation"
+    tracks = _esm3_tracks(node)
+    if tracks:
+        return "backbone_generation" if "structure" in tracks else "generation"
+    return "backbone_generation"
+
+
+def _esm3_tracks(node: WorkflowNodeSummary) -> set[str]:
+    for container in (node.params, node.output):
+        if not isinstance(container, dict):
+            continue
+        tracks = container.get("tracks")
+        if isinstance(tracks, str):
+            return {tracks.strip().lower()}
+        if isinstance(tracks, (list, tuple, set)):
+            return {str(track).strip().lower() for track in tracks if str(track).strip()}
+    return set()
+
+
+def _esm3_has_structure_output(node: WorkflowNodeSummary) -> bool:
+    output = node.output if isinstance(node.output, dict) else {}
+    if _nonempty_text(output.get("predicted_pdb")):
+        return True
+    confidence = output.get("confidence_scores")
+    if isinstance(confidence, dict) and any(
+        confidence.get(key) is not None for key in ("mean_plddt", "plddt", "ptm")
+    ):
+        return True
+    candidates = output.get("candidates")
+    if isinstance(candidates, list):
+        return any(_candidate_has_structure_output(candidate) for candidate in candidates)
+    return False
+
+
+def _candidate_has_structure_output(candidate: Any) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    if any(
+        _nonempty_text(candidate.get(key))
+        for key in ("structure_path", "predicted_pdb", "predicted_cif", "pdb_path", "cif_path")
+    ):
+        return True
+    capabilities = candidate.get("capabilities")
+    if isinstance(capabilities, dict) and any(
+        bool(capabilities.get(key)) for key in ("has_backbone_structure", "has_full_structure")
+    ):
+        return True
+    scores = candidate.get("scores")
+    esm3_scores = scores.get("esm3") if isinstance(scores, dict) else None
+    return isinstance(esm3_scores, dict) and bool(esm3_scores.get("structure_predicted"))
+
+
+def _nonempty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def detect_workflow_type(model: ReportModel) -> str:
     """Infer the coarse workflow shape from the tool set + structure presence."""
     tools = {(node.tool or "").strip().lower() for node in model.graph.nodes}
-    has_structures = any(
-        (c.structure_path or "").strip() for c in model.candidates
-    ) or any(c.structure_path for c in model.final_candidates)
-    if tools & _BINDER_TOOLS:
+    has_structures = any((c.structure_path or "").strip() for c in model.candidates) or any(
+        c.structure_path for c in model.final_candidates
+    )
+    if _has_binder_workflow_signal(model, tools):
         return WorkflowType.BINDER
     if (
         (tools & _RETRIEVAL_TOOLS)
@@ -146,6 +282,28 @@ def detect_workflow_type(model: ReportModel) -> str:
     if has_structures or (tools & _STRUCTURE_GENERATOR_TOOLS):
         return WorkflowType.DENOVO
     return WorkflowType.GENERIC
+
+
+def _has_binder_workflow_signal(model: ReportModel, tools: set[str]) -> bool:
+    if tools & _BINDER_GENERATOR_TOOLS:
+        return True
+    if tools & _INTERFACE_EVALUATOR_TOOLS:
+        return True
+    for node in model.graph.nodes:
+        tool = (node.tool or "").strip().lower()
+        allowed_modes = _MODED_BINDER_TOOLS.get(tool)
+        if allowed_modes and _node_mode(node) in allowed_modes:
+            return True
+    return False
+
+
+def _node_mode(node: WorkflowNodeSummary) -> str:
+    for container in (node.output, node.params):
+        if isinstance(container, dict):
+            mode = container.get("mode")
+            if mode not in (None, ""):
+                return str(mode).strip().lower()
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +339,41 @@ def _fmt(value: Any, digits: int = 2) -> str | None:
     if abs(num - round(num)) < 1e-9:
         return str(round(num))
     return f"{num:.{digits}f}"
+
+
+def _max_numeric_from_rows(value: Any, key: str = "score") -> str | None:
+    values: list[float] = []
+    if isinstance(value, list):
+        for row in value:
+            if isinstance(row, dict):
+                num = _as_float(row.get(key))
+            else:
+                num = _as_float(row)
+            if num is not None:
+                values.append(num)
+    elif isinstance(value, dict):
+        for item in value.values():
+            num = _as_float(item)
+            if num is not None:
+                values.append(num)
+    else:
+        num = _as_float(value)
+        if num is not None:
+            values.append(num)
+    if not values:
+        return None
+    return _fmt(max(values))
+
+
+def _dockq_disp(value: Any) -> str | None:
+    return _max_numeric_from_rows(value, key="score")
+
+
+def _first_recorded(*values: Any) -> Any | None:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _degap(seq: str) -> str:
@@ -231,14 +424,25 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
             ("boltz2_affinity", "ptm", "pTM", None, _fmt),
             ("boltz2_affinity", "pae", "PAE", "Å", _fmt),
             ("boltz2_affinity", "mean_pae", "PAE", "Å", _fmt),
+            ("boltz2_affinity", "confidence_score", "Confidence", None, _fmt),
+            ("bindcraft", "plddt", "pLDDT", None, _plddt_disp),
             ("boltzgen", "confidence", "Confidence", None, _fmt),
             ("boltzgen", "score", "Generation score", None, _fmt),
+            ("pxdesign", "score", "Generation score", None, _fmt),
+            ("proteina_complexa", "plddt", "pLDDT", None, _plddt_disp),
+            ("proteina_complexa", "scaffold_plddt", "Scaffold pLDDT", None, _plddt_disp),
+            ("proteina_complexa", "binder_refold_rmsd", "Refold RMSD", "Å", _fmt),
+            ("proteina_complexa", "ligand_rmsd", "Ligand RMSD", "Å", _fmt),
+            ("proteina_complexa", "motif_rmsd", "Motif RMSD", "Å", _fmt),
+            ("proteina_complexa", "designability", "Designability", None, _fmt),
             ("protenix_v2", "plddt", "pLDDT", None, _plddt_disp),
             ("protenix_v2", "ptm", "pTM", None, _fmt),
             ("protenix_v2", "pae", "PAE", "Å", _fmt),
             ("protenix_v2", "mean_pae", "PAE", "Å", _fmt),
             ("protenix_v2", "ranking_score", "Rank score", None, _fmt),
             ("protenix_v2", "gpde", "gPDE", None, _fmt),
+            ("pxmeter", "lddt", "lDDT", None, _fmt),
+            ("pxmeter", "per_interface_lddt", "Interface lDDT", None, _max_numeric_from_rows),
             ("protein_qc", "plddt", "pLDDT", None, _plddt_disp),
             ("protein_qc", "ca_bfactor_plddt", "CA B-factor pLDDT", None, _plddt_disp),
         ],
@@ -247,14 +451,31 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
         "Interface & binding",
         [
             ("boltz2_affinity", "iptm", "ipTM", None, _fmt),
+            ("boltz2_affinity", "predicted_affinity", "Affinity", None, _fmt),
             ("boltz2_affinity", "affinity", "Affinity", None, _fmt),
             ("boltz2_affinity", "affinity_pred_value", "Affinity", None, _fmt),
+            (
+                "boltz2_affinity",
+                "affinity_probability_binary",
+                "Binder probability",
+                None,
+                _fmt,
+            ),
             ("boltz2_affinity", "pae_interaction", "Interaction PAE", "Å", _fmt),
             ("boltz2_affinity", "iplddt", "ipLDDT", None, _fmt),
+            ("bindcraft", "iptm", "ipTM", None, _fmt),
+            ("bindcraft", "pae_interaction", "Interaction PAE", "Å", _fmt),
+            ("boltzgen", "affinity_pred_value", "Affinity", None, _fmt),
+            ("boltzgen", "affinity_probability_binary", "Binder probability", None, _fmt),
+            ("proteina_complexa", "iptm", "ipTM", None, _fmt),
+            ("proteina_complexa", "ligand_contacts", "Ligand contacts", None, _fmt),
             ("protenix_v2", "iptm", "ipTM", None, _fmt),
             ("protenix_v2", "ipae", "ipAE", "Å", _fmt),
             ("protenix_v2", "iplddt", "ipLDDT", None, _fmt),
+            ("ipsae", "ipsae_score", "ipSAE", None, _fmt),
+            ("ipsae", "ipsae_max", "ipSAE", None, _fmt),
             ("ipsae", "ipsae", "ipSAE", None, _fmt),
+            ("pxmeter", "dockq", "DockQ", None, _dockq_disp),
             ("prodigy", "binding_affinity", "ΔG", "kcal/mol", _fmt),
             ("structure_analysis", "interface_contacts", "Interface contacts", None, _fmt),
         ],
@@ -312,7 +533,13 @@ def _pct(value: Any) -> float | None:
 
 def _score_namespace(candidate: ReportCandidate, tool: str) -> dict[str, Any]:
     block = candidate.scores.get(tool) if isinstance(candidate.scores, dict) else None
-    return block if isinstance(block, dict) else {}
+    if isinstance(block, dict):
+        return block
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    source_tool = str(source.get("tool") or "").strip().lower()
+    if source_tool == tool and isinstance(candidate.scores, dict):
+        return candidate.scores
+    return {}
 
 
 # Short, human-readable source-tool labels for metric provenance. Every score
@@ -323,9 +550,13 @@ _METRIC_SOURCE_NAME: dict[str, str] = {
     "esm3": "ESM-3",
     "esm2": "ESM-2",
     "boltz2_affinity": "Boltz-2",
+    "bindcraft": "BindCraft",
     "boltzgen": "BoltzGen",
+    "proteina_complexa": "Proteina-Complexa",
     "protenix_v2": "Protenix",
     "protein_qc": "Protein QC",
+    "pxdesign": "PXDesign",
+    "pxmeter": "PXMeter",
     "sequence_analysis": "Seq. analysis",
     "structure_analysis": "Struct. analysis",
     "proteinmpnn": "ProteinMPNN",
@@ -341,15 +572,14 @@ def _source_name(tool: str) -> str:
     return _METRIC_SOURCE_NAME.get(tool, tool.replace("_", " ").title() if tool else "")
 
 
-def _build_score_groups(
-    candidate: ReportCandidate, msa_blocks: list[MSABlock]
-) -> list[ScoreGroup]:
+def _build_score_groups(candidate: ReportCandidate, msa_blocks: list[MSABlock]) -> list[ScoreGroup]:
     groups: list[ScoreGroup] = []
     suppress_protenix_interface_metrics = _is_protenix_monomer_candidate(candidate)
     for family, specs in _FAMILY_SPECS:
         # (label, value, unit, source_tool) — source carries the producing tool
         # so the renderer can tag each confidence metric with its origin.
         metrics: list[tuple[str, str, str | None, str]] = []
+        seen_metrics: set[tuple[str, str]] = set()
         for tool, key, label, unit, transform in specs:
             if (
                 suppress_protenix_interface_metrics
@@ -363,7 +593,12 @@ def _build_score_groups(
             shown = transform(block[key]) if transform else _fmt(block[key])
             if shown is None:
                 continue
-            metrics.append((label, shown, unit, _source_name(tool)))
+            source = _source_name(tool)
+            identity = (label, source)
+            if identity in seen_metrics:
+                continue
+            seen_metrics.add(identity)
+            metrics.append((label, shown, unit, source))
         if family == "Novelty & similarity" and msa_blocks:
             ident = max((mb.mean_identity for mb in msa_blocks), default=0.0)
             if ident:
@@ -458,7 +693,12 @@ def _cif_protein_chain_count(text: str) -> int | None:
         chains: set[str] = set()
         while i < len(lines):
             stripped = lines[i].strip()
-            if not stripped or stripped.startswith("#") or stripped == "loop_" or stripped.startswith("_"):
+            if (
+                not stripped
+                or stripped.startswith("#")
+                or stripped == "loop_"
+                or stripped.startswith("_")
+            ):
                 break
             parts = stripped.split()
             if len(parts) > max(comp_idx, chain_idx):
@@ -584,6 +824,20 @@ def _rank_sort_key(candidate: ReportCandidate) -> tuple[float, float]:
     )
 
 
+def _final_fallback_sort_key(candidate: ReportCandidate) -> tuple[int, int, int, float, float]:
+    """Choose the richest sequence-matched record to represent a submitted pick."""
+    source = candidate.source if isinstance(candidate.source, dict) else {}
+    source_tool = str(source.get("tool") or "").strip().lower()
+    rank_key = _rank_sort_key(candidate)
+    return (
+        0 if _candidate_ranked_candidate_id(candidate) else 1,
+        0 if candidate.structure_path else 1,
+        0 if source_tool in _STRUCTURE_GENERATOR_TOOLS else 1,
+        rank_key[0],
+        rank_key[1],
+    )
+
+
 def _candidate_scoring_rank(
     candidate: ReportCandidate,
     scoring_ranks: dict[str, int],
@@ -614,7 +868,9 @@ def _candidate_ranked_candidate_id(candidate: ReportCandidate) -> str | None:
     source = candidate.source if isinstance(candidate.source, dict) else {}
     for container in (
         source,
-        source.get("objective_rank_evidence") if isinstance(source.get("objective_rank_evidence"), dict) else {},
+        source.get("objective_rank_evidence")
+        if isinstance(source.get("objective_rank_evidence"), dict)
+        else {},
     ):
         if isinstance(container, dict):
             value = container.get("ranked_candidate_id")
@@ -661,9 +917,7 @@ def _resolve_final_records(model: ReportModel) -> dict[int, str]:
        matched no record by id, credit the *single* best-ranked record sharing
        the degapped sequence — never the whole shard set.
     """
-    final_ids: set[str] = {
-        str(fc.candidate_id) for fc in model.final_candidates if fc.candidate_id
-    }
+    final_ids: set[str] = {str(fc.candidate_id) for fc in model.final_candidates if fc.candidate_id}
     resolved: dict[int, str] = {}
 
     # Pass 1: exact candidate_id match.
@@ -674,16 +928,16 @@ def _resolve_final_records(model: ReportModel) -> dict[int, str]:
             resolved[idx] = Provenance.EXACT
             matched_ids.add(cid)
 
-    # Pass 2: sequence fallback, only for final picks unresolved by id.
-    unresolved_seqs: set[str] = set()
+    # Pass 2: sequence fallback, only for final picks unresolved by id. When
+    # several records share the submitted sequence, prefer the record carrying
+    # the submitted structure/objective-rank evidence over QC-only aliases.
     for fc in model.final_candidates:
         fcid = str(fc.candidate_id or "")
         if fcid and fcid in matched_ids:
             continue
         seq = _degap(fc.sequence or "")
-        if seq:
-            unresolved_seqs.add(seq)
-    for seq in unresolved_seqs:
+        if not seq:
+            continue
         candidates = [
             idx
             for idx, cand in enumerate(model.candidates)
@@ -691,7 +945,21 @@ def _resolve_final_records(model: ReportModel) -> dict[int, str]:
         ]
         if not candidates:
             continue
-        best = min(candidates, key=lambda i: _rank_sort_key(model.candidates[i]))
+        fc_structure = (fc.structure_path or "").strip()
+        if fc_structure:
+            fc_path = Path(fc_structure)
+            structure_matches = [
+                idx
+                for idx in candidates
+                if (model.candidates[idx].structure_path or "").strip()
+                and (
+                    model.candidates[idx].structure_path == fc_structure
+                    or Path(model.candidates[idx].structure_path or "").name == fc_path.name
+                )
+            ]
+            if structure_matches:
+                candidates = structure_matches
+        best = min(candidates, key=lambda i: _final_fallback_sort_key(model.candidates[i]))
         resolved[best] = Provenance.INFERRED
     return resolved
 
@@ -786,13 +1054,44 @@ def _node_evidence_summary(candidate: ReportCandidate, tool: str) -> str:
         s = _fmt(block.get("score"))
         if s:
             bits.append(f"MPNN {s}")
-    elif name in {"boltz2_affinity", "protenix_v2"}:
+    elif name in {"bindcraft", "boltz2_affinity", "protenix_v2", "proteina_complexa"}:
         p = _plddt_100(block.get("plddt"))
         if p is not None:
             bits.append(f"pLDDT {p}")
         i = _fmt(block.get("iptm"))
         if i:
             bits.append(f"ipTM {i}")
+        a = _fmt(_first_recorded(block.get("affinity_pred_value"), block.get("predicted_affinity")))
+        if a:
+            bits.append(f"Affinity {a}")
+    elif name == "boltzgen":
+        c = _fmt(block.get("confidence"))
+        if c:
+            bits.append(f"Confidence {c}")
+        a = _fmt(block.get("affinity_pred_value"))
+        if a:
+            bits.append(f"Affinity {a}")
+    elif name == "pxdesign":
+        s = _fmt(block.get("score"))
+        if s:
+            bits.append(f"Generation score {s}")
+    elif name == "ipsae":
+        i = _fmt(
+            _first_recorded(
+                block.get("ipsae_score"),
+                block.get("ipsae_max"),
+                block.get("ipsae"),
+            )
+        )
+        if i:
+            bits.append(f"ipSAE {i}")
+    elif name == "pxmeter":
+        d = _dockq_disp(block.get("dockq"))
+        if d:
+            bits.append(f"DockQ {d}")
+        lddt = _fmt(block.get("lddt"))
+        if lddt:
+            bits.append(f"lDDT {lddt}")
     return " · ".join(bits)
 
 
@@ -981,9 +1280,7 @@ def _rank_key(bundle: CandidateEvidenceBundle) -> tuple[float, float]:
     # Prefer the authoritative objective_rank display rank; fall back to the
     # recorded rank.
     rank = (
-        bundle.display_rank
-        if bundle.display_rank is not None
-        else _as_int(bundle.candidate.rank)
+        bundle.display_rank if bundle.display_rank is not None else _as_int(bundle.candidate.rank)
     )
     score = _as_float(bundle.candidate.score)
     return (
@@ -1036,9 +1333,7 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
     ordered_nodes = _topo_order(list(model.graph.nodes))
     final_map = _resolve_final_records(model)
     scoring_ranks = _scoring_rank_map(model)
-    top_ranked_id = next(
-        (cid for cid, rank in scoring_ranks.items() if rank == 1), None
-    )
+    top_ranked_id = next((cid for cid, rank in scoring_ranks.items() if rank == 1), None)
 
     bundles = [
         _build_bundle(
@@ -1057,12 +1352,8 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
     # in ``model.candidates`` (distinct id *and* sequence — a genuinely disjoint
     # submission record). The submitted design must never be missing from the
     # board, so synthesise a FINAL bundle directly from any such record.
-    represented_ids = {
-        str(model.candidates[i].candidate_id or "") for i in final_map
-    } - {""}
-    represented_seqs = {
-        _degap(model.candidates[i].sequence or "") for i in final_map
-    } - {""}
+    represented_ids = {str(model.candidates[i].candidate_id or "") for i in final_map} - {""}
+    represented_seqs = {_degap(model.candidates[i].sequence or "") for i in final_map} - {""}
     for fc in model.final_candidates:
         fcid = str(fc.candidate_id or "")
         fseq = _degap(fc.sequence or "")
@@ -1096,6 +1387,8 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
 
 __all__ = [
     "build_review_model",
+    "classify_generation_stage_key",
     "classify_tool_role",
+    "classify_workflow_stage_key",
     "detect_workflow_type",
 ]

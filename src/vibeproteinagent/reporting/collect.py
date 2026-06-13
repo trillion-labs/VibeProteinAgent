@@ -2326,6 +2326,24 @@ def _candidates_from_submission(
         if not isinstance(row, dict):
             continue
         scores = _candidate_score_map(row)
+        ranked_candidate_id = _submission_ranked_candidate_id(row)
+        material_key = _submission_material_key(row)
+        source = {
+            "kind": "final_submission",
+            "submission_id": submission.get("submission_id"),
+            "outcome": submission.get("outcome"),
+            "reasoning": submission.get("reasoning"),
+            "justification": row.get("justification"),
+            "job_id": row.get("source_job_id"),
+            "tool": row.get("source_tool"),
+            "node_id": row.get("source_workflow_node_id"),
+            "auto_selected": bool(submission.get("auto_selected", False)),
+            "candidate_artifacts": _candidate_artifact_metadata(row),
+        }
+        if ranked_candidate_id:
+            source["ranked_candidate_id"] = ranked_candidate_id
+        if material_key:
+            source["material_key"] = material_key
         artifacts = [
             ReportArtifact(
                 field=str(artifact.get("field") or ""),
@@ -2352,22 +2370,53 @@ def _candidates_from_submission(
                     else None
                 ),
                 scores=scores,
-                source={
-                    "kind": "final_submission",
-                    "submission_id": submission.get("submission_id"),
-                    "outcome": submission.get("outcome"),
-                    "reasoning": submission.get("reasoning"),
-                    "justification": row.get("justification"),
-                    "job_id": row.get("source_job_id"),
-                    "tool": row.get("source_tool"),
-                    "node_id": row.get("source_workflow_node_id"),
-                    "auto_selected": bool(submission.get("auto_selected", False)),
-                    "candidate_artifacts": _candidate_artifact_metadata(row),
-                },
+                source=source,
                 artifacts=artifacts,
             )
         )
     return out
+
+
+def _submission_ranked_candidate_id(row: dict[str, Any]) -> str | None:
+    for container in (
+        row,
+        row.get("selection_evidence") if isinstance(row.get("selection_evidence"), dict) else {},
+        row.get("candidate_ref") if isinstance(row.get("candidate_ref"), dict) else {},
+    ):
+        if not isinstance(container, dict):
+            continue
+        value = container.get("ranked_candidate_id")
+        if value not in (None, ""):
+            return str(value)
+    scores = row.get("scores")
+    if isinstance(scores, dict):
+        objective = scores.get("objective_rank")
+        if isinstance(objective, dict):
+            value = objective.get("ranked_candidate_id")
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _submission_material_key(row: dict[str, Any]) -> str | None:
+    for container in (
+        row,
+        row.get("selection_evidence") if isinstance(row.get("selection_evidence"), dict) else {},
+        row.get("candidate_ref") if isinstance(row.get("candidate_ref"), dict) else {},
+    ):
+        if not isinstance(container, dict):
+            continue
+        value = container.get("material_key")
+        if value not in (None, ""):
+            return str(value)
+    scores = row.get("scores")
+    if isinstance(scores, dict):
+        objective = scores.get("objective_rank")
+        if isinstance(objective, dict):
+            value = objective.get("material_key")
+            if value not in (None, ""):
+                return str(value)
+    return None
 
 
 def _enrich_final_candidates_from_current_candidates(
@@ -2377,13 +2426,17 @@ def _enrich_final_candidates_from_current_candidates(
     """Backfill final picks from candidates already collected for this report."""
     if not final_candidates:
         return final_candidates
-    by_id = {candidate.candidate_id: candidate for candidate in current_candidates}
+    by_id: dict[str, list[ReportCandidate]] = {}
+    for candidate in current_candidates:
+        if candidate.candidate_id:
+            by_id.setdefault(str(candidate.candidate_id), []).append(candidate)
     enriched: list[ReportCandidate] = []
     for candidate in final_candidates:
-        rich = by_id.get(candidate.candidate_id)
-        if rich is None:
+        matches = by_id.get(str(candidate.candidate_id or ""), [])
+        if len(matches) != 1:
             enriched.append(candidate)
             continue
+        rich = matches[0]
         enriched.append(
             replace(
                 candidate,
@@ -2416,7 +2469,18 @@ def _enrich_final_candidates_from_objective_rank(
         row = match["row"]
         scores = dict(candidate.scores or {})
         rank_scores = dict(scores.get("objective_rank") or {})
-        rank_scores.update(_candidate_score_map(row))
+        rank_row_scores = _candidate_score_map(row)
+        for key, value in rank_row_scores.items():
+            if key == "objective_rank":
+                if isinstance(value, dict):
+                    rank_scores.update(value)
+                continue
+            if key not in scores:
+                scores[key] = value
+            elif isinstance(scores.get(key), dict) and isinstance(value, dict):
+                merged = dict(value)
+                merged.update(scores[key])
+                scores[key] = merged
         if match.get("ranked_candidate_id"):
             rank_scores.setdefault("ranked_candidate_id", match.get("ranked_candidate_id"))
         if row.get("formula_text") is not None:
@@ -2524,6 +2588,16 @@ def _objective_rank_match_for_candidate(
         if len(material_matches) == 1:
             return material_matches[0]
     candidate_id = str(candidate.candidate_id or "")
+    sequence = _candidate_sequence_identity(candidate)
+    if candidate_id and sequence:
+        exact_sequence = [
+            row
+            for row in rows
+            if str(row["row"].get("candidate_id") or "") == candidate_id
+            and _row_sequence_identity(row["row"]) == sequence
+        ]
+        if len(exact_sequence) == 1:
+            return exact_sequence[0]
     if candidate_id:
         exact = [
             row
@@ -2548,6 +2622,13 @@ def _objective_rank_match_for_candidate(
         )
     )
     return matches[0]
+
+
+def _row_sequence_identity(row: dict[str, Any]) -> str | None:
+    value = row.get("sequence")
+    if value in (None, ""):
+        return None
+    return "".join(str(value).split()).upper()
 
 
 def _merge_final_candidate_evidence_into_current_candidates(

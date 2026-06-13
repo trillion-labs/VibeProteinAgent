@@ -158,6 +158,17 @@ objective -> thresholds -> explore tools/workflows -> evidence -> rank
 VPA itself stays a stateless, deterministic substrate; the external agent owns
 the exploration loop and runs as many jobs as the objective warrants.
 
+## A Note on Report Rendering
+
+The HTML report is generated automatically from the run's artifacts. Because the
+external agent's behavior is dynamic, the renderer can't always anticipate every
+shape the results take, so sometimes a piece of a report (e.g., structure view) 
+may come out missing or blank.
+
+If that happens, just tell the LLM agent about the rendering issue and ask it 
+to re-link the affected artifact or adjust the values that feed the HTML and 
+render the report again.
+
 ## Cite
 
 ```bibtex

@@ -32,12 +32,33 @@
     "ranked_json": {"type": "string", "minLength": 1},
     "ranked_tsv": {"type": "string", "minLength": 1},
     "warnings": {"type": "array", "items": {"type": "string"}, "default": []},
+    "structured_warnings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/structured_warning"},
+      "default": [],
+      "description": "Machine-readable warnings about ranked row identity or evidence completeness."
+    },
     "runtime_ms": {"type": "integer", "minimum": 0}
   },
   "additionalProperties": false,
   "$defs": {
     "gate_record": {"type": "object", "additionalProperties": true},
     "score_component": {"type": "object", "additionalProperties": true},
+    "structured_warning": {
+      "type": "object",
+      "required": ["code", "severity", "message", "candidate_id", "ranked_candidate_id"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"type": "string", "enum": ["warning"]},
+        "message": {"type": "string", "minLength": 1},
+        "candidate_id": {"type": "string", "minLength": 1},
+        "ranked_candidate_id": {"type": "string", "minLength": 1},
+        "present_fields": {"type": "array", "items": {"type": "string"}},
+        "required_any_of": {"type": "array", "items": {"type": "string"}},
+        "score_namespaces": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
     "candidate_ref": {
       "type": "object",
       "required": ["candidate_id", "ranked_candidate_id"],
@@ -46,7 +67,9 @@
         "ranked_candidate_id": {"type": "string", "minLength": 1},
         "identity_key": {"type": "string"},
         "material_key": {"type": "string"},
-        "source_job_ids": {"type": "array", "items": {"type": "string"}}
+        "source_job_ids": {"type": "array", "items": {"type": "string"}},
+        "source": {"type": "object", "additionalProperties": true},
+        "material_identity": {"type": "object", "additionalProperties": true}
       },
       "additionalProperties": true
     },
@@ -81,6 +104,11 @@
         "passed_gates": {"type": "array", "items": {"$ref": "#/$defs/gate_record"}},
         "failed_gates": {"type": "array", "items": {"$ref": "#/$defs/gate_record"}},
         "tie_breaker_values": {"type": "object", "additionalProperties": {"type": ["number", "null"]}},
+        "structured_warnings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/structured_warning"},
+          "default": []
+        },
         "candidate_ref": {"$ref": "#/$defs/candidate_ref"}
       },
       "additionalProperties": true

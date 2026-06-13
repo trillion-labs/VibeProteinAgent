@@ -240,6 +240,12 @@ if [ "$FULL_INSTALL" = true ]; then
     echo "      -> JAX with CUDA..."
     uv pip install "${JAX_CUDA_EXTRA}==0.10.0" \
         -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+    if [[ "$CUDA_PROFILE" != "cpu" ]]; then
+        # JAX CUDA 12 wheels require cuDNN >=9.8. PyTorch cu128 can leave an
+        # older cuDNN dependency in the env, which imports but fails at XLA
+        # compile time with `dnn_support != nullptr`.
+        uv pip install "nvidia-cudnn-cu12>=9.8,<10" --upgrade
+    fi
     uv pip install flax==0.9.0 --no-deps
     uv pip install dm-haiku==0.0.16 --no-deps
     uv pip install optax==0.2.2 --no-deps
@@ -269,6 +275,54 @@ fi
 
 uv pip install biotite==1.6.0
 echo "Updated biotite to 1.6.0 for ligand compatibility"
+
+if [[ "$FULL_INSTALL" == "true" && "$CUDA_PROFILE" != "cpu" ]]; then
+    echo "[verify] Checking JAX GPU DNN backend..."
+    NVIDIA_LIB_PATHS="$(python - <<'PY'
+from pathlib import Path
+import site
+
+priority = {
+    "cudnn": 0,
+    "cublas": 1,
+    "cuda_runtime": 2,
+    "cuda_nvrtc": 3,
+}
+paths = []
+for base in site.getsitepackages():
+    root = Path(base) / "nvidia"
+    if root.is_dir():
+        paths.extend(path for path in root.glob("*/lib") if path.is_dir())
+paths.sort(key=lambda path: (priority.get(path.parent.name, 100), path.parent.name))
+print(":".join(str(path) for path in paths))
+PY
+)"
+    if [[ -n "$NVIDIA_LIB_PATHS" ]]; then
+        export LD_LIBRARY_PATH="$NVIDIA_LIB_PATHS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+    JAX_TRACEBACK_FILTERING=off python - <<'PY'
+import jax
+import jax.numpy as jnp
+from jax import lax
+
+gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
+if not gpu_devices:
+    raise RuntimeError("no JAX GPU devices are visible")
+
+device = gpu_devices[0]
+x = jax.device_put(jnp.ones((1, 16, 16, 1), dtype=jnp.float32), device)
+w = jax.device_put(jnp.ones((3, 3, 1, 4), dtype=jnp.float32), device)
+y = lax.conv_general_dilated(
+    x,
+    w,
+    window_strides=(1, 1),
+    padding="SAME",
+    dimension_numbers=("NHWC", "HWIO", "NHWC"),
+)
+float(jnp.sum(y).block_until_ready())
+print("JAX GPU DNN backend: ok")
+PY
+fi
 
 # ------------------------------------------------------------------------------
 # Done!

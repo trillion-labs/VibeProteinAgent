@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import shlex
@@ -34,7 +35,7 @@ if str(_VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_VENDOR_ROOT))
 
 try:
-    from proteinmpnn_vendor import (  # noqa: E402 — vendored import after sys.path tweak
+    from proteinmpnn_vendor import (
         ProteinMPNN,
         _S_to_seq,
         _scores,
@@ -440,8 +441,7 @@ def _mpnn_structure_path_from_candidate(candidate: dict[str, Any]) -> str | None
 
 
 def _infer_protein_chain_ids(path: Path) -> list[str]:
-    suffix = path.suffix.lower()
-    if suffix in {".cif", ".mmcif"}:
+    if _is_cif_like_path(path):
         return _infer_cif_protein_chain_ids(path)
     return _infer_pdb_protein_chain_ids(path)
 
@@ -463,7 +463,7 @@ def _infer_pdb_protein_chain_ids(path: Path) -> list[str]:
 
 def _infer_cif_protein_chain_ids(path: Path) -> list[str]:
     try:
-        lines = path.read_text(errors="ignore").splitlines()
+        lines = _read_structure_text(path, errors="ignore").splitlines()
     except OSError:
         return []
     cols: list[str] = []
@@ -502,7 +502,7 @@ def _materialize_mpnn_pdb_input(
     requested_chains: list[str] | None,
     job_dir: Path,
 ) -> tuple[Path, list[str] | None, dict[str, Any] | None]:
-    if structure_path.suffix.lower() not in {".cif", ".mmcif"}:
+    if not _is_cif_like_path(structure_path):
         chains = requested_chains
         if chains is None:
             inferred = _infer_protein_chain_ids(structure_path)
@@ -511,7 +511,7 @@ def _materialize_mpnn_pdb_input(
 
     rows = _read_cif_atom_rows(structure_path)
     raw_to_pdb = _raw_to_pdb_chain_map(rows)
-    pdb_path = job_dir / "inputs" / f"{structure_path.stem}_proteinmpnn_input.pdb"
+    pdb_path = job_dir / "inputs" / f"{_structure_stem(structure_path)}_proteinmpnn_input.pdb"
     pdb_path.parent.mkdir(parents=True, exist_ok=True)
     _write_cif_rows_as_pdb(rows, pdb_path, raw_to_pdb)
     mapped_chains = _map_requested_chains(requested_chains, raw_to_pdb)
@@ -525,9 +525,37 @@ def _materialize_mpnn_pdb_input(
     return pdb_path, mapped_chains, metadata
 
 
+def _is_cif_like_path(path: Path) -> bool:
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    if not suffixes:
+        return False
+    if suffixes[-1] in {".cif", ".mmcif"}:
+        return True
+    return len(suffixes) >= 2 and suffixes[-1] == ".gz" and suffixes[-2] in {
+        ".cif",
+        ".mmcif",
+    }
+
+
+def _structure_stem(path: Path) -> str:
+    name = path.name
+    lowered = name.lower()
+    for suffix in (".mmcif.gz", ".cif.gz", ".mmcif", ".cif", ".pdb"):
+        if lowered.endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem
+
+
+def _read_structure_text(path: Path, *, errors: str = "replace") -> str:
+    if path.suffix.lower() == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8", errors=errors) as handle:
+            return handle.read()
+    return path.read_text(errors=errors)
+
+
 def _read_cif_atom_rows(path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    lines = path.read_text(errors="replace").splitlines()
+    lines = _read_structure_text(path, errors="replace").splitlines()
     index = 0
     while index < len(lines):
         if lines[index].strip() != "loop_":

@@ -9,6 +9,7 @@ from vibeproteinagent.cli.output import fail_from_exception, print_envelope_ok
 from vibeproteinagent.reporting import (
     collect_report_model,
     resolve_report_output_path,
+    validate_final_report_contract,
     write_report,
 )
 from vibeproteinagent.reporting.enrich import ensure_sequence_analysis_enrichment
@@ -58,6 +59,7 @@ def report(
         enrichment_job_ids = ensure_sequence_analysis_enrichment(ws, model.summary.id, model)
         if enrichment_job_ids:
             model = collect_report_model(ws, id)
+        validate_final_report_contract(model)
         default_name = f"{id}_report_bundle" if format_ == "bundle" else f"{id}_report.html"
         default_out = ws.root / default_name
         target_out = Path(out) if out else default_out

@@ -577,6 +577,7 @@ def render_report(
         from vibeproteinagent.reporting import (
             collect_report_model,
             resolve_report_output_path,
+            validate_final_report_contract,
             write_report,
         )
         from vibeproteinagent.reporting.enrich import ensure_sequence_analysis_enrichment
@@ -589,6 +590,7 @@ def render_report(
         )
         if enrichment_job_ids:
             model = collect_report_model(ctx.workspace, source_id)
+        validate_final_report_contract(model)
         default_name = (
             f"{source_id}_report_bundle"
             if format == "bundle"

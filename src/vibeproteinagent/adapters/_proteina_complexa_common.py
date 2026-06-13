@@ -52,12 +52,13 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from vibeproteinagent.adapters.runtime import sanitized_python_env, smoke_import
-from vibeproteinagent.core.errors import VPAError
+from vibeproteinagent.core.errors import DependencyError, VPAError
 from vibeproteinagent.workers.sidecar import PersistentPythonSidecar, SidecarRuntimeSpec
 
 # --------------------------------------------------------------------------- root path resolution
@@ -284,21 +285,12 @@ def build_isolated_env(
         str(community / "ckpts" / "RF3" / "rf3_foundry_01_24_latest_remapped.ckpt"),
     )
     env.setdefault("UV_VENV", str(venv))
-    nvidia_lib_root = (
-        venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages" / "nvidia"
-    )
-    if nvidia_lib_root.is_dir():
-        lib_paths = [
-            str(path)
-            for path in sorted(nvidia_lib_root.glob("*/lib"))
-            if path.is_dir()
-        ]
-        if lib_paths:
-            existing_ld = env.get("LD_LIBRARY_PATH")
-            env["LD_LIBRARY_PATH"] = os.pathsep.join(
-                [*lib_paths, *([existing_ld] if existing_ld else [])]
-            )
+    lib_paths = _nvidia_package_lib_paths(venv)
+    if lib_paths:
+        existing_ld = env.get("LD_LIBRARY_PATH")
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            [*lib_paths, *([existing_ld] if existing_ld else [])]
+        )
     env.setdefault(
         "FOLDSEEK_EXEC", shutil.which("foldseek") or str(venv / "bin" / "foldseek")
     )
@@ -313,19 +305,41 @@ def build_isolated_env(
     )
     env.setdefault(
         "TMOL_PATH",
-        str(
-            venv
-            / "lib"
-            / f"python{sys.version_info.major}.{sys.version_info.minor}"
-            / "site-packages"
-            / "tmol"
-        ),
+        str(_venv_site_packages(venv) / "tmol"),
     )
     if seed is not None:
         env["PYTHONHASHSEED"] = str(seed)
     if extra:
         env.update(extra)
     return env
+
+
+def _venv_site_packages(venv: Path) -> Path:
+    candidates = sorted((venv / "lib").glob("python*/site-packages"))
+    if candidates:
+        return candidates[0]
+    return (
+        venv
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+
+
+def _nvidia_package_lib_paths(venv: Path) -> list[str]:
+    site_packages = _venv_site_packages(venv)
+    nvidia_root = site_packages / "nvidia"
+    if not nvidia_root.is_dir():
+        return []
+    priority = {
+        "cudnn": 0,
+        "cublas": 1,
+        "cuda_runtime": 2,
+        "cuda_nvrtc": 3,
+    }
+    paths = [path for path in nvidia_root.glob("*/lib") if path.is_dir()]
+    paths.sort(key=lambda path: (priority.get(path.parent.name, 100), path.parent.name))
+    return [str(path) for path in paths]
 
 
 def build_sidecar_env(
@@ -363,6 +377,72 @@ def venv_import_skip_reason(timeout_s: int = 30) -> str | None:
         f"{reason}. "
         "Check msgpack, VPA sidecar install, and proteinfoundation CLI installation."
     )
+
+
+def jax_dnn_skip_reason(timeout_s: int = 45) -> str | None:
+    """Verify that Proteina-Complexa's sidecar can execute a tiny GPU DNN op.
+
+    The normal availability probe intentionally stays shallow. Installer doctor
+    uses this deeper probe to catch JAX/XLA/cuDNN failures that only appear when
+    AF2RewardModel-like evaluation reaches GPU DNN kernels.
+    """
+    python = proteina_complexa_python()
+    code = r"""
+import jax
+import jax.numpy as jnp
+from jax import lax
+
+gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
+if not gpu_devices:
+    raise RuntimeError("no JAX GPU devices are visible")
+
+device = gpu_devices[0]
+x = jax.device_put(jnp.ones((1, 16, 16, 1), dtype=jnp.float32), device)
+w = jax.device_put(jnp.ones((3, 3, 1, 4), dtype=jnp.float32), device)
+y = lax.conv_general_dilated(
+    x,
+    w,
+    window_strides=(1, 1),
+    padding="SAME",
+    dimension_numbers=("NHWC", "HWIO", "NHWC"),
+)
+float(jnp.sum(y).block_until_ready())
+print("ok")
+"""
+    env = build_sidecar_env(seed=None)
+    env["JAX_TRACEBACK_FILTERING"] = "off"
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+        )
+    except FileNotFoundError:
+        reason = f"Proteina-Complexa JAX GPU DNN python not found: {python}"
+    except subprocess.TimeoutExpired:
+        reason = f"Proteina-Complexa JAX GPU DNN probe timed out after {timeout_s}s"
+    else:
+        if proc.returncode == 0:
+            return None
+        reason = "Proteina-Complexa JAX GPU DNN probe failed: " + _stderr_tail(
+            proc.stderr or proc.stdout or f"exit code {proc.returncode}"
+        )
+    if not reason:
+        return None
+    return (
+        f"{reason}. Proteina-Complexa can import, but its JAX/XLA/cuDNN GPU "
+        "backend is not ready for AF2RewardModel-style evaluation."
+    )
+
+
+def _stderr_tail(text: str, *, max_lines: int = 8) -> str:
+    lines = [line for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return "no stderr captured"
+    return " | ".join(lines[-max_lines:])
 
 
 # --------------------------------------------------------------------------- output discovery
@@ -485,9 +565,73 @@ def run_design(
             timeout_s=timeout_s,
         )
     except VPAError as exc:
+        details = _sidecar_error_details(
+            exc,
+            cmd=cmd,
+            config_path=config_path,
+            overrides=overrides,
+            steps=steps,
+            cwd=cwd,
+        )
+        if _is_accelerator_backend_failure(details):
+            raise DependencyError(
+                "Proteina-Complexa sidecar failed in the CUDA/JAX/XLA backend "
+                "while running the design/evaluation pipeline. This is a runtime "
+                "readiness issue, not a candidate quality failure.",
+                details=details,
+            ) from exc
         raise RuntimeError(
             f"complexa design sidecar failed. cmd: {' '.join(cmd)}. {exc}"
         ) from exc
+
+
+def _sidecar_error_details(
+    exc: VPAError,
+    *,
+    cmd: list[str],
+    config_path: Path,
+    overrides: list[str],
+    steps: list[str] | None,
+    cwd: Path,
+) -> dict[str, Any]:
+    return {
+        "cmd": cmd,
+        "config_path": str(config_path),
+        "overrides": list(overrides),
+        "steps": list(steps) if steps else None,
+        "cwd": str(cwd),
+        "sidecar_message": exc.message,
+        "sidecar_details": exc.details,
+        "root_cause_hint": _accelerator_backend_hint(exc),
+    }
+
+
+def _accelerator_backend_hint(exc: VPAError) -> str | None:
+    text = _flatten_sidecar_error_text(exc)
+    if "dnn_support != nullptr" in text:
+        return "JAX/XLA could not initialize a GPU DNN/cuDNN backend"
+    if "jaxruntimeerror" in text and ("xla" in text or "cuda" in text or "cudnn" in text):
+        return "JAX/XLA GPU runtime failed"
+    if "cudnn" in text and ("jax" in text or "xla" in text):
+        return "cuDNN is unavailable or incompatible with the JAX/XLA runtime"
+    return None
+
+
+def _is_accelerator_backend_failure(details: dict[str, Any]) -> bool:
+    return bool(details.get("root_cause_hint"))
+
+
+def _flatten_sidecar_error_text(exc: VPAError) -> str:
+    parts = [exc.message, str(exc)]
+    details = exc.details
+    if isinstance(details, dict):
+        parts.append(str(details.get("code") or ""))
+        nested = details.get("details")
+        if isinstance(nested, dict):
+            parts.extend(str(value) for value in nested.values())
+        else:
+            parts.append(str(nested or ""))
+    return "\n".join(parts).lower()
 
 
 def run_design_sidecar(

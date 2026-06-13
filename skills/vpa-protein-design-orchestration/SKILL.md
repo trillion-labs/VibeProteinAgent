@@ -54,8 +54,9 @@ this list (names below are illustrative examples, not exhaustive):
 - Sequence & backbone co-generation / infilling (e.g. `esm3`).
 - Sequence engineering (e.g. `sequence_edit`).
 - Binder generation (e.g. `pxdesign`, `bindcraft`, `boltzgen`, `proteina_complexa`).
-- Evidence — structure prediction, affinity, QC (e.g. `boltz2_affinity`,
-  `protein_qc`, `ipsae`, `prodigy`, `tmalign`).
+- Evidence — structure prediction, interface scoring, affinity, QC (e.g.
+  `protein_qc`, `ipsae`, `prodigy`, `tmalign`; use `boltz2_affinity` only for
+  small-molecule ligand affinity inputs, not protein-protein binder affinity).
 - Candidate-stream control: `merge_candidates` (dedup/union only),
   `objective_rank`, `submit_candidate`.
 
@@ -143,6 +144,9 @@ objective:
 - [ ] one trajectory tracks this user query and was started with `--objective`
 - [ ] candidate tools/workflows tried, with reason
 - [ ] any top-k/subset validation rule recorded
+- [ ] objective_rank inputs are canonical rows you would be willing to submit:
+      selected sequence/structure/scores/artifacts/source ids stay attached
+      when available
 - [ ] evidence jobs run -> objective_rank with explicit gates/formula run by
       default before submit/report (even for a single candidate) so the report
       renders ranking + score from tool output
@@ -160,6 +164,9 @@ validated, treat that as a candidate-identity contract failure rather than a
 normal tie. Inspect the per-tool outputs, proceed only with an explicit caveat
 when the evidence is otherwise decisive, and prefer fixing candidate wiring or
 rerunning with canonical candidate streams before final report rendering.
+If structure and scalar metrics are split across different rows, merge or rerun
+through canonical candidates before `submit_candidate`; do not rely on the
+report to guess that they are the same design.
 
 If no candidate passes, call `submit_candidate` with
 `outcome=no_acceptable_candidate` and explain the failed thresholds.
@@ -171,14 +178,14 @@ criteria or asked for design hypotheses despite the failed threshold.
 
 Goal: a binder for protein target X.
 
--> define objective + measurable thresholds (e.g. pLDDT >= 80, ipSAE >= 0.7)
--> pxdesign (generate binders vs X; emits canonical candidates)
--> protenix_v2 (folds pxdesign candidates -> pLDDT + PAE)
--> ipSAE (evidence from PAE)
--> objective_rank (pass job_ids plus objective_name, gates, score_formula, and tie_breakers)
--> analyze the room for improvement + try other tools, or mask some
+- [ ]  define objective + measurable thresholds (e.g. pLDDT >= 80, ipSAE >= 0.7)
+- [ ]  pxdesign (generate binders vs X; emits canonical candidates)
+- [ ]  protenix_v2 (folds pxdesign candidates -> pLDDT + PAE)
+- [ ]  ipSAE (evidence from PAE)
+- [ ]  objective_rank (pass job_ids plus objective_name, gates, score_formula, and tie_breakers)
+- [ ]  analyze the room for improvement + try other tools, or mask some
    structure/sequence and regenerate
 ...
--> submit_candidate (prefer rank=1 from the objective_rank job; accepted if a
+- [ ]  submit_candidate (prefer rank=1 from the objective_rank job; accepted if a
    design clears thresholds, else no_acceptable_candidate)
--> run the submit_candidate next_report_command
+- [ ]  run the submit_candidate next_report_command

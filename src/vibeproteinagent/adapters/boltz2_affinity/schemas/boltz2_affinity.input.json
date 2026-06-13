@@ -11,7 +11,7 @@
     "input_yaml": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to a Boltz-format YAML describing protein chain(s) + ligand and (optionally) the affinity property to score. Mutually exclusive with `sequences` and `candidates`.",
+      "description": "Absolute path to a Boltz-format YAML describing protein chain(s) + a small-molecule ligand and the affinity property to score. Affinity binder must be a ligand chain, not a protein/RNA/DNA chain. Mutually exclusive with `sequences` and `candidates`.",
       "examples": ["/abs/path/complex.yaml"],
       "vpa:digest": "sha256-if-path"
     },
@@ -72,13 +72,13 @@
       "type": "array",
       "items": {"type": "object", "additionalProperties": true},
       "default": [],
-      "description": "Canonical Candidate[] from an upstream tool (e.g. ProteinMPNN sequences for affinity scoring). Translates to `sequences` when neither `input_yaml` nor `sequences` is given.",
+      "description": "Canonical Candidate[] from an upstream small-molecule ligand workflow. Translates to `sequences` when neither `input_yaml` nor `sequences` is given. Protein-protein binder candidates are not valid affinity inputs for Boltz2.",
       "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "ligandmpnn", "local_id": "0"}, "sequence": "MKTAYI..."}]]
     },
     "binder_chain": {
       "type": "string",
-      "description": "Chain id of the binder ligand or protein whose affinity is scored. Required when using `sequences`; ignored when `input_yaml` already declares a `properties.affinity` block.",
-      "examples": ["L", "B"]
+      "description": "Chain id of the small-molecule ligand whose affinity is scored. Required when using `sequences`; ignored when `input_yaml` already declares a `properties.affinity` block. Protein/RNA/DNA binder chains are rejected.",
+      "examples": ["L"]
     },
     "seeds": {
       "type": "array",

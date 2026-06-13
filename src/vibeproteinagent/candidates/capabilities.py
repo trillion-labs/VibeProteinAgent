@@ -36,7 +36,6 @@ CANONICAL_CONSUMERS: dict[str, str] = {
     "protein_qc": "candidates",
     "tmalign": "candidates",
     "pxmeter": "candidates",
-    "boltz2_affinity": "candidates",
     "esm2": "candidates",
     "esm3": "candidates",
     "protenix_v2": "candidates",
@@ -217,7 +216,7 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "pxdesign": _contract(consumes=_FULL_STRUCTURE, produces=_BACKBONE_SEQUENCE_SCORES),
     "proteina_complexa": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_SEQUENCE_SCORES),
     "protenix_v2": _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES),
-    "boltz2_affinity": _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES),
+    "boltz2_affinity": _contract(produces=_FULL_SEQUENCE_SCORES),
     # Structure and score consumers.
     "structure_analysis": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "foldseek": _contract(consumes=_BACKBONE, produces=_SCORES, preserves_upstream=False),
@@ -392,6 +391,24 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "produces": sorted(_FULL_STRUCTURE | _SCORES),
             "min_candidate_items": 2,
             "description": "Scores predicted structure against reference structure; requires two structure candidates or explicit CIF paths.",
+        },
+    ],
+    "boltz2_affinity": [
+        {
+            "name": "small_molecule_ligand_affinity",
+            "default": True,
+            "inputs": {
+                "input_yaml": "Boltz YAML with protein target and ligand affinity binder",
+                "sequences": "typed protein/ligand entries with ligand binder_chain",
+            },
+            "consumes": [],
+            "produces": sorted(_FULL_SEQUENCE_SCORES),
+            "description": (
+                "Predicts a complex structure and affinity for a small-molecule "
+                "ligand binder. It is not a protein-protein binder affinity "
+                "scorer; use ipSAE, PRODIGY, PyRosetta, or structure-confidence "
+                "tools for protein-protein binder workflows."
+            ),
         },
     ],
     "tmalign": [

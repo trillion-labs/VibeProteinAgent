@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import operator
 import re
 import time
@@ -21,12 +22,47 @@ MissingGatePolicy = Literal["fail", "warn", "zero", "ignore"]
 ScoreDirection = Literal["higher", "lower"]
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}")
-_REFERENCE_CANDIDATE_TOOLS = frozenset({
-    "interpro_sequences",
-    "go_sequences",
-    "family_profile",
-})
+_FORMULA_FUNCTION_ARITIES: dict[str, tuple[int | None, int | None]] = {
+    "abs": (1, 1),
+    "sqrt": (1, 1),
+    "log": (1, 2),
+    "log10": (1, 1),
+    "log2": (1, 1),
+    "exp": (1, 1),
+    "min": (1, None),
+    "max": (1, None),
+    "clamp": (3, 3),
+}
+_REFERENCE_CANDIDATE_TOOLS = frozenset(
+    {
+        "interpro_sequences",
+        "go_sequences",
+        "family_profile",
+    }
+)
 _STRUCTURE_KEYS = ("structure_path", "predicted_cif", "predicted_pdb", "pdb_path", "cif_path")
+_MATERIAL_SEQUENCE_KEYS = ("sequence", "protein_sequence", "designed_sequence")
+_REPORTABLE_STRUCTURE_KEYS = (
+    "structure_path",
+    "full_structure_path",
+    "backbone_path",
+    "predicted_cif",
+    "predicted_pdb",
+    "pdb_path",
+    "cif_path",
+)
+_SCALAR_IDENTITY_KEYS = {
+    "candidate_id",
+    "name",
+    "id",
+    "seed",
+    "header",
+    "source_job_id",
+    "source_tool",
+    "source_workflow_id",
+    "source_workflow_node_id",
+}
+_SCALAR_VALUE_TYPES = (str, int, float, bool)
 
 
 class ObjectiveGate(BaseModel):
@@ -103,6 +139,7 @@ class ObjectiveRankOutput(BaseModel):
     ranked_json: str
     ranked_tsv: str
     warnings: list[str] = Field(default_factory=list)
+    structured_warnings: list[dict[str, Any]] = Field(default_factory=list)
     runtime_ms: int
 
 
@@ -173,7 +210,7 @@ def _candidate_rows_from_output(output: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _row_sequence(row: dict[str, Any]) -> str | None:
-    for key in ("sequence", "protein_sequence", "designed_sequence"):
+    for key in _MATERIAL_SEQUENCE_KEYS:
         value = row.get(key)
         if value not in (None, ""):
             return str(value)
@@ -271,9 +308,7 @@ def _ranked_identity_metadata(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             material_key = str(metadata[index]["material_key"])
             source_ids = list(metadata[index].get("source_job_ids") or [])
             suffix = _ranked_id_hash(candidate_id, material_key, source_ids)
-            metadata[index]["ranked_candidate_id"] = (
-                f"{candidate_id}__v{version}_{suffix}"
-            )
+            metadata[index]["ranked_candidate_id"] = f"{candidate_id}__v{version}_{suffix}"
     return metadata
 
 
@@ -320,11 +355,12 @@ def _identity_keys(row: dict[str, Any]) -> list[str]:
             keys.append(f"{name}:{value}")
             break
     source = row.get("source") if isinstance(row.get("source"), dict) else {}
-    source_job_id = row.get("source_job_id")
+    source_job_ids = _source_job_ids(row)
     for name in ("local_id", "native_id"):
         value = source.get(name)
-        if value not in (None, "") and source_job_id not in (None, ""):
-            keys.append(f"source_job:{source_job_id}:source.{name}:{value}")
+        if value not in (None, "") and source_job_ids:
+            for source_job_id in source_job_ids:
+                keys.append(f"source_job:{source_job_id}:source.{name}:{value}")
     structure = _row_structure_identity(row)
     if structure:
         keys.append(f"structure:{structure}")
@@ -469,11 +505,34 @@ class _FormulaEvaluator:
                 details={"syntax": type(node).__name__, "formula": self.formula},
             )
         if isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name) or node.func.id not in {"min", "max", "abs", "clamp"}:
+            if not isinstance(node.func, ast.Name) or node.func.id not in _FORMULA_FUNCTION_ARITIES:
                 raise InvalidParamsError(
                     "score_formula contains an unknown function",
                     details={"formula": self.formula},
                 )
+            if node.keywords:
+                raise InvalidParamsError(
+                    "score_formula function calls do not support keyword arguments",
+                    details={"function": node.func.id, "formula": self.formula},
+                )
+            min_args, max_args = _FORMULA_FUNCTION_ARITIES[node.func.id]
+            arg_count = len(node.args)
+            too_few = min_args is not None and arg_count < min_args
+            too_many = max_args is not None and arg_count > max_args
+            if too_few or too_many:
+                raise InvalidParamsError(
+                    "score_formula function called with invalid arity",
+                    details={
+                        "function": node.func.id,
+                        "arg_count": arg_count,
+                        "min_args": min_args,
+                        "max_args": max_args,
+                        "formula": self.formula,
+                    },
+                )
+            for arg in node.args:
+                self._validate(arg)
+            return
         if isinstance(node, ast.Name):
             if not re.fullmatch(r"__m\d+", node.id):
                 raise InvalidParamsError(
@@ -530,6 +589,8 @@ class _FormulaEvaluator:
             result = _eval_ast(self.tree.body, values)
         except ZeroDivisionError as exc:
             return None, components, [*warnings, f"score_formula division by zero: {exc}"]
+        except (OverflowError, ValueError) as exc:
+            return None, components, [*warnings, f"score_formula evaluation error: {exc}"]
         return float(result), components, warnings
 
 
@@ -556,13 +617,24 @@ def _eval_ast(node: ast.AST, variables: dict[str, float]) -> float:
             return float(fn(_eval_ast(node.left, variables), _eval_ast(node.right, variables)))
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         args = [_eval_ast(arg, variables) for arg in node.args]
-        if node.func.id == "min":
+        function = node.func.id
+        if function == "min":
             return float(min(args))
-        if node.func.id == "max":
+        if function == "max":
             return float(max(args))
-        if node.func.id == "abs" and len(args) == 1:
+        if function == "abs":
             return abs(args[0])
-        if node.func.id == "clamp" and len(args) == 3:
+        if function == "sqrt":
+            return math.sqrt(args[0])
+        if function == "log":
+            return math.log(args[0]) if len(args) == 1 else math.log(args[0], args[1])
+        if function == "log10":
+            return math.log10(args[0])
+        if function == "log2":
+            return math.log2(args[0])
+        if function == "exp":
+            return math.exp(args[0])
+        if function == "clamp":
             value, low, high = args
             return float(max(low, min(high, value)))
     raise InvalidParamsError("score_formula could not be evaluated")
@@ -685,7 +757,7 @@ def _format_number(value: Any) -> str:
     if num is None:
         return str(value)
     if abs(num - round(num)) < 1e-9:
-        return str(int(round(num)))
+        return str(round(num))
     return f"{num:.6g}"
 
 
@@ -694,10 +766,7 @@ def _tie_breaker_values(
     metrics: dict[str, float],
     constants: dict[str, float],
 ) -> dict[str, float | None]:
-    return {
-        tb.metric: _metric_path_value(tb.metric, metrics, constants)
-        for tb in tie_breakers
-    }
+    return {tb.metric: _metric_path_value(tb.metric, metrics, constants) for tb in tie_breakers}
 
 
 def _sort_key(
@@ -712,7 +781,9 @@ def _sort_key(
         score_key = -score
     else:
         score_key = score
-    values = row.get("tie_breaker_values") if isinstance(row.get("tie_breaker_values"), dict) else {}
+    values = (
+        row.get("tie_breaker_values") if isinstance(row.get("tie_breaker_values"), dict) else {}
+    )
     tb_keys: list[float] = []
     for tb in params.tie_breakers:
         value = _coerce_float(values.get(tb.metric))
@@ -753,6 +824,160 @@ def _copy_original_fields(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _source_identity(row: dict[str, Any]) -> dict[str, Any]:
+    source = row.get("source") if isinstance(row.get("source"), dict) else {}
+    identity: dict[str, Any] = {}
+    for key in ("tool", "node_id", "job_id", "local_id", "native_id", "index"):
+        value = source.get(key)
+        if value not in (None, "", [], {}):
+            identity[key] = value
+    source_job_ids = _source_job_ids(row)
+    if source_job_ids:
+        identity["job_ids"] = source_job_ids
+    for row_key, identity_key in (
+        ("source_tool", "tool"),
+        ("source_job_id", "job_id"),
+        ("source_workflow_id", "workflow_id"),
+        ("source_workflow_node_id", "workflow_node_id"),
+    ):
+        value = row.get(row_key)
+        if value not in (None, "", [], {}) and identity_key not in identity:
+            identity[identity_key] = value
+    return identity
+
+
+def _material_identity(row: dict[str, Any]) -> dict[str, Any]:
+    artifacts = row.get("artifacts") if isinstance(row.get("artifacts"), dict) else {}
+    material: dict[str, Any] = {
+        "has_sequence": _row_sequence(row) is not None,
+        "has_structure": _row_structure_identity(row) is not None
+        or any(row.get(key) not in (None, "") for key in _REPORTABLE_STRUCTURE_KEYS),
+        "artifact_namespaces": sorted(str(key) for key in artifacts),
+    }
+    sequence = _row_sequence(row)
+    if sequence:
+        material["sequence"] = sequence
+    structure = _row_structure_identity(row)
+    if structure:
+        material["structure"] = structure
+    for key in ("structure_path", "full_structure_path", "backbone_path"):
+        value = row.get(key)
+        if value not in (None, ""):
+            material[key] = value
+    return material
+
+
+def _is_scalar_only_row(row: dict[str, Any]) -> bool:
+    populated = {key: value for key, value in row.items() if value not in (None, "", [], {})}
+    if not populated:
+        return True
+    for key, value in populated.items():
+        if key in _SCALAR_IDENTITY_KEYS:
+            continue
+        if not isinstance(value, _SCALAR_VALUE_TYPES):
+            return False
+    return True
+
+
+def _contains_numeric_leaf(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_numeric_leaf(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_numeric_leaf(child) for child in value)
+    return _coerce_float(value) is not None
+
+
+def _score_evidence_namespaces(row: dict[str, Any]) -> list[str]:
+    namespaces: set[str] = set()
+    for container_key in ("scores", "metrics", "confidence_scores"):
+        container = row.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key, value in container.items():
+            namespace = str(key)
+            if namespace == "objective_rank":
+                continue
+            if isinstance(value, dict):
+                if _contains_numeric_leaf(value):
+                    namespaces.add(namespace)
+            elif "." in namespace and _contains_numeric_leaf(value):
+                namespaces.add(namespace.split(".", 1)[0])
+    for key, value in row.items():
+        if key in {"scores", "metrics", "confidence_scores"}:
+            continue
+        if "." in str(key) and _contains_numeric_leaf(value):
+            namespaces.add(str(key).split(".", 1)[0])
+    return sorted(namespaces)
+
+
+def _has_reportable_material_or_artifacts(row: dict[str, Any]) -> bool:
+    if _row_sequence(row):
+        return True
+    if any(row.get(key) not in (None, "", [], {}) for key in _REPORTABLE_STRUCTURE_KEYS):
+        return True
+    artifacts = row.get("artifacts")
+    return isinstance(artifacts, dict) and any(
+        value not in (None, "", [], {}) for value in artifacts.values()
+    )
+
+
+def _identity_contract_warnings(
+    row: dict[str, Any],
+    *,
+    candidate_id: str,
+    ranked_candidate_id: str,
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    if _is_scalar_only_row(row):
+        warnings.append(
+            {
+                "code": "scalar_only_ranked_row",
+                "severity": "warning",
+                "message": (
+                    "Ranked row contains only scalar fields; no source material or "
+                    "reportable evidence can be attached."
+                ),
+                "candidate_id": candidate_id,
+                "ranked_candidate_id": ranked_candidate_id,
+                "present_fields": sorted(
+                    str(key) for key, value in row.items() if value not in (None, "", [], {})
+                ),
+                "required_any_of": [
+                    "sequence",
+                    "structure_path",
+                    "full_structure_path",
+                    "backbone_path",
+                    "artifacts",
+                    "source",
+                ],
+            }
+        )
+
+    score_namespaces = _score_evidence_namespaces(row)
+    if score_namespaces and not _has_reportable_material_or_artifacts(row):
+        warnings.append(
+            {
+                "code": "missing_reportable_evidence",
+                "severity": "warning",
+                "message": (
+                    "Ranked row has namespaced scores but no reportable sequence, "
+                    "structure path, or artifacts."
+                ),
+                "candidate_id": candidate_id,
+                "ranked_candidate_id": ranked_candidate_id,
+                "score_namespaces": score_namespaces,
+                "required_any_of": [
+                    "sequence",
+                    "structure_path",
+                    "full_structure_path",
+                    "backbone_path",
+                    "artifacts",
+                ],
+            }
+        )
+    return warnings
+
+
 @register_adapter("descriptor.yaml")
 class ObjectiveRankAdapter(ToolAdapter):
     def __init__(self, config: dict, weights_dir: Path, device: torch.device) -> None:
@@ -769,6 +994,7 @@ class ObjectiveRankAdapter(ToolAdapter):
         gate_summary = _gate_summary(params.gates)
 
         ranked: list[dict[str, Any]] = []
+        structured_warnings: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
             identity = identity_metadata[index]
             metrics = _flatten_metrics(row)
@@ -786,6 +1012,11 @@ class ObjectiveRankAdapter(ToolAdapter):
             candidate_warnings = [*score_warnings, *gate_warnings]
             candidate_id = str(identity["candidate_id"])
             ranked_candidate_id = str(identity["ranked_candidate_id"])
+            contract_warnings = _identity_contract_warnings(
+                row,
+                candidate_id=candidate_id,
+                ranked_candidate_id=ranked_candidate_id,
+            )
             tie_values = _tie_breaker_values(params.tie_breakers, metrics, params.constants)
             objective_block = {
                 "objective_name": params.objective_name,
@@ -818,12 +1049,15 @@ class ObjectiveRankAdapter(ToolAdapter):
                     "ranking_intent": "objective",
                     **objective_block,
                     "warnings": candidate_warnings,
+                    "structured_warnings": contract_warnings,
                     "candidate_ref": {
                         "candidate_id": candidate_id,
                         "ranked_candidate_id": ranked_candidate_id,
                         "identity_key": identity["identity_key"],
                         "material_key": identity["material_key"],
                         "source_job_ids": identity["source_job_ids"],
+                        "source": _source_identity(row),
+                        "material_identity": _material_identity(row),
                     },
                     **_copy_original_fields(row),
                     "scores": scores,
@@ -845,6 +1079,11 @@ class ObjectiveRankAdapter(ToolAdapter):
                 for warning in row.get("warnings", [])
                 if isinstance(warning, str)
             )
+            structured_warnings.extend(
+                warning
+                for warning in row.get("structured_warnings", [])
+                if isinstance(warning, dict)
+            )
 
         out_dir = ctx.job_dir / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -857,9 +1096,12 @@ class ObjectiveRankAdapter(ToolAdapter):
                 "passed_gates\tfailed_gates\n"
             )
             for row in selected:
+                objective_score = (
+                    row.get("objective_score") if row.get("objective_score") is not None else ""
+                )
                 fh.write(
                     f"{row['rank']}\t{row['candidate_id']}\t{row['ranked_candidate_id']}\t"
-                    f"{row.get('objective_score') if row.get('objective_score') is not None else ''}\t"
+                    f"{objective_score}\t"
                     f"{len(row.get('passed_gates') or [])}\t"
                     f"{len(row.get('failed_gates') or [])}\n"
                 )
@@ -875,6 +1117,7 @@ class ObjectiveRankAdapter(ToolAdapter):
             ranked_json=str(json_path),
             ranked_tsv=str(tsv_path),
             warnings=sorted(dict.fromkeys(warnings)),
+            structured_warnings=structured_warnings,
             runtime_ms=int((time.time() - t0) * 1000),
         )
 
@@ -884,6 +1127,10 @@ class ObjectiveRankAdapter(ToolAdapter):
 
 def _source_job_ids(row: dict[str, Any]) -> list[str]:
     values: list[str] = []
+    source = row.get("source") if isinstance(row.get("source"), dict) else {}
+    source_job_id = source.get("job_id")
+    if isinstance(source_job_id, str) and source_job_id:
+        values.append(source_job_id)
     for key in ("source_job_id", "source_job_ids", "evidence_job_ids"):
         value = row.get(key)
         if isinstance(value, str) and value:
