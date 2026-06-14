@@ -141,7 +141,11 @@ class RF3RewardRunner(BaseRewardModel):
             json_data = {
                 "name": Path(input_file).stem,
                 "components": [
-                    {"seq": sequence, "chain_id": "B"},
+                    {
+                        "seq": sequence,
+                        "chain_id": "B",
+                        "chain_type": "POLYPEPTIDE(L)",
+                    },
                     {
                         "smiles": smiles,
                         # "chain_id": "A"
@@ -233,7 +237,7 @@ class RF3RewardRunner(BaseRewardModel):
                     predictions.append(pred)
                 except Exception as e:
                     logger.error(f"Failed to process {input_file}: {e}")
-                    predictions.append(self._empty_prediction())
+                    predictions.append(self._empty_prediction(error=str(e)))
 
             return predictions
         finally:
@@ -565,13 +569,13 @@ class RF3RewardRunner(BaseRewardModel):
                 predictions.append(pred)
             except Exception as e:
                 logger.error(f"Failed to process {input_file}: {e}")
-                predictions.append(self._empty_prediction())
+                predictions.append(self._empty_prediction(error=str(e)))
 
         return predictions
 
-    def _empty_prediction(self) -> dict[str, Any]:
+    def _empty_prediction(self, error: str | None = None) -> dict[str, Any]:
         """Return empty prediction for failed cases."""
-        return {
+        prediction = {
             "summary_confidence": [
                 {
                     "plddt": torch.tensor(0.0),
@@ -589,6 +593,9 @@ class RF3RewardRunner(BaseRewardModel):
             ],
             "output_cif_path": None,
         }
+        if error:
+            prediction["error"] = error
+        return prediction
 
     def _parse_rf3_output_from_file(self, input_file: str, out_dir: str) -> dict[str, Any]:
         """Parse RF3 output files from direct file input.

@@ -30,6 +30,10 @@ from .metrics import (
     metric_explainer as _metric_explainer,
 )
 from .metrics import (
+    display_metric_label as _display_metric_label,
+    metric_matches as _metric_matches,
+    metric_variant_rank as _metric_variant_rank,
+    metric_variant_title as _metric_variant_title,
     pretty_metric_name as _pretty_metric_name,
 )
 from .identity import (
@@ -202,6 +206,12 @@ def _bundle_model(model: ReportModel, root: Path) -> ReportModel:
         artifacts=artifacts,
         raw_summary=raw_summary if isinstance(raw_summary, dict) else model.raw_summary,
     )
+
+
+def _agent_client_meta_tag(agent_client: str | None) -> str:
+    if agent_client not in {"codex", "claude_code"}:
+        return ""
+    return f'<meta name="vpa:agent_client" content="{_attr(agent_client)}">'
 
 
 def _rewrite_paths(value: Any, path_map: dict[str, str]) -> Any:
@@ -826,18 +836,31 @@ def _dedupe_text(values: list[str]) -> list[str]:
 def _bundle_metric(
     bundle: CandidateEvidenceBundle, target_label: str
 ) -> tuple[str, str | None, str, str] | None:
-    target = _metric_label_for_display(target_label)
+    matches: list[tuple[tuple[int, str], int, tuple[str, str | None, str, str]]] = []
+    offset = 0
     for group in bundle.score_groups:
         for label, value, unit, source in group.metrics:
-            if _metric_label_for_display(label) == target:
-                return str(value), unit, source, group.provenance
-    return None
+            if _metric_matches(label, target_label):
+                matches.append(
+                    (
+                        _metric_variant_rank(label, target_label),
+                        offset,
+                        (str(value), unit, source, group.provenance),
+                    )
+                )
+            offset += 1
+    if not matches:
+        return None
+    return min(matches, key=lambda item: (item[0], item[1]))[2]
 
 
 def _metric_label_for_display(label: str) -> str:
-    if label == "\u0394G":
-        return "Delta G"
-    return label
+    return _display_metric_label(label)
+
+
+def _chip_raw_label(chip: Any) -> str:
+    raw = getattr(chip, "raw_label", None)
+    return str(raw or getattr(chip, "label", "") or "")
 
 
 def _metric_float(metric: tuple[str, str | None, str, str] | None) -> float | None:
@@ -1180,7 +1203,8 @@ def _saas_overview_section(vm: OverviewViewModel) -> str:
     )
     caveat = (
         f'<div class="saas-card saas-caveat"><p class="saas-card-kicker">Main Caveat</p>'
-        f"<p>{_h(vm.main_caveat)}</p>{_prov_chip(vm.caveat_provenance)}</div>"
+        f'<div class="saas-caveat-body"><p>{_h(vm.main_caveat)}</p></div>'
+        f"{_prov_chip(vm.caveat_provenance)}</div>"
         if vm.main_caveat
         else '<div class="saas-card saas-caveat saas-caveat-ok"><p class="saas-card-kicker">Main Caveat</p><p>No blocking caveat recorded.</p></div>'
     )
@@ -1641,7 +1665,9 @@ def _comparison_row(
     metric_cols: list[str],
     bundle: CandidateEvidenceBundle | None = None,
 ) -> str:
-    metric_map = {_metric_label_for_display(chip.label): chip for chip in row.metric_chips}
+    metric_map = {
+        _metric_label_for_display(_chip_raw_label(chip)): chip for chip in row.metric_chips
+    }
     cells = "".join(
         _comparison_metric_cell(metric_map.get(label), label=label) for label in metric_cols
     )
@@ -2124,19 +2150,23 @@ def _snapshot_metric_labels(
     else:
         preferred = ["pLDDT", "pTM", "ipTM", "ipSAE", "GRAVY", "Net charge", "Instability", "pI"]
     observed = [
-        chip.label
+        _metric_label_for_display(_chip_raw_label(chip))
         for chip in dossier.metric_chips
-        if _metric_label_for_display(chip.label) != "QC" and _chip_numeric_value(chip) is not None
+        if _metric_label_for_display(_chip_raw_label(chip)) != "QC"
+        and _chip_numeric_value(chip) is not None
     ]
     return list(dict.fromkeys([*preferred, *observed]))[:7]
 
 
 def _dossier_metric_chip(dossier: CandidateDossierViewModel, label: str) -> Any | None:
-    target = _metric_label_for_display(label)
-    for chip in dossier.metric_chips:
-        if _metric_label_for_display(chip.label) == target:
-            return chip
-    return None
+    matches = [
+        (_metric_variant_rank(_chip_raw_label(chip), label), index, chip)
+        for index, chip in enumerate(dossier.metric_chips)
+        if _metric_matches(_chip_raw_label(chip), label)
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda item: (item[0], item[1]))[2]
 
 
 def _chip_numeric_value(chip: Any | None) -> float | None:
@@ -2181,7 +2211,7 @@ def _evidence_metric_bar(
     chip = _dossier_metric_chip(dossier, label)
     value = _chip_numeric_value(chip)
     pct = _snapshot_score_percent(label, value)
-    title = _cross_candidate_metric_title(label, preset)
+    title = _cross_candidate_metric_title(_chip_raw_label(chip) if chip is not None else label, preset)
     if chip is None or pct is None:
         return ""
     unit = chip.unit or ""
@@ -3083,16 +3113,14 @@ def _metric_values_from_dossiers(
     dossiers: list[CandidateDossierViewModel], label: str
 ) -> list[float]:
     values: list[float] = []
-    target = _metric_label_for_display(label)
     for dossier in dossiers:
-        for chip in dossier.metric_chips:
-            if _metric_label_for_display(chip.label) != target:
-                continue
-            try:
-                values.append(float(str(chip.value).replace(",", "")))
-            except (TypeError, ValueError):
-                pass
-            break
+        chip = _dossier_metric_chip(dossier, label)
+        if chip is None:
+            continue
+        try:
+            values.append(float(str(chip.value).replace(",", "")))
+        except (TypeError, ValueError):
+            pass
     return values
 
 
@@ -3302,13 +3330,8 @@ def _saas_empty_pattern_card(title: str, message: str) -> str:
 
 
 def _cross_candidate_metric_title(label: str, preset: WorkflowReviewPreset | None = None) -> str:
-    if (
-        preset is not None
-        and preset.workflow_type == WorkflowType.BINDER
-        and _metric_label_for_display(label) == "pLDDT"
-    ):
-        return "Complex pLDDT"
-    return label
+    workflow_type = preset.workflow_type if preset is not None else None
+    return _metric_variant_title(label, workflow_type=workflow_type)
 
 
 def _saas_missing_metrics_card(labels: list[str]) -> str:
@@ -3456,6 +3479,7 @@ def render_report_html(
     # attached to the canonical rows.
     model = _flatten_candidate_view(_dedup_candidate_view(manifest_model))
     title = f"VPA report · {model.summary.id}"
+    agent_client_meta = _agent_client_meta_tag(model.summary.agent_client)
 
     # Keep the removed product-stage "Why this workflow?" trace out of the
     # report, but restore the raw DAG as a secondary audit section outside the
@@ -3577,6 +3601,7 @@ def render_report_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {agent_client_meta}
   <title>{_h(title)}</title>
   <style>{_css()}</style>
 </head>
@@ -14939,6 +14964,12 @@ body { background:var(--saas-bg); }
   overflow-wrap:anywhere;
   word-break:break-word;
 }
+.saas-caveat-body {
+  max-height:128px;
+  overflow-y:auto;
+  padding-right:6px;
+}
+.saas-caveat-body p { margin:0; }
 .saas-caveat .saas-card-kicker { color:var(--saas-amber) !important; }
 .saas-caveat-ok { border-color:var(--line-strong); background:#fff; }
 .saas-rationale-grid {

@@ -40,6 +40,7 @@ def run_binder_eval(
     binder_chain: str = None,  # If none, use the last chain id in the refolded complex
     num_redesign_seqs: int = None,  # If none, default to 8 for protein targets, 1 for ligand targets
     fixed_residues_override: list[str] | None = None,
+    smiles: str | None = None,
 ) -> dict[str, list[dict[str, dict]]]:
     """Evaluates protein binder designs using inverse folding models and folding models.
 
@@ -288,6 +289,7 @@ def run_binder_eval(
             # "updated_pdb_path": updated_pdb_path,
             "updated_pdb_path": updated_pdb_path.replace("_updated.pdb", ".pdb"),
             "binder_chain_id": binder_chain,
+            "smiles": smiles,
         }
     else:
         raise NotImplementedError(f"Folding model {model_name} not supported")
@@ -314,6 +316,21 @@ def run_binder_eval(
     for seq_num, complex_pdb_path in enumerate(complex_pdb_paths):
         seq_type = sequence_types_list[seq_num]
         label = f"{seq_type}_seq_{seq_num + 1}"
+        if not complex_pdb_path:
+            logger.warning(
+                "Skipping RMSD for %s because %s did not produce a refolded complex path",
+                label,
+                model_name,
+            )
+            rmsd_results.append(
+                {
+                    label: {
+                        "rmsd_status": "missing_refolded_complex",
+                        "rmsd_error": f"{model_name} did not produce a refolded complex path",
+                    }
+                }
+            )
+            continue
         if not is_target_ligand:
             refolded_complex = load_any(complex_pdb_path, file_type="pdb")[0]
             rmsd_result = calculate_prot_prot_binder_rmsd(

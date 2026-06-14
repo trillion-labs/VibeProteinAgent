@@ -59,7 +59,11 @@ def convert_pdb_to_rf3_json(
             # Convert 3-letter to 1-letter amino acid codes
             sequence = _convert_to_single_letter(sequence)
 
-            component = {"seq": sequence, "chain_id": chain_id}
+            component = {
+                "seq": sequence,
+                "chain_id": chain_id,
+                "chain_type": "POLYPEPTIDE(L)",
+            }
 
             # Add MSA path if available
             if msa_paths and chain_id in msa_paths:
@@ -241,7 +245,11 @@ def create_rf3_complex_input(
         chain_id_counter += 1
 
         if mol_type == "protein":
-            component = {"seq": seq, "chain_id": chain_id}
+            component = {
+                "seq": seq,
+                "chain_id": chain_id,
+                "chain_type": "POLYPEPTIDE(L)",
+            }
             if msa_path is not None:
                 component["msa_path"] = msa_path
         elif mol_type == "ligand":

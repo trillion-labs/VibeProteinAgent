@@ -361,6 +361,13 @@ def _fmt(value: Any, digits: int = 2) -> str | None:
     return f"{num:.{digits}f}"
 
 
+def _fraction_pct_disp(value: Any) -> str | None:
+    num = _as_float(value)
+    if num is None:
+        return None
+    return _fmt(num * 100.0 if 0.0 <= num <= 1.0 else num)
+
+
 def _max_numeric_from_rows(value: Any, key: str = "score") -> str | None:
     values: list[float] = []
     if isinstance(value, list):
@@ -438,6 +445,7 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
     (
         "Structure confidence",
         [
+            ("val", "mono_plddt", "Monomer pLDDT", None, _plddt_disp),
             ("esm3", "mean_plddt", "pLDDT", None, _plddt_disp),
             ("esm3", "ptm", "pTM", None, _fmt),
             ("boltz2_affinity", "plddt", "pLDDT", None, _plddt_disp),
@@ -470,6 +478,11 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
     (
         "Interface & binding",
         [
+            ("val", "ipsae", "ipSAE", None, _fmt),
+            ("val", "cx_iptm_min", "cx ipTM min", None, _fmt),
+            ("val", "cx_iptm_mean", "cx ipTM mean", None, _fmt),
+            ("val", "n_contact_pairs", "Interface contacts", None, _fmt),
+            ("val", "n_target_res", "Target residues", None, _fmt),
             ("boltz2_affinity", "iptm", "ipTM", None, _fmt),
             ("boltz2_affinity", "predicted_affinity", "Affinity", None, _fmt),
             ("boltz2_affinity", "affinity", "Affinity", None, _fmt),
@@ -498,15 +511,53 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
             ("pxmeter", "dockq", "DockQ", None, _dockq_disp),
             ("prodigy", "binding_affinity", "ΔG", "kcal/mol", _fmt),
             ("structure_analysis", "interface_contacts", "Interface contacts", None, _fmt),
+            (
+                "structure_analysis",
+                "ligand_pocket.ligand_buried_fraction",
+                "Ligand buried fraction",
+                "%",
+                _fraction_pct_disp,
+            ),
+            (
+                "structure_analysis",
+                "ligand_contacts.contact_residue_count",
+                "Ligand contact residues",
+                None,
+                _fmt,
+            ),
+            (
+                "structure_analysis",
+                "ligand_contacts.contact_atom_pair_count",
+                "Ligand atom contacts",
+                None,
+                _fmt,
+            ),
+            (
+                "structure_analysis",
+                "ligand_contacts.contact_ligand_atom_count",
+                "Contacted ligand atoms",
+                None,
+                _fmt,
+            ),
+            (
+                "structure_analysis",
+                "ligand_pocket.pocket_residue_count",
+                "Pocket residues",
+                None,
+                _fmt,
+            ),
         ],
     ),
     (
         "Sequence biophysics",
         [
+            ("val", "length", "Length", "aa", _fmt),
             ("sequence_analysis", "gravy", "GRAVY", None, _fmt),
             ("sequence_analysis", "pI", "pI", None, _fmt),
             ("sequence_analysis", "net_charge", "Net charge", None, _fmt),
             ("sequence_analysis", "instability_index", "Instability", None, _fmt),
+            ("sequence_analysis", "length", "Length", "aa", _fmt),
+            ("sequence_analysis", "aromatic_fraction", "Aromatic fraction", None, _fmt),
             ("protein_qc", "instability_index", "Instability", None, _fmt),
             ("protein_qc", "pi", "pI", None, _fmt),
             ("protein_qc", "gravy", "GRAVY", None, _fmt),
@@ -537,6 +588,7 @@ _FAMILY_SPECS: list[tuple[str, list[tuple[str, str, str, str | None, Any]]]] = [
     (
         "Novelty & similarity",
         [
+            ("val", "win_id", "Window identity", None, _fmt),
             ("proteinmpnn", "seq_recovery", "Seq recovery", "%", lambda v: _fmt(_pct(v))),
             ("proteinmpnn", "score", "MPNN score", None, _fmt),
         ],
@@ -552,14 +604,47 @@ def _pct(value: Any) -> float | None:
 
 
 def _score_namespace(candidate: ReportCandidate, tool: str) -> dict[str, Any]:
-    block = candidate.scores.get(tool) if isinstance(candidate.scores, dict) else None
+    scores = candidate.scores if isinstance(candidate.scores, dict) else {}
+    out: dict[str, Any] = {}
+    block = scores.get(tool)
     if isinstance(block, dict):
-        return block
+        out.update(block)
+    prefix = f"{tool}:"
+    for raw_key, value in scores.items():
+        if not isinstance(raw_key, str) or not raw_key.startswith(prefix):
+            continue
+        metric = raw_key[len(prefix) :].strip()
+        if metric:
+            out.setdefault(metric, value)
+    if tool == "sequence_analysis":
+        # Some adapters publish per-candidate sequence-analysis fields as bare
+        # keys rather than inside a ``sequence_analysis`` namespace. Keep this
+        # fallback candidate-local; collector no longer attaches global
+        # sequence-analysis summaries to objective-rank rows.
+        for key in (
+            "gravy",
+            "pI",
+            "pi",
+            "net_charge",
+            "instability_index",
+            "aromatic_fraction",
+            "length",
+        ):
+            if key not in scores:
+                continue
+            out.setdefault("pI" if key == "pi" else key, scores[key])
     source = candidate.source if isinstance(candidate.source, dict) else {}
     source_tool = str(source.get("tool") or "").strip().lower()
     if source_tool == tool and isinstance(candidate.scores, dict):
-        return candidate.scores
-    return {}
+        for raw_key, value in scores.items():
+            if (
+                isinstance(raw_key, str)
+                and raw_key
+                and ":" not in raw_key
+                and not isinstance(value, dict)
+            ):
+                out.setdefault(raw_key, value)
+    return out
 
 
 # Short, human-readable source-tool labels for metric provenance. Every score
@@ -585,11 +670,31 @@ _METRIC_SOURCE_NAME: dict[str, str] = {
     "pyrosetta": "PyRosetta",
     "objective_rank": "Objective rank",
     "submit_candidate": "Submit candidate",
+    "val": "Objective metrics",
 }
 
 
 def _source_name(tool: str) -> str:
     return _METRIC_SOURCE_NAME.get(tool, tool.replace("_", " ").title() if tool else "")
+
+
+def _score_value(block: dict[str, Any], key: str) -> Any:
+    """Read a score by literal key or dotted nested path.
+
+    Candidate score blocks are not uniform: predictors usually emit flat
+    metrics, while analyzers such as structure_analysis publish structured
+    sub-blocks. Keeping dotted lookup here lets the family registry remain a
+    declarative list instead of growing tool-specific extraction branches.
+    """
+
+    if key in block:
+        return block[key]
+    current: Any = block
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
 
 
 def _build_score_groups(candidate: ReportCandidate, msa_blocks: list[MSABlock]) -> list[ScoreGroup]:
@@ -600,6 +705,7 @@ def _build_score_groups(candidate: ReportCandidate, msa_blocks: list[MSABlock]) 
         # so the renderer can tag each confidence metric with its origin.
         metrics: list[tuple[str, str, str | None, str]] = []
         seen_metrics: set[tuple[str, str]] = set()
+        seen_metric_values: set[tuple[str, str, str | None]] = set()
         for tool, key, label, unit, transform in specs:
             if (
                 suppress_protenix_interface_metrics
@@ -608,16 +714,22 @@ def _build_score_groups(candidate: ReportCandidate, msa_blocks: list[MSABlock]) 
             ):
                 continue
             block = _score_namespace(candidate, tool)
-            if key not in block:
+            raw_value = _score_value(block, key)
+            if raw_value is None:
                 continue
-            shown = transform(block[key]) if transform else _fmt(block[key])
+            shown = transform(raw_value) if transform else _fmt(raw_value)
             if shown is None:
                 continue
             source = _source_name(tool)
             identity = (label, source)
-            if identity in seen_metrics:
+            value_identity = (label, shown, unit)
+            duplicate_value = (
+                label == "Length" and unit == "aa" and value_identity in seen_metric_values
+            )
+            if identity in seen_metrics or duplicate_value:
                 continue
             seen_metrics.add(identity)
+            seen_metric_values.add(value_identity)
             metrics.append((label, shown, unit, source))
         if family == "Novelty & similarity" and msa_blocks:
             ident = max((mb.mean_identity for mb in msa_blocks), default=0.0)
@@ -657,7 +769,7 @@ def _is_protenix_monomer_candidate(candidate: ReportCandidate) -> bool:
     promote an enzyme/foldability report into a binder/interface review.
     """
 
-    if "protenix_v2" not in (candidate.scores or {}):
+    if not _score_namespace(candidate, "protenix_v2"):
         return False
     path = (candidate.structure_path or "").strip()
     if not path:
@@ -995,6 +1107,13 @@ def _unique_support_candidate(
         matches = [c for c in candidates if _candidate_ranked_candidate_id(c) == ranked_id]
         if len(matches) == 1:
             return matches[0]
+        structure_stem = _candidate_structure_stem_identity(ranked)
+        if structure_stem:
+            stem_matches = [
+                c for c in matches if _candidate_structure_stem_identity(c) == structure_stem
+            ]
+            if len(stem_matches) == 1:
+                return stem_matches[0]
     material_key = _candidate_material_key(ranked)
     if material_key:
         matches = [c for c in candidates if _candidate_material_key(c) == material_key]
@@ -1003,6 +1122,15 @@ def _unique_support_candidate(
     structure = _candidate_structure_identity(ranked)
     if structure:
         matches = [c for c in candidates if _candidate_structure_identity(c) == structure]
+        if len(matches) == 1:
+            return matches[0]
+    structure_stem = _candidate_structure_stem_identity(ranked)
+    if structure_stem:
+        matches = [
+            c
+            for c in candidates
+            if _candidate_structure_stem_identity(c) == structure_stem
+        ]
         if len(matches) == 1:
             return matches[0]
     candidate_id = str(ranked.candidate_id or "")
@@ -1021,6 +1149,13 @@ def _unique_support_candidate(
         if len(matches) == 1:
             return matches[0]
     return None
+
+
+def _candidate_structure_stem_identity(candidate: ReportCandidate) -> str | None:
+    structure = _candidate_structure_identity(candidate)
+    if not structure:
+        return None
+    return Path(structure).stem or structure
 
 
 def _enrich_ranked_candidate(
@@ -1063,6 +1198,16 @@ def _ranking_manifest_candidates(model: ReportModel) -> list[ReportCandidate]:
     """
 
     ranked: list[ReportCandidate] = []
+    support_pool = [
+        candidate
+        for candidate in model.candidates
+        if str((candidate.source or {}).get("tool") or "").strip().lower() != "objective_rank"
+    ]
+    objective_rank_support_pool = [
+        candidate
+        for candidate in model.candidates
+        if str((candidate.source or {}).get("tool") or "").strip().lower() == "objective_rank"
+    ]
     for node in model.graph.nodes:
         if (node.tool or "").strip().lower() != "objective_rank":
             continue
@@ -1079,7 +1224,9 @@ def _ranking_manifest_candidates(model: ReportModel) -> list[ReportCandidate]:
             ranked_row.setdefault("objective_name", output.get("objective_name"))
             ranked_row.setdefault("score_direction", output.get("score_direction"))
             canonical = _ranked_row_candidate(ranked_row, node=node, index=index)
-            support = _unique_support_candidate(canonical, model.candidates)
+            support = _unique_support_candidate(canonical, support_pool)
+            if support is None:
+                support = _unique_support_candidate(canonical, objective_rank_support_pool)
             if support is None:
                 support = _unique_support_candidate(canonical, model.final_candidates)
             ranked.append(

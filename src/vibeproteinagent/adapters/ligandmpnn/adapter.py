@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter
 from vibeproteinagent.adapters.context import AdapterRunContext
+from vibeproteinagent.adapters.profile_guidance import (
+    normalize_profile_guidance,
+    profile_guidance_metadata,
+)
 from vibeproteinagent.candidates.paths import candidate_pdb_path
 from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
@@ -45,11 +49,15 @@ from ligandmpnn_vendor import (  # noqa: E402
 from ligandmpnn_vendor import (  # noqa: E402
     restype_int_to_str as _RESTYPE_INT_TO_STR,
 )
+from ligandmpnn_vendor import (  # noqa: E402
+    restype_str_to_int as _RESTYPE_STR_TO_INT,
+)
 
 
 class LigandMPNNInput(BaseModel):
     pdb_path: str | None = Field(None, description="Absolute path to the input PDB.")
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+    profile_guidance: dict[str, Any] | None = None
     chains: list[str] | None = Field(
         None, description="Chain identifiers to load; None loads every chain."
     )
@@ -107,6 +115,8 @@ class LigandMPNNInput(BaseModel):
 
     @model_validator(mode="after")
     def _require_pdb_path(self) -> LigandMPNNInput:
+        if self.profile_guidance is not None:
+            self.profile_guidance = normalize_profile_guidance(self.profile_guidance)
         if not self.pdb_path:
             raise ValueError("ligandmpnn requires pdb_path")
         return self
@@ -125,6 +135,8 @@ class LigandMPNNOutput(BaseModel):
     num_residues: int
     runtime_ms: int
     position_mappings: dict[str, object] = Field(default_factory=dict)
+    profile_guidance_applied: bool = False
+    profile_guidance_warnings: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -263,6 +275,14 @@ class LigandMPNNAdapter(ToolAdapter):
         )
 
         B_in, L = fd["S"].shape
+        applicability = _ligandmpnn_profile_bias_applicability(
+            params.profile_guidance,
+            num_residues=int(L),
+        )
+        profile_bias_applied = bool(applicability.get("applied"))
+        profile_bias_warnings = [
+            str(item) for item in applicability.get("warnings") or []
+        ]
         ctx.emit_progress(0.20)
 
         # Inject the sampling controls expected by ProteinMPNN.sample(). All
@@ -293,9 +313,10 @@ class LigandMPNNAdapter(ToolAdapter):
             fd_batch["batch_size"] = int(this_batch)
             fd_batch["temperature"] = float(params.temperature) if params.temperature > 0 else 1e-6
             fd_batch["bias"] = torch.zeros(B_in, L, 21, device=self.device)
+            if profile_bias_applied:
+                _apply_profile_bias_by_res(fd_batch["bias"], params.profile_guidance)
             # Hard-omit the requested amino acids by adding -inf to their bias.
             for aa in params.omit_aas:
-                from ligandmpnn_vendor import restype_str_to_int as _RESTYPE_STR_TO_INT
                 idx = _RESTYPE_STR_TO_INT.get(aa)
                 if idx is not None:
                     fd_batch["bias"][..., idx] = -1e9
@@ -350,14 +371,25 @@ class LigandMPNNAdapter(ToolAdapter):
         runtime_ms = int((time.time() - t0) * 1000)
         return LigandMPNNOutput(
             designs=designs,
-            candidates=_ligandmpnn_candidates(params, designs, pdb_path),
+            candidates=_ligandmpnn_candidates(
+                params,
+                designs,
+                pdb_path,
+                profile_guidance_applied=profile_bias_applied,
+                profile_guidance_warnings=profile_bias_warnings,
+            ),
             designs_fasta=str(fasta_path),
             num_residues=int(L),
             runtime_ms=runtime_ms,
             position_mappings={
                 "redesigned_positions": redesigned_resolution.to_audit()
             } if redesigned_resolution is not None else {},
-            warnings=redesigned_resolution.warnings if redesigned_resolution is not None else [],
+            profile_guidance_applied=profile_bias_applied,
+            profile_guidance_warnings=profile_bias_warnings,
+            warnings=[
+                *profile_bias_warnings,
+                *(redesigned_resolution.warnings if redesigned_resolution is not None else []),
+            ],
         )
 
     def estimate_vram(self, params: LigandMPNNInput) -> int:
@@ -390,6 +422,9 @@ def _ligandmpnn_candidates(
     params: LigandMPNNInput,
     designs: list[LigandMPNNDesign],
     structure_path: str,
+    *,
+    profile_guidance_applied: bool | None = None,
+    profile_guidance_warnings: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for index, design in enumerate(designs):
@@ -417,10 +452,16 @@ def _ligandmpnn_candidates(
                 "ligandmpnn": {
                     "score": design.score,
                     "seq_recovery": design.seq_recovery,
+                    "profile_guidance_applied": bool(profile_guidance_applied),
+                    "profile_guidance_warnings": list(profile_guidance_warnings or []),
                 }
             },
             "artifacts": {},
         }
+        if params.profile_guidance is not None:
+            candidate["artifacts"]["profile_guidance"] = profile_guidance_metadata(
+                params.profile_guidance
+            )
         if params.candidates and _is_canonical_candidate(params.candidates[0]):
             upstream_scores = params.candidates[0].get("scores")
             if isinstance(upstream_scores, dict):
@@ -449,3 +490,59 @@ def _resolve_redesigned_positions(params: LigandMPNNInput, pdb_path: Path):
 def _ligandmpnn_residue_key(residue_id: str, default_chain: str) -> str:
     ref = parse_residue_id(residue_id, default_chain=default_chain)
     return f"{ref.chain_id}{ref.resseq}"
+
+
+def _ligandmpnn_profile_bias_applicability(
+    profile_guidance: dict[str, Any] | None,
+    *,
+    num_residues: int,
+) -> dict[str, Any]:
+    guidance = normalize_profile_guidance(profile_guidance)
+    if guidance is None:
+        return {"applied": False, "warnings": []}
+    consensus = str(guidance.get("consensus_sequence") or "")
+    warnings: list[str] = []
+    if not consensus:
+        warnings.append("profile guidance has no consensus sequence")
+        return {"applied": False, "warnings": warnings}
+    if len(consensus) != int(num_residues):
+        warnings.append(
+            "profile guidance length does not match LigandMPNN residue count"
+        )
+        return {"applied": False, "warnings": warnings}
+    return {
+        "applied": True,
+        "warnings": warnings,
+        "position_preference_count": len(guidance.get("position_preferences") or []),
+    }
+
+
+def _apply_profile_bias_by_res(
+    bias: torch.Tensor,
+    profile_guidance: dict[str, Any] | None,
+) -> None:
+    guidance = normalize_profile_guidance(profile_guidance)
+    if guidance is None or bias.ndim != 3:
+        return
+    length = int(bias.shape[1])
+    for item in guidance.get("position_preferences") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            position = int(item.get("position"))
+        except (TypeError, ValueError):
+            continue
+        if position < 1 or position > length:
+            continue
+        frequencies = item.get("frequencies")
+        if not isinstance(frequencies, dict):
+            continue
+        for aa, frequency in frequencies.items():
+            aa_index = _RESTYPE_STR_TO_INT.get(str(aa).upper())
+            if aa_index is None:
+                continue
+            try:
+                value = float(frequency)
+            except (TypeError, ValueError):
+                continue
+            bias[:, position - 1, aa_index] += 0.5 * value

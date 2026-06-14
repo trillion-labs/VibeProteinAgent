@@ -15,7 +15,12 @@ from typing import Any
 
 from vibeproteinagent.core.errors import InvalidParamsError
 
-from .metrics import SCORE_DEFINITIONS
+from .metrics import (
+    SCORE_DEFINITIONS,
+    display_metric_label,
+    metric_matches,
+    metric_variant_rank,
+)
 from .models import (
     CandidateEvidenceBundle,
     CandidateStatus,
@@ -82,6 +87,7 @@ class MetricChip:
     source: str = ""
     family: str = ""
     provenance: str = Provenance.DERIVED
+    raw_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -443,7 +449,10 @@ def build_workflow_review_preset(
                 "Interaction PAE",
                 "ipAE",
                 "ipLDDT",
+                "Ligand buried fraction",
                 "Ligand contacts",
+                "Ligand contact residues",
+                "Ligand atom contacts",
                 "Delta G",
                 "Interface contacts",
                 "Confidence",
@@ -464,7 +473,10 @@ def build_workflow_review_preset(
                 "Binder probability",
                 "DockQ",
                 "Interaction PAE",
+                "Ligand buried fraction",
                 "Ligand contacts",
+                "Ligand contact residues",
+                "Ligand atom contacts",
                 "GRAVY",
                 "Net charge",
                 "Instability",
@@ -812,7 +824,7 @@ def build_candidate_board_row(
 ) -> CandidateBoardRow:
     preset = preset or _preset_for_workflow_type(bundle.workflow_type)
     candidate = bundle.candidate
-    label = _status_label(bundle.status)
+    label = _candidate_status_label(bundle)
     rank = (
         display_rank
         if display_rank is not None
@@ -842,7 +854,7 @@ def build_candidate_dossier_view_model(
         candidate_id=candidate.candidate_id,
         sequence=candidate.sequence,
         status=bundle.status,
-        status_label=_status_label(bundle.status),
+        status_label=_candidate_status_label(bundle),
         structure_path=candidate.structure_path,
         structure_variant_count=len(bundle.structure_variants),
         download_count=(
@@ -1032,11 +1044,10 @@ def _metric_chips(
 ) -> list[MetricChip]:
     preset = preset or _preset_for_workflow_type(bundle.workflow_type)
     preferred = list(preset.metric_priority)
-    chips: list[MetricChip] = []
-    by_label: dict[str, MetricChip] = {}
+    observed_chips: list[tuple[str, MetricChip]] = []
     for group in bundle.score_groups:
         for label, value, unit, source in group.metrics:
-            normalized = _metric_label(label)
+            normalized = display_metric_label(label)
             chip = MetricChip(
                 label=normalized,
                 value=str(value),
@@ -1044,12 +1055,22 @@ def _metric_chips(
                 source=source,
                 family=group.family,
                 provenance=group.provenance,
+                raw_label=str(label),
             )
-            by_label.setdefault(normalized, chip)
+            observed_chips.append((str(label), chip))
+    chips: list[MetricChip] = []
+    used: set[int] = set()
     for label in preferred:
-        chip = by_label.get(label)
-        if chip is not None:
-            chips.append(chip)
+        ranked_matches = [
+            (metric_variant_rank(raw_label, label), index, chip)
+            for index, (raw_label, chip) in enumerate(observed_chips)
+            if index not in used and metric_matches(raw_label, label)
+        ]
+        if not ranked_matches:
+            continue
+        _rank, index, chip = min(ranked_matches, key=lambda item: (item[0], item[1]))
+        used.add(index)
+        chips.append(chip)
     if bundle.status == CandidateStatus.FAILED_QC:
         chips.append(MetricChip(label="QC", value="Fail", family="Flags & liabilities"))
     elif bundle.candidate.qc_flags or bundle.candidate.liabilities:
@@ -1057,15 +1078,6 @@ def _metric_chips(
     else:
         chips.append(MetricChip(label="QC", value="Pass", family="Flags & liabilities"))
     return chips[:limit]
-
-
-def _metric_label(label: str) -> str:
-    if label == "\u0394G":
-        return "Delta G"
-    if label.lower() in {"net charge", "charge"}:
-        return "Net charge"
-    return label
-
 
 def _candidate_verdict(
     bundle: CandidateEvidenceBundle, preset: WorkflowReviewPreset | None = None
@@ -1329,6 +1341,14 @@ def _ranking_basis_view_model(
 
 
 def _objective_override_note(bundles: list[CandidateEvidenceBundle]) -> str:
+    has_rank_one_final = any(
+        bundle.status == CandidateStatus.FINAL
+        and (bundle.display_rank if bundle.display_rank is not None else bundle.candidate.rank)
+        == 1
+        for bundle in bundles
+    )
+    if has_rank_one_final:
+        return ""
     for bundle in bundles:
         if bundle.status != CandidateStatus.FINAL or bundle.submitted_despite_rank is None:
             continue
@@ -1606,12 +1626,20 @@ def _count_warning(
 
 
 def _main_caveat(model: ReportModel, review: ReportReviewModel) -> str | None:
+    proteina_warnings = [
+        item
+        for item in model.warnings
+        if _is_proteina_complexa_warning(item)
+        and _is_executive_caveat_warning(item, model.graph.nodes)
+    ]
+    if proteina_warnings:
+        return _proteina_complexa_warning_caveat(proteina_warnings)
     warning = next(
         (item for item in model.warnings if _is_executive_caveat_warning(item, model.graph.nodes)),
         None,
     )
     if warning is not None:
-        return str(warning.message or "").strip()
+        return _executive_warning_caveat(warning)
     failed = sum(1 for b in review.bundles if b.status == CandidateStatus.FAILED_OR_REJECTED)
     generated_only = sum(
         1 for b in review.bundles if b.status == CandidateStatus.GENERATED_NOT_EVALUATED
@@ -1654,6 +1682,86 @@ def _main_caveat(model: ReportModel, review: ReportReviewModel) -> str | None:
     if finals == 0 and review.bundles:
         return "No final submitted candidate was recorded."
     return None
+
+
+def _executive_warning_caveat(warning: ReportWarning) -> str:
+    message = str(warning.message or "").strip()
+    source = str(warning.source or "").strip().lower()
+    lower = message.lower()
+    if "complexa design sidecar failed" in lower or source.startswith("proteina_complexa"):
+        if "target_ligand.pdb" in lower and "target_ligand_heavy" not in lower:
+            return (
+                "An initial Proteina-Complexa ligand-binder run failed during ligand "
+                "featurization, likely because the ligand PDB atom list did not match "
+                "the SMILES heavy-atom graph. Later recorded evidence should be read "
+                "from recovered structures and downstream validation."
+            )
+        if (
+            "py_ssize_t_clean" in lower
+            or "file opened in 'text' mode" in lower
+            or "dnn_support != nullptr" in lower
+        ):
+            return (
+                "Proteina-Complexa generation produced structures, but its evaluation "
+                "backend failed in the recorded run. Ranking therefore relies on "
+                "downstream recorded validators rather than Proteina-Complexa reward "
+                "metrics."
+            )
+        return (
+            "A Proteina-Complexa node failed during recorded execution; inspect the "
+            "Workflow audit for the full command and traceback. Final evidence is "
+            "limited to successfully recorded downstream validators."
+        )
+    return message
+
+
+def _is_proteina_complexa_warning(warning: ReportWarning) -> bool:
+    source = str(warning.source or "").strip().lower()
+    message = str(warning.message or "").strip().lower()
+    return source.startswith("proteina_complexa") or "proteina-complexa" in message
+
+
+def _proteina_complexa_warning_caveat(warnings: list[ReportWarning]) -> str:
+    text = "\n".join(str(item.message or "") for item in warnings).lower()
+    has_ligand_atom_mismatch = any(
+        marker in text
+        for marker in (
+            "rdkit mol and atom array do not match",
+            "operands could not be broadcast",
+            "expected size",
+            "target_ligand.pdb",
+        )
+    )
+    has_eval_runtime_failure = any(
+        marker in text
+        for marker in (
+            "target_ligand_heavy",
+            "py_ssize_t_clean",
+            "file opened in 'text' mode",
+            "dnn_support != nullptr",
+            "jaxruntimeerror",
+        )
+    )
+    if has_ligand_atom_mismatch and has_eval_runtime_failure:
+        return (
+            "Proteina-Complexa had recorded failures in both setup and evaluation: "
+            "an initial ligand atom-count/featurization mismatch, then an evaluation "
+            "runtime/backend failure after heavy-atom ligand inputs were used. Final "
+            "ranking should be read from successfully recorded downstream validators."
+        )
+    if has_eval_runtime_failure:
+        return (
+            "Proteina-Complexa generated structures, but its evaluation backend failed "
+            "in the recorded run. Final ranking should be read from downstream recorded "
+            "validators rather than Proteina-Complexa reward metrics."
+        )
+    if has_ligand_atom_mismatch:
+        return (
+            "A Proteina-Complexa ligand-binder run failed during ligand featurization, "
+            "likely because the ligand PDB atom list did not match the SMILES heavy-atom "
+            "graph. Later recorded validators determine the reportable evidence."
+        )
+    return _executive_warning_caveat(warnings[0])
 
 
 def _is_executive_caveat_warning(
@@ -2276,6 +2384,12 @@ def _stage_label(key: str) -> str:
 
 def _status_label(status: str) -> str:
     return _STATUS_LABELS.get(status, status.replace("_", " ").title())
+
+
+def _candidate_status_label(bundle: CandidateEvidenceBundle) -> str:
+    if bundle.status == CandidateStatus.FINAL and bundle.submitted_despite_rank is not None:
+        return "Accepted alternative"
+    return _status_label(bundle.status)
 
 
 def _display_status(state: str | None) -> str:

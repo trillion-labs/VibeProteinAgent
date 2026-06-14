@@ -100,6 +100,8 @@ def run_rf3_eval(
     logger.info(f"Target chain IDs: {target_chain_ids}")
     logger.info(f"Is target ligand: {is_target_ligand}")
     logger.info("================================================")
+    if is_target_ligand and not smiles:
+        raise ValueError("RF3 ligand-target evaluation requires target SMILES")
 
     # Prepare all inputs in batch
     temp_dir = tempfile.mkdtemp(prefix="rf3_batch_")
@@ -171,6 +173,15 @@ def run_rf3_eval(
             }
             # Add the complex PDB path to the complex metrics
             complex_metrics["complex_pdb_path"] = complex_pdb_path
+            if complex_pdb_path is None:
+                complex_metrics["rf3_status"] = "failed"
+                complex_metrics["rf3_error"] = (
+                    prediction.get("error")
+                    or prediction.get("exception")
+                    or "RF3 prediction did not produce output_cif_path"
+                )
+            else:
+                complex_metrics["rf3_status"] = "completed"
             complex_statistics.append({f"seq_{seq_idx + 1}": complex_metrics})
 
             logger.info("Completed prediction")

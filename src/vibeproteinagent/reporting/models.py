@@ -1,7 +1,34 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any
+
+
+_ALLOWED_AGENT_CLIENTS = frozenset({"codex", "claude_code"})
+
+
+def _normalize_agent_client(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "claude": "claude_code",
+        "claudecode": "claude_code",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in _ALLOWED_AGENT_CLIENTS else None
+
+
+def _detect_agent_client() -> str | None:
+    explicit = _normalize_agent_client(os.environ.get("VPA_AGENT_CLIENT"))
+    if explicit:
+        return explicit
+    if any(key.startswith("CODEX_") for key in os.environ):
+        return "codex"
+    if any(key.startswith("CLAUDE_CODE") or key.startswith("CLAUDECODE") for key in os.environ):
+        return "claude_code"
+    return None
 
 
 @dataclass(frozen=True)
@@ -34,6 +61,7 @@ class RunSummary:
     submitted_at: int | None = None
     finished_at: int | None = None
     runtime_ms: int | None = None
+    agent_client: str | None = field(default_factory=_detect_agent_client)
 
 
 @dataclass(frozen=True)

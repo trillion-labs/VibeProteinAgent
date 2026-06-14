@@ -193,6 +193,14 @@ echo "[3/8] Installing PyTorch for CUDA profile $CUDA_PROFILE..."
 uv pip install --index-strategy unsafe-best-match \
     "$TORCH_SPEC" torchvision torchaudio \
     --index-url "$TORCH_INDEX_URL"
+if [[ "$CUDA_PROFILE" != "cpu" ]]; then
+    # Triton 3.3.1, pulled by torch 2.7.1 wheels, can fail on Python 3.12 at
+    # driver.active.utils.load_binary with:
+    #   SystemError: PY_SSIZE_T_CLEAN macro must be defined for '#' formats
+    # RF3/cuequivariance evaluation reaches this path. Pin the patched Triton
+    # release and verify it below with an actual kernel launch.
+    uv pip install "triton==3.4.0"
+fi
 
 # ------------------------------------------------------------------------------
 # 4. Install base dependencies from pyproject.toml
@@ -321,6 +329,135 @@ y = lax.conv_general_dilated(
 )
 float(jnp.sum(y).block_until_ready())
 print("JAX GPU DNN backend: ok")
+PY
+
+    echo "[verify] Checking Triton CUDA load_binary backend..."
+    TRITON_PROBE="$(mktemp "${TMPDIR:-/tmp}/complexa_triton_probe_XXXX.py")"
+    cat > "$TRITON_PROBE" <<'PY'
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def kernel(x, y, n: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n
+    values = tl.load(x + offsets, mask=mask, other=0.0)
+    tl.store(y + offsets, values + 1.0, mask=mask)
+
+x = torch.ones((16,), device="cuda", dtype=torch.float32)
+y = torch.empty_like(x)
+kernel[(1,)](x, y, x.numel(), BLOCK=16)
+torch.cuda.synchronize()
+assert float(y[0].item()) == 2.0
+print("Triton CUDA load_binary backend: ok")
+PY
+    python "$TRITON_PROBE"
+    rm -f "$TRITON_PROBE"
+
+    echo "[verify] Checking Proteina-Complexa RF3 evaluate smoke..."
+    export RF3_CKPT_PATH="${RF3_CKPT_PATH:-$PROJECT_DIR/community_models/ckpts/RF3/rf3_foundry_01_24_latest_remapped.ckpt}"
+    export RF3_EXEC_PATH="${RF3_EXEC_PATH:-$VENV_DIR/.venv/bin/rf3}"
+    python - <<'PY'
+import os
+import tempfile
+from pathlib import Path
+
+
+def atom_line(serial, atom, res, chain, resseq, x, y, z, element):
+    return (
+        f"ATOM  {serial:5d} {atom:<4s} {res:>3s} {chain}{resseq:4d}    "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+    )
+
+
+def het_line(serial, atom, res, chain, resseq, x, y, z, element):
+    return (
+        f"HETATM{serial:5d} {atom:<4s} {res:>3s} {chain}{resseq:4d}    "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+    )
+
+
+def write_complex(path):
+    serial = 1
+    lines = []
+    lines.append(het_line(serial, "C1", "LIG", "A", 1, 0.0, 0.0, 0.0, "C"))
+    serial += 1
+    for resseq in range(1, 17):
+        z = (resseq - 1) * 1.5
+        atoms = (
+            ("N", 4.0, 0.0, z, "N"),
+            ("CA", 4.5, 0.8, z + 0.3, "C"),
+            ("C", 5.2, 0.1, z + 0.8, "C"),
+            ("O", 5.2, -0.8, z + 1.0, "O"),
+            ("CB", 4.4, 1.8, z + 0.2, "C"),
+        )
+        for atom, x, y, zz, element in atoms:
+            lines.append(atom_line(serial, atom, "ALA", "B", resseq, x, y, zz, element))
+            serial += 1
+    lines.append("TER\n")
+    lines.append("END\n")
+    path.write_text("".join(lines))
+
+
+with tempfile.TemporaryDirectory(prefix="complexa_eval_smoke_") as tmp:
+    root = Path(tmp)
+    sample_dir = root / "sample"
+    sample_dir.mkdir()
+    sample_pdb = sample_dir / "sample.pdb"
+    target_pdb = root / "target_ligand.pdb"
+    write_complex(sample_pdb)
+    target_pdb.write_text(
+        "".join(
+            line
+            for line in sample_pdb.read_text().splitlines(True)
+            if (line.startswith("HETATM") and line[21] == "A")
+            or line.startswith("END")
+        )
+    )
+
+    ckpt_path = os.environ.get("RF3_CKPT_PATH")
+    rf3_path = os.environ.get("RF3_EXEC_PATH")
+    if not ckpt_path or not Path(ckpt_path).is_file():
+        raise RuntimeError(f"RF3_CKPT_PATH is not a file: {ckpt_path}")
+    if not rf3_path or not Path(rf3_path).is_file():
+        raise RuntimeError(f"RF3_EXEC_PATH is not a file: {rf3_path}")
+
+    from proteinfoundation.metrics.binder_metrics import run_binder_eval
+    from proteinfoundation.rewards.rf3_reward import get_default_rf3_runner
+
+    runner = get_default_rf3_runner(
+        ckpt_path=ckpt_path,
+        rf3_path=rf3_path,
+        dump_dir=str(root / "rf3"),
+    )
+    _, _, sequence_type_stats, _ = run_binder_eval(
+        pdb_file_path=str(sample_pdb),
+        target_pdb_path=str(target_pdb),
+        folding_model_specs={"model_name": "RF3", "runner": runner},
+        tmp_path=str(sample_dir),
+        target_pdb_chain=["A"],
+        sequence_types=["self"],
+        inverse_folding_model="ligand_mpnn",
+        gen_target_chain=["A"],
+        binder_chain="B",
+        interface_cutoff=8.0,
+        is_target_ligand=True,
+        num_redesign_seqs=1,
+        smiles="C",
+    )
+    stats = sequence_type_stats["self"]["complex_stats"][0]
+    if stats.get("rf3_status") != "completed":
+        raise RuntimeError(f"RF3 evaluate smoke did not complete: {stats}")
+    complex_pdb_path = stats.get("complex_pdb_path")
+    if not complex_pdb_path or not Path(complex_pdb_path).is_file():
+        raise RuntimeError(f"RF3 evaluate smoke did not write complex PDB: {stats}")
+    rmsd = sequence_type_stats["self"]["rmsd_stats"][0]
+    if "binder_scRMSD_ca" not in rmsd and "binder_scRMSD" not in rmsd:
+        raise RuntimeError(f"RF3 evaluate smoke did not compute RMSD: {rmsd}")
+    if "ligand_scRMSD" not in rmsd:
+        raise RuntimeError(f"RF3 ligand evaluate smoke did not compute ligand RMSD: {rmsd}")
+print("Proteina-Complexa RF3 evaluate smoke: ok")
 PY
 fi
 

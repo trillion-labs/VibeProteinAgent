@@ -152,11 +152,16 @@ def compute_binder_metrics(
     cfg_metric = eval_config.metric
 
     # Get dataset config - fallback to generation config only if dataset doesn't exist
+    target_smiles = None
     if "dataset" in eval_config:
         cfg_dataset = eval_config.dataset
+        target_cfg = eval_config.dataset.target_dict_cfg.get(cfg_dataset.task_name, {})
     else:
         cfg_dataset = eval_config.generation.dataloader.dataset
+        target_cfg = eval_config.generation.target_dict_cfg.get(cfg_dataset.task_name, {})
     target_task_name = cfg_dataset.task_name
+    if isinstance(target_cfg, (dict, DictConfig)):
+        target_smiles = target_cfg.get("SMILES") or target_cfg.get("smiles")
 
     # Initialize folding model
     folding_model = cfg_metric.get("binder_folding_method", "colabdesign")
@@ -238,6 +243,7 @@ def compute_binder_metrics(
                 is_target_ligand=is_target_ligand,
                 num_redesign_seqs=num_redesign_seqs,
                 fixed_residues_override=fixed_residues_override,
+                smiles=target_smiles,
             )
 
             # Save raw stats

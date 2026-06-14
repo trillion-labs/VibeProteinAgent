@@ -3450,6 +3450,22 @@ try:
             "ready": deep_reason is None,
             "reason": deep_reason,
         }}
+        triton_reason = None if deep_reason else common.triton_load_binary_skip_reason()
+        details["triton_runtime_probe"] = {{
+            "name": "proteina_complexa_triton_load_binary",
+            "ready": triton_reason is None,
+            "reason": triton_reason,
+        }}
+        if triton_reason:
+            deep_reason = triton_reason
+        evaluate_reason = None if deep_reason else common.evaluate_smoke_skip_reason()
+        details["evaluate_runtime_probe"] = {{
+            "name": "proteina_complexa_rf3_ligand_evaluate_smoke",
+            "ready": evaluate_reason is None,
+            "reason": evaluate_reason,
+        }}
+        if evaluate_reason:
+            deep_reason = evaluate_reason
         if deep_reason:
             payload["ready"] = False
             payload["reason"] = deep_reason

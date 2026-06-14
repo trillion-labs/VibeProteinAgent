@@ -30,6 +30,294 @@ Helpers:
 """
 from __future__ import annotations
 
+import re
+
+# --------------------------------------------------------------------------- metric labels
+#
+# Report surfaces often compare metrics by human labels rather than raw adapter
+# keys. Those labels drift: objective_rank may emit ``cx ipTM min``, a predictor
+# may emit ``ipTM``, and a rationale may refer to ``complex ipTM``. Keep the
+# canonical matching rules here so summary cards, matrices, charts, and future
+# report widgets do not each grow one-off alias tables.
+
+
+def metric_token(label: object) -> str:
+    """Normalize a metric label/key into a stable lowercase token."""
+
+    text = str(label or "").strip()
+    text = text.replace("Δ", "delta").replace("δ", "delta")
+    text = text.replace("Å", "a").replace("å", "a")
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+_METRIC_CANONICAL_KEYS: dict[str, str] = {
+    # Structure confidence.
+    "plddt": "plddt",
+    "mean_plddt": "plddt",
+    "ca_bfactor_plddt": "plddt",
+    "monomer_plddt": "plddt",
+    "mono_plddt": "plddt",
+    "complex_plddt": "plddt",
+    "cx_plddt": "plddt",
+    "ptm": "ptm",
+    "mean_ptm": "ptm",
+    "pae": "pae",
+    "mean_pae": "pae",
+    "rank_score": "ranking_score",
+    "ranking_score": "ranking_score",
+    "confidence": "confidence",
+    "confidence_score": "confidence",
+    "model_confidence": "confidence",
+    "gpde": "gpde",
+    "lddt": "lddt",
+    "interface_lddt": "interface_lddt",
+    "per_interface_lddt": "interface_lddt",
+    # Interface and binding.
+    "iptm": "iptm",
+    "cx_iptm": "iptm",
+    "cx_iptm_min": "iptm",
+    "cx_iptm_mean": "iptm",
+    "cx_iptm_max": "iptm",
+    "complex_iptm": "iptm",
+    "complex_iptm_min": "iptm",
+    "complex_iptm_mean": "iptm",
+    "complex_iptm_max": "iptm",
+    "ipsae": "ipsae",
+    "ipsae_score": "ipsae",
+    "ipsae_max": "ipsae",
+    "ipae": "ipae",
+    "ipae_interaction": "interaction_pae",
+    "pae_interaction": "interaction_pae",
+    "interaction_pae": "interaction_pae",
+    "iplddt": "iplddt",
+    "dockq": "dockq",
+    "binding_affinity": "delta_g",
+    "delta_g": "delta_g",
+    "dg": "delta_g",
+    "affinity": "affinity",
+    "predicted_affinity": "affinity",
+    "affinity_pred_value": "affinity",
+    "binder_probability": "binder_probability",
+    "affinity_probability": "binder_probability",
+    "affinity_probability_binary": "binder_probability",
+    "ligand_buried_fraction": "ligand_buried_fraction",
+    "ligand_buried_atom_count": "ligand_buried_atom_count",
+    "contact_residue_count": "ligand_contact_residues",
+    "ligand_contact_residues": "ligand_contact_residues",
+    "contact_atom_pair_count": "ligand_atom_contacts",
+    "ligand_atom_contacts": "ligand_atom_contacts",
+    "contact_ligand_atom_count": "contacted_ligand_atoms",
+    "contacted_ligand_atoms": "contacted_ligand_atoms",
+    "ligand_heavy_atom_count": "ligand_heavy_atoms",
+    "pocket_residue_count": "pocket_residues",
+    "ligand_contacts": "ligand_contacts",
+    "interface_contacts": "interface_contacts",
+    "n_contact_pairs": "interface_contacts",
+    "target_residues": "target_residues",
+    "n_target_res": "target_residues",
+    "liability_count": "liability_count",
+    # Sequence/developability.
+    "length": "length",
+    "sequence_length": "length",
+    "gravy": "gravy",
+    "pi": "pi",
+    "p_i": "pi",
+    "isoelectric_point": "pi",
+    "net_charge": "net_charge",
+    "charge": "net_charge",
+    "instability": "instability",
+    "instability_index": "instability",
+    "aromatic_fraction": "aromatic_fraction",
+    # Stability/scoring.
+    "rosetta_total_score": "rosetta_total_score",
+    "total_score": "rosetta_total_score",
+    "mean_total_score": "rosetta_total_score",
+    "ddg": "ddg",
+    "ddg_reu": "ddg",
+    "mean_ddg": "mean_ddg",
+    "delta_delta_g": "ddg",
+    "seq_recovery": "seq_recovery",
+    "sequence_recovery": "seq_recovery",
+    "mpnn_score": "mpnn_score",
+    # Rank/novelty.
+    "objective_score": "objective_score",
+    "objective_rank": "objective_rank",
+    "rank": "objective_rank",
+    "window_identity": "window_identity",
+    "win_id": "window_identity",
+    "msa_mean_identity": "msa_mean_identity",
+    "mean_identity": "msa_mean_identity",
+    # Misc.
+    "qc": "qc",
+    "generation_score": "generation_score",
+    "refold_rmsd": "refold_rmsd",
+    "binder_refold_rmsd": "refold_rmsd",
+    "ligand_rmsd": "ligand_rmsd",
+    "motif_rmsd": "motif_rmsd",
+    "designability": "designability",
+}
+
+
+_METRIC_DISPLAY_LABELS: dict[str, str] = {
+    "plddt": "pLDDT",
+    "ptm": "pTM",
+    "pae": "PAE",
+    "ranking_score": "Rank score",
+    "confidence": "Confidence",
+    "gpde": "gPDE",
+    "lddt": "lDDT",
+    "interface_lddt": "Interface lDDT",
+    "iptm": "ipTM",
+    "ipsae": "ipSAE",
+    "ipae": "ipAE",
+    "interaction_pae": "Interaction PAE",
+    "iplddt": "ipLDDT",
+    "dockq": "DockQ",
+    "delta_g": "Delta G",
+    "affinity": "Affinity",
+    "binder_probability": "Binder probability",
+    "ligand_buried_fraction": "Ligand buried fraction",
+    "ligand_buried_atom_count": "Ligand buried atoms",
+    "ligand_contact_residues": "Ligand contact residues",
+    "ligand_atom_contacts": "Ligand atom contacts",
+    "contacted_ligand_atoms": "Contacted ligand atoms",
+    "ligand_heavy_atoms": "Ligand heavy atoms",
+    "pocket_residues": "Pocket residues",
+    "ligand_contacts": "Ligand contacts",
+    "interface_contacts": "Interface contacts",
+    "target_residues": "Target residues",
+    "liability_count": "Liability count",
+    "length": "Length",
+    "gravy": "GRAVY",
+    "pi": "pI",
+    "net_charge": "Net charge",
+    "instability": "Instability",
+    "aromatic_fraction": "Aromatic fraction",
+    "rosetta_total_score": "Rosetta total score",
+    "ddg": "ddG",
+    "mean_ddg": "Mean ddG",
+    "seq_recovery": "Seq recovery",
+    "mpnn_score": "MPNN score",
+    "objective_score": "Objective score",
+    "objective_rank": "Objective rank",
+    "window_identity": "Window identity",
+    "msa_mean_identity": "MSA mean identity",
+    "qc": "QC",
+    "generation_score": "Generation score",
+    "refold_rmsd": "Refold RMSD",
+    "ligand_rmsd": "Ligand RMSD",
+    "motif_rmsd": "Motif RMSD",
+    "designability": "Designability",
+}
+
+
+_VARIANT_PRIORITY: dict[str, dict[str, int]] = {
+    # Binder summaries should prefer robust multi-seed aggregates over a single
+    # predictor row when the query asks for generic ipTM.
+    "iptm": {
+        "cx_iptm_min": 0,
+        "complex_iptm_min": 0,
+        "cx_iptm": 5,
+        "complex_iptm": 5,
+        "iptm": 10,
+        "cx_iptm_mean": 20,
+        "complex_iptm_mean": 20,
+        "cx_iptm_max": 30,
+        "complex_iptm_max": 30,
+    },
+    # In binder reports, raw pLDDT support rows usually describe the selected
+    # complex structure, while monomer pLDDT is a foldability support signal.
+    "plddt": {
+        "complex_plddt": 0,
+        "cx_plddt": 0,
+        "plddt": 10,
+        "mean_plddt": 10,
+        "monomer_plddt": 30,
+        "mono_plddt": 30,
+        "ca_bfactor_plddt": 40,
+    },
+    "ipsae": {"ipsae": 0, "ipsae_score": 5, "ipsae_max": 10},
+    "affinity": {"predicted_affinity": 0, "affinity_pred_value": 0, "affinity": 10},
+    "binder_probability": {
+        "binder_probability": 0,
+        "affinity_probability_binary": 5,
+        "affinity_probability": 10,
+    },
+    "pae": {"mean_pae": 0, "pae": 10},
+    "interaction_pae": {"interaction_pae": 0, "pae_interaction": 0, "ipae_interaction": 10},
+    "instability": {"instability": 0, "instability_index": 0},
+    "pi": {"pi": 0, "p_i": 0, "isoelectric_point": 5},
+    "interface_contacts": {"interface_contacts": 0, "n_contact_pairs": 5},
+    "target_residues": {"target_residues": 0, "n_target_res": 5},
+    "ligand_contact_residues": {"ligand_contact_residues": 0, "contact_residue_count": 5},
+    "ligand_atom_contacts": {"ligand_atom_contacts": 0, "contact_atom_pair_count": 5},
+    "contacted_ligand_atoms": {"contacted_ligand_atoms": 0, "contact_ligand_atom_count": 5},
+    "pocket_residues": {"pocket_residues": 0, "pocket_residue_count": 5},
+}
+
+
+def canonical_metric_key(label: object) -> str:
+    """Return the canonical comparison key for a metric label/key."""
+
+    token = metric_token(label)
+    if token in _METRIC_CANONICAL_KEYS:
+        return _METRIC_CANONICAL_KEYS[token]
+    if token.endswith("_score"):
+        base = token[: -len("_score")]
+        if base in _METRIC_CANONICAL_KEYS:
+            return _METRIC_CANONICAL_KEYS[base]
+    return token
+
+
+def display_metric_label(label: object) -> str:
+    """Human display label for a metric, after canonical alias resolution."""
+
+    key = canonical_metric_key(label)
+    if key in _METRIC_DISPLAY_LABELS:
+        return _METRIC_DISPLAY_LABELS[key]
+    text = str(label or "").strip()
+    if text == "ΔG":
+        return "Delta G"
+    return text
+
+
+def metric_variant_rank(label: object, target_label: object | None = None) -> tuple[int, str]:
+    """Sort key for choosing a recorded variant for a requested metric label."""
+
+    token = metric_token(label)
+    key = canonical_metric_key(target_label if target_label is not None else label)
+    priorities = _VARIANT_PRIORITY.get(key, {})
+    return priorities.get(token, 100), token
+
+
+def metric_matches(label: object, target_label: object) -> bool:
+    return canonical_metric_key(label) == canonical_metric_key(target_label)
+
+
+def metric_variant_title(label: object, *, workflow_type: str | None = None) -> str:
+    """Specific title for a recorded metric variant, preserving useful context."""
+
+    token = metric_token(label)
+    key = canonical_metric_key(label)
+    if workflow_type == "binder":
+        if token == "monomer_plddt" or token == "mono_plddt":
+            return "Monomer pLDDT"
+        if token in {"complex_plddt", "cx_plddt", "plddt", "mean_plddt"}:
+            return "Complex pLDDT"
+        if token in {"cx_iptm_min", "complex_iptm_min"}:
+            return "Complex ipTM min"
+        if token in {"cx_iptm_mean", "complex_iptm_mean"}:
+            return "Complex ipTM mean"
+        if token in {"cx_iptm", "complex_iptm"}:
+            return "Complex ipTM"
+    if token in {"cx_iptm_min", "complex_iptm_min"}:
+        return "ipTM min"
+    if token in {"cx_iptm_mean", "complex_iptm_mean"}:
+        return "ipTM mean"
+    if key == "plddt" and token in {"monomer_plddt", "mono_plddt"}:
+        return "Monomer pLDDT"
+    return display_metric_label(label)
+
 # --------------------------------------------------------------------------- metrics
 #
 # Single source of truth for metric semantics. Adapters and the

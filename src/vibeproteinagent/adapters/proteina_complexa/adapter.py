@@ -24,6 +24,7 @@ from vibeproteinagent.candidates.chain_roles import (
     complex_chain_metadata,
 )
 from vibeproteinagent.candidates.schema import stable_candidate_id
+from vibeproteinagent.core.errors import VPAError
 
 ProteinaComplexaMode = Literal["protein_binder", "ligand_binder", "motif"]
 ProteinaComplexaSearchAlgorithm = Literal[
@@ -199,6 +200,7 @@ class ProteinaComplexaOutput(BaseModel):
     seeds_used: list[int]
     position_mappings: dict[str, object] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    recovered_after_evaluation_failure: bool = False
 
 
 @register_adapter("descriptor.yaml")
@@ -248,26 +250,45 @@ class ProteinaComplexaAdapter(ToolAdapter):
         extra_env = {"USE_V2_COMPLEXA_ARCH": "True"} if params.mode == "motif" else None
         steps = _resolve_steps(params)
 
-        ctx.emit_progress(0.10)
-        common.run_design(
-            sidecar=common.sidecar_for(
-                cache=self._sidecars,
-                seed=params.seed,
-                extra_env=extra_env,
-            ),
-            config_path=config_path,
-            overrides=overrides,
-            cwd=common.proteina_complexa_tree(),
-            steps=steps,
-        )
-        ctx.emit_progress(0.92)
-
         run_dir = common.inference_run_dir(
             config_stem=Path(pipeline).stem,
             task_name=task_name,
             run_name=run_name,
         )
-        designs = _collect_designs(run_dir=run_dir, params=params)
+        run_started_at = time.time()
+        run_failed: Exception | None = None
+        ctx.emit_progress(0.10)
+        try:
+            common.run_design(
+                sidecar=common.sidecar_for(
+                    cache=self._sidecars,
+                    seed=params.seed,
+                    extra_env=extra_env,
+                ),
+                config_path=config_path,
+                overrides=overrides,
+                cwd=common.proteina_complexa_tree(),
+                steps=steps,
+            )
+        except Exception as exc:
+            run_failed = exc
+        ctx.emit_progress(0.92)
+
+        recovered_after_evaluation_failure = False
+        try:
+            designs = _collect_designs(run_dir=run_dir, params=params)
+        except Exception:
+            if run_failed is not None:
+                raise run_failed
+            raise
+        if run_failed is not None:
+            if "evaluate" not in (steps or []):
+                raise run_failed
+            designs = _fresh_designs(designs, min_mtime_s=run_started_at - 2.0)
+            if not designs:
+                raise run_failed
+            recovered_after_evaluation_failure = True
+            mapping_warnings.append(_partial_recovery_warning(run_failed, run_dir, len(designs)))
         runtime_ms = int((time.time() - started) * 1000)
         ctx.emit_progress(1.0)
         return ProteinaComplexaOutput(
@@ -279,6 +300,7 @@ class ProteinaComplexaAdapter(ToolAdapter):
             seeds_used=[params.seed] if params.seed is not None else [],
             position_mappings=position_mappings,
             warnings=mapping_warnings,
+            recovered_after_evaluation_failure=recovered_after_evaluation_failure,
         )
 
     def estimate_vram(self, params: ProteinaComplexaInput) -> int:
@@ -294,6 +316,38 @@ class ProteinaComplexaAdapter(ToolAdapter):
         self._sidecars.clear()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+def _partial_recovery_warning(exc: Exception, run_dir: Path, design_count: int) -> str:
+    hint = None
+    if isinstance(exc, VPAError):
+        hint = exc.details.get("root_cause_hint")
+    if hint is None:
+        details = getattr(exc, "details", None)
+        hint = details.get("root_cause_hint") if isinstance(details, dict) else None
+    suffix = f" Root cause hint: {hint}." if hint else ""
+    return (
+        "Proteina-Complexa generated "
+        f"{design_count} structure{'s' if design_count != 1 else ''} under {run_dir}, "
+        "but the evaluate step failed. Candidate structures are recovered; "
+        "Proteina-Complexa reward/confidence metrics are missing and must not be "
+        f"treated as recorded evidence.{suffix}"
+    )
+
+
+def _fresh_designs(
+    designs: list[ProteinaComplexaDesign],
+    *,
+    min_mtime_s: float,
+) -> list[ProteinaComplexaDesign]:
+    fresh: list[ProteinaComplexaDesign] = []
+    for design in designs:
+        try:
+            if Path(design.pdb_path).stat().st_mtime >= min_mtime_s:
+                fresh.append(design)
+        except OSError:
+            continue
+    return fresh
 
 
 def _resolve_steps(params: ProteinaComplexaInput) -> list[ProteinaComplexaStep] | None:
@@ -459,11 +513,13 @@ def _validate_ligand_only_target(target_pdb: Path, ligand_smiles: str) -> None:
     if mol is None:
         raise ValueError(f"ligand_smiles is not parseable by RDKit: {ligand_smiles!r}")
     expected_heavy_atoms = mol.GetNumHeavyAtoms()
+    pdb_atom_count = 0
     pdb_heavy_atoms = 0
     with target_pdb.open() as handle:
         for line in handle:
             if not line.startswith(("ATOM  ", "HETATM")):
                 continue
+            pdb_atom_count += 1
             element = line[76:78].strip() or line[12:16].strip()[:1]
             if element.upper() != "H":
                 pdb_heavy_atoms += 1
@@ -474,21 +530,40 @@ def _validate_ligand_only_target(target_pdb: Path, ligand_smiles: str) -> None:
             f"{pdb_heavy_atoms} heavy atoms in {target_pdb}, but RDKit parsed "
             f"{expected_heavy_atoms} heavy atoms from ligand_smiles."
         )
+    if pdb_atom_count != expected_heavy_atoms:
+        raise ValueError(
+            "Proteina-Complexa ligand_binder mode expects a heavy-atom-only "
+            "ligand PDB. Got "
+            f"{pdb_atom_count} atoms in {target_pdb}, but RDKit parsed "
+            f"{expected_heavy_atoms} heavy atoms from ligand_smiles."
+        )
 
 
 def _prepare_ligand_only_target(target_pdb: Path, job_dir: Path) -> Path:
     lines = target_pdb.read_text().splitlines(keepends=True)
     changed = False
+    stripped_hydrogen = False
     fixed: list[str] = []
     for line in lines:
-        if line.startswith(("ATOM  ", "HETATM")) and len(line) > 21 and line[21] == " ":
-            fixed.append(f"{line[:21]}A{line[22:]}")
+        if line.startswith(("ATOM  ", "HETATM")):
+            element = line[76:78].strip() or line[12:16].strip()[:1]
+            if element.upper() == "H":
+                changed = True
+                stripped_hydrogen = True
+                continue
+            if len(line) > 21 and line[21] == " ":
+                fixed.append(f"{line[:21]}A{line[22:]}")
+                changed = True
+            else:
+                fixed.append(line)
+        elif stripped_hydrogen and line.startswith("CONECT"):
             changed = True
+            continue
         else:
             fixed.append(line)
     if not changed:
         return target_pdb
-    prepared = job_dir / f"{target_pdb.stem}_chainA{target_pdb.suffix}"
+    prepared = job_dir / f"{target_pdb.stem}_heavy_chainA{target_pdb.suffix}"
     prepared.write_text("".join(fixed))
     return prepared
 

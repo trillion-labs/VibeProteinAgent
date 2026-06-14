@@ -1866,10 +1866,10 @@ def _normalize_candidates(
                 exclude_reference_candidates=exclude_reference_candidates,
             )
         )
-    _attach_qc_and_analysis(candidates, nodes, merge_global_metrics=False)
-    candidates = _merge_sequence_analysis_candidates(candidates)
     if ranked:
         candidates = _combine_objective_rank_manifest_candidates(ranked, candidates)
+    _attach_qc_and_analysis(candidates, nodes, merge_global_metrics=False)
+    candidates = _merge_sequence_analysis_candidates(candidates)
     candidates = _merge_pyrosetta_relax_aliases_into_candidates(candidates)
     return _dedupe_candidates(candidates)
 
@@ -1973,32 +1973,34 @@ def _merge_sequence_analysis_candidates(
     if not base:
         return candidates
 
-    by_id = {candidate.candidate_id: index for index, candidate in enumerate(base)}
+    by_id: dict[str, list[int]] = {}
+    for index, candidate in enumerate(base):
+        if candidate.candidate_id:
+            by_id.setdefault(candidate.candidate_id, []).append(index)
     sequence_to_indices: dict[str, list[int]] = {}
     for index, candidate in enumerate(base):
         if candidate.sequence:
             sequence_to_indices.setdefault(candidate.sequence, []).append(index)
 
     for enriched in sequence_analysis:
-        target_index = by_id.get(enriched.candidate_id)
-        if target_index is None and enriched.sequence:
-            matches = sequence_to_indices.get(enriched.sequence, [])
-            if len(matches) == 1:
-                target_index = matches[0]
-        if target_index is None:
+        target_indices = list(by_id.get(enriched.candidate_id, []))
+        if not target_indices and enriched.sequence:
+            target_indices = list(sequence_to_indices.get(enriched.sequence, []))
+        if not target_indices:
             continue
-        target = base[target_index]
         enriched_scores = _fold_flat_tool_metrics_into_namespace(
             enriched.scores,
             "sequence_analysis",
         )
-        base[target_index] = replace(
-            target,
-            scores=_merge_candidate_score_namespaces(target.scores, enriched_scores),
-            qc_flags=target.qc_flags or enriched.qc_flags,
-            liabilities=target.liabilities or enriched.liabilities,
-            artifacts=target.artifacts or enriched.artifacts,
-        )
+        for target_index in target_indices:
+            target = base[target_index]
+            base[target_index] = replace(
+                target,
+                scores=_merge_candidate_score_namespaces(target.scores, enriched_scores),
+                qc_flags=target.qc_flags or enriched.qc_flags,
+                liabilities=target.liabilities or enriched.liabilities,
+                artifacts=target.artifacts or enriched.artifacts,
+            )
     return base
 
 
@@ -2939,7 +2941,6 @@ def _ranked_candidates(
                     artifacts=_matching_artifacts(stable_structure_path, artifacts),
                 )
             )
-    _attach_qc_and_analysis(out, nodes, merge_global_metrics=True)
     return sorted(out, key=lambda c: (c.rank or 999999, -(c.score or 0.0)))
 
 
@@ -3040,11 +3041,11 @@ def _attach_qc_and_analysis(
 ) -> None:
     """Merge tool-level signals into candidate score maps.
 
-    Ranked candidates are already an aggregate product of the workflow, so they
-    can receive global QC/analysis context. Output-derived candidates are more
-    often independent catalog entries; for those, attach metrics only from the
-    candidate's source node to avoid cross-contaminating flat runs such as
-    Boltz2 + BoltzGen + Protenix smoke catalogs.
+    Candidate rows should only receive metrics from their own source node unless
+    a caller is intentionally enriching a legacy single-record summary. Objective
+    rank rows already carry their own row-level ``val`` / gate metrics and must
+    not receive global predictor scalars; otherwise one candidate can inherit an
+    unrelated Protenix, ipSAE, or sequence-analysis summary.
     """
     qc_flags: list[str] = []
     liabilities: list[Any] = []
@@ -3067,6 +3068,11 @@ def _attach_qc_and_analysis(
             # structure_analysis also publishes scalars (helix_pct, sheet_pct,
             # buried_polar_count, etc.) — surface those too.
             per_tool_metrics.append((node_id, tool, _score_map(output)))
+        elif tool == "sequence_analysis":
+            # sequence_analysis publishes both per-candidate rows and a global
+            # multi-sequence summary. The rows are merged by candidate identity;
+            # the global summary must not become every candidate's GRAVY/length.
+            continue
         else:
             # Any other tool: extract its top-level numeric scalars (filtered
             # by ``_SCORE_KEYS``), plus anything inside nested metric dicts.
@@ -3444,17 +3450,24 @@ def _finalization_contract_warnings(
         )
 
     final_ids = {str(c.candidate_id) for c in final_candidates if c.candidate_id}
-    final_score_namespaces = {
-        str(namespace)
+    final_ids_with_evaluator_scores = {
+        str(candidate.candidate_id)
         for candidate in final_candidates
-        for namespace in candidate.scores
+        if candidate.candidate_id
+        and {str(namespace) for namespace in candidate.scores} & evaluator_tools
     }
-    final_has_evaluator_scores = bool(final_score_namespaces & evaluator_tools)
+    final_ids_with_evaluator_scores.update(
+        _objective_rank_ids_with_evaluator_scores(nodes, evaluator_tools, final_ids)
+    )
+    final_has_evaluator_scores = bool(final_ids) and final_ids.issubset(
+        final_ids_with_evaluator_scores
+    )
     evaluator_candidate_ids = _candidate_ids_from_tools(nodes, evaluator_tools)
     evaluator_unmatched = bool(
         final_ids
         and evaluator_candidate_ids
         and evaluator_candidate_ids.isdisjoint(final_ids)
+        and not final_ids.issubset(final_ids_with_evaluator_scores)
     )
     if not final_has_evaluator_scores or evaluator_unmatched:
         warnings.append(
@@ -3470,6 +3483,45 @@ def _finalization_contract_warnings(
         )
 
     return warnings
+
+
+def _objective_rank_ids_with_evaluator_scores(
+    nodes: list[WorkflowNodeSummary],
+    evaluator_tools: set[str] | frozenset[str],
+    final_ids: set[str],
+) -> set[str]:
+    out: set[str] = set()
+    if not final_ids:
+        return out
+    for node in nodes:
+        if (node.tool or "").lower() != "objective_rank":
+            continue
+        output = node.output if isinstance(node.output, dict) else {}
+        for row in output.get("ranked_candidates") or []:
+            if not isinstance(row, dict):
+                continue
+            scores = row.get("scores") if isinstance(row.get("scores"), dict) else {}
+            if not ({str(namespace) for namespace in scores} & evaluator_tools):
+                continue
+            candidate_ids = _candidate_identity_values(row)
+            matched = candidate_ids & final_ids
+            out.update(matched)
+    return out
+
+
+def _candidate_identity_values(row: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("candidate_id", "ranked_candidate_id"):
+        value = row.get(key)
+        if value:
+            values.add(str(value))
+    ref = row.get("candidate_ref")
+    if isinstance(ref, dict):
+        for key in ("candidate_id", "ranked_candidate_id"):
+            value = ref.get(key)
+            if value:
+                values.add(str(value))
+    return values
 
 
 def _candidate_ids_from_tools(

@@ -27,6 +27,12 @@
     "num_residues": {"type": "integer", "minimum": 1},
     "runtime_ms": {"type": "integer", "minimum": 0},
     "position_mappings": {"type": "object", "additionalProperties": true, "default": {}},
+    "profile_guidance_applied": {"type": "boolean", "default": false},
+    "profile_guidance_warnings": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
     "warnings": {"type": "array", "items": {"type": "string"}, "default": []}
   },
   "additionalProperties": false

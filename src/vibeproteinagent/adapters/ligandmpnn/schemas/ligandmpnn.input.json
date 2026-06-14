@@ -18,6 +18,13 @@
       "description": "Canonical Candidate[] from an upstream structure tool. Promotes the first item's structure_path into `pdb_path` when omitted.",
       "examples": [[{"schema_version": "candidate_v1", "candidate_id": "c0", "source": {"tool": "rfdiffusion", "local_id": "0"}, "structure_path": "/abs/scaffold.pdb"}]]
     },
+    "profile_guidance": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "default": null,
+      "description": "Family-profile guidance compiled from a profile_source upstream. When the profile consensus length matches the LigandMPNN residue count, the adapter applies a soft position-specific amino-acid bias.",
+      "examples": [{"schema_version": "profile_guidance_v1", "consensus_sequence": "ACDEFG"}]
+    },
     "chains": {
       "type": ["array", "null"],
       "items": {"type": "string", "minLength": 1},

@@ -54,6 +54,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -438,6 +439,223 @@ print("ok")
     )
 
 
+def triton_load_binary_skip_reason(timeout_s: int = 45) -> str | None:
+    """Verify Triton can compile and load a tiny CUDA kernel.
+
+    Proteina-Complexa RF3 evaluation reaches Triton's
+    ``driver.active.utils.load_binary`` through cuequivariance fused ops. A
+    broken Triton/native-extension stack can import cleanly but fail only when
+    a compiled CUDA kernel is loaded, so doctor must exercise that exact class
+    of operation.
+    """
+
+    python = proteina_complexa_python()
+    code = r'''
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def kernel(x, y, n: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n
+    values = tl.load(x + offsets, mask=mask, other=0.0)
+    tl.store(y + offsets, values + 1.0, mask=mask)
+
+x = torch.ones((16,), device="cuda", dtype=torch.float32)
+y = torch.empty_like(x)
+kernel[(1,)](x, y, x.numel(), BLOCK=16)
+torch.cuda.synchronize()
+assert float(y[0].item()) == 2.0
+print("ok")
+'''
+    env = build_sidecar_env(seed=None)
+    probe_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix="_proteina_complexa_triton_probe.py", delete=False
+        ) as handle:
+            handle.write(code)
+            probe_path = Path(handle.name)
+        proc = subprocess.run(
+            [str(python), str(probe_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+        )
+    except FileNotFoundError:
+        reason = f"Proteina-Complexa Triton probe python not found: {python}"
+    except subprocess.TimeoutExpired:
+        reason = f"Proteina-Complexa Triton probe timed out after {timeout_s}s"
+    finally:
+        if probe_path is not None:
+            probe_path.unlink(missing_ok=True)
+    if "proc" in locals() and proc.returncode == 0:
+        return None
+    if "reason" not in locals():
+        reason = "Proteina-Complexa Triton CUDA load_binary probe failed: " + _stderr_tail(
+            proc.stderr or proc.stdout or f"exit code {proc.returncode}"
+        )
+    return (
+        f"{reason}. Proteina-Complexa can import, but its Triton/cuequivariance "
+        "backend is not ready for RF3 evaluation."
+    )
+
+
+def evaluate_smoke_skip_reason(timeout_s: int = 900) -> str | None:
+    """Run a real minimal Proteina-Complexa RF3 binder-evaluation smoke.
+
+    This is intentionally heavier than import/JAX/Triton probes. It executes
+    the vendor ``run_binder_eval()`` path with ``sequence_types=['self']`` on a
+    synthetic ligand-binder complex, initializes the real RF3 runner, launches
+    RF3 through its JSON ligand path, parses the generated confidence/CIF output,
+    converts CIF to PDB through Biotite, and computes binder/ligand RMSD. That
+    covers the evaluate stack where Proteina-Complexa previously failed after
+    generation.
+    """
+
+    python = proteina_complexa_python()
+    code = r'''
+import os
+import tempfile
+from pathlib import Path
+
+
+def atom_line(serial, atom, res, chain, resseq, x, y, z, element):
+    return (
+        f"ATOM  {serial:5d} {atom:<4s} {res:>3s} {chain}{resseq:4d}    "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+    )
+
+
+def het_line(serial, atom, res, chain, resseq, x, y, z, element):
+    return (
+        f"HETATM{serial:5d} {atom:<4s} {res:>3s} {chain}{resseq:4d}    "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+    )
+
+
+def write_complex(path):
+    serial = 1
+    lines = []
+    lines.append(het_line(serial, "C1", "LIG", "A", 1, 0.0, 0.0, 0.0, "C"))
+    serial += 1
+    for resseq in range(1, 17):
+        z = (resseq - 1) * 1.5
+        atoms = (
+            ("N", 4.0, 0.0, z, "N"),
+            ("CA", 4.5, 0.8, z + 0.3, "C"),
+            ("C", 5.2, 0.1, z + 0.8, "C"),
+            ("O", 5.2, -0.8, z + 1.0, "O"),
+            ("CB", 4.4, 1.8, z + 0.2, "C"),
+        )
+        for atom, x, y, zz, element in atoms:
+            lines.append(atom_line(serial, atom, "ALA", "B", resseq, x, y, zz, element))
+            serial += 1
+    lines.append("TER\n")
+    lines.append("END\n")
+    path.write_text("".join(lines))
+
+
+with tempfile.TemporaryDirectory(prefix="complexa_eval_smoke_") as tmp:
+    root = Path(tmp)
+    sample_dir = root / "sample"
+    sample_dir.mkdir()
+    sample_pdb = sample_dir / "sample.pdb"
+    target_pdb = root / "target_ligand.pdb"
+    write_complex(sample_pdb)
+    target_pdb.write_text(
+        "".join(
+            line
+            for line in sample_pdb.read_text().splitlines(True)
+            if (line.startswith("HETATM") and line[21] == "A")
+            or line.startswith("END")
+        )
+    )
+
+    ckpt_path = os.environ.get("RF3_CKPT_PATH")
+    rf3_path = os.environ.get("RF3_EXEC_PATH")
+    if not ckpt_path or not Path(ckpt_path).is_file():
+        raise RuntimeError(f"RF3_CKPT_PATH is not a file: {ckpt_path}")
+    if not rf3_path or not Path(rf3_path).is_file():
+        raise RuntimeError(f"RF3_EXEC_PATH is not a file: {rf3_path}")
+
+    from proteinfoundation.metrics.binder_metrics import run_binder_eval
+    from proteinfoundation.rewards.rf3_reward import get_default_rf3_runner
+
+    runner = get_default_rf3_runner(
+        ckpt_path=ckpt_path,
+        rf3_path=rf3_path,
+        dump_dir=str(root / "rf3"),
+    )
+    _, _, sequence_type_stats, _ = run_binder_eval(
+        pdb_file_path=str(sample_pdb),
+        target_pdb_path=str(target_pdb),
+        folding_model_specs={"model_name": "RF3", "runner": runner},
+        tmp_path=str(sample_dir),
+        target_pdb_chain=["A"],
+        sequence_types=["self"],
+        inverse_folding_model="ligand_mpnn",
+        gen_target_chain=["A"],
+        binder_chain="B",
+        interface_cutoff=8.0,
+        is_target_ligand=True,
+        num_redesign_seqs=1,
+        smiles="C",
+    )
+    stats = sequence_type_stats["self"]["complex_stats"][0]
+    if stats.get("rf3_status") != "completed":
+        raise RuntimeError(f"RF3 evaluate smoke did not complete: {stats}")
+    complex_pdb_path = stats.get("complex_pdb_path")
+    if not complex_pdb_path or not Path(complex_pdb_path).is_file():
+        raise RuntimeError(f"RF3 evaluate smoke did not write complex PDB: {stats}")
+    rmsd = sequence_type_stats["self"]["rmsd_stats"][0]
+    if "binder_scRMSD_ca" not in rmsd and "binder_scRMSD" not in rmsd:
+        raise RuntimeError(f"RF3 evaluate smoke did not compute RMSD: {rmsd}")
+    if "ligand_scRMSD" not in rmsd:
+        raise RuntimeError(f"RF3 ligand evaluate smoke did not compute ligand RMSD: {rmsd}")
+print("ok")
+'''
+    env = build_sidecar_env(seed=None)
+    env["JAX_TRACEBACK_FILTERING"] = "off"
+    probe_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix="_proteina_complexa_eval_smoke.py", delete=False
+        ) as handle:
+            handle.write(code)
+            probe_path = Path(handle.name)
+        proc = subprocess.run(
+            [str(python), str(probe_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+            cwd=proteina_complexa_tree(),
+        )
+    except FileNotFoundError:
+        reason = f"Proteina-Complexa evaluate smoke python not found: {python}"
+    except subprocess.TimeoutExpired:
+        reason = f"Proteina-Complexa evaluate smoke timed out after {timeout_s}s"
+    finally:
+        if probe_path is not None:
+            probe_path.unlink(missing_ok=True)
+    if "proc" in locals() and proc.returncode == 0:
+        return None
+    if "reason" not in locals():
+        reason = "Proteina-Complexa RF3 evaluate smoke failed: " + _stderr_tail(
+            (proc.stderr or "") + "\n" + (proc.stdout or "") or f"exit code {proc.returncode}",
+            max_lines=20,
+        )
+    return (
+        f"{reason}. Proteina-Complexa can import and may pass primitive GPU probes, "
+        "but the full RF3 evaluate path is not ready."
+    )
+
+
 def _stderr_tail(text: str, *, max_lines: int = 8) -> str:
     lines = [line for line in text.strip().splitlines() if line.strip()]
     if not lines:
@@ -554,7 +772,7 @@ def run_design(
             f"via `cd {proteina_complexa_tree()} && ./env/build_uv_env.sh`."
         )
     try:
-        return sidecar.call(
+        result = sidecar.call(
             _RUNNER_SIDECAR_CALL,
             {
                 "config_path": str(config_path),
@@ -564,6 +782,12 @@ def run_design(
             },
             timeout_s=timeout_s,
         )
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise RuntimeError(
+                f"complexa design sidecar failed. cmd: {' '.join(cmd)}. "
+                f"exit_code={result.get('exit_code')}"
+            )
+        return result
     except VPAError as exc:
         details = _sidecar_error_details(
             exc,
@@ -573,11 +797,12 @@ def run_design(
             steps=steps,
             cwd=cwd,
         )
-        if _is_accelerator_backend_failure(details):
+        if _is_dependency_sidecar_failure(details):
             raise DependencyError(
-                "Proteina-Complexa sidecar failed in the CUDA/JAX/XLA backend "
-                "while running the design/evaluation pipeline. This is a runtime "
-                "readiness issue, not a candidate quality failure.",
+                "Proteina-Complexa sidecar failed in its runtime/evaluation "
+                "backend (CUDA/JAX/XLA or Python API compatibility) while running "
+                "the design pipeline. This is a dependency or runtime compatibility "
+                "issue, not a candidate quality failure.",
                 details=details,
             ) from exc
         raise RuntimeError(
@@ -602,11 +827,15 @@ def _sidecar_error_details(
         "cwd": str(cwd),
         "sidecar_message": exc.message,
         "sidecar_details": exc.details,
-        "root_cause_hint": _accelerator_backend_hint(exc),
+        "root_cause_hint": _sidecar_runtime_hint(exc),
     }
 
 
 def _accelerator_backend_hint(exc: VPAError) -> str | None:
+    return _sidecar_runtime_hint(exc)
+
+
+def _sidecar_runtime_hint(exc: VPAError) -> str | None:
     text = _flatten_sidecar_error_text(exc)
     if "dnn_support != nullptr" in text:
         return "JAX/XLA could not initialize a GPU DNN/cuDNN backend"
@@ -614,10 +843,18 @@ def _accelerator_backend_hint(exc: VPAError) -> str | None:
         return "JAX/XLA GPU runtime failed"
     if "cudnn" in text and ("jax" in text or "xla" in text):
         return "cuDNN is unavailable or incompatible with the JAX/XLA runtime"
+    if "py_ssize_t_clean macro must be defined" in text:
+        return "Python C-extension ABI mismatch in the Proteina-Complexa evaluation runtime"
+    if "a file opened in 'text' mode is required" in text:
+        return "Proteina-Complexa evaluation writer API mismatch in the sidecar runtime"
     return None
 
 
 def _is_accelerator_backend_failure(details: dict[str, Any]) -> bool:
+    return bool(details.get("root_cause_hint"))
+
+
+def _is_dependency_sidecar_failure(details: dict[str, Any]) -> bool:
     return bool(details.get("root_cause_hint"))
 
 
