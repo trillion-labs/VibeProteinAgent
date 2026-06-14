@@ -11,6 +11,10 @@
   "files": [
     "bin/",
     "src/",
+    "!src/**/__pycache__/",
+    "!src/**/*.pyc",
+    "!src/**/*.pyo",
+    "scripts/",
     "vendor/",
     "containers/",
     "pyproject.toml",

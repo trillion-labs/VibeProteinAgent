@@ -198,6 +198,8 @@ tools:
       - name: ligandmpnn_weights
         path: "models/ligandmpnn_v_32_020_25.pt"
         artifact_ref: "ligandmpnn/ligandmpnn_v_32_020_25.pt"
+        url: "https://files.ipd.uw.edu/pub/ligandmpnn/ligandmpnn_v_32_020_25.pt"
+        sha256: "42caaa5cdb380867d2b31c30de4ab53ea89171279b3a0732ddf94bc4d3cb6981"
         source_path: "vendor/ligandmpnn/weights/ligandmpnn_v_32_020_25.pt"
         env_var: VPA_MODEL_CACHE
         required: true
@@ -250,11 +252,47 @@ tools:
       prebuilt_ref: "sidecars/proteina-complexa/{cuda_profile}"
       install_script: "bash vendor/proteina-complexa/env/build_uv_env.sh --root {sidecar_path} --cuda-profile {cuda_profile}"
     weights:
-      - name: proteina_complexa_checkpoints
-        path: "cache/proteina-complexa/checkpoints"
-        artifact_ref: "proteina_complexa/checkpoints"
-        source_path: "vendor/proteina-complexa/ckpts"
+      - name: proteina_complexa_model
+        path: "cache/proteina-complexa/checkpoints/complexa.ckpt"
+        artifact_ref: "proteina_complexa/checkpoints/complexa.ckpt"
+        url: "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/clara/proteina_complexa/1.0/files?redirect=true&path=complexa.ckpt"
         env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        required: true
+      - name: proteina_complexa_autoencoder
+        path: "cache/proteina-complexa/checkpoints/complexa_ae.ckpt"
+        artifact_ref: "proteina_complexa/checkpoints/complexa_ae.ckpt"
+        url: "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/clara/proteina_complexa/1.0/files?redirect=true&path=complexa_ae.ckpt"
+        env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        required: true
+      - name: proteina_complexa_ligand_model
+        path: "cache/proteina-complexa/checkpoints/complexa_ligand.ckpt"
+        artifact_ref: "proteina_complexa/checkpoints/complexa_ligand.ckpt"
+        url: "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/clara/proteina_complexa_ligand/1.0/files?redirect=true&path=complexa_ligand.ckpt"
+        env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        required: true
+      - name: proteina_complexa_ligand_autoencoder
+        path: "cache/proteina-complexa/checkpoints/complexa_ligand_ae.ckpt"
+        artifact_ref: "proteina_complexa/checkpoints/complexa_ligand_ae.ckpt"
+        url: "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/clara/proteina_complexa_ligand/1.0/files?redirect=true&path=complexa_ligand_ae.ckpt"
+        env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        required: true
+      - name: proteina_complexa_ame_model
+        path: "cache/proteina-complexa/checkpoints/complexa_ame.ckpt"
+        artifact_ref: "proteina_complexa/checkpoints/complexa_ame.ckpt"
+        url: "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/clara/proteina_complexa_ame/1.0/files?redirect=true&path=complexa_ame.ckpt"
+        env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        required: true
+      - name: proteina_complexa_ame_autoencoder
+        path: "cache/proteina-complexa/checkpoints/complexa_ame_ae.ckpt"
+        artifact_ref: "proteina_complexa/checkpoints/complexa_ame_ae.ckpt"
+        url: "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/clara/proteina_complexa_ame/1.0/files?redirect=true&path=complexa_ame_ae.ckpt"
+        env_var: VPA_PROTEINA_COMPLEXA_CKPTS
+        required: true
+      - name: proteina_complexa_rf3_checkpoint
+        path: "cache/proteina-complexa/community_models/RF3/rf3_foundry_01_24_latest_remapped.ckpt"
+        artifact_ref: "proteina_complexa/rf3/rf3_foundry_01_24_latest_remapped.ckpt"
+        url: "https://files.ipd.uw.edu/pub/rf3/rf3_foundry_01_24_latest_remapped.ckpt"
+        env_var: RF3_CKPT_PATH
         env_value: path
         required: true
     disk_bytes: 30000000000
@@ -370,12 +408,29 @@ tools:
     runtime: shared
     required: false
     weights:
-      - name: rfpeptides_weights
-        path: "cache/rfpeptides"
-        artifact_ref: "rfpeptides/weights"
-        source_path: "vendor/rfpeptides/weights"
+      - name: rfpeptides_base
+        path: "cache/rfpeptides/Base_ckpt.pt"
+        artifact_ref: "rfpeptides/weights/Base_ckpt.pt"
+        url: "http://files.ipd.uw.edu/pub/RFdiffusion/6f5902ac237024bdd0c176cb93063dc4/Base_ckpt.pt"
+        sha256: "0fcf7d7c32b4848030aca3a051e6768de194616f96ba6c38186351a33bfc6eca"
+        source_path: "vendor/rfpeptides/weights/Base_ckpt.pt"
         env_var: VPA_RFPEPTIDES_WEIGHTS
-        env_value: path
+        required: true
+      - name: rfpeptides_complex
+        path: "cache/rfpeptides/Complex_base_ckpt.pt"
+        artifact_ref: "rfpeptides/weights/Complex_base_ckpt.pt"
+        url: "http://files.ipd.uw.edu/pub/RFdiffusion/e29311f6f1bf1af907f9ef9f44b8328b/Complex_base_ckpt.pt"
+        sha256: "76e4e260aefee3b582bd76b77ab95d2592e64f00c51bf344968ab9239f3250bc"
+        source_path: "vendor/rfpeptides/weights/Complex_base_ckpt.pt"
+        env_var: VPA_RFPEPTIDES_WEIGHTS
+        required: true
+      - name: rfpeptides_fold
+        path: "cache/rfpeptides/Complex_Fold_base_ckpt.pt"
+        artifact_ref: "rfpeptides/weights/Complex_Fold_base_ckpt.pt"
+        url: "http://files.ipd.uw.edu/pub/RFdiffusion/60f09a193fb5e5ccdc4980417708dbab/Complex_Fold_base_ckpt.pt"
+        sha256: "0ac3b4024aea811078cec41482528291d6d7d7084bf8190ec118f54642fb81a1"
+        source_path: "vendor/rfpeptides/weights/Complex_Fold_base_ckpt.pt"
+        env_var: VPA_RFPEPTIDES_WEIGHTS
         required: true
     disk_bytes: 2000000000
   sequence_analysis:

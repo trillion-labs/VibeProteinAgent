@@ -107,8 +107,7 @@ Open this repository in Codex and ask in natural language. For example:
 
 ```text
 Install VibeProteinAgent into /vpa.
-Use the full profile with CUDA auto-detection, run doctor, and tell me whether
-VPA is ready.
+Use the full profile with CUDA auto-detection, run doctor, and tell me whether VPA is ready.
 ```
 
 Then send a protein request:

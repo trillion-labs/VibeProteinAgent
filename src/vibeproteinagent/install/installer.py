@@ -2101,6 +2101,20 @@ def _ensure_tool_units(
             required=required,
             artifact_index=artifact_index,
         )
+    pre_sidecar_weights = _pre_sidecar_weight_names(tool)
+    for weight in tool.weights:
+        if weight.name not in pre_sidecar_weights:
+            continue
+        _ensure_weight(
+            tool,
+            weight,
+            paths,
+            options,
+            state,
+            results,
+            required=required,
+            artifact_index=artifact_index,
+        )
     if tool.sidecar:
         _ensure_sidecar(
             tool,
@@ -2112,6 +2126,8 @@ def _ensure_tool_units(
             artifact_index=artifact_index,
         )
     for weight in tool.weights:
+        if weight.name in pre_sidecar_weights:
+            continue
         _ensure_weight(
             tool,
             weight,
@@ -2131,6 +2147,12 @@ def _ensure_tool_units(
             )
         results.append({"unit": f"binary:{tool.name}", "status": status, "binary": tool.binary})
         state.mark(f"binary:{tool.name}", status, {"binary": tool.binary})
+
+
+def _pre_sidecar_weight_names(tool: InstallTool) -> set[str]:
+    if tool.name == "proteina_complexa":
+        return {"proteina_complexa_rf3_checkpoint"}
+    return set()
 
 
 def _ensure_source(
@@ -2468,6 +2490,13 @@ def _env_exports(
                     options,
                 ),
             )
+            for weight in tool.weights:
+                if weight.name == "rfdiffusion3_checkpoint":
+                    exports.setdefault(
+                        "VPA_RFDIFFUSION3_WEIGHTS",
+                        str(_weight_path(paths, weight).parent),
+                    )
+                    break
     if options is not None:
         exports.update(_cuda_env_exports(resolve_cuda_stack(options.cuda_profile)))
     return exports
@@ -2961,6 +2990,28 @@ def _ensure_weight(
         )
         state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
         return
+    if _is_rfdiffusion3_weight(tool, weight):
+        if options.offline:
+            raise DependencyError(
+                "required RFdiffusion3 checkpoint is not cached and --offline was set",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        _install_rfdiffusion3_checkpoint(paths, path)
+        if not _weight_ready(path, weight):
+            raise DependencyError(
+                "RFdiffusion3 Foundry checkpoint install did not become ready",
+                details={"tool": tool.name, "weight": weight.name, "path": str(path)},
+            )
+        results.append(
+            {
+                "unit": f"weight:{tool.name}:{weight.name}",
+                "status": "downloaded",
+                "path": str(path),
+                "installer": "foundry install rfd3",
+            }
+        )
+        state.mark(f"weight:{tool.name}:{weight.name}", "ready", {"path": str(path)})
+        return
     if weight.hf_repo_id:
         if options.offline:
             raise DependencyError(
@@ -3049,6 +3100,10 @@ def _is_pxdesign_weight(tool: InstallTool, weight: InstallWeight) -> bool:
     return tool.name == "pxdesign" and weight.name == "pxdesign_weights"
 
 
+def _is_rfdiffusion3_weight(tool: InstallTool, weight: InstallWeight) -> bool:
+    return tool.name == "rfdiffusion3" and weight.name == "rfdiffusion3_checkpoint"
+
+
 def _pxdesign_weights_ready(path: Path) -> bool:
     required = [
         *(path / name for name in _PXDESIGN_CHECKPOINT_URLS),
@@ -3067,11 +3122,89 @@ def _download_pxdesign_weights(path: Path) -> None:
     _download_pxdesign_af2_params(path / "tool_weights" / "af2")
 
 
+def _install_rfdiffusion3_checkpoint(paths: InstallPaths, path: Path) -> None:
+    foundry = paths.root / "sidecars" / "rfdiffusion3" / "bin" / "foundry"
+    if not foundry.is_file():
+        raise DependencyError(
+            "RFdiffusion3 sidecar is missing the Foundry executable",
+            details={
+                "foundry": str(foundry),
+                "hint": "install the rfdiffusion3 sidecar before installing its checkpoint",
+            },
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["DEBUG"] = "false"
+    proc = subprocess.run(
+        [
+            str(foundry),
+            "install",
+            "rfd3",
+            "--checkpoint-dir",
+            str(path.parent),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    if proc.returncode != 0:
+        raise DependencyError(
+            "Foundry failed to install the RFdiffusion3 checkpoint",
+            details={
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+                "checkpoint_dir": str(path.parent),
+            },
+        )
+    if path.is_file():
+        return
+    candidates = [
+        candidate
+        for candidate in sorted(path.parent.rglob("*.ckpt"))
+        if candidate.is_file() and candidate != path
+    ]
+    if not candidates:
+        raise DependencyError(
+            "Foundry completed but no RFdiffusion3 checkpoint file was found",
+            details={
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+                "checkpoint_dir": str(path.parent),
+            },
+        )
+    preferred = _preferred_rfdiffusion3_checkpoint(candidates)
+    if path.exists() or path.is_symlink():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    path.symlink_to(preferred)
+
+
+def _preferred_rfdiffusion3_checkpoint(candidates: list[Path]) -> Path:
+    exact_names = ("rfd3_latest.ckpt", "rfdiffusion3.ckpt", "rfd3.ckpt")
+    by_name = {candidate.name: candidate for candidate in candidates}
+    for name in exact_names:
+        candidate = by_name.get(name)
+        if candidate is not None:
+            return candidate
+    latest = [candidate for candidate in candidates if "latest" in candidate.name.lower()]
+    if latest:
+        return latest[0]
+    return candidates[0]
+
+
 def _download_file(url: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.parent / f".{target.name}.download"
-    urllib.request.urlretrieve(url, tmp)
-    tmp.replace(target)
+    try:
+        with _open_download_url(url) as source, tmp.open("wb") as fh:
+            shutil.copyfileobj(source, fh)
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _open_download_url(url: str):

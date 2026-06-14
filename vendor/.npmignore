@@ -1,0 +1,41 @@
+# Keep the npm bootstrap package from publishing local model drops, sidecar
+# environments, caches, and example payloads under package.json "files": ["vendor/"].
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.venv/
+**/.uv-cache/
+**/build/
+**/dist/
+**/*.egg-info/
+
+# Local model/cache/checkpoint directories.
+**/checkpoints/
+**/ckpts/
+**/params/
+**/weights/
+**/model_params/
+**/tool_weights/
+**/release_data/
+
+# Large or generated model/archive artifacts.
+**/*.ckpt
+**/*.npz
+**/*.pt
+**/*.pth
+**/*.safetensors
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.zip
+**/*.bz2
+
+# Runtime/test/demo payloads not needed by the npx installer.
+**/example/
+**/examples/
+**/notebooks/
+**/img/
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.ttf

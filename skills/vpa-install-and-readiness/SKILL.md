@@ -10,11 +10,17 @@ CUDA mismatch, missing binaries, credentials, or tool readiness.
 
 ## Approach
 
-- Prefer `vpa install doctor` before changing the environment.
-- Use `vpa install plan --profile full --cuda-profile auto` to inspect impact.
-- Use `vpa install --profile full --cuda-profile auto --yes` for ordinary setup.
-- Use `--tools <tool,...>` for focused repair when a specific tool is missing.
-- Re-run `vpa install doctor` after changes and report remaining caveats.
+- If VPA is not already installed and ready, install with:
+
+```bash
+npx -y vibeproteinagent install --profile full --cuda-profile auto --yes
+```
+
+- If ESM3 is required, set `HF_TOKEN` in the same environment before running
+  that command.
+- Do not ask users to manually install sidecar envs or checkpoints for tools in
+  the full profile.
+- Use `vpa install doctor --profile full` after install or repair.
 
 ## Readiness Checks
 

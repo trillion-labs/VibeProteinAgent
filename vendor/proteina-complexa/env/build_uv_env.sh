@@ -284,6 +284,41 @@ fi
 uv pip install biotite==1.6.0
 echo "Updated biotite to 1.6.0 for ligand compatibility"
 
+export RF3_CKPT_PATH="${RF3_CKPT_PATH:-$VENV_DIR/community_models/ckpts/RF3/rf3_foundry_01_24_latest_remapped.ckpt}"
+if [[ "$FULL_INSTALL" == "true" ]]; then
+    if [[ ! -s "$RF3_CKPT_PATH" ]]; then
+        echo "[verify] Downloading RF3 checkpoint for Proteina-Complexa evaluate smoke..."
+        mkdir -p "$(dirname "$RF3_CKPT_PATH")"
+        python - "$RF3_CKPT_PATH" <<'PY'
+import shutil
+import sys
+import urllib.request
+from pathlib import Path
+
+url = "https://files.ipd.uw.edu/pub/rf3/rf3_foundry_01_24_latest_remapped.ckpt"
+target = Path(sys.argv[1])
+tmp = target.with_name(f".{target.name}.download")
+request = urllib.request.Request(
+    url,
+    headers={
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+        )
+    },
+)
+try:
+    with urllib.request.urlopen(request) as source, tmp.open("wb") as handle:
+        shutil.copyfileobj(source, handle)
+    if tmp.stat().st_size <= 0:
+        raise RuntimeError("downloaded RF3 checkpoint is empty")
+    tmp.replace(target)
+finally:
+    tmp.unlink(missing_ok=True)
+PY
+    fi
+fi
+
 if [[ "$FULL_INSTALL" == "true" && "$CUDA_PROFILE" != "cpu" ]]; then
     echo "[verify] Checking JAX GPU DNN backend..."
     NVIDIA_LIB_PATHS="$(python - <<'PY'
@@ -356,7 +391,6 @@ PY
     rm -f "$TRITON_PROBE"
 
     echo "[verify] Checking Proteina-Complexa RF3 evaluate smoke..."
-    export RF3_CKPT_PATH="${RF3_CKPT_PATH:-$PROJECT_DIR/community_models/ckpts/RF3/rf3_foundry_01_24_latest_remapped.ckpt}"
     export RF3_EXEC_PATH="${RF3_EXEC_PATH:-$VENV_DIR/.venv/bin/rf3}"
     python - <<'PY'
 import os

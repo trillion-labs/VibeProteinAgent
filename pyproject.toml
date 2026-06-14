@@ -8,7 +8,13 @@ dynamic = ["version"]
 description = "Local-first GPU-ready protein design tool substrate."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "PolyForm-Noncommercial-1.0.0" }
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = [
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+  "src/vibeproteinagent/reporting/assets/3Dmol-min.js.LICENSE.txt",
+  "src/vibeproteinagent/visualization/assets/3Dmol-min.js.LICENSE.txt",
+]
 authors = [{ name = "VibeProteinAgent contributors" }]
 keywords = ["protein", "gpu", "mcp", "workflow", "bioinformatics"]
 classifiers = [
@@ -77,6 +83,13 @@ include = [
   "CITATION.cff",
   "containers",
   "pyproject.toml",
+]
+exclude = [
+  "vendor",
+  "vendor/**",
+  "**/__pycache__",
+  "**/*.pyc",
+  "**/*.pyo",
 ]
 
 [tool.pytest.ini_options]
