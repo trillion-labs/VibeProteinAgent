@@ -456,7 +456,11 @@ class GOSequencesAdapter(ToolAdapter):
             child_ctx = AdapterRunContext(
                 job_id=ctx.job_id,
                 workspace_root=ctx.workspace_root,
-                job_dir=out_dir / "terms" / f"go_{index:02d}_{str(child_params.go_id).replace(':', '_')}",
+                job_dir=(
+                    out_dir
+                    / "terms"
+                    / f"go_{index:02d}_{str(child_params.go_id).replace(':', '_')}"
+                ),
                 is_cancelled=ctx.is_cancelled,
                 log=ctx.log,
                 emit_progress=lambda pct, index=index, total=total: ctx.emit_progress(
@@ -468,8 +472,9 @@ class GOSequencesAdapter(ToolAdapter):
         candidate_rows = []
         for child in child_outputs:
             for candidate in child.candidates:
-                score = (((candidate.get("scores") or {}).get("go_sequences") or {}).get("sequence_relevance_score") or 0.0)
-                intent = ((candidate.get("scores") or {}).get("go_sequences") or {}).get("intent") or {}
+                go_scores = (candidate.get("scores") or {}).get("go_sequences") or {}
+                score = go_scores.get("sequence_relevance_score") or 0.0
+                intent = go_scores.get("intent") or {}
                 candidate_rows.append(
                     {
                         "candidate": candidate,
@@ -529,14 +534,22 @@ class GOSequencesAdapter(ToolAdapter):
         ctx.emit_progress(1.0)
         first = child_outputs[0] if child_outputs else None
         return GOSequencesOutput(
-            go_id=first.go_id if first else str(term_specs[0].get("term_id") or term_specs[0].get("id")),
+            go_id=(
+                first.go_id
+                if first
+                else str(term_specs[0].get("term_id") or term_specs[0].get("id"))
+            ),
             go_label=first.go_label if first else None,
             association_records=sum(child.association_records for child in child_outputs),
-            resolved_uniprot_accessions=sum(child.resolved_uniprot_accessions for child in child_outputs),
+            resolved_uniprot_accessions=sum(
+                child.resolved_uniprot_accessions for child in child_outputs
+            ),
             raw_result_count=sum(child.raw_result_count for child in child_outputs),
             kept_sequences=sum(child.kept_sequences for child in child_outputs),
             kept_sequence_count=sum(child.kept_sequence_count for child in child_outputs),
-            dropped_empty_sequence_count=sum(child.dropped_empty_sequence_count for child in child_outputs),
+            dropped_empty_sequence_count=sum(
+                child.dropped_empty_sequence_count for child in child_outputs
+            ),
             sequences=sequences,
             candidates=candidates,
             empty_facets=empty_facets,

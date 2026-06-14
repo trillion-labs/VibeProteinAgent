@@ -333,7 +333,7 @@ class Supervisor:
         pid = handle.process.pid
         if pid is None:
             return
-        targets = list(reversed(_descendant_pids(pid))) + [pid]
+        targets = [*list(reversed(_descendant_pids(pid))), pid]
         self._log.warn(
             "terminate_worker_tree",
             worker_id=handle.worker_id,

@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
@@ -45,8 +45,8 @@ def _parse_retry_after(value: str | None) -> float | None:
     if retry_dt is None:
         return None
     if retry_dt.tzinfo is None:
-        retry_dt = retry_dt.replace(tzinfo=timezone.utc)
-    delta = (retry_dt - datetime.now(timezone.utc)).total_seconds()
+        retry_dt = retry_dt.replace(tzinfo=UTC)
+    delta = (retry_dt - datetime.now(UTC)).total_seconds()
     return max(0.0, delta)
 
 

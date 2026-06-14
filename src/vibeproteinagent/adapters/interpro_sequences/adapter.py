@@ -411,8 +411,11 @@ class InterProSequencesAdapter(ToolAdapter):
         candidate_rows = []
         for child in child_outputs:
             for candidate in child.candidates:
-                score = (((candidate.get("scores") or {}).get("interpro_sequences") or {}).get("sequence_relevance_score") or 0.0)
-                intent = ((candidate.get("scores") or {}).get("interpro_sequences") or {}).get("intent") or {}
+                interpro_scores = (
+                    (candidate.get("scores") or {}).get("interpro_sequences") or {}
+                )
+                score = interpro_scores.get("sequence_relevance_score") or 0.0
+                intent = interpro_scores.get("intent") or {}
                 candidate_rows.append(
                     {
                         "candidate": candidate,
@@ -460,10 +463,16 @@ class InterProSequencesAdapter(ToolAdapter):
         ctx.emit_progress(1.0)
         first = child_outputs[0] if child_outputs else None
         return InterProSequencesOutput(
-            interpro_id=first.interpro_id if first else str(term_specs[0].get("term_id") or term_specs[0].get("id")),
+            interpro_id=(
+                first.interpro_id
+                if first
+                else str(term_specs[0].get("term_id") or term_specs[0].get("id"))
+            ),
             retrieved_accessions=sum(child.retrieved_accessions for child in child_outputs),
             kept_sequences=sum(child.kept_sequences for child in child_outputs),
-            dropped_by_temporal_filter=sum(child.dropped_by_temporal_filter for child in child_outputs),
+            dropped_by_temporal_filter=sum(
+                child.dropped_by_temporal_filter for child in child_outputs
+            ),
             candidates=candidates,
             empty_facets=empty_facets,
             fasta_path=str(fasta_path),

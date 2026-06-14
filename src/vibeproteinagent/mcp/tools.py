@@ -9,12 +9,12 @@ from vibeproteinagent.adapters import (
     ToolRegistry,
     serialize_descriptor,
 )
+from vibeproteinagent.adapters.availability import attach_availability, descriptor_availability
 from vibeproteinagent.adapters.descriptor import (
     resolve_input_schema_dict,
     resolve_output_schema_dict,
 )
 from vibeproteinagent.adapters.schema_affordance import conditional_required_summary
-from vibeproteinagent.adapters.availability import attach_availability, descriptor_availability
 from vibeproteinagent.adapters.visibility import is_public_tool
 from vibeproteinagent.core.errors import (
     DaemonUnavailableError,
@@ -1042,7 +1042,7 @@ __all__ = [
     "start_trajectory",
     "submit_job",
     "tool_info",
-    "wait_trajectory",
     "wait_job",
+    "wait_trajectory",
     "warm_tool",
 ]

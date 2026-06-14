@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any
 
 from .http import HttpClient, HttpError
@@ -91,7 +91,9 @@ def search_go_terms(
 
 def lookup_go_term(client: HttpClient, term_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
-        data = client.get_json(f"{QUICKGO}/ontology/go/terms/{urllib.parse.quote(term_id, safe='')}")
+        data = client.get_json(
+            f"{QUICKGO}/ontology/go/terms/{urllib.parse.quote(term_id, safe='')}"
+        )
         rows = _quickgo_term_rows(data)
         source = "quickgo"
     except HttpError as exc:
@@ -417,7 +419,8 @@ def _text_score(query: str, *fields: Any) -> float:
 
 
 def _tokens(value: str) -> set[str]:
-    return {part for part in "".join(ch.lower() if ch.isalnum() else " " for ch in value).split() if len(part) > 1}
+    normalized = "".join(ch.lower() if ch.isalnum() else " " for ch in value)
+    return {part for part in normalized.split() if len(part) > 1}
 
 
 def _normalized_phrase(value: Any) -> str:

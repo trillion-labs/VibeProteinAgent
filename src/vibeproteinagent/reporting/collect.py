@@ -27,10 +27,17 @@ from vibeproteinagent.workspace.types import (
 
 from .identity import (
     candidate_material_key as _candidate_material_key,
+)
+from .identity import (
     candidate_ranked_candidate_id as _candidate_ranked_candidate_id,
+)
+from .identity import (
     candidate_sequence_identity as _candidate_sequence_identity,
-    candidate_structure_identity as _candidate_structure_identity,
+)
+from .identity import (
     row_material_key as _row_material_key,
+)
+from .identity import (
     row_ranked_candidate_id as _row_ranked_candidate_id,
 )
 from .models import (
@@ -2279,7 +2286,11 @@ def _enrich_final_candidates_from_objective_rank(
                 candidate,
                 rank=rank or candidate.rank,
                 score=(
-                    _as_float(row.get("objective_score") if row.get("objective_score") is not None else row.get("score"))
+                    _as_float(
+                        row.get("objective_score")
+                        if row.get("objective_score") is not None
+                        else row.get("score")
+                    )
                     if candidate.score is None
                     else candidate.score
                 ),
@@ -2617,7 +2628,11 @@ def _pyrosetta_score_record_from_payload(
         "candidate_id": str(payload.get("candidate_id") or ""),
         "structure_path": structure_path,
         "total_score": total_score,
-        "tokens": _stability_record_tokens(payload.get("candidate_id"), structure_path, node.node_id),
+        "tokens": _stability_record_tokens(
+            payload.get("candidate_id"),
+            structure_path,
+            node.node_id,
+        ),
     }
 
 

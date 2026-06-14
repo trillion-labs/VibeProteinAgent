@@ -20,6 +20,12 @@ from typing import Any
 from vibeproteinagent._version import __version__
 from vibeproteinagent.core.errors import InvalidParamsError
 
+from .identity import (
+    candidate_material_key as _identity_candidate_material_key,
+)
+from .identity import (
+    candidate_ranked_candidate_id as _identity_candidate_ranked_candidate_id,
+)
 from .metrics import (
     DUAL_SCALE_METRICS as _DUAL_SCALE_METRICS,
 )
@@ -27,18 +33,22 @@ from .metrics import (
     METRIC_REGISTRY as _METRIC_REGISTRY,
 )
 from .metrics import (
+    display_metric_label as _display_metric_label,
+)
+from .metrics import (
     metric_explainer as _metric_explainer,
 )
 from .metrics import (
-    display_metric_label as _display_metric_label,
     metric_matches as _metric_matches,
-    metric_variant_rank as _metric_variant_rank,
-    metric_variant_title as _metric_variant_title,
-    pretty_metric_name as _pretty_metric_name,
 )
-from .identity import (
-    candidate_material_key as _identity_candidate_material_key,
-    candidate_ranked_candidate_id as _identity_candidate_ranked_candidate_id,
+from .metrics import (
+    metric_variant_rank as _metric_variant_rank,
+)
+from .metrics import (
+    metric_variant_title as _metric_variant_title,
+)
+from .metrics import (
+    pretty_metric_name as _pretty_metric_name,
 )
 from .models import (
     BoardGroup,

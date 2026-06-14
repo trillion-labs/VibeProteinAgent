@@ -279,7 +279,7 @@ class ProteinaComplexaAdapter(ToolAdapter):
             designs = _collect_designs(run_dir=run_dir, params=params)
         except Exception:
             if run_failed is not None:
-                raise run_failed
+                raise run_failed from None
             raise
         if run_failed is not None:
             if "evaluate" not in (steps or []):

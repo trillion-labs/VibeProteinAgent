@@ -81,7 +81,7 @@ def suggested_profile_length(profile: dict[str, Any] | None) -> int | None:
     for key in ("median", "mean", "min"):
         value = _safe_float(stats.get(key))
         if value is not None and value > 0:
-            return int(round(value))
+            return round(value)
     consensus = str(guidance.get("consensus_sequence") or "")
     return len(consensus) or None
 

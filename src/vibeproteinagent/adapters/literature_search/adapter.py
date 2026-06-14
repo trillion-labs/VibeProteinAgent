@@ -192,7 +192,7 @@ class LiteratureSearchInput(BaseModel):
     fetch_text_mined_terms: bool = True
 
     @model_validator(mode="after")
-    def _reconcile_dates(self) -> "LiteratureSearchInput":
+    def _reconcile_dates(self) -> LiteratureSearchInput:
         if (
             self.published_before
             and self.temporal_cutoff

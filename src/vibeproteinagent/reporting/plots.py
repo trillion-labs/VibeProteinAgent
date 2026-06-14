@@ -31,7 +31,10 @@ def build_plots(model: ReportModel) -> list[PlotSpec]:
                     identities,
                     tool_label=source,
                     output_kind="MSA sequence identity",
-                    score_definition="Fractional identity to the query over aligned, non-gap query columns.",
+                    score_definition=(
+                        "Fractional identity to the query over aligned, non-gap "
+                        "query columns."
+                    ),
                 ),
             )
         )

@@ -206,7 +206,11 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "esm3": _contract(consumes=_SEQUENCE, produces=_FULL_STRUCTURE | _SEQUENCE | _SCORES),
     # Backbone/structure generators.
     "rfdiffusion": _contract(produces=_BACKBONE, preserves_upstream=False),
-    "rfdiffusion3": _contract(consumes=_FULL_STRUCTURE, produces=_BACKBONE, preserves_upstream=False),
+    "rfdiffusion3": _contract(
+        consumes=_FULL_STRUCTURE,
+        produces=_BACKBONE,
+        preserves_upstream=False,
+    ),
     "rfpeptides": _contract(produces=_BACKBONE, preserves_upstream=False),
     "boltzgen": _contract(produces=_FULL_SEQUENCE_SCORES),
     # Sequence design, backbone-design, or full-structure producers.
@@ -224,7 +228,11 @@ TOOL_CANDIDATE_CONTRACTS: dict[str, CandidateCapabilityContract] = {
     "tmalign": _contract(consumes=_BACKBONE, produces=_BACKBONE_SCORES, min_candidate_items=2),
     "ipsae": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "prodigy": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
-    "pxmeter": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES, min_candidate_items=2),
+    "pxmeter": _contract(
+        consumes=_FULL_STRUCTURE,
+        produces=_FULL_STRUCTURE | _SCORES,
+        min_candidate_items=2,
+    ),
     "pyrosetta": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "vina": _contract(consumes=_FULL_STRUCTURE, produces=_FULL_STRUCTURE | _SCORES),
     "protein_qc": _contract(produces=_SCORES),
@@ -251,7 +259,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {"mode": "unconditional"},
             "consumes": [],
             "produces": sorted(_BACKBONE),
-            "description": "Generates backbone structures from noise without an upstream target structure.",
+            "description": (
+                "Generates backbone structures from noise without an upstream "
+                "target structure."
+            ),
         },
         {
             "name": "target_conditioned_backbone_generation",
@@ -259,7 +270,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {"mode": "partial_diffusion"},
             "consumes": sorted(_BACKBONE),
             "produces": sorted(_BACKBONE),
-            "description": "Uses an upstream or user-provided target/motif structure and emits backbone candidates.",
+            "description": (
+                "Uses an upstream or user-provided target/motif structure and "
+                "emits backbone candidates."
+            ),
         },
     ],
     "rfpeptides": [
@@ -269,7 +283,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {},
             "consumes": [],
             "produces": sorted(_BACKBONE),
-            "description": "Generates cyclic peptide backbones without a target when no target_pdb/candidates are supplied.",
+            "description": (
+                "Generates cyclic peptide backbones without a target when no "
+                "target_pdb/candidates are supplied."
+            ),
         },
         {
             "name": "target_conditioned_peptide_backbone_generation",
@@ -287,7 +304,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {"target_pdb": "<path or canonical candidates>"},
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_BACKBONE),
-            "description": "Current adapter requires a target structure and emits binder backbone candidates.",
+            "description": (
+                "Current adapter requires a target structure and emits binder "
+                "backbone candidates."
+            ),
         },
     ],
     "boltzgen": [
@@ -320,7 +340,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {"target_pdb": "<path or canonical candidates>"},
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Requires a target structure and emits sequenced, scored binder structures.",
+            "description": (
+                "Requires a target structure and emits sequenced, scored binder "
+                "structures."
+            ),
         },
     ],
     "pxdesign": [
@@ -342,18 +365,31 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
         {
             "name": "protein_binder",
             "default": True,
-            "inputs": {"mode": "protein_binder", "target_pdb": "<path or canonical candidates>"},
+            "inputs": {
+                "mode": "protein_binder",
+                "target_pdb": "<path or canonical candidates>",
+            },
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Requires a protein target structure and emits sequenced, scored binder candidates.",
+            "description": (
+                "Requires a protein target structure and emits sequenced, scored "
+                "binder candidates."
+            ),
         },
         {
             "name": "ligand_binder",
             "default": False,
-            "inputs": {"mode": "ligand_binder", "target_pdb": "<path>", "ligand_smiles": "<SMILES>"},
+            "inputs": {
+                "mode": "ligand_binder",
+                "target_pdb": "<path>",
+                "ligand_smiles": "<SMILES>",
+            },
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Requires ligand target context and emits sequenced, scored binder candidates.",
+            "description": (
+                "Requires ligand target context and emits sequenced, scored "
+                "binder candidates."
+            ),
         },
         {
             "name": "motif",
@@ -361,7 +397,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {"mode": "motif", "motif_pdb": "<path or canonical candidates>"},
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Requires a motif structure and emits sequenced, scored scaffold candidates.",
+            "description": (
+                "Requires a motif structure and emits sequenced, scored scaffold "
+                "candidates."
+            ),
         },
     ],
     "esm3": [
@@ -371,7 +410,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {"tracks": ["embedding"]},
             "consumes": sorted(_SEQUENCE),
             "produces": sorted(_SEQUENCE_SCORES),
-            "description": "Consumes sequence and emits sequence-level embeddings/scores without a predicted structure.",
+            "description": (
+                "Consumes sequence and emits sequence-level embeddings/scores "
+                "without a predicted structure."
+            ),
         },
         {
             "name": "sequence_to_structure",
@@ -379,7 +421,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "inputs": {"tracks": ["sequence", "structure"]},
             "consumes": sorted(_SEQUENCE),
             "produces": sorted(_FULL_SEQUENCE_SCORES),
-            "description": "Consumes sequence and emits sequence plus predicted structure and confidence scores.",
+            "description": (
+                "Consumes sequence and emits sequence plus predicted structure "
+                "and confidence scores."
+            ),
         },
     ],
     "pxmeter": [
@@ -390,7 +435,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "consumes": sorted(_FULL_STRUCTURE),
             "produces": sorted(_FULL_STRUCTURE | _SCORES),
             "min_candidate_items": 2,
-            "description": "Scores predicted structure against reference structure; requires two structure candidates or explicit CIF paths.",
+            "description": (
+                "Scores predicted structure against reference structure; requires "
+                "two structure candidates or explicit CIF paths."
+            ),
         },
     ],
     "boltz2_affinity": [
@@ -419,7 +467,10 @@ TOOL_CANDIDATE_CAPABILITY_PROFILES: dict[str, list[dict[str, object]]] = {
             "consumes": sorted(_BACKBONE),
             "produces": sorted(_BACKBONE_SCORES),
             "min_candidate_items": 2,
-            "description": "Aligns two structures; backbone coordinates are sufficient, full structures are also accepted.",
+            "description": (
+                "Aligns two structures; backbone coordinates are sufficient, full "
+                "structures are also accepted."
+            ),
         },
     ],
 }
@@ -455,7 +506,11 @@ def candidate_contract_for_inputs(
         return _contract(produces=_BACKBONE, preserves_upstream=False)
     if tool_name == "esm3":
         tracks = inputs.get("tracks")
-        track_set = {str(item).lower() for item in tracks} if isinstance(tracks, list) else {"sequence", "structure"}
+        track_set = (
+            {str(item).lower() for item in tracks}
+            if isinstance(tracks, list)
+            else {"sequence", "structure"}
+        )
         if "structure" in track_set:
             return _contract(consumes=_SEQUENCE, produces=_FULL_SEQUENCE_SCORES)
         return _contract(consumes=_SEQUENCE, produces=_SEQUENCE_SCORES)

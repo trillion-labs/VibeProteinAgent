@@ -111,7 +111,9 @@ class SubmitCandidateInput(BaseModel):
         if self.outcome == "no_acceptable_candidate" and self.candidates:
             raise ValueError("no_acceptable_candidate submission must not include candidates")
         if self.outcome == "no_acceptable_candidate" and self.selection_summary is not None:
-            raise ValueError("no_acceptable_candidate submission must not include selection_summary")
+            raise ValueError(
+                "no_acceptable_candidate submission must not include selection_summary"
+            )
         return self
 
 
@@ -276,7 +278,11 @@ def _selection_evidence(
     row: dict[str, Any],
 ) -> dict[str, Any]:
     source_tool = (tool_name or "").strip().lower()
-    objective_block = row.get("scores", {}).get("objective_rank") if isinstance(row.get("scores"), dict) else None
+    objective_block = (
+        row.get("scores", {}).get("objective_rank")
+        if isinstance(row.get("scores"), dict)
+        else None
+    )
     row_is_objective = (
         source_tool == "objective_rank"
         or row.get("ranking_intent") == "objective"

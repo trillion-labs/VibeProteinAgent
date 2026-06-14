@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 PositionBasis = Literal["auto", "sequence", "structure"]
 
@@ -88,8 +89,8 @@ def residue_refs_from_objects(residues: Sequence[Any]) -> list[ResidueRef]:
             continue
         refs.append(
             ResidueRef(
-                chain_id=str(getattr(residue, "chain_id")),
-                resseq=int(getattr(residue, "resseq")),
+                chain_id=str(residue.chain_id),
+                resseq=int(residue.resseq),
                 icode=str(getattr(residue, "icode", "") or ""),
                 aa=aa,
             )
@@ -124,7 +125,10 @@ def resolve_positions(
     residue_ids: list[str] = []
     mapped_positions: list[dict[str, Any]] = []
     missing_positions: list[int] = []
-    explicit_ids = [normalize_residue_id(item, default_chain=chain_id) for item in explicit_residue_ids or []]
+    explicit_ids = [
+        normalize_residue_id(item, default_chain=chain_id)
+        for item in explicit_residue_ids or []
+    ]
     sequence_text = resolve_reference_sequence(sequence, fasta_path)
     basis: Literal["sequence", "structure"]
 
@@ -140,7 +144,8 @@ def resolve_positions(
         basis = "structure"
         if positions:
             warnings.append(
-                f"{label} interpreted as structure residue numbers because no sequence/fasta was provided"
+                f"{label} interpreted as structure residue numbers because no "
+                "sequence/fasta was provided"
             )
 
     if basis == "sequence":
@@ -210,7 +215,8 @@ def resolve_position_range(
         warnings = []
         if position_basis == "auto":
             warnings.append(
-                f"{label} interpreted as a structure residue range because no sequence/fasta was provided"
+                f"{label} interpreted as a structure residue range because no "
+                "sequence/fasta was provided"
             )
         return f"{chain_id}{start}-{end}", PositionResolution(
             residue_ids=[],
@@ -229,7 +235,10 @@ def resolve_position_range(
     )
     mapped = [
         ref
-        for ref in (parse_residue_id(item, default_chain=chain_id) for item in resolution.residue_ids)
+        for ref in (
+            parse_residue_id(item, default_chain=chain_id)
+            for item in resolution.residue_ids
+        )
         if ref.chain_id == chain_id
     ]
     ranges = _contiguous_numeric_ranges(mapped)

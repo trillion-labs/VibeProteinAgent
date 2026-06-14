@@ -15,14 +15,14 @@ from vibeproteinagent.adapters.profile_guidance import (
     normalize_profile_guidance,
     profile_guidance_metadata,
 )
-from vibeproteinagent.candidates.paths import candidate_pdb_path
-from vibeproteinagent.candidates.schema import stable_candidate_id
 from vibeproteinagent.adapters.residue_mapping import (
     PositionBasis,
     parse_residue_id,
     parse_structure_residue_refs,
     resolve_positions,
 )
+from vibeproteinagent.candidates.paths import candidate_pdb_path
+from vibeproteinagent.candidates.schema import stable_candidate_id
 
 # vendor/ligandmpnn/ holds the upstream package under `ligandmpnn_vendor/`.
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]

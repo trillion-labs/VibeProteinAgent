@@ -248,7 +248,9 @@ class TemplateSelectInput(BaseModel):
         if out.get("template_db_kind") == "foldseek":
             structure_path = first.get("structure_path")
             if not structure_path:
-                raise ValueError("template_select canonical Candidate[] input requires structure_path")
+                raise ValueError(
+                    "template_select canonical Candidate[] input requires structure_path"
+                )
             out.setdefault("query_structure", structure_path)
         else:
             sequence = first.get("sequence")

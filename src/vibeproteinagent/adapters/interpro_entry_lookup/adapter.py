@@ -71,7 +71,11 @@ class InterProEntryLookupAdapter(ToolAdapter):
         }
         return InterProEntryLookupOutput(
             accession=str(entry["accession"]),
-            status=("resolved" if row.get("valid") else ("backend_error" if warnings else "no_match")),
+            status=(
+                "resolved"
+                if row.get("valid")
+                else ("backend_error" if warnings else "no_match")
+            ),
             matches=[
                 {
                     "source": entry.get("source") or "interpro_entry_lookup",

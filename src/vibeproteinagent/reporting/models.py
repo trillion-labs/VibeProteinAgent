@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-
 _ALLOWED_AGENT_CLIENTS = frozenset({"codex", "claude_code"})
 
 

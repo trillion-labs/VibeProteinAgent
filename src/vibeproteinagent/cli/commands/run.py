@@ -20,6 +20,7 @@ from vibeproteinagent.core.types import (
     parse_kv_pairs,
     resolve_salt,
 )
+from vibeproteinagent.workers.supervisor_client import SupervisorClient
 from vibeproteinagent.workspace import (
     JobRecord,
     JobState,
@@ -27,7 +28,6 @@ from vibeproteinagent.workspace import (
     Workspace,
     now_us,
 )
-from vibeproteinagent.workers.supervisor_client import SupervisorClient
 
 
 def run(

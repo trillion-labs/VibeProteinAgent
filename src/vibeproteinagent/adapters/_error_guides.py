@@ -145,7 +145,7 @@ def _format_property_suggestion(
     list the valid property names and offer a did-you-mean for each rejected
     name. Without this hint the LLM only learns its guess was wrong, not
     what the actual field names are — which we've observed produces stuck
-    retries (same guess 3× in a row) on tools like bindcraft/go_sequences.
+    retries (same guess 3x in a row) on tools like bindcraft/go_sequences.
     """
     if "Additional properties are not allowed" not in raw_message:
         return None
@@ -202,7 +202,10 @@ def _format_root_schema_hint(
         conditional_hints = matching_conditional_required_hints(subschema, params)
         pieces.extend(conditional_hints)
     if required:
-        pieces.append("Root schema guidance: satisfy one required input set: " + "; ".join(required))
+        pieces.append(
+            "Root schema guidance: satisfy one required input set: "
+            + "; ".join(required)
+        )
     if valid_fields:
         shown = valid_fields if len(valid_fields) <= 12 else valid_fields[:12]
         suffix = "" if len(valid_fields) <= 12 else f", ... ({len(valid_fields) - 12} more)"

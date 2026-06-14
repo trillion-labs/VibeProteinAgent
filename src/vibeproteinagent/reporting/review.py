@@ -31,14 +31,32 @@ from typing import Any
 from .collect import _as_float, _as_int, _string_list
 from .identity import (
     candidate_manifest_identity as _candidate_manifest_identity,
+)
+from .identity import (
     candidate_material_key as _candidate_material_key,
+)
+from .identity import (
     candidate_ranked_candidate_id as _candidate_ranked_candidate_id,
+)
+from .identity import (
     candidate_sequence_identity as _candidate_sequence_identity,
+)
+from .identity import (
     candidate_structure_identity as _candidate_structure_identity,
+)
+from .identity import (
     row_material_key as _row_material_key,
+)
+from .identity import (
     row_ranked_candidate_id as _row_ranked_candidate_id,
+)
+from .identity import (
     strong_candidate_manifest_identity as _strong_candidate_manifest_identity,
+)
+from .identity import (
     submitted_material_key as _submitted_material_key,
+)
+from .identity import (
     submitted_ranked_candidate_id as _submitted_ranked_candidate_id,
 )
 from .models import (
@@ -1274,28 +1292,42 @@ def _resolve_final_records(model: ReportModel) -> dict[int, str]:
     for final_idx, fc in enumerate(model.final_candidates):
         ranked_id = _submitted_ranked_candidate_id(fc)
         if ranked_id:
-            match = unique_match(lambda cand: _candidate_ranked_candidate_id(cand) == ranked_id)
+            match = unique_match(
+                lambda cand, ranked_id=ranked_id: (
+                    _candidate_ranked_candidate_id(cand) == ranked_id
+                )
+            )
             if match is not None:
                 resolved[match] = Provenance.EXACT
                 matched_finals.add(final_idx)
                 continue
         material_key = _submitted_material_key(fc)
         if material_key:
-            match = unique_match(lambda cand: _candidate_material_key(cand) == material_key)
+            match = unique_match(
+                lambda cand, material_key=material_key: (
+                    _candidate_material_key(cand) == material_key
+                )
+            )
             if match is not None:
                 resolved[match] = Provenance.EXACT
                 matched_finals.add(final_idx)
                 continue
         fc_structure = _candidate_structure_identity(fc)
         if fc_structure:
-            match = unique_match(lambda cand: _candidate_structure_identity(cand) == fc_structure)
+            match = unique_match(
+                lambda cand, fc_structure=fc_structure: (
+                    _candidate_structure_identity(cand) == fc_structure
+                )
+            )
             if match is not None:
                 resolved[match] = Provenance.EXACT
                 matched_finals.add(final_idx)
                 continue
         fcid = str(fc.candidate_id or "")
         if fcid:
-            match = unique_match(lambda cand: str(cand.candidate_id or "") == fcid)
+            match = unique_match(
+                lambda cand, fcid=fcid: str(cand.candidate_id or "") == fcid
+            )
             if match is not None:
                 resolved[match] = Provenance.EXACT
                 matched_finals.add(final_idx)
@@ -1715,7 +1747,9 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
         and isinstance(node.output.get("ranked_candidates"), list)
         for node in model.graph.nodes
     )
-    manifest_model = replace(model, candidates=manifest_candidates) if has_ranking_manifest else model
+    manifest_model = (
+        replace(model, candidates=manifest_candidates) if has_ranking_manifest else model
+    )
     final_map = _resolve_final_records(manifest_model)
     scoring_ranks = _scoring_rank_map(model)
     top_ranked_id = next((cid for cid, rank in scoring_ranks.items() if rank == 1), None)
@@ -1784,7 +1818,9 @@ def build_review_model(model: ReportModel) -> ReportReviewModel:
         workflow_type=workflow_type,
         board_groups=board_groups,
         bundles=bundles,
-        grouping_policy="ranking_manifest" if manifest_candidates != list(model.candidates) else "raw",
+        grouping_policy=(
+            "ranking_manifest" if manifest_candidates != list(model.candidates) else "raw"
+        ),
     )
 
 

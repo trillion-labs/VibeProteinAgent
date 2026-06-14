@@ -4,13 +4,13 @@ from copy import deepcopy
 from typing import Any
 
 from vibeproteinagent.adapters.descriptor import resolve_input_schema_dict
+from vibeproteinagent.core.errors import InvalidParamsError
 from vibeproteinagent.workflows.parameter_policies import (
     RUNTIME_SOURCES,
     STRONG_USER_SOURCES,
     TOOL_PARAMETER_POLICIES,
     policy_for,
 )
-from vibeproteinagent.core.errors import InvalidParamsError
 
 from .parameter_derivers import (
     candidate_input_json,

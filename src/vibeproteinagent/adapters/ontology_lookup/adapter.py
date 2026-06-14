@@ -62,7 +62,11 @@ class OntologyLookupAdapter(ToolAdapter):
         }
         return OntologyLookupOutput(
             id=str(term["id"]),
-            status=("resolved" if row.get("valid") else ("backend_error" if warnings else "no_match")),
+            status=(
+                "resolved"
+                if row.get("valid")
+                else ("backend_error" if warnings else "no_match")
+            ),
             matches=[
                 {
                     "source": term.get("source") or "ontology_lookup",

@@ -6,12 +6,26 @@ from vibeproteinagent.core.errors import InvalidParamsError
 
 from .identity import (
     candidate_material_key as _material_key,
+)
+from .identity import (
     candidate_ranked_candidate_id as _ranked_candidate_id,
+)
+from .identity import (
     candidate_sequence_identity as _candidate_sequence_identity,
+)
+from .identity import (
     row_material_key as _row_material_key,
+)
+from .identity import (
     row_ranked_candidate_id as _row_ranked_candidate_id,
+)
+from .identity import (
     structure_identity as _structure_identity,
+)
+from .identity import (
     submitted_material_key as _submitted_material_key,
+)
+from .identity import (
     submitted_ranked_candidate_id as _submitted_ranked_candidate_id,
 )
 from .models import ReportCandidate, ReportModel

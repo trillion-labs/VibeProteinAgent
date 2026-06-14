@@ -206,7 +206,10 @@ def _make_runner(ctx: SessionCtx, descriptor: ToolDescriptor, wait_s: float):
                         "requested_workspace": ctx.workspace.name,
                         "supervisor_workspace": runtime_info.get("workspace"),
                         "socket": runtime_info.get("socket"),
-                        "hint": "start the daemon for this workspace before calling dynamic run_<tool>",
+                        "hint": (
+                            "start the daemon for this workspace before calling "
+                            "dynamic run_<tool>"
+                        ),
                     },
                 )
             )

@@ -18,7 +18,7 @@ runs them, checks the evidence, and gives you an inspectable HTML report.
   sit behind a single `vpa` command surface.
 - **Agent-first.** Codex or Claude Code reads the repo skills,
   picks the tools that fit your objective, runs them, and analyzes the evidence.
-- **Local-first, no design-API bills.** Models run on your own GPUs; once you
+- **No design-API bills.** Protein design models run on your own GPUs; once you
   have a coding agent you can run autonomous protein design without subscribing
   to a hosted protein-design service. (First-party code is source-available for
   non-commercial use — see [License](#license).)

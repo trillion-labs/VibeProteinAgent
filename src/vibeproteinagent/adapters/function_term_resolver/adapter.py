@@ -28,7 +28,9 @@ class FunctionTermResolverInput(BaseModel):
             "item may include intent_id, label, query, and required."
         ),
     )
-    preferred_namespaces: list[Literal["go", "interpro"]] = Field(default_factory=lambda: ["go", "interpro"])
+    preferred_namespaces: list[Literal["go", "interpro"]] = Field(
+        default_factory=lambda: ["go", "interpro"]
+    )
     aspect: str | None = None
     limit_per_target: int = Field(default=5, ge=1, le=25)
     timeout_s: float = Field(default=15.0, gt=0, le=60)
@@ -430,7 +432,11 @@ def _empty_facets(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "term_relevance_score": term_relevance_score,
                 "score_breakdown": score_breakdown,
                 "selected_reason": selected_reason
-                or f"resolver facet {target.get('intent_id') or target.get('label') or target.get('query')} did not produce an executable term",
+                or (
+                    "resolver facet "
+                    f"{target.get('intent_id') or target.get('label') or target.get('query')} "
+                    "did not produce an executable term"
+                ),
                 "resolver_evidence": {
                     "intent_id": target.get("intent_id"),
                     "label": target.get("label"),

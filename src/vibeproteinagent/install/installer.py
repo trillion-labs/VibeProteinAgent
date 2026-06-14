@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import gzip
+import hashlib
 import json
 import os
 import os.path
@@ -455,7 +455,13 @@ def _run_docker_install_validation(
     if doctor.returncode != 0 and "could not select device driver" in doctor.stderr:
         no_gpu_cmd = [item for item in cmd if item not in ("--gpus", "all")]
         doctor = subprocess.run(no_gpu_cmd, text=True, capture_output=True, check=False)
-        checks.append({"name": "docker_gpu", "status": "skipped", "reason": "GPU runtime unavailable"})
+        checks.append(
+            {
+                "name": "docker_gpu",
+                "status": "skipped",
+                "reason": "GPU runtime unavailable",
+            }
+        )
     checks.append(
         {
             "name": "docker_doctor",
@@ -480,7 +486,9 @@ def _run_docker_install_validation(
                     "failed_count": len(failed),
                     "needs_credential_count": len(capabilities.get("needs_credential") or []),
                     "needs_acceptance_count": len(capabilities.get("needs_acceptance") or []),
-                    "needs_local_artifact_count": len(capabilities.get("needs_local_artifact") or []),
+                    "needs_local_artifact_count": len(
+                        capabilities.get("needs_local_artifact") or []
+                    ),
                     "unavailable_count": len(capabilities.get("unavailable") or []),
                 }
         except Exception as exc:
@@ -752,7 +760,6 @@ def _capability_summary(
         tool_results = result_by_tool.get(tool.name, [])
         last = _authoritative_tool_result(tool_results) or {}
         status = str(last.get("status") or "")
-        reason = str(last.get("reason") or "")
         if status == "ready":
             buckets["ready"].append({"tool": tool.name})
         elif "hf_token" in tool.access_requirements:
@@ -2447,7 +2454,10 @@ def _env_exports(
                     options,
                 ),
             )
-            exports.setdefault("TOOL_WEIGHTS_ROOT", str(paths.cache_dir / "pxdesign" / "tool_weights"))
+            exports.setdefault(
+                "TOOL_WEIGHTS_ROOT",
+                str(paths.cache_dir / "pxdesign" / "tool_weights"),
+            )
         elif tool.name == "rfdiffusion3":
             exports.setdefault(
                 "VPA_RFDIFFUSION3_ENV",
@@ -2608,10 +2618,10 @@ def _repair_sidecar_python_links(
         python_link.unlink()
         python_link.symlink_to(os.path.relpath(shared_python, python_link.parent))
         repaired.append(str(python_link))
-    for cfg in (sidecar_path / "pyvenv.cfg", sidecar_path / ".venv" / "pyvenv.cfg"):
-        if not cfg.is_file():
+    for venv_cfg in (sidecar_path / "pyvenv.cfg", sidecar_path / ".venv" / "pyvenv.cfg"):
+        if not venv_cfg.is_file():
             continue
-        lines = cfg.read_text().splitlines()
+        lines = venv_cfg.read_text().splitlines()
         changed = False
         rewritten: list[str] = []
         for line in lines:
@@ -2625,8 +2635,8 @@ def _repair_sidecar_python_links(
             else:
                 rewritten.append(line)
         if changed:
-            cfg.write_text("\n".join(rewritten) + "\n")
-            repaired.append(str(cfg))
+            venv_cfg.write_text("\n".join(rewritten) + "\n")
+            repaired.append(str(venv_cfg))
     if repaired:
         results.append(
             {

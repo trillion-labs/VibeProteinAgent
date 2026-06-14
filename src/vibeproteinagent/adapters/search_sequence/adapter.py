@@ -31,24 +31,137 @@ from vibeproteinagent.adapters.interpro_sequences.adapter import (
 
 
 class SearchSequenceInput(BaseModel):
-    context: str | None = Field(default=None, description="Natural-language sequence retrieval context used for internal GO/InterPro term resolution when exact terms are absent or semantic facets are present.")
-    go_term: str | None = Field(default=None, pattern=r"^GO:[0-9]{7}$", description="Optional explicit Gene Ontology identifier in GO:NNNNNNN format. When provided, GO sequence retrieval is always run.", examples=["GO:0052855", None])
-    interpro_term: str | None = Field(default=None, pattern=r"^IPR[0-9]{6}$", description="Optional explicit InterPro accession in IPRNNNNNN format. When provided, InterPro sequence retrieval is always run.", examples=["IPR000001", None])
-    go_terms: list[dict[str, Any]] = Field(default_factory=list, description="Bounded GO term records, usually from a resolver. Each record may include term_id, intent_id, label, term_relevance_score, and score_breakdown.")
-    interpro_terms: list[dict[str, Any]] = Field(default_factory=list, description="Bounded InterPro term records, usually from a resolver. Each record may include term_id, intent_id, label, term_relevance_score, and score_breakdown.")
-    semantic_intents: list[dict[str, Any]] = Field(default_factory=list, description="Optional semantic facets to resolve independently. Each item may include intent_id, label, query, and required.")
-    reviewed: bool | None = Field(default=True, description="If true, prefer reviewed Swiss-Prot records where source APIs support the filter; false restricts to unreviewed records; null returns both.")
-    taxon_id: int | None = Field(default=None, description="Optional NCBI taxonomy id to restrict returned UniProt sequences. Null disables taxonomy filtering.")
-    temporal_cutoff: str | None = Field(default=None, description="Optional ISO date (YYYY-MM-DD); only sequences with UniProt entry dates on or before this date are retained.")
-    include_fragments: bool = Field(default=False, description="If true, include InterPro sequences flagged by UniProt as fragments. GO retrieval currently ignores this field.")
-    max_sequences: int = Field(default=300, ge=1, le=10000, description="Maximum source sequences scanned or kept per retrieval source before downstream candidate bounding.")
-    max_downstream_candidates: int = Field(default=40, ge=1, le=1000, description="Maximum final canonical Candidate[] records emitted after source merge, deduplication, scoring, and intent-quota top-K.")
-    timeout_s: float = Field(default=20.0, gt=0, le=120, description="HTTP timeout in seconds for resolver and source retrieval calls.")
-    include_undated: bool = Field(default=False, description="When temporal_cutoff is set, controls whether records lacking a parseable UniProt entry date are included.")
-    min_length: int | None = Field(default=None, ge=1, description="Optional minimum sequence length in amino acids.")
-    max_length: int | None = Field(default=None, ge=1, description="Optional maximum sequence length in amino acids.")
-    page_size: int = Field(default=200, ge=1, le=500, description="Number of records fetched per remote API page where supported.")
-    max_concurrency: int = Field(default=5, ge=1, le=20, description="Maximum parallel HTTP fetches used by source retrieval adapters.")
+    context: str | None = Field(
+        default=None,
+        description=(
+            "Natural-language sequence retrieval context used for internal "
+            "GO/InterPro term resolution when exact terms are absent or semantic "
+            "facets are present."
+        ),
+    )
+    go_term: str | None = Field(
+        default=None,
+        pattern=r"^GO:[0-9]{7}$",
+        description=(
+            "Optional explicit Gene Ontology identifier in GO:NNNNNNN format. "
+            "When provided, GO sequence retrieval is always run."
+        ),
+        examples=["GO:0052855", None],
+    )
+    interpro_term: str | None = Field(
+        default=None,
+        pattern=r"^IPR[0-9]{6}$",
+        description=(
+            "Optional explicit InterPro accession in IPRNNNNNN format. When "
+            "provided, InterPro sequence retrieval is always run."
+        ),
+        examples=["IPR000001", None],
+    )
+    go_terms: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Bounded GO term records, usually from a resolver. Each record may "
+            "include term_id, intent_id, label, term_relevance_score, and "
+            "score_breakdown."
+        ),
+    )
+    interpro_terms: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Bounded InterPro term records, usually from a resolver. Each record "
+            "may include term_id, intent_id, label, term_relevance_score, and "
+            "score_breakdown."
+        ),
+    )
+    semantic_intents: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Optional semantic facets to resolve independently. Each item may "
+            "include intent_id, label, query, and required."
+        ),
+    )
+    reviewed: bool | None = Field(
+        default=True,
+        description=(
+            "If true, prefer reviewed Swiss-Prot records where source APIs "
+            "support the filter; false restricts to unreviewed records; null "
+            "returns both."
+        ),
+    )
+    taxon_id: int | None = Field(
+        default=None,
+        description=(
+            "Optional NCBI taxonomy id to restrict returned UniProt sequences. "
+            "Null disables taxonomy filtering."
+        ),
+    )
+    temporal_cutoff: str | None = Field(
+        default=None,
+        description=(
+            "Optional ISO date (YYYY-MM-DD); only sequences with UniProt entry "
+            "dates on or before this date are retained."
+        ),
+    )
+    include_fragments: bool = Field(
+        default=False,
+        description=(
+            "If true, include InterPro sequences flagged by UniProt as fragments. "
+            "GO retrieval currently ignores this field."
+        ),
+    )
+    max_sequences: int = Field(
+        default=300,
+        ge=1,
+        le=10000,
+        description=(
+            "Maximum source sequences scanned or kept per retrieval source before "
+            "downstream candidate bounding."
+        ),
+    )
+    max_downstream_candidates: int = Field(
+        default=40,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum final canonical Candidate[] records emitted after source "
+            "merge, deduplication, scoring, and intent-quota top-K."
+        ),
+    )
+    timeout_s: float = Field(
+        default=20.0,
+        gt=0,
+        le=120,
+        description="HTTP timeout in seconds for resolver and source retrieval calls.",
+    )
+    include_undated: bool = Field(
+        default=False,
+        description=(
+            "When temporal_cutoff is set, controls whether records lacking a "
+            "parseable UniProt entry date are included."
+        ),
+    )
+    min_length: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional minimum sequence length in amino acids.",
+    )
+    max_length: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional maximum sequence length in amino acids.",
+    )
+    page_size: int = Field(
+        default=200,
+        ge=1,
+        le=500,
+        description="Number of records fetched per remote API page where supported.",
+    )
+    max_concurrency: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum parallel HTTP fetches used by source retrieval adapters.",
+    )
 
 
 class SearchSequenceOutput(BaseModel):
@@ -96,7 +209,11 @@ class SearchSequenceAdapter(ToolAdapter):
         query = _query_text(params)
         explicit_go_terms = _explicit_go_terms(params)
         explicit_interpro_terms = _explicit_interpro_terms(params)
-        should_resolve = bool(params.context or params.semantic_intents or not (explicit_go_terms or explicit_interpro_terms))
+        should_resolve = bool(
+            params.context
+            or params.semantic_intents
+            or not (explicit_go_terms or explicit_interpro_terms)
+        )
 
         resolver_output: FunctionTermResolverOutput | None = None
         resolver_empty_facets: list[dict[str, Any]] = []
@@ -141,7 +258,11 @@ class SearchSequenceAdapter(ToolAdapter):
             for candidate in result.candidates
             if isinstance(candidate, dict)
         ]
-        if failed and not successful_candidates and all(result.status == "failed" for result in source_results):
+        if (
+            failed
+            and not successful_candidates
+            and all(result.status == "failed" for result in source_results)
+        ):
             first = failed[0]
             raise RuntimeError(
                 f"search_sequence source {first.source} failed: "
@@ -279,15 +400,35 @@ def _query_text(params: SearchSequenceInput) -> str:
     if labels:
         return "; ".join(labels[:5])
     terms = [params.go_term, params.interpro_term]
-    terms.extend(str(t.get("term_id") or t.get("id")) for t in params.go_terms if isinstance(t, dict))
-    terms.extend(str(t.get("term_id") or t.get("id")) for t in params.interpro_terms if isinstance(t, dict))
+    terms.extend(
+        str(t.get("term_id") or t.get("id"))
+        for t in params.go_terms
+        if isinstance(t, dict)
+    )
+    terms.extend(
+        str(t.get("term_id") or t.get("id"))
+        for t in params.interpro_terms
+        if isinstance(t, dict)
+    )
     return " ".join(term for term in terms if term)
 
 
 def _explicit_go_terms(params: SearchSequenceInput) -> list[dict[str, Any]]:
-    terms = [_normalize_term(term, namespace="go", explicit=True) for term in params.go_terms if isinstance(term, dict)]
+    terms = [
+        _normalize_term(term, namespace="go", explicit=True)
+        for term in params.go_terms
+        if isinstance(term, dict)
+    ]
     if params.go_term:
-        terms.insert(0, {"term_id": params.go_term, "id": params.go_term, "intent_id": params.go_term, "explicit": True})
+        terms.insert(
+            0,
+            {
+                "term_id": params.go_term,
+                "id": params.go_term,
+                "intent_id": params.go_term,
+                "explicit": True,
+            },
+        )
     return [term for term in terms if term.get("term_id")]
 
 
@@ -298,7 +439,15 @@ def _explicit_interpro_terms(params: SearchSequenceInput) -> list[dict[str, Any]
         if isinstance(term, dict)
     ]
     if params.interpro_term:
-        terms.insert(0, {"term_id": params.interpro_term, "id": params.interpro_term, "intent_id": params.interpro_term, "explicit": True})
+        terms.insert(
+            0,
+            {
+                "term_id": params.interpro_term,
+                "id": params.interpro_term,
+                "intent_id": params.interpro_term,
+                "explicit": True,
+            },
+        )
     return [term for term in terms if term.get("term_id")]
 
 
@@ -472,7 +621,10 @@ def _source_no_term_events(
                 "selected_term": None,
                 "term_relevance_score": None,
                 "score_breakdown": {},
-                "selected_reason": f"resolver did not select any {source.upper()} term for this retrieval stream",
+                "selected_reason": (
+                    f"resolver did not select any {source.upper()} term "
+                    "for this retrieval stream"
+                ),
                 "resolver_evidence": {},
                 "retrieval_status": "no_terms",
                 "candidate_count": 0,
@@ -493,7 +645,10 @@ def _source_no_term_events(
                 "selected_term": None,
                 "term_relevance_score": None,
                 "score_breakdown": {},
-                "selected_reason": f"resolver did not select any {source.upper()} term for this retrieval stream",
+                "selected_reason": (
+                    f"resolver did not select any {source.upper()} term "
+                    "for this retrieval stream"
+                ),
                 "resolver_evidence": {
                     "intent_id": target.get("intent_id"),
                     "label": target.get("label"),
@@ -540,8 +695,16 @@ def _merge_dedupe_top_k(
     explicit_interpro_terms: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     explicit_term_ids = {
-        "go_sequences": {str(term.get("term_id")) for term in explicit_go_terms if term.get("term_id")},
-        "interpro_sequences": {str(term.get("term_id")) for term in explicit_interpro_terms if term.get("term_id")},
+        "go_sequences": {
+            str(term.get("term_id"))
+            for term in explicit_go_terms
+            if term.get("term_id")
+        },
+        "interpro_sequences": {
+            str(term.get("term_id"))
+            for term in explicit_interpro_terms
+            if term.get("term_id")
+        },
     }
     best_by_sequence: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
@@ -553,7 +716,10 @@ def _merge_dedupe_top_k(
         if current is None:
             best_by_sequence[sequence] = incoming
             continue
-        if _candidate_rank_key(incoming, explicit_term_ids) < _candidate_rank_key(current, explicit_term_ids):
+        if _candidate_rank_key(incoming, explicit_term_ids) < _candidate_rank_key(
+            current,
+            explicit_term_ids,
+        ):
             best_by_sequence[sequence] = _merge_candidate_score_details(incoming, current)
         else:
             best_by_sequence[sequence] = _merge_candidate_score_details(current, incoming)

@@ -14,7 +14,6 @@ from vibeproteinagent.adapters.sequence_analysis.adapter import SequenceAnalysis
 from vibeproteinagent.reporting.models import ReportCandidate, ReportModel
 from vibeproteinagent.workspace import ArtifactStore, JobState, JobStore, Workspace
 
-
 REPORT_ENRICHMENT_CALL_ID_PREFIX = "report_enrich_sequence_analysis"
 REPORT_ENRICHMENT_CONTRACT_VERSION = 3
 

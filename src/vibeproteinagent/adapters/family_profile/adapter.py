@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from vibeproteinagent.adapters.base import ToolAdapter, register_adapter, torch
 from vibeproteinagent.adapters.context import AdapterRunContext
-from vibeproteinagent.candidates.schema import validate_candidate_v1
 from vibeproteinagent.candidates.capabilities import candidate_capability_flags
+from vibeproteinagent.candidates.schema import validate_candidate_v1
 
 _AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 _AA_SET = frozenset(_AMINO_ACIDS)
@@ -221,7 +221,10 @@ def _build_profile(
     }
 
 
-def _normalize_profile(profile: dict[str, Any] | None, params: FamilyProfileInput) -> dict[str, Any]:
+def _normalize_profile(
+    profile: dict[str, Any] | None,
+    params: FamilyProfileInput,
+) -> dict[str, Any]:
     normalized = copy.deepcopy(profile or {})
     normalized.setdefault("schema_version", "family_profile_v1")
     if params.family_id is not None:
@@ -427,7 +430,7 @@ def _consensus_match_score(sequence: str, profile: dict[str, Any]) -> float:
     consensus = str(profile.get("consensus_sequence") or "")
     comparable = 0
     matches = 0
-    for residue, expected in zip(sequence, consensus):
+    for residue, expected in zip(sequence, consensus, strict=False):
         if expected not in _AA_SET:
             continue
         comparable += 1
@@ -453,7 +456,7 @@ def _motif_match_score(sequence: str, profile: dict[str, Any]) -> float:
         if comparable <= 0:
             scores.append(0.0)
             continue
-        matches = sum(1 for a, b in zip(fragment, motif) if a == b)
+        matches = sum(1 for a, b in zip(fragment, motif, strict=False) if a == b)
         scores.append(matches / comparable)
     return statistics.mean(scores) if scores else 0.0
 
@@ -465,7 +468,7 @@ def _length_zscore(length: int, profile: dict[str, Any]) -> float | None:
     if mean is None:
         return None
     if stdev is None or stdev == 0:
-        return 0.0 if length == int(round(mean)) else float(length - mean)
+        return 0.0 if length == round(mean) else float(length - mean)
     return (length - mean) / stdev
 
 
