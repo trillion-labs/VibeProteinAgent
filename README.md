@@ -28,6 +28,12 @@ runs them, checks the evidence, and gives you an inspectable HTML report.
   interactive 3D structure rendering, per-candidate statistics, comparison
   tables, and rankings.
 
+## Performance on VibeProteinBench
+
+We evaluate VPA with Codex (GPT 5.5 high) as the base agent on [VibeProteinBench](https://arxiv.org/abs/2605.10978). VPA sets a new state of the art on both protein engineering and generation tasks, as shown below.
+
+![VPA codex performance](assets/readme/vpa_performance.png)
+
 ## Requirements
 
 - **Hugging Face token.** ESM3 requires gated downloads; export
@@ -74,7 +80,7 @@ You do not need to memorize VPA commands for normal use. Ask your coding agent
 for the result you want:
 
 ```text
-Install VPA into /vpa and check that the full GPU profile is ready.
+Install VPA into .vibeproteinagent/ folder and check that the full GPU profile is ready.
 ```
 
 or:
@@ -106,7 +112,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 Open this repository in Codex and ask in natural language. For example:
 
 ```text
-Install VibeProteinAgent into /vpa.
+Install VibeProteinAgent into .vibeproteinagent/.
 Use the full profile with CUDA auto-detection, run doctor, and tell me whether VPA is ready.
 ```
 
@@ -125,7 +131,7 @@ decide what to run. The portable interface is plain language.
 In Claude Code, use the project command included in this repo:
 
 ```text
-/vpa Install VibeProteinAgent into /vpa. Use the full profile with CUDA
+/vpa Install VibeProteinAgent into .vibeproteinagent/. Use the full profile with CUDA
 auto-detection, run doctor, and report readiness.
 ```
 

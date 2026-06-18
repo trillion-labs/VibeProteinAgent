@@ -10,6 +10,7 @@ import importlib
 import inspect
 import json
 import os
+import shutil
 import sys
 import time
 from copy import deepcopy
@@ -69,6 +70,246 @@ PROTENIX_TREE = Path(
 PROTENIX_CKPT_DIR = Path(
     os.environ.get("VPA_PROTENIX_CKPT", PROTENIX_CKPT_DEFAULT)
 ).expanduser()
+PROTENIX_LAYER_NORM_SO = (
+    PROTENIX_TREE
+    / "protenix"
+    / "model"
+    / "layer_norm"
+    / "fast_layer_norm_cuda_v2.so"
+)
+
+
+def _ensure_cuda_extension_toolchain() -> dict[str, Any]:
+    """Seed CUDA extension build environment for Protenix's layer-norm JIT."""
+    cuda_home = _find_cuda_toolkit_home()
+    report = _cuda_toolchain_report(cuda_home)
+    if cuda_home is None:
+        return report
+
+    os.environ["CUDA_HOME"] = str(cuda_home)
+    os.environ["CUDA_PATH"] = str(cuda_home)
+    os.environ["CUDACXX"] = str(cuda_home / "bin" / "nvcc")
+    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "9.0;10.0")
+
+    cc, cxx = _find_cuda_host_compilers(cuda_home)
+    if cc is not None:
+        os.environ.setdefault("CC", str(cc))
+    if cxx is not None:
+        os.environ.setdefault("CXX", str(cxx))
+        os.environ.setdefault("CUDAHOSTCXX", str(cxx))
+
+    for key, values in _cuda_toolchain_path_prepends(cuda_home).items():
+        _prepend_env_path(key, values)
+
+    try:
+        import torch.utils.cpp_extension as cpp_extension
+
+        cpp_extension.CUDA_HOME = str(cuda_home)
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        report["torch_cpp_extension"] = {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    else:
+        report["torch_cpp_extension"] = {
+            "ok": True,
+            "CUDA_HOME": str(cuda_home),
+        }
+    return _cuda_toolchain_report(cuda_home)
+
+
+def _find_cuda_toolkit_home() -> Path | None:
+    candidates: list[Path] = []
+    for key in ("VPA_CUDA_TOOLKIT_HOME", "CUDA_HOME", "CUDA_PATH", "CONDA_PREFIX"):
+        value = os.environ.get(key)
+        if value:
+            candidates.append(Path(value).expanduser())
+
+    for base in _cuda_search_bases():
+        candidates.append(base / ".vibeproteinbench" / "cuda-12.8")
+        candidates.append(base / "cuda-12.8")
+
+    try:
+        spec = importlib.util.find_spec("nvidia.cuda_nvcc")
+    except Exception:
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        for location in spec.submodule_search_locations:
+            candidates.append(Path(location))
+
+    nvcc = shutil.which("nvcc")
+    if nvcc:
+        candidates.append(Path(nvcc).resolve().parent.parent)
+    candidates.extend([Path("/usr/local/cuda-12.8"), Path("/usr/local/cuda")])
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if (resolved / "bin" / "nvcc").is_file():
+            return resolved
+    return None
+
+
+def _cuda_search_bases() -> list[Path]:
+    bases = [Path.cwd()]
+    vpa_home = os.environ.get("VPA_HOME")
+    if vpa_home:
+        bases.append(Path(vpa_home).expanduser())
+        bases.append(Path(vpa_home).expanduser().parent)
+    bases.extend(Path(__file__).resolve().parents)
+    protenix_parents = (
+        PROTENIX_TREE.resolve().parents if PROTENIX_TREE.exists() else PROTENIX_TREE.parents
+    )
+    bases.extend(protenix_parents)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for base in bases:
+        try:
+            resolved = base.expanduser().resolve()
+        except OSError:
+            resolved = base.expanduser()
+        if resolved not in seen:
+            unique.append(resolved)
+            seen.add(resolved)
+    return unique
+
+
+def _find_cuda_host_compilers(cuda_home: Path) -> tuple[Path | None, Path | None]:
+    search_dirs = [cuda_home / "bin", Path(sys.executable).resolve().parent]
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        search_dirs.append(Path(conda_prefix).expanduser() / "bin")
+    cc = _find_executable(("x86_64-conda-linux-gnu-gcc", "gcc", "cc"), search_dirs)
+    cxx = _find_executable(
+        ("x86_64-conda-linux-gnu-g++", "g++", "x86_64-conda-linux-gnu-c++", "c++"),
+        search_dirs,
+    )
+    return cc, cxx
+
+
+def _find_executable(names: tuple[str, ...], search_dirs: list[Path]) -> Path | None:
+    for directory in search_dirs:
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
+def _cuda_toolchain_path_prepends(cuda_home: Path) -> dict[str, list[str]]:
+    prepends: dict[str, list[str]] = {}
+    bin_dir = cuda_home / "bin"
+    if bin_dir.is_dir():
+        prepends["PATH"] = [str(bin_dir)]
+    lib_dirs = [
+        cuda_home / "lib64",
+        cuda_home / "lib",
+        cuda_home / "targets" / "x86_64-linux" / "lib",
+    ]
+    existing_lib_dirs = [str(path) for path in lib_dirs if path.is_dir()]
+    if existing_lib_dirs:
+        prepends["LD_LIBRARY_PATH"] = existing_lib_dirs
+    include_dirs = [
+        cuda_home / "targets" / "x86_64-linux" / "include",
+        cuda_home / "include",
+    ]
+    existing_include_dirs = [str(path) for path in include_dirs if path.is_dir()]
+    if existing_include_dirs:
+        prepends["CPATH"] = existing_include_dirs
+    return prepends
+
+
+def _prepend_env_path(key: str, values: list[str]) -> None:
+    current = os.environ.get(key, "")
+    current_parts = [part for part in current.split(os.pathsep) if part]
+    prepend_parts = [part for part in values if part and part not in current_parts]
+    if prepend_parts:
+        os.environ[key] = os.pathsep.join([*prepend_parts, *current_parts])
+    elif key not in os.environ and current_parts:
+        os.environ[key] = os.pathsep.join(current_parts)
+
+
+def _cuda_toolchain_report(cuda_home: Path | None) -> dict[str, Any]:
+    cc, cxx = (
+        _find_cuda_host_compilers(cuda_home) if cuda_home is not None else (None, None)
+    )
+    include_paths = _cuda_include_paths(cuda_home)
+    lib_paths = _cuda_library_paths(cuda_home)
+    required_libs = {
+        name: _first_matching_file(lib_paths, f"{name}.so*")
+        for name in ("libcusparse", "libcublas", "libcusolver")
+    }
+    return {
+        "cuda_home": str(cuda_home) if cuda_home is not None else None,
+        "nvcc": {
+            "ok": bool(cuda_home and (cuda_home / "bin" / "nvcc").is_file()),
+            "path": str(cuda_home / "bin" / "nvcc") if cuda_home is not None else None,
+        },
+        "host_compiler": {
+            "ok": cxx is not None,
+            "cc": str(cc) if cc is not None else None,
+            "cxx": str(cxx) if cxx is not None else None,
+        },
+        "cuda_headers": {
+            "ok": _first_matching_file(include_paths, "cusparse.h") is not None,
+            "include_paths": [str(path) for path in include_paths],
+            "cusparse_h": _stringify_path(_first_matching_file(include_paths, "cusparse.h")),
+        },
+        "cuda_libraries": {
+            "ok": all(path is not None for path in required_libs.values()),
+            "library_paths": [str(path) for path in lib_paths],
+            "libs": {key: _stringify_path(value) for key, value in required_libs.items()},
+        },
+    }
+
+
+def _cuda_include_paths(cuda_home: Path | None) -> list[Path]:
+    if cuda_home is None:
+        return []
+    return [
+        path
+        for path in (
+            cuda_home / "targets" / "x86_64-linux" / "include",
+            cuda_home / "include",
+        )
+        if path.is_dir()
+    ]
+
+
+def _cuda_library_paths(cuda_home: Path | None) -> list[Path]:
+    if cuda_home is None:
+        return []
+    return [
+        path
+        for path in (
+            cuda_home / "lib64",
+            cuda_home / "lib",
+            cuda_home / "targets" / "x86_64-linux" / "lib",
+        )
+        if path.is_dir()
+    ]
+
+
+def _first_matching_file(paths: list[Path], pattern: str) -> Path | None:
+    for path in paths:
+        for candidate in path.glob(pattern):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _stringify_path(path: Path | None) -> str | None:
+    return str(path) if path is not None else None
 
 
 def _resolve_checkpoint() -> Path:
@@ -133,6 +374,7 @@ def _ensure_protenix_importable() -> None:
     at IMPORT time to compute default CCD / checkpoint paths, so we have to
     set the env var *before* importing anything from Protenix.
     """
+    _ensure_cuda_extension_toolchain()
     if not PROTENIX_TREE.is_dir():
         raise FileNotFoundError(
             f"Protenix source tree not found at {PROTENIX_TREE}. "
@@ -159,6 +401,110 @@ def _ensure_protenix_importable() -> None:
                 if mod_name == prefix or mod_name.startswith(f"{prefix}."):
                     sys.modules.pop(mod_name, None)
     _stub_fair_esm_symbols()
+
+
+def availability_report() -> dict[str, object]:
+    checks: dict[str, object] = {}
+    failures: list[str] = []
+
+    toolchain = _ensure_cuda_extension_toolchain()
+
+    tree_ok = PROTENIX_TREE.is_dir() and (PROTENIX_TREE / "runner").is_dir() and (
+        PROTENIX_TREE / "protenix"
+    ).is_dir()
+    checks["tree"] = {
+        "ok": tree_ok,
+        "path": str(PROTENIX_TREE),
+        "runner": str(PROTENIX_TREE / "runner"),
+        "protenix": str(PROTENIX_TREE / "protenix"),
+    }
+    if not tree_ok:
+        failures.append(
+            f"Protenix tree not present at {PROTENIX_TREE}. "
+            "Set VPA_PROTENIX_TREE to a Protenix checkout."
+        )
+
+    checkpoint = PROTENIX_CKPT_DIR / f"{PROTENIX_MODEL_NAME}.pt"
+    checkpoint_ok = checkpoint.is_file()
+    checks["checkpoint"] = {
+        "ok": checkpoint_ok,
+        "path": str(checkpoint),
+        "model_name": PROTENIX_MODEL_NAME,
+    }
+    if not checkpoint_ok:
+        failures.append(
+            f"Protenix checkpoint not found at {checkpoint}. "
+            "Set VPA_PROTENIX_CKPT to the checkpoint directory."
+        )
+
+    layer_norm_ok = PROTENIX_LAYER_NORM_SO.is_file()
+    checks["layer_norm"] = {
+        "ok": layer_norm_ok,
+        "path": str(PROTENIX_LAYER_NORM_SO),
+    }
+
+    checks["nvcc"] = toolchain["nvcc"]
+    checks["host_compiler"] = toolchain["host_compiler"]
+    checks["cuda_headers"] = toolchain["cuda_headers"]
+    checks["cuda_libraries"] = toolchain["cuda_libraries"]
+    checks["cuda_toolkit"] = {
+        "ok": bool(toolchain.get("cuda_home")),
+        "cuda_home": toolchain.get("cuda_home"),
+    }
+
+    torch_cuda = _torch_cuda_report()
+    checks["torch_cuda"] = torch_cuda
+    if not torch_cuda["ok"]:
+        failures.append("Protenix-v2 requires torch CUDA; no CUDA device is visible.")
+
+    can_build_layer_norm = bool(
+        toolchain["nvcc"]["ok"]
+        and toolchain["host_compiler"]["ok"]
+        and toolchain["cuda_headers"]["ok"]
+    )
+    checks["layer_norm_build"] = {
+        "ok": layer_norm_ok or can_build_layer_norm,
+        "prebuilt_so": layer_norm_ok,
+        "toolchain_complete": can_build_layer_norm,
+    }
+    if not layer_norm_ok and not can_build_layer_norm:
+        failures.append(
+            "Protenix layer-norm extension is not prebuilt and CUDA extension "
+            "toolchain is incomplete (needs nvcc, host C++ compiler, and CUDA headers)."
+        )
+
+    return {
+        "available": not failures,
+        "reason": "; ".join(failures) if failures else None,
+        "checks": checks,
+    }
+
+
+def availability_skip_reason() -> str | None:
+    report = availability_report()
+    reason = report.get("reason")
+    return str(reason) if reason else None
+
+
+def _torch_cuda_report() -> dict[str, object]:
+    info: dict[str, object] = {
+        "ok": bool(torch.cuda.is_available()),
+        "torch_version": getattr(torch, "__version__", None),
+        "torch_cuda_version": getattr(torch.version, "cuda", None),
+        "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+    }
+    if torch.cuda.is_available():
+        info["devices"] = [
+            {
+                "index": index,
+                "name": torch.cuda.get_device_name(index),
+                "compute_capability": ".".join(
+                    str(part) for part in torch.cuda.get_device_capability(index)
+                ),
+            }
+            for index in range(torch.cuda.device_count())
+        ]
+    return info
 
 
 # --------------------------------------------------------------------------- I/O models

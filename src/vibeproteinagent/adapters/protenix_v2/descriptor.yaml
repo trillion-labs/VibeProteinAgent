@@ -11,6 +11,7 @@ startup_cost: high
 estimated_runtime_s: 600
 warm_load_capable: true
 pin_warm: true
+availability_probe: "vibeproteinagent.adapters.protenix_v2.adapter:availability_report"
 supported_tasks: [structure_prediction]
 input_schema: schemas/protenix_v2.input.json
 output_schema: schemas/protenix_v2.output.json

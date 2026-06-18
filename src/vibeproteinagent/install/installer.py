@@ -26,6 +26,7 @@ from vibeproteinagent.install.artifacts import (
     materialize_artifact,
 )
 from vibeproteinagent.install.cuda import (
+    CUDA_COMPILING_TOOLS,
     GPU_HEAVY_TOOLS,
     RF_DGL_TOOLS,
     CudaStack,
@@ -1610,7 +1611,11 @@ def _ensure_protenix_shared_deps(
     state: InstallState,
     results: list[dict[str, Any]],
 ) -> None:
-    probe_code = "import absl, frozendict, ml_collections; print('ok')"
+    probe_code = (
+        "import absl, frozendict, ml_collections, ninja; "
+        "import nvidia.cuda_nvcc; "
+        "print('ok')"
+    )
     probe = subprocess.run(
         [str(python), "-c", probe_code],
         text=True,
@@ -1660,6 +1665,8 @@ _PROTENIX_RUNTIME_DEPS = (
     "absl-py",
     "frozendict",
     "ml-collections",
+    "ninja",
+    "nvidia-cuda-nvcc-cu12>=12.8,<12.9",
     "optree",
 )
 
@@ -2374,6 +2381,7 @@ def _write_env_exports(
         "unset _vpa_bin",
     ]
     lines.extend(f"export {key}={shlex.quote(value)}" for key, value in sorted(exports.items()))
+    lines.extend(_cuda_toolchain_activation_lines(exports))
     content = "\n".join(lines) + "\n"
     env_file = paths.root / "env.sh"
     env_file.write_text(content)
@@ -2395,12 +2403,14 @@ def _write_env_exports(
 def _apply_install_env(paths: InstallPaths, exports: dict[str, str]) -> dict[str, str | None]:
     values = {cfg.VPA_HOME_ENV: str(paths.root), **exports}
     old = {key: os.environ.get(key) for key in values}
+    old.setdefault("PATH", os.environ.get("PATH"))
+    for key in _cuda_toolchain_path_prepends(exports):
+        old.setdefault(key, os.environ.get(key))
     os.environ.update(values)
-    old["PATH"] = os.environ.get("PATH")
     shared_bin = str(paths.shared_env / "bin")
-    os.environ["PATH"] = (
-        f"{shared_bin}{os.pathsep}{old['PATH']}" if old["PATH"] else shared_bin
-    )
+    _prepend_env_path("PATH", [shared_bin])
+    for key, values_for_key in _cuda_toolchain_path_prepends(exports).items():
+        _prepend_env_path(key, values_for_key)
     return old
 
 
@@ -2498,7 +2508,9 @@ def _env_exports(
                     )
                     break
     if options is not None:
-        exports.update(_cuda_env_exports(resolve_cuda_stack(options.cuda_profile)))
+        cuda_stack = resolve_cuda_stack(options.cuda_profile)
+        exports.update(_cuda_env_exports(cuda_stack))
+        exports.update(_cuda_toolchain_env_exports(selection, paths, cuda_stack))
     return exports
 
 
@@ -2514,6 +2526,176 @@ def _prebuilt_export_or_default(
     if candidate and _prebuilt_python_path(tool_name, Path(candidate).expanduser()).is_file():
         return str(Path(candidate).expanduser())
     return str(default_path)
+
+
+def _cuda_toolchain_env_exports(
+    selection: InstallSelection,
+    paths: InstallPaths,
+    stack: CudaStack,
+) -> dict[str, str]:
+    if stack.name == "cpu":
+        return {}
+    if not set(selection.tool_names).intersection(CUDA_COMPILING_TOOLS):
+        return {}
+    cuda_home = _find_cuda_toolkit_home(paths, stack)
+    if cuda_home is None:
+        return {}
+    exports = {
+        "CUDA_HOME": str(cuda_home),
+        "CUDA_PATH": str(cuda_home),
+        "CUDACXX": str(cuda_home / "bin" / "nvcc"),
+        "TORCH_CUDA_ARCH_LIST": "9.0;10.0",
+        "VPA_CUDA_TOOLKIT_HOME": str(cuda_home),
+    }
+    cc, cxx = _find_cuda_host_compilers(cuda_home, paths)
+    if cc is not None:
+        exports["CC"] = str(cc)
+    if cxx is not None:
+        exports["CXX"] = str(cxx)
+        exports["CUDAHOSTCXX"] = str(cxx)
+    return exports
+
+
+def _find_cuda_toolkit_home(paths: InstallPaths, stack: CudaStack) -> Path | None:
+    candidates: list[Path] = []
+    for key in ("VPA_CUDA_TOOLKIT_HOME", "CUDA_HOME", "CUDA_PATH", "CONDA_PREFIX"):
+        value = os.environ.get(key)
+        if value:
+            candidates.append(Path(value).expanduser())
+    if stack.cuda_version:
+        cuda_dir = f"cuda-{stack.cuda_version}"
+        candidates.extend(
+            [
+                paths.root / cuda_dir,
+                _source_root() / ".vibeproteinbench" / cuda_dir,
+                _source_root().parent / ".vibeproteinbench" / cuda_dir,
+            ]
+        )
+    candidates.append(paths.shared_env)
+    for site_pkg in (paths.shared_env / "lib").glob("python*/site-packages"):
+        candidates.append(site_pkg / "nvidia" / "cuda_nvcc")
+    nvcc = shutil.which("nvcc")
+    if nvcc:
+        candidates.append(Path(nvcc).resolve().parent.parent)
+    if stack.cuda_version:
+        candidates.append(Path(f"/usr/local/cuda-{stack.cuda_version}"))
+    candidates.append(Path("/usr/local/cuda"))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if _cuda_toolkit_has_nvcc(resolved):
+            return resolved
+    return None
+
+
+def _cuda_toolkit_has_nvcc(cuda_home: Path) -> bool:
+    return (cuda_home / "bin" / "nvcc").is_file()
+
+
+def _find_cuda_host_compilers(
+    cuda_home: Path,
+    paths: InstallPaths,
+) -> tuple[Path | None, Path | None]:
+    search_dirs = [
+        cuda_home / "bin",
+        paths.shared_env / "bin",
+    ]
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        search_dirs.append(Path(conda_prefix).expanduser() / "bin")
+    cc = _find_executable(
+        (
+            "x86_64-conda-linux-gnu-gcc",
+            "gcc",
+            "cc",
+        ),
+        search_dirs,
+    )
+    cxx = _find_executable(
+        (
+            "x86_64-conda-linux-gnu-g++",
+            "g++",
+            "x86_64-conda-linux-gnu-c++",
+            "c++",
+        ),
+        search_dirs,
+    )
+    return cc, cxx
+
+
+def _find_executable(names: tuple[str, ...], search_dirs: list[Path]) -> Path | None:
+    for directory in search_dirs:
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
+def _cuda_toolchain_path_prepends(exports: dict[str, str]) -> dict[str, list[str]]:
+    cuda_home_raw = exports.get("CUDA_HOME") or exports.get("CUDA_PATH")
+    if not cuda_home_raw:
+        return {}
+    cuda_home = Path(cuda_home_raw)
+    prepends: dict[str, list[str]] = {}
+    bin_dir = cuda_home / "bin"
+    if bin_dir.is_dir():
+        prepends["PATH"] = [str(bin_dir)]
+    lib_dirs = [
+        cuda_home / "lib64",
+        cuda_home / "lib",
+        cuda_home / "targets" / "x86_64-linux" / "lib",
+    ]
+    existing_lib_dirs = [str(path) for path in lib_dirs if path.is_dir()]
+    if existing_lib_dirs:
+        prepends["LD_LIBRARY_PATH"] = existing_lib_dirs
+    include_dirs = [
+        cuda_home / "targets" / "x86_64-linux" / "include",
+        cuda_home / "include",
+    ]
+    existing_include_dirs = [str(path) for path in include_dirs if path.is_dir()]
+    if existing_include_dirs:
+        prepends["CPATH"] = existing_include_dirs
+    return prepends
+
+
+def _cuda_toolchain_activation_lines(exports: dict[str, str]) -> list[str]:
+    lines: list[str] = []
+    for key, values in sorted(_cuda_toolchain_path_prepends(exports).items()):
+        for index, value in enumerate(reversed(values)):
+            var = f"_vpa_{key.lower()}_{index}"
+            lines.extend(
+                [
+                    f"{var}={shlex.quote(value)}",
+                    f'case ":${{{key}:-}}:" in',
+                    f'  *:"${var}":*) ;;',
+                    f'  *) export {key}="${var}${{{key}:+:${key}}}" ;;',
+                    "esac",
+                    f"unset {var}",
+                ]
+            )
+    return lines
+
+
+def _prepend_env_path(key: str, values: list[str]) -> None:
+    current = os.environ.get(key, "")
+    current_parts = [part for part in current.split(os.pathsep) if part]
+    prepend_parts = [part for part in values if part and part not in current_parts]
+    if prepend_parts:
+        os.environ[key] = os.pathsep.join([*prepend_parts, *current_parts])
+    elif key not in os.environ and current_parts:
+        os.environ[key] = os.pathsep.join(current_parts)
 
 
 def _cuda_env_exports(stack: CudaStack) -> dict[str, str]:
